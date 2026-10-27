@@ -16,7 +16,7 @@ import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscr
 import { SubscriptionRepository } from '../subscriptions/subscription.repository.js';
 import { BILLING_MESSAGES } from '../messages.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
-import type { BillingConfig } from '../config/billing-config.js';
+import { ASSISTANCE_PRODUCER, type BillingConfig } from '../config/billing-config.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;
@@ -32,7 +32,8 @@ export interface PaymentRequestResult {
  * does not name that Organization subscription: no Subscription effect, logged for review (ADR-0044 B9).
  */
 /** `purchased` (Core V2 S3c): a routed `direct_purchase` recorded in its beneficiary's Personal Subscription ledger. */
-export type SubscriptionSettlementOutcome = 'settled' | 'purchased' | 'conflict' | 'unrouted' | null;
+/** Core V2 S5b (E-7): `late` = a verified assisted success that could not apply, held in `assistance_late_settlement` for S6h. */
+export type SubscriptionSettlementOutcome = 'settled' | 'purchased' | 'late' | 'conflict' | 'unrouted' | null;
 
 export interface EventApplication {
   outcome: Decision['outcome'];
@@ -96,7 +97,11 @@ export class PaymentRequestRepository {
     const invoice = rows[0];
     if (!invoice || relationTo(invoice, caller) === null) throw notFound();
     if (invoice.status !== 'open') throw billingError(409, 'invoice_not_payable', BILLING_MESSAGES.onlyOpenInvoicePayable);
-    if (invoice.payerType !== 'user') throw billingError(409, 'payment_request_not_supported', BILLING_MESSAGES.onlyUserPayer);
+    // B-026 (v1): user payers only. Core V2 S5b (E-3): the single exception is the Organization payer of the reserved assisted-settlement
+    // producer's invoice (its routing is assisted_settlement; the database refuses any other Organization-payer request too).
+    if (invoice.payerType !== 'user' && !(invoice.payerType === 'organization' && invoice.producer === ASSISTANCE_PRODUCER)) {
+      throw billingError(409, 'payment_request_not_supported', BILLING_MESSAGES.onlyUserPayer);
+    }
 
     const active = await q.query<PaymentRequestRow>(
       `SELECT * FROM payment_request WHERE "invoiceId" = $1 AND status = ANY($2::text[])`,
@@ -414,6 +419,10 @@ export class PaymentRequestRepository {
     // record's beneficiary and product, never the invoice's Organization), with this transaction's verified settlement as evidence.
     const personalRouting = (await q.query<{ beneficiaryUserId: string; productId: string }>(
       `SELECT "beneficiaryUserId", "productId" FROM invoice_entitlement WHERE "invoiceId" = $1 AND purpose = 'direct_purchase'`, [invoice.id])).rows[0];
+    // Core V2 S5b (E-7, E-12): an assisted settlement is recorded in the BENEFICIARY's ledger only when it is still applicable
+    const assisted = (await q.query<{ beneficiaryUserId: string; productId: string; assistanceRequestId: string }>(
+      `SELECT "beneficiaryUserId", "productId", "assistanceRequestId" FROM invoice_entitlement WHERE "invoiceId" = $1 AND purpose = 'assisted_settlement'`, [invoice.id])).rows[0];
+    if (assisted) return this.applyAssistedSettlement(q, invoice.id, assisted, paymentRequestId, receiptId, settledAt);
     if (personalRouting) {
       const line = (await q.query<{ priceId: string }>(
         `SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1 AND "productId" = $2 AND "interval" = 'recurring'`, [invoice.id, personalRouting.productId])).rows;
@@ -452,6 +461,44 @@ export class PaymentRequestRepository {
       if (code === 'subscription_conflict') return 'conflict';
       throw e;
     }
+  }
+
+  /**
+   * Core V2 S5b (E-7, E-12; ADR-0044 B14): the verified success of an assisted-settlement channel. Serialized on the assistance request row
+   * (the lock the cash-return sweep takes): the purchase is recorded only while the request is cash_collected, has no purchase and no
+   * cash-return obligation, and this channel is not closed; then the channel is `settled` and the request `settled` (E-10), together.
+   * Otherwise nothing changes the entitlement or any obligation: the success is recorded, append-only, as an `assistance_late_settlement`
+   * held for S6h reconciliation (L-1 to L-3). The invoice and request are already `paid` (the provider's verified evidence is kept).
+   */
+  private async applyAssistedSettlement(
+    q: Queryable, invoiceId: string, routing: { beneficiaryUserId: string; productId: string; assistanceRequestId: string },
+    paymentRequestId: string, receiptId: string, settledAt: Date,
+  ): Promise<SubscriptionSettlementOutcome> {
+    const request = (await q.query<{ status: string; organizationId: string }>(`SELECT status, "organizationId" FROM assistance_request WHERE id = $1 FOR UPDATE`, [routing.assistanceRequestId])).rows[0]!;
+    const channel = (await q.query<{ id: string; status: string }>(`SELECT id, status FROM assistance_settlement_channel WHERE "invoiceId" = $1 FOR UPDATE`, [invoiceId])).rows[0];
+    const purchased = (await q.query(`SELECT 1 FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [routing.assistanceRequestId])).rows.length > 0;
+    const obligation = (await q.query(`SELECT 1 FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [routing.assistanceRequestId])).rows.length > 0;
+    const reason = !channel || channel.status === 'closed' || channel.status === 'settled' ? 'channel_closed'
+      : purchased ? 'purchase_exists'
+        : obligation ? 'cash_return_obligation_exists'
+          : request.status !== 'cash_collected' ? 'request_not_settleable'
+            : null;
+    if (reason) {
+      await q.query(
+        `INSERT INTO assistance_late_settlement ("assistanceRequestId", "invoiceId", "paymentRequestId", "receiptId", reason) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+        [routing.assistanceRequestId, invoiceId, paymentRequestId, receiptId, reason],
+      );
+      return 'late';
+    }
+    const line = (await q.query<{ priceId: string }>(
+      `SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1 AND "productId" = $2 AND "interval" = 'recurring'`, [invoiceId, routing.productId])).rows;
+    if (line.length !== 1) return 'unrouted';
+    await this.personal.recordPurchase(q, {
+      userId: routing.beneficiaryUserId, productId: routing.productId, priceId: line[0]!.priceId, invoiceId, paymentRequestId, receiptId, settledAt, assistanceRequestId: routing.assistanceRequestId,
+    });
+    await q.query(`UPDATE assistance_settlement_channel SET status = 'settled' WHERE id = $1`, [channel!.id]);
+    await q.query(`UPDATE assistance_request SET status = 'settled' WHERE id = $1`, [routing.assistanceRequestId]);
+    return 'purchased';
   }
 
   private async transitionRequest(q: Queryable, request: PaymentRequestRow, to: string, ctx: TransitionContext): Promise<void> {

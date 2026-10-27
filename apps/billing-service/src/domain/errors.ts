@@ -46,7 +46,11 @@ export type BillingErrorCode =
   | 'assistance_request_not_pending'
   | 'cash_collection_time_invalid'
   | 'cash_collection_already_reported'
-  | 'fee_not_usable';
+  | 'fee_not_usable'
+  | 'assistance_request_not_settleable' // Core V2 S5b assisted settlement and cash return (register BIL-16, BIL-17)
+  | 'settlement_channel_open'
+  | 'cash_return_not_open'
+  | 'cash_return_time_invalid';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

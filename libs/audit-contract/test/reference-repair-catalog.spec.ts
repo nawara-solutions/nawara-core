@@ -66,7 +66,7 @@ describe('A5.4-AC1: additive only', () => {
   });
 
   it('batch 1 added exactly the two reference-repair actions to the 54 (batch 2 adds two more: reference-repair-batch2.spec.ts)', () => {
-    const BATCH2 = ['hierarchy.reference_anchor_mismatch_detected', 'hierarchy.reference_repair_unresolved', 'authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided', 'audit_legal_hold.placed', 'audit_legal_hold.released', 'file.grant_issued', 'file.grant_revoked', 'file.granted_read', 'file.hold_placed', 'file.hold_released', 'assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined']; // + S2-Audit.2's three, S2-Audit.4's two, S2-File.1's two, S2-File.2's one, S2-File.3's two, S5a's three
+    const BATCH2 = ['hierarchy.reference_anchor_mismatch_detected', 'hierarchy.reference_repair_unresolved', 'authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided', 'audit_legal_hold.placed', 'audit_legal_hold.released', 'file.grant_issued', 'file.grant_revoked', 'file.granted_read', 'file.hold_placed', 'file.hold_released', 'assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined', 'assistance_request.settlement_requested', 'cash_return_obligation.opened', 'cash_return_obligation.return_reported']; // + S2-Audit.2's three, S2-Audit.4's two, S2-File.1's two, S2-File.2's one, S2-File.3's two, S5a's three, S5b's three
     expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE) && !BATCH2.includes(a)).sort()).toEqual([DENIED, REPAIRED]);
   });
 

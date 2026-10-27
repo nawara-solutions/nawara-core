@@ -96,6 +96,10 @@ describe('BILLING_MESSAGES', () => {
       [en('cashCollectionAlreadyReported'), 'Cash collection was already reported for this request.'],
       [en('cashCollectionTimeInvalid'), 'cashCollectedAt must be no earlier than the consent and no later than now.'],
       [en('feeNotUsable'), "The Organization's approved fee is above the Platform's current cap."],
+      [en('assistanceRequestNotSettleable'), 'This assistance request cannot be settled electronically now.'], // Core V2 S5b
+      [en('settlementChannelOpen'), 'A settlement of this assistance request is already in progress.'],
+      [en('cashReturnNotOpen'), 'The cash-return obligation is not open.'],
+      [en('cashReturnTimeInvalid'), 'returnedAt must be no earlier than the cash collection and no later than now.'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

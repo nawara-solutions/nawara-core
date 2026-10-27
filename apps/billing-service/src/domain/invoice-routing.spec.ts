@@ -45,10 +45,28 @@ describe('decideRouting', () => {
     ['an Organization paying an Organization subscription (B7)', { payerType: 'organization', organizationId: ORG, lines: [line('organization')] }, 'organization_payer'],
     ['a company paying an Organization subscription', { payerType: 'company', organizationId: ORG, lines: [line('organization')] }, 'organization_payer'],
     ['an Organization subscription without its Organization', { payerType: 'user', organizationId: null, lines: [line('organization')] }, 'organization_missing'],
-    ['an Organization paying a personal product (assisted settlement, S5a)', { payerType: 'organization', organizationId: ORG, lines: [line('personal')] }, 'assisted_settlement_unavailable'],
+    ['an Organization paying a personal product outside an assistance channel (S5b)', { payerType: 'organization', organizationId: ORG, lines: [line('personal')] }, 'assisted_settlement_unavailable'],
     ['a company paying a personal product', { payerType: 'company', organizationId: null, lines: [line('personal')] }, 'payer_not_user'],
   ])('refuses %s', (_label, input, reason) => {
     expect(decideRouting({ payerId: 'p', ...input })).toEqual({ refused: reason });
+  });
+
+  it('Core V2 S5b (E-3): an Organization paying its own assistance request\'s frozen product is assisted_settlement to that beneficiary', () => {
+    const l = line('personal');
+    const assistance = { id: '55555555-5555-4555-8555-555555555555', beneficiaryUserId: 'b-1', organizationId: ORG, productId: l.productId };
+    expect(decideRouting({ payerType: 'organization', payerId: ORG, organizationId: ORG, lines: [l], assistance })).toEqual({
+      routed: { purpose: 'assisted_settlement', target: 'personal', beneficiaryUserId: 'b-1', organizationId: ORG, productId: l.productId, platformId: P, assistanceRequestId: assistance.id },
+    });
+    // another Organization's request, another product, or a payer that is not the request's Organization: refused
+    const other = '66666666-6666-4666-8666-666666666666';
+    for (const input of [
+      { payerType: 'organization', payerId: other, organizationId: other, lines: [l], assistance },
+      { payerType: 'organization', payerId: ORG, organizationId: ORG, lines: [line('personal')], assistance },
+      { payerType: 'organization', payerId: other, organizationId: ORG, lines: [l], assistance },
+      { payerType: 'organization', payerId: ORG, organizationId: ORG, lines: [l], assistance: null },
+    ]) expect(decideRouting(input)).toEqual({ refused: 'assisted_settlement_unavailable' });
+    // a user paying a personal product stays a direct purchase, whatever assistance is supplied
+    expect(decideRouting({ payerType: 'user', payerId: 'u-1', organizationId: null, lines: [l], assistance })).toMatchObject({ routed: { purpose: 'direct_purchase', beneficiaryUserId: 'u-1' } });
   });
 
   it('never reads entitlementKind: only the product target decides (a legacy organization_license line with target none is ordinary)', () => {

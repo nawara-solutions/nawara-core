@@ -30,6 +30,8 @@ export interface SettledPurchase {
   paymentRequestId: string;
   receiptId: string;
   settledAt: Date;
+  /** Core V2 S5b (E-12): an assisted purchase names its routing purpose and assistance request (DB-12); a direct purchase names neither. */
+  assistanceRequestId?: string | null;
 }
 
 /**
@@ -42,7 +44,7 @@ export class PersonalSubscriptionRepository {
   constructor(private readonly db: DbService) {}
 
   /**
-   * Records one settled direct purchase, in the CALLER's transaction (the one applying Payment's verified settlement), so the receipt, the
+   * Records one settled direct (or, Core V2 S5b, assisted) purchase, in the CALLER's transaction (the one applying Payment's verified settlement), so the receipt, the
    * invoice and request `paid`, and this purchase commit or roll back together. Ensures the beneficiary's Personal Subscription for the
    * product exists (its Platform is the product's), then appends the purchase; the database checks the evidence (DB-9 / DB-10, the S3b
    * settlement rule) and lays its original span. Purchases of one subscription are serialized (a transaction-scoped advisory lock), so
@@ -60,10 +62,11 @@ export class PersonalSubscriptionRepository {
     if (!subscription) throw new Error('personal purchase: the product is not a personal subscription product'); // unreachable: the routing record's FK
     const { rows } = await q.query<{ id: string }>(
       `INSERT INTO subscription_purchase ("personalSubscriptionId", "invoiceId", purpose, "beneficiaryUserId", "productId", "priceId", "paymentRequestId", "receiptId",
-                                          "settledAt", "originalStart", "originalEnd", "transactionId")
-       VALUES ($1, $2, 'direct_purchase', $3, $4, $5, $6, $7, $8::timestamptz, $8::timestamptz, $8::timestamptz + interval '1 second', pg_current_xact_id())
+                                          "settledAt", "originalStart", "originalEnd", "transactionId", "assistanceRequestId")
+       VALUES ($1, $2, $9, $3, $4, $5, $6, $7, $8::timestamptz, $8::timestamptz, $8::timestamptz + interval '1 second', pg_current_xact_id(), $10)
        ON CONFLICT DO NOTHING RETURNING id`,
-      [subscription.id, p.invoiceId, p.userId, p.productId, p.priceId, p.paymentRequestId, p.receiptId, p.settledAt],
+      [subscription.id, p.invoiceId, p.userId, p.productId, p.priceId, p.paymentRequestId, p.receiptId, p.settledAt,
+       p.assistanceRequestId ? 'assisted_settlement' : 'direct_purchase', p.assistanceRequestId ?? null],
     );
     return { subscription, recorded: rows.length === 1 };
   }

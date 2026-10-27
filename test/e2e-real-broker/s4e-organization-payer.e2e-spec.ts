@@ -94,7 +94,8 @@ describeWithEnv(
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest},simulation-harness:${harnessToken.digest}`,
         // an ISOLATED TEST policy: the only place the default-denied creation grant is held (A-5)
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
-          'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.organization_payer'], allowedPlatforms: [TEST_PLATFORM] },
+          // Core V2 S5b (E-2): an assisted settlement now needs the narrow, purpose-bound grant
+          'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.assisted_settlement'], allowedPlatforms: [TEST_PLATFORM] },
           'simulation-harness': { operations: ['payment.simulation.resolve'], allowedPlatforms: [] },
         } }),
         ...refStub.env,

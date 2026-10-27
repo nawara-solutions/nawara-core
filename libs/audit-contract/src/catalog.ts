@@ -444,6 +444,33 @@ const SPEC = {
     },
     purpose: 'An Organization administrator declared the physical cash collection, starting the 72-hour settlement deadline (not a settlement).',
   },
+  // Core V2 S5b (register BIL-16, BIL-17; the Owner's E-13): the Organization's electronic settlement of an assistance request is requested
+  // (an invoice and a payment request, never a settlement: only Payment's verified success settles); the cash-return obligation opens past
+  // the deadline without a settlement (Billing's own sweep); the Organization reports the full cash return (which does not discharge it).
+  'assistance_request.settlement_requested': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_request'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      invoice_id: { type: 'uuid', shape: 'value', required: true },
+      payment_request_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'An Organization administrator started the electronic settlement of an assistance request (an invoice and a payment request; not yet paid).',
+  },
+  'cash_return_obligation.opened': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['assistance_sweep'] }, organization: 'required',
+    resource: ['cash_return_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      assistance_request_id: { type: 'uuid', shape: 'value', required: true },
+      amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+    },
+    purpose: 'The settlement deadline passed with no electronic settlement: the Organization owes the beneficiary the full cash collected, fee included.',
+  },
+  'cash_return_obligation.return_reported': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['cash_return_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { returned_at: { type: 'timestamp', shape: 'value', required: true } },
+    purpose: 'An Organization administrator declared the full cash returned to the beneficiary (awaiting the beneficiary\'s confirmation).',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {

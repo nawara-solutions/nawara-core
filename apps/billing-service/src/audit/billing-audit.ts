@@ -16,7 +16,8 @@ export type BillingAuditAction =
   | 'invoice.issued' | 'invoice.discarded' | 'invoice.paid'
   | 'payment_request.created' | 'payment_request.cancelled'
   | 'product.created' | 'product.archived' | 'price.created' | 'price.retired'
-  | 'assistance_request.created' | 'assistance_request.declined' | 'assistance_request.cash_collection_reported'; // Core V2 S5a (D-9)
+  | 'assistance_request.created' | 'assistance_request.declined' | 'assistance_request.cash_collection_reported' // Core V2 S5a (D-9)
+  | 'assistance_request.settlement_requested' | 'cash_return_obligation.opened' | 'cash_return_obligation.return_reported'; // Core V2 S5b (E-13)
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in
@@ -31,6 +32,7 @@ export function auditActor(ctx: TransitionContext): AuditActor {
   if (ctx.actor.type === 'user' && ctx.actor.id && ctx.actor.userKind) return { type: 'user', id: ctx.actor.id, userKind: ctx.actor.userKind };
   if (ctx.actor.type === 'system' && ctx.cause.type === 'payment_event') return { type: 'system', id: 'payment_event_consumer' };
   if (ctx.actor.type === 'system' && ctx.cause.type === 'reconciliation') return { type: 'system', id: 'payment_reconciler' };
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'assistance_sweep') return { type: 'system', id: 'assistance_sweep' }; // Core V2 S5b (E-6)
   throw new Error(`billing_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 

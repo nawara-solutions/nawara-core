@@ -1,3 +1,4 @@
+import { organizationPayerGrant } from '../payments/payment.service.js';
 import { readFileSync } from 'node:fs';
 import { generateServiceToken } from '@nawara/service-kit';
 import { describe, expect, it } from 'vitest';
@@ -307,6 +308,43 @@ describe('loadPaymentConfig', () => {
       for (const op of ['*', 'payment.*', 'payment.create.*', 'payment.create.organization']) {
         expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', op]) }), op).toThrow();
       }
+    });
+  });
+
+  describe('Core V2 S5b (E-2): payment.create.assisted_settlement is a narrow, purpose-bound grant for billing-service only', () => {
+    const producer = generateServiceToken();
+    const other = generateServiceToken();
+    const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${producer.digest},other-producer:${other.digest}` };
+    const policy = (billing: string[], others: string[] = ['payment.create']) =>
+      JSON.stringify({ callers: { 'billing-service': { operations: billing, allowedPlatforms: [P1] }, 'other-producer': { operations: others, allowedPlatforms: [P1] } } });
+    const prod = { ...env, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672' };
+
+    it('billing-service may hold it in a non-production policy; the approved V1 policy does not', () => {
+      expect(loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.create.assisted_settlement']) }).servicePolicy.of('billing-service')?.operations.has('payment.create.assisted_settlement')).toBe(true);
+      expect(loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${producer.digest}`, PAYMENT_SERVICE_POLICY: BILLING_POLICY }).servicePolicy.of('billing-service')?.operations.has('payment.create.assisted_settlement')).toBe(false);
+    });
+
+    it('no other service identity may hold it', () => {
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create'], ['payment.create', 'payment.create.assisted_settlement']) })).toThrow(/may be held only by billing-service/);
+    });
+
+    it('is refused in production configuration', () => {
+      expect(() => loadPaymentConfig({ ...prod, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.create.assisted_settlement']) })).toThrow(/no production configuration may hold yet/);
+    });
+
+    it('no wildcard or prefix grants it', () => {
+      for (const op of ['payment.create.assisted', 'payment.create.assisted_settlement.*', 'payment.create.*']) {
+        expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', op]) }), op).toThrow();
+      }
+    });
+
+    it('the required grant is purpose-bound: assisted needs the narrow grant only; recovery and any other Organization payer need the broad one', () => {
+      expect(organizationPayerGrant('assisted_settlement', 'organization')).toBe('payment.create.assisted_settlement');
+      expect(organizationPayerGrant('assisted_settlement', 'user')).toBe('payment.create.assisted_settlement'); // the pairing then refuses it
+      expect(organizationPayerGrant('recovery_settlement', 'organization')).toBe('payment.create.organization_payer');
+      expect(organizationPayerGrant('non_entitlement', 'organization')).toBe('payment.create.organization_payer');
+      expect(organizationPayerGrant('direct_purchase', 'user')).toBeNull();
+      expect(organizationPayerGrant('organization_subscription', 'user')).toBeNull();
     });
   });
 });

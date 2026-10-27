@@ -14,10 +14,18 @@ import { ConfigError, parseCallerPolicy, policyList, type CallerPolicyMap } from
  * payer is an Organization (`assisted_settlement`, `recovery_settlement`). Denied by default and never implied: `payment.create` alone does
  * not include it (no wildcard exists). Refused in production configuration, so only isolated test policies hold it until a separate Owner
  * decision grants it to a real Billing producer (S5b / S6f).
+ *
+ * Core V2 S5b (the Owner's E-2): `payment.create.assisted_settlement` is the NARROW, purpose-bound grant for exactly one Organization-payer
+ * purpose, `assisted_settlement`. It is the only operation that admits that purpose (the broad `payment.create.organization_payer` no longer
+ * does: it is left to `recovery_settlement`, still default-denied, S6f); only the caller `billing-service` may hold it, never implied, no
+ * wildcard, and production configuration refuses it like the broad grant.
  */
-export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer'] as const;
+export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer', 'payment.create.assisted_settlement'] as const;
 export const SIMULATION_RESOLVE_OPERATION = 'payment.simulation.resolve';
 export const ORGANIZATION_PAYER_CREATE_OPERATION = 'payment.create.organization_payer';
+export const ASSISTED_SETTLEMENT_CREATE_OPERATION = 'payment.create.assisted_settlement';
+/** Core V2 S5b (E-2): the one service identity that may hold the assisted-settlement grant. */
+export const ASSISTED_SETTLEMENT_CALLER = 'billing-service';
 export type PaymentOperation = (typeof PAYMENT_OPERATIONS)[number];
 
 export interface PaymentCallerPolicy {
@@ -38,7 +46,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * authority (ADR-0042 Amendment 3) and cannot be expressed with an empty operation list.
  */
 export function parsePaymentServicePolicy(raw: string | undefined, registered: readonly string[]): CallerPolicyMap<PaymentCallerPolicy> {
-  return parseCallerPolicy(raw, registered, {
+  const policy = parseCallerPolicy<PaymentCallerPolicy>(raw, registered, {
     variable: 'PAYMENT_SERVICE_POLICY',
     keys: ['operations', 'allowedPlatforms'],
     entry: (at, e) => {
@@ -49,6 +57,13 @@ export function parsePaymentServicePolicy(raw: string | undefined, registered: r
       return { operations, allowedPlatforms: policyList(`${at}.allowedPlatforms`, e.allowedPlatforms, { pattern: UUID, allowEmpty: true }) };
     },
   });
+  // Core V2 S5b (E-2): the assisted-settlement grant belongs to the Billing service identity alone
+  for (const caller of policy.callers()) {
+    if (caller !== ASSISTED_SETTLEMENT_CALLER && policy.of(caller)?.operations.has(ASSISTED_SETTLEMENT_CREATE_OPERATION)) {
+      throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${ASSISTED_SETTLEMENT_CREATE_OPERATION} may be held only by ${ASSISTED_SETTLEMENT_CALLER} (Core V2 S5b, E-2)`);
+    }
+  }
+  return policy;
 }
 
 /** Core V2 S4f (F-S2, F-S5): the simulation authority is refused outright unless the simulation provider is enabled (never in production). */
@@ -61,12 +76,17 @@ export function assertSimulationGrant(policy: CallerPolicyMap<PaymentCallerPolic
   }
 }
 
-/** Core V2 S4e (A-5): no production configuration grants Organization-payer creation; that needs its own Owner decision (S5b / S6f). */
+/**
+ * Core V2 S4e (A-5), S5b (E-2): no production configuration grants Organization-payer creation, broad or assisted; production activation
+ * needs its own Owner decision.
+ */
 export function assertOrganizationPayerGrant(policy: CallerPolicyMap<PaymentCallerPolicy>, isProduction: boolean): void {
   if (!isProduction) return;
   for (const caller of policy.callers()) {
-    if (policy.of(caller)?.operations.has(ORGANIZATION_PAYER_CREATE_OPERATION)) {
-      throw new ConfigError(`PAYMENT_SERVICE_POLICY grants ${ORGANIZATION_PAYER_CREATE_OPERATION}, which no production configuration may hold yet (a separate Owner decision)`);
+    for (const op of [ORGANIZATION_PAYER_CREATE_OPERATION, ASSISTED_SETTLEMENT_CREATE_OPERATION]) {
+      if (policy.of(caller)?.operations.has(op)) {
+        throw new ConfigError(`PAYMENT_SERVICE_POLICY grants ${op}, which no production configuration may hold yet (a separate Owner decision)`);
+      }
     }
   }
 }

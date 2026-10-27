@@ -58,7 +58,9 @@ configurable `IDEMPOTENCY_TTL_HOURS` ceiling is retired and refused. The permane
 **Core V2 S4e (Organization-payer attempts; ADR-0044 B7; S0 DB-15, §3.6; Owner A-1 to A-7; register PAY-03 F):** an Organization
 pays exactly `assisted_settlement` or `recovery_settlement`, created only by a caller holding the default-denied
 `payment.create.organization_payer` (refused in production configuration; no ordinary producer holds it, so the capability stays inactive
-until S5b / S6f and a separate Owner decision). The payer Organization is the payment's `organizationId` (database insert guard, immutable),
+until S5b / S6f and a separate Owner decision). *Core V2 S5b (Owner E-2):* the grant is purpose-bound: `assisted_settlement` is admitted only
+under `payment.create.assisted_settlement` (only `billing-service`, never in production configuration), and the broad operation no longer
+admits it (it stays default-denied, for `recovery_settlement`). The payer Organization is the payment's `organizationId` (database insert guard, immutable),
 inside the producer's Platforms (Organization reference read). Its **Organization actor**, an ordinary member whom Auth's live `/auth/me`
 shows active with an active administrator membership in that Organization on the Organization's authoritative Platform, starts and syncs
 its attempts and reads its payments; anyone else gets the collapsed `404`. This is the active-Organization actor set only: V-5 (inactive

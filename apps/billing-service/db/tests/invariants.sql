@@ -68,7 +68,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND table_name NOT IN ('invoice_number_sequence')
     AND NOT (table_name = 'subscription_purchase' AND column_name = 'ledgerSeq') -- S3c: the ledger's ORDER, not money
     AND NOT (table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount') -- S3f: school-fee configuration, checked below
-    AND NOT (table_name = 'assistance_request' AND column_name IN ('baseAmount', 'feeAmount', 'totalAmount'))), '8'); -- S5a: frozen assistance terms, checked below
+    AND NOT (table_name = 'assistance_request' AND column_name IN ('baseAmount', 'feeAmount', 'totalAmount')) -- S5a: frozen assistance terms, checked below
+    AND NOT (table_name = 'cash_return_obligation' AND column_name = 'amount')), '8'); -- S5b: the frozen total owed back, checked below
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -952,7 +953,7 @@ SELECT pg_temp.assert_eq('S5a', 'reportedAt is the database time and settleBy ex
 SELECT pg_temp.expect_error('S5a', 'a reported collection is final in S5a (no decline, no second report)', format($$UPDATE assistance_request SET status = 'declined', "declinedBy" = %L, "declinedByRole" = 'beneficiary', "cashCollectedAt" = NULL, "reportedAt" = NULL, "reportedBy" = NULL, "settleBy" = NULL WHERE id = %L$$, :'a_ben', :'a_req'), '23514');
 SELECT pg_temp.expect_error('S5a', 'the reported time is immutable once recorded', format($$UPDATE assistance_request SET "cashCollectedAt" = "cashCollectedAt" + interval '1 second' WHERE id = %L$$, :'a_req'), '23514', 'assistance_request_not_pending');
 SELECT pg_temp.expect_error('S5a', 'an assistance request is never deleted', format($$DELETE FROM assistance_request WHERE id = %L$$, :'a_req'), '23514');
-SELECT pg_temp.expect_error('S5a', 'an assistance request is never truncated', $$TRUNCATE assistance_request$$, '23514');
+SELECT pg_temp.expect_error('S5a', 'an assistance request is never truncated (S5b tables reference it: CASCADE reaches their own no-truncate guards)', $$TRUNCATE assistance_request CASCADE$$, '23514');
 SELECT pg_temp.assert_eq('S5a', 'overdue is derived: unresolved and past settleBy at the database''s current time; never for pending or declined',
   (SELECT (billing_assistance_overdue('cash_collected', now() - interval '1 millisecond') AND NOT billing_assistance_overdue('cash_collected', now() + interval '1 hour')
            AND NOT billing_assistance_overdue('pending', now() - interval '1 hour') AND NOT billing_assistance_overdue('declined', now() - interval '1 hour'))::text), 'true');
@@ -964,6 +965,30 @@ SELECT pg_temp.expect_error('S5a', 'an assistance idempotency record is never ch
   UPDATE assistance_command_idempotency SET "responseStatus" = 200 WHERE "actorUserId" = %L$$, :'a_ben', :'a_ben'), '23514');
 SELECT pg_temp.expect_error('S5a', 'an unknown assistance command is refused', format($$
   INSERT INTO assistance_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s5a-0002', 'assistance_request.settle', repeat('a', 64), 201, '{}')$$, :'a_ben'), '23514', 'assistance_command_idempotency_operation');
+
+-- ------------------------------------------------------------------------------------------------------------- S5b assisted settlement and cash return (0030)
+-- Reuses the S5a request above (cash_collected at its consent instant; settleBy 72 hours later, in the future).
+SELECT pg_temp.expect_error('S5b', 'no cash-return obligation before the deadline (E-6)', format($$INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt")
+  SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt" FROM assistance_request WHERE id = %L$$, :'a_req'), '23514', 'cash_return_obligation_not_due');
+SELECT pg_temp.expect_error('S5b', 'a request is settled only by its purchase (E-12)', format($$UPDATE assistance_request SET status = 'settled' WHERE id = %L$$, :'a_req'), '23514', 'assistance_request_settled_by_purchase');
+SELECT pg_temp.assert_eq('S5b', 'overdue never applies to a settled request', (SELECT (NOT billing_assistance_overdue('settled', now() - interval '1 hour'))::text), 'true');
+SELECT t_mk_invoice() AS s5b_inv \gset
+INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES ('00000000-0000-4000-8000-00000000b5b1', :'a_org', :'f_p', :'f_prod', :'a_price', 'TND', 9000, 0, 9000, :'a_cap', true) RETURNING id AS s5b_pending \gset
+SELECT pg_temp.expect_error('S5b', 'no settlement channel for a request without recorded cash collection (E-1)', format($$INSERT INTO assistance_settlement_channel ("assistanceRequestId", "invoiceId", "startedBy") VALUES (%L, %L, %L)$$, :'s5b_pending', :'s5b_inv', :'a_act'), '23514', 'assistance_request_not_settleable');
+SELECT pg_temp.expect_error('S5b', 'a channel is created open, never closed or settled', format($$INSERT INTO assistance_settlement_channel ("assistanceRequestId", "invoiceId", "startedBy", status, "closedAt") VALUES (%L, %L, %L, 'closed', now())$$, :'a_req', :'s5b_inv', :'a_act'), '23514', 'assistance_settlement_channel_created_open');
+SELECT pg_temp.expect_error('S5b', 'an assisted routing record names its assistance request (DB-5)', format($$INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId")
+  VALUES (%L, 'assisted_settlement', 'personal', 'user', 'u', 'u', %L, %L)$$, :'s5b_inv', :'a_org', :'f_prod'), '23514', 'invoice_entitlement_combination');
+SELECT pg_temp.expect_error('S5b', 'no other purpose may name an assistance request', format($$INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId", "assistanceRequestId")
+  SELECT %L, 'non_entitlement', 'none', "payerType", "payerId", NULL, NULL, NULL, %L FROM invoice WHERE id = %L$$, :'s5b_inv', :'a_req', :'s5b_inv'), '23514', 'invoice_entitlement_combination');
+SELECT pg_temp.expect_error('S5b', 'a cash-return obligation has only the S5b states', $$INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", status)
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'TND', now(), 'confirmed_returned')$$, '23514');
+SELECT pg_temp.expect_error('S5b', 'a late settlement needs a verified settlement of its request', format($$INSERT INTO assistance_late_settlement ("assistanceRequestId", "invoiceId", "paymentRequestId", "receiptId", reason)
+  VALUES (%L, %L, gen_random_uuid(), gen_random_uuid(), 'channel_closed')$$, :'a_req', :'s5b_inv'), '23514', 'assistance_late_settlement_verified');
+SELECT pg_temp.assert_eq('S5b', 'no settlement, late-settlement or obligation row ever references a subscription grant column (a cash report never settles)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('cash_return_obligation', 'assistance_late_settlement') AND column_name ~* '(entitlement|subscription)'), '0');
+SELECT pg_temp.expect_error('S5b', 'an assistance idempotency record admits the S5b commands only', format($$
+  INSERT INTO assistance_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s5b-0001', 'cash_return_obligation.confirm', repeat('a', 64), 200, '{}')$$, :'a_ben'), '23514', 'assistance_command_idempotency_operation');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

@@ -1,14 +1,15 @@
 import { Body, Controller, Get, Header, Headers, Inject, Param, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiHeader, ApiOperation, ApiParam, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { RateLimitService, type AuthIdentity } from '@nawara/service-kit';
+import { RateLimitService, resolveLocale, type AuthIdentity } from '@nawara/service-kit';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { requestTransitionContext } from '../domain/actors.js';
 import { notFound } from '../domain/errors.js';
 import { idempotencyKey } from '../fees/fee-input.js';
 import type { AssistanceCommandResult } from './assistance-idempotency.js';
-import { isAssistanceId, normaliseAssistanceCreateInput, normaliseCashCollectionInput, normaliseDeclineInput } from './assistance-input.js';
+import { isAssistanceId, normaliseAssistanceCreateInput, normaliseCashCollectionInput, normaliseCashReturnInput, normaliseDeclineInput } from './assistance-input.js';
+import { AssistanceSettlementService } from './assistance-settlement.service.js';
 import { AssistanceUser, AssistanceUserGuard } from './assistance-user.guard.js';
 import { AssistanceService } from './assistance.service.js';
 
@@ -48,6 +49,27 @@ class AssistanceRequestDto {
   @ApiProperty({ format: 'date-time' }) createdAt!: string;
 }
 
+class SettlementResultDto {
+  @ApiProperty({ format: 'uuid' }) invoiceId!: string;
+  @ApiProperty({ format: 'uuid', description: 'Read the request (GET /billing/assistance-requests/{id}) for its progress.' }) paymentRequestId!: string;
+  @ApiProperty({ type: String, nullable: true, description: 'null until Payment supplies an identifier; never invented.' }) paymentId!: string | null;
+}
+
+class CashReturnDto {
+  @ApiProperty({ format: 'date-time', description: 'When the full cash was returned (RFC 3339 with a zone, at most milliseconds): no earlier than the collection, no later than now.' }) returnedAt!: string;
+}
+
+class CashReturnObligationDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty({ format: 'uuid' }) assistanceRequestId!: string;
+  @ApiProperty({ enum: ['open', 'return_reported'] }) status!: string;
+  @ApiProperty({ description: 'The frozen total (base + Organization fee), minor units.' }) amount!: number;
+  @ApiProperty() currency!: string;
+  @ApiProperty({ format: 'date-time' }) openedAt!: string;
+  @ApiProperty({ type: String, nullable: true, format: 'date-time' }) returnedAt!: string | null;
+  @ApiProperty({ type: String, nullable: true, format: 'date-time' }) returnReportedAt!: string | null;
+}
+
 const KEY = { name: 'Idempotency-Key', required: true, description: 'Required: 8-128 of [A-Za-z0-9._:-], bound to you and this exact command. The same key and command replays the first success (Idempotent-Replayed: true); a different command with it is 409 idempotency_key_conflict.' };
 const R401 = { status: 401, description: 'no bearer, a bearer Auth refuses, or a SERVICE token (never forwarded to Auth)' };
 const R404 = { status: 404, description: 'an unknown request, or you are neither its beneficiary nor an administrator of its Organization (one answer)' };
@@ -72,6 +94,7 @@ function answer(res: Response, r: AssistanceCommandResult & { replayed: boolean 
 export class AssistanceController {
   constructor(
     private readonly assistance: AssistanceService,
+    private readonly settlement: AssistanceSettlementService,
     private readonly rateLimit: RateLimitService,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
   ) {}
@@ -155,5 +178,63 @@ export class AssistanceController {
     const input = normaliseCashCollectionInput(body);
     if (!isAssistanceId(id)) throw notFound();
     return answer(res, await this.assistance.reportCashCollection(user, k, id.toLowerCase(), input, requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
+  }
+
+  @Post(':id/settlement')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: "Start the Organization's electronic settlement of an assistance request (an administrator of its Organization, never its beneficiary).",
+    description: 'Only after cash collection and before settleBy. Creates and issues an invoice paid by the Organization for the frozen BASE price only ' +
+      '(never the Organization fee), routed assisted_settlement to the beneficiary, and its payment request; Payment is contacted asynchronously ' +
+      '(paymentId is null until Payment supplies one). The administrator then pays it at Payment. Only Payment\'s verified success records the ' +
+      "beneficiary's purchase; nothing here settles, activates or grants anything. One open or uncertain settlement at a time.",
+  })
+  @ApiParam(ID)
+  @ApiHeader(KEY)
+  @ApiResponse({ status: 201, type: SettlementResultDto, description: 'Started (or a replay of this key, Idempotent-Replayed: true).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request (no body is accepted) | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: you are the beneficiary of this request' })
+  @ApiResponse(R404)
+  @ApiResponse({ status: 409, description: 'assistance_request_not_settleable (not cash_collected, past settleBy, purchased or a cash-return obligation exists) | settlement_channel_open | idempotency_key_conflict' })
+  @ApiResponse(R503)
+  async settle(@AssistanceUser() user: AuthIdentity, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Headers('accept-language') acceptLanguage: string | undefined, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    normaliseDeclineInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.settlement.settle(user, k, id.toLowerCase(), resolveLocale(acceptLanguage), requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
+  }
+}
+
+/** Core V2 S5b (register BIL-17; the Owner's E-8, E-9): an Organization's cash-return obligation to a beneficiary. Simulation only, as above. */
+@ApiTags('organization assistance')
+@ApiBearerAuth()
+@Controller('billing/cash-return-obligations')
+@UseGuards(AssistanceUserGuard)
+export class CashReturnObligationController {
+  constructor(private readonly settlement: AssistanceSettlementService) {}
+
+  @Post(':id/return')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Report that the full cash (base and fee) was returned to the beneficiary (an administrator of the Organization, never the beneficiary).',
+    description: 'Moves the obligation open -> return_reported. It does NOT discharge it: the beneficiary confirms or disputes later. No partial return.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiHeader(KEY)
+  @ApiBody({ type: CashReturnDto })
+  @ApiResponse({ status: 200, type: CashReturnObligationDto, description: 'Reported (or a replay of this key).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: you are the beneficiary' })
+  @ApiResponse({ status: 404, description: 'an unknown obligation, or you are not an administrator of its Organization (one answer)' })
+  @ApiResponse({ status: 409, description: 'cash_return_not_open | idempotency_key_conflict' })
+  @ApiResponse({ status: 422, description: 'cash_return_time_invalid: before the cash collection or in the future' })
+  @ApiResponse(R503)
+  async reportReturn(@AssistanceUser() user: AuthIdentity, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    const input = normaliseCashReturnInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.settlement.reportReturn(user, k, id.toLowerCase(), input, requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
   }
 }

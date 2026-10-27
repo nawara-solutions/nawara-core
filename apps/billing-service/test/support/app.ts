@@ -81,6 +81,7 @@ export async function createTestApp(opts: {
     // `BILLING_DISPATCH_INTERVAL_MS` is capped at 300_000 (dispatch's own configured max); `BILLING_RECONCILE_INTERVAL_MS`
     // allows up to an hour, so it is set further out.
     BILLING_DISPATCH_INTERVAL_MS: '300000',
+    BILLING_ASSISTANCE_SWEEP_INTERVAL_MS: '3600000', // Core V2 S5b: tests call sweepOnce() directly
     BILLING_RECONCILE_INTERVAL_MS: '3600000',
     ...(opts.tokens?.length ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(','), BILLING_SERVICE_POLICY: allOperationsPolicy(opts.tokens) } : {}),
     ...opts.env,
