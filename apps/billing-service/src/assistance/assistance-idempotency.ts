@@ -4,7 +4,10 @@ import { requestHash } from '../domain/canonical.js';
 import { billingError } from '../domain/errors.js';
 import { BILLING_MESSAGES } from '../messages.js';
 
-export type AssistanceOperation = 'assistance_request.create' | 'assistance_request.decline' | 'assistance_request.cash_collection';
+export type AssistanceOperation =
+  | 'assistance_request.create' | 'assistance_request.decline' | 'assistance_request.cash_collection'
+  // Core V2 S5b: the settlement is a money command (class M, E-1): its record is never deleted either (permanent, >= the approved 90 days)
+  | 'assistance_request.settlement' | 'cash_return_obligation.return';
 
 export interface AssistanceCommandResult {
   status: number;

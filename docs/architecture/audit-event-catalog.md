@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (14)
+## billing-service (17)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -79,6 +79,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `assistance_request.created` | commercial | user (member) | required | assistance_request | — | succeeded | `product_id`: uuid<br>`price_id`: uuid<br>`base_amount`: integer 1–9007199254740991<br>`fee_amount`: integer 0–9007199254740991<br>`fee_proposal_id`?: uuid | A member consented to have an Organization pay for a personal product, on frozen financial terms (base price and approved fee). |
 | `assistance_request.declined` | commercial | user (member) | required | assistance_request | — | succeeded | `declined_by`: beneficiary \| organization_actor | A pending assistance request was finally declined, by its beneficiary or by an administrator of the Organization. |
 | `assistance_request.cash_collection_reported` | commercial | user (member) | required | assistance_request | — | succeeded | `cash_collected_at`: timestamp<br>`settle_by`: timestamp | An Organization administrator declared the physical cash collection, starting the 72-hour settlement deadline (not a settlement). |
+| `assistance_request.settlement_requested` | commercial | user (member) | required | assistance_request | — | succeeded | `invoice_id`: uuid<br>`payment_request_id`: uuid | An Organization administrator started the electronic settlement of an assistance request (an invoice and a payment request; not yet paid). |
+| `cash_return_obligation.opened` | commercial | system (`assistance_sweep`) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`amount`: integer 1–9007199254740991 | The settlement deadline passed with no electronic settlement: the Organization owes the beneficiary the full cash collected, fee included. |
+| `cash_return_obligation.return_reported` | commercial | user (member) | required | cash_return_obligation | — | succeeded | `returned_at`: timestamp | An Organization administrator declared the full cash returned to the beneficiary (awaiting the beneficiary's confirmation). |
 
 ## payment-service (5)
 
@@ -124,4 +127,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 71 actions.**
+**Total: 74 actions.**

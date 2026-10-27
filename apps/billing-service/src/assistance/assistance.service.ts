@@ -9,6 +9,7 @@ import { BILLING_MESSAGES } from '../messages.js';
 import { AssistanceAuthority, type AssistanceParties } from './assistance-authority.js';
 import { AssistanceCommandIdempotency, type AssistanceCommandResult } from './assistance-idempotency.js';
 import type { AssistanceCreateInput } from './assistance-input.js';
+import { loadSettlementView } from './assistance-settlement.view.js';
 
 /** The row as stored, plus the overdue state the database derives at read time (D-6). */
 interface AssistanceRow extends AssistanceParties {
@@ -23,19 +24,20 @@ interface AssistanceRow extends AssistanceParties {
   feeCapVersion: number | null;
   consent: boolean;
   consentAt: Date;
-  status: 'pending' | 'declined' | 'cash_collected';
+  status: 'pending' | 'declined' | 'cash_collected' | 'settled';
   declinedByRole: 'beneficiary' | 'organization_actor' | null;
   declinedAt: Date | null;
   cashCollectedAt: Date | null;
   reportedAt: Date | null;
   settleBy: Date | null;
+  collectionFeeCapVersion: number | null;
   createdAt: Date;
   overdue: boolean;
 }
 
 const SELECT_ROW = `SELECT id, "beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", trim(currency) AS currency, "baseAmount", "feeAmount",
   "totalAmount", "feeProposalId", "feeCapVersion", consent, "consentAt", status, "declinedByRole", "declinedAt", "cashCollectedAt", "reportedAt",
-  "settleBy", "createdAt", billing_assistance_overdue(status, "settleBy") AS overdue FROM assistance_request`;
+  "settleBy", "collectionFeeCapVersion", "createdAt", billing_assistance_overdue(status, "settleBy") AS overdue FROM assistance_request`;
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
@@ -65,6 +67,7 @@ export function representAssistanceRequest(r: AssistanceRow) {
     cashCollectedAt: iso(r.cashCollectedAt),
     reportedAt: iso(r.reportedAt),
     settleBy: iso(r.settleBy),
+    collectionFeeCapVersion: r.collectionFeeCapVersion, // Core V2 S5b (E-11): the cap version the fee satisfied at collection
     overdue: r.overdue,
     createdAt: iso(r.createdAt),
   };
@@ -120,7 +123,7 @@ export class AssistanceService {
         `SELECT "unitAmount" FROM price WHERE id = $1 AND "productId" = $2 AND "retiredAt" IS NULL AND "effectiveFrom" <= now() AND "interval" = 'recurring' AND currency = $3`,
         [input.priceId, input.productId, platform.currency])).rows[0];
       if (!price) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
-      const open = (await q.query(`SELECT 1 FROM assistance_request WHERE "beneficiaryUserId" = $1 AND "organizationId" = $2 AND "productId" = $3 AND status <> 'declined'`,
+      const open = (await q.query(`SELECT 1 FROM assistance_request WHERE "beneficiaryUserId" = $1 AND "organizationId" = $2 AND "productId" = $3 AND status NOT IN ('declined', 'settled')`,
         [beneficiary, input.organizationId, input.productId])).rows[0];
       if (open) throw billingError(409, 'assistance_request_open', BILLING_MESSAGES.assistanceRequestOpen);
 
@@ -154,7 +157,7 @@ export class AssistanceService {
     if (!row) throw notFound();
     const relation = await this.authority.relation(identity, row);
     if (!relation.beneficiary && !relation.organizationActor) throw notFound();
-    return representAssistanceRequest(row);
+    return { ...representAssistanceRequest(row), ...(await loadSettlementView(this.db, id)) }; // Core V2 S5b: its channels and obligation
   }
 
   /**
@@ -195,10 +198,15 @@ export class AssistanceService {
     if (relation.beneficiary) throw operationNotPermitted(); // D-5: the beneficiary never reports their own collection, administrator or not
     return this.idempotency.run(identity.id, key, 'assistance_request.cash_collection', { id, ...input }, async (q): Promise<AssistanceCommandResult> => {
       const current = (await this.load(q, id, true))!;
-      if (current.status === 'cash_collected') throw billingError(409, 'cash_collection_already_reported', BILLING_MESSAGES.cashCollectionAlreadyReported);
+      if (current.status === 'cash_collected' || current.status === 'settled') throw billingError(409, 'cash_collection_already_reported', BILLING_MESSAGES.cashCollectionAlreadyReported);
       if (current.status !== 'pending') throw billingError(409, 'assistance_request_not_pending', BILLING_MESSAGES.assistanceRequestNotPending);
       const ordered = (await q.query<{ ok: boolean }>(`SELECT ($1::timestamptz >= $2::timestamptz AND $1::timestamptz <= now()) AS ok`, [input.cashCollectedAt, current.consentAt])).rows[0];
       if (!ordered.ok) throw billingError(422, 'cash_collection_time_invalid', BILLING_MESSAGES.cashCollectionTimeInvalid);
+      // Core V2 S5b (E-11): the frozen fee is validated again against the Platform's CURRENT cap when the collection is recorded, under the
+      // fee lock; above it the report is refused (never reduced or repriced). The database checks it too and keeps the cap version.
+      await q.query(`SELECT billing_fee_lock($1)`, [current.platformId]);
+      const cap = (await q.query<{ amount: string }>(`SELECT amount FROM billing_current_fee_cap($1)`, [current.platformId])).rows[0];
+      if (Number(current.feeAmount) > Number(cap?.amount ?? 0)) throw billingError(409, 'fee_not_usable', BILLING_MESSAGES.feeNotUsable);
       await q.query(`UPDATE assistance_request SET status = 'cash_collected', "cashCollectedAt" = $2, "reportedBy" = $3 WHERE id = $1`, [id, input.cashCollectedAt, identity.id]);
       const updated = (await this.load(q, id))!;
       await this.audit.record(q, 'assistance_request.cash_collection_reported', {

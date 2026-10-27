@@ -53,7 +53,14 @@ export function normaliseCashCollectionInput(raw: unknown): { cashCollectedAt: s
   return { cashCollectedAt: v };
 }
 
-/** BIL-14: a decline carries no body (an empty object, or none). */
+/** Core V2 S5b BIL-17 (E-9): only the asserted time the full frozen amount was returned. No amount: partial returns are not supported. */
+export function normaliseCashReturnInput(raw: unknown): { returnedAt: string } {
+  const v = fields(raw, ['returnedAt']).returnedAt;
+  if (typeof v !== 'string' || !isRealTimestamp(v)) throw bad(BILLING_MESSAGES.mustBeTimestamp, { field: 'returnedAt' });
+  return { returnedAt: v };
+}
+
+/** BIL-14 (and, Core V2 S5b, BIL-16): a decline or a settlement carries no body (an empty object, or none). */
 export function normaliseDeclineInput(raw: unknown): Record<string, never> {
   if (raw !== undefined && raw !== null && !(isObject(raw) && Object.keys(raw).length === 0)) fields(raw, []);
   return {};

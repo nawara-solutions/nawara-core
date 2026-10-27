@@ -544,7 +544,7 @@ describeWithEnv('Organization assistance (Core V2 S5a, simulation) — real Post
       await expect(svc.read(who, ORG)).rejects.toMatchObject({ status: 404 });
       await expect(svc.decline(who, 'k-12345678', ORG, null as never)).rejects.toMatchObject({ status: 404 });
       await expect(svc.reportCashCollection(who, 'k-12345678', ORG, { cashCollectedAt: ago(0) }, null as never)).rejects.toMatchObject({ status: 404 });
-      expect(AssistanceModule.register({ isProduction: false } as BillingConfig).controllers).toHaveLength(1);
+      expect(AssistanceModule.register({ isProduction: false } as BillingConfig).controllers).toHaveLength(2); // + S5b's cash-return controller
     });
   });
 });

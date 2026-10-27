@@ -39,6 +39,7 @@ describeWithEnv('Organization-payer payments and attempts (Core V2 S4e) — real
   let admin: pg.Pool;
   const granted = generateServiceToken(); // an isolated test fixture holding the inactive creation grant (A-5)
   const plain = generateServiceToken(); // an ordinary producer: payment.create, read, cancel only
+  const broad = generateServiceToken(); // Core V2 S5b (E-2): holds only the broad Organization-payer grant, never the assisted one
   const harness = generateServiceToken();
   let authDown = false;
   const identities: Record<string, AuthIdentity> = {};
@@ -97,11 +98,13 @@ describeWithEnv('Organization-payer payments and attempts (Core V2 S4e) — real
     admin = new pg.Pool({ connectionString: db.url, max: 12 });
     t = await createTestApp({
       databaseUrl: db.url, authClient, reference, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir],
-      tokens: [{ caller: 'billing-service', digest: granted.digest }, { caller: 'plain-producer', digest: plain.digest }, { caller: 'simulation-harness', digest: harness.digest }],
+      tokens: [{ caller: 'billing-service', digest: granted.digest }, { caller: 'plain-producer', digest: plain.digest }, { caller: 'simulation-harness', digest: harness.digest }, { caller: 'broad-producer', digest: broad.digest }],
       env: {
         PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: randomBytes(32).toString('hex'), PAYMENT_MAX_ATTEMPTS: '1',
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
-          'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.organization_payer'], allowedPlatforms: [P1] },
+          // Core V2 S5b (E-2): assisted settlements need the narrow grant; this isolated fixture also keeps the broad one for recovery cases
+          'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.organization_payer', 'payment.create.assisted_settlement'], allowedPlatforms: [P1] },
+          'broad-producer': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.organization_payer'], allowedPlatforms: [P1] },
           'plain-producer': { operations: ['payment.create', 'payment.read', 'payment.cancel'], allowedPlatforms: [P1] },
           'simulation-harness': { operations: ['payment.simulation.resolve'], allowedPlatforms: [] },
         } }),
@@ -126,6 +129,15 @@ describeWithEnv('Organization-payer payments and attempts (Core V2 S4e) — real
       const recovery = await create({ purpose: 'recovery_settlement', beneficiaryUserId: undefined, organizationId: ORG_A.toUpperCase(), payer: { type: 'organization', id: ORG_A.toUpperCase() } });
       expect(recovery).toMatchObject({ payer: { type: 'organization', id: ORG_A }, organizationId: ORG_A, purpose: 'recovery_settlement' });
       expect((await outboxRows(assisted.id, 'payment.created'))[0].payload).toMatchObject({ organizationId: ORG_A, purpose: 'assisted_settlement', beneficiaryUserId: STUDENT, liveMode: false });
+    });
+
+    it('Core V2 S5b (E-2): the broad grant no longer admits an assisted settlement (403, nothing written); it still admits a recovery settlement', async () => {
+      const before = await payments();
+      const r = await createAs(broad.token, body());
+      expect([r.status, r.body.code]).toEqual([403, 'operation_not_permitted']);
+      expect(await payments()).toBe(before);
+      const recovery = await createAs(broad.token, body({ purpose: 'recovery_settlement', beneficiaryUserId: undefined }));
+      expect(recovery.status).toBe(201);
     });
 
     it('an ordinary producer (payment.create without the grant) is 403 and writes nothing, whatever it sends', async () => {

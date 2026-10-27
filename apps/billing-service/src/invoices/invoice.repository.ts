@@ -1,4 +1,5 @@
 import { BillingAudit } from '../audit/billing-audit.js';
+import { ASSISTANCE_PRODUCER } from '../config/billing-config.js';
 import { Injectable } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
 import { type Caller, type TransitionContext } from '../domain/actors.js';
@@ -52,8 +53,11 @@ export class InvoiceRepository {
     const prices = await this.loadPrices(q, input.lines.map((l) => l.priceId));
     const priced = input.lines.map((l) => {
       const p = prices.get(l.priceId);
-      // unknown, retired, not yet effective, archived product, or a price of ANOTHER seller: all one answer (never leaks which)
-      if (!p || !p.available || p.sellerType !== input.seller.type || p.sellerId !== input.seller.id) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
+      // unknown, retired, not yet effective, archived product, or a price of ANOTHER seller: all one answer (never leaks which). Core V2 S5b
+      // (E-4): the reserved assisted-settlement producer continues a consent-backed obligation on its request's FROZEN price, even one retired
+      // or archived since consent (its commit-time guard binds the line to that request); nothing else ever bypasses availability.
+      const frozen = producer === ASSISTANCE_PRODUCER;
+      if (!p || (!p.available && !frozen) || p.sellerType !== input.seller.type || p.sellerId !== input.seller.id) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
       return { line: l, price: p };
     });
     const currency = priced[0]!.price.currency;
@@ -142,9 +146,9 @@ export class InvoiceRepository {
     if (routing.platformId !== null && !verified.callerPlatforms.has(routing.platformId)) throw routingInvalid('platform_out_of_scope');
     if (routing.purpose === 'organization_subscription' && verified.organizationPlatformId !== routing.platformId) throw routingInvalid('organization_platform_mismatch');
     await q.query(
-      `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId],
+      `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId", "assistanceRequestId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId, routing.assistanceRequestId ?? null],
     );
     let snapshot;
     try {
@@ -259,7 +263,13 @@ export class InvoiceRepository {
         WHERE l."invoiceId" = $1 ORDER BY l."lineNumber"`,
       [row.id],
     );
-    return { payerType: row.payerType, payerId: row.payerId, organizationId: row.organizationId, lines: rows };
+    // Core V2 S5b (E-3): the assistance request whose settlement channel this invoice is (Billing's own rows; only the reserved producer has one)
+    const assistance = row.producer === ASSISTANCE_PRODUCER
+      ? (await q.query<{ id: string; beneficiaryUserId: string; organizationId: string; productId: string }>(
+        `SELECT a.id, a."beneficiaryRef" AS "beneficiaryUserId", a."organizationId", a."productId"
+           FROM assistance_settlement_channel c JOIN assistance_request a ON a.id = c."assistanceRequestId" WHERE c."invoiceId" = $1`, [row.id])).rows[0] ?? null
+      : null;
+    return { payerType: row.payerType, payerId: row.payerId, organizationId: row.organizationId, lines: rows, assistance };
   }
 
   private async lockForCaller(q: Queryable, invoiceId: string, caller: Caller): Promise<InvoiceRow> {

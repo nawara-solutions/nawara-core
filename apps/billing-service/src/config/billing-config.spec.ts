@@ -59,6 +59,11 @@ describe('loadBillingConfig', () => {
     expect(refusal({ ...BASE, SERVICE_TOKENS: `some-product:${'b'.repeat(64)},billing-owner:${digest}` })).toContain('billing-owner is reserved');
   });
 
+  it('Core V2 S5b (E-3): no service may hold a token in the reserved assisted-settlement producer name billing-assistance', () => {
+    const digest = 'a'.repeat(64);
+    expect(refusal({ ...BASE, SERVICE_TOKENS: `billing-assistance:${digest}` })).toContain('billing-assistance is reserved');
+  });
+
   it('Core V2 S3e: grace is not configurable — the retired SUBSCRIPTION_GRACE_DAYS is refused, whatever its value, never silently ignored', () => {
     for (const v of ['1', '7', '365', '0', 'seven']) expect(refusal({ ...BASE, SUBSCRIPTION_GRACE_DAYS: v })).toContain('SUBSCRIPTION_GRACE_DAYS was retired');
     expect(() => loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '' })).not.toThrow(); // empty means unset, like every other optional value
@@ -67,7 +72,7 @@ describe('loadBillingConfig', () => {
 
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4, caller admission since Stage 21.C.2)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
-      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
+      'assistanceSweep', 'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
       'metrics', // V2 A12.2: the kit's metrics listener settings (off by default), used by configureApp
       'nodeEnv', 'organizationReference', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
       'serviceName', 'servicePolicy', 'serviceTokens', 'supportedCurrencies', 'trustProxy', 'trustProxyHops',

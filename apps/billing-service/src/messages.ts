@@ -386,4 +386,25 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Les frais approuvés de l'organisation dépassent le plafond actuel de la plateforme.",
     ar: 'الرسوم المعتمدة للمنظمة أعلى من الحد الأقصى الحالي للمنصة.',
   },
+  // Core V2 S5b: assisted settlement and cash return (register BIL-16, BIL-17)
+  assistanceRequestNotSettleable: {
+    en: 'This assistance request cannot be settled electronically now.',
+    fr: "Cette demande d'aide ne peut pas être réglée électroniquement maintenant.",
+    ar: 'لا يمكن تسوية طلب المساعدة هذا إلكترونيًا الآن.',
+  },
+  settlementChannelOpen: {
+    en: 'A settlement of this assistance request is already in progress.',
+    fr: "Un règlement de cette demande d'aide est déjà en cours.",
+    ar: 'توجد بالفعل تسوية قيد التنفيذ لطلب المساعدة هذا.',
+  },
+  cashReturnNotOpen: {
+    en: 'The cash-return obligation is not open.',
+    fr: "L'obligation de restitution des espèces n'est pas ouverte.",
+    ar: 'التزام إرجاع النقد غير مفتوح.',
+  },
+  cashReturnTimeInvalid: {
+    en: 'returnedAt must be no earlier than the cash collection and no later than now.',
+    fr: 'returnedAt ne doit être ni antérieur à la collecte des espèces ni postérieur à maintenant.',
+    ar: 'يجب ألا يسبق returnedAt وقت تحصيل النقد وألا يتجاوز الوقت الحالي.',
+  },
 });

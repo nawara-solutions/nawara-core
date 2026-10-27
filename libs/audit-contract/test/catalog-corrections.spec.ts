@@ -96,9 +96,10 @@ describe('Core V2 S3g (D-CAT-9): the four catalog actions additionally accept th
   it('no other Billing action gains a user kind', () => {
     const billingWithUser = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'billing-service' && AUDIT_CATALOG.get(a)!.actors.user);
     // + the three member-only assistance-request actions Core V2 S5a added later (D-9): new actions, not a widening of an existing one
-    const S5A = ['assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined'];
+    const S5A = ['assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined', 'assistance_request.settlement_requested', 'cash_return_obligation.return_reported']; // + S5b (E-13)
     expect(billingWithUser.sort()).toEqual(['invoice.discarded', 'invoice.issued', 'payment_request.cancelled', 'payment_request.created', ...CATALOG, ...S5A].sort());
     for (const a of S5A) expect(AUDIT_CATALOG.get(a as never)!.actors).toEqual({ user: ['member'] });
+    expect(AUDIT_CATALOG.get('cash_return_obligation.opened' as never)!.actors).toEqual({ system: ['assistance_sweep'] }); // S5b: Billing's own sweep, never a user
   });
 });
 
@@ -131,7 +132,7 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 
 describe('nothing else was broadened', () => {
   it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the four of A5.4-AC1 (batches 1 and 2), and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(71); // + the three assistance-request actions of Core V2 S5a (D-9); + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4, the two evidence-grant actions of S2-File.1, file.granted_read (S2-File.2) and the two hold actions of S2-File.3
+    expect(AUDIT_ACTIONS).toHaveLength(74); // + the three assistance-request actions of Core V2 S5a (D-9) and the three settlement / cash-return actions of S5b (E-13); + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4, the two evidence-grant actions of S2-File.1, file.granted_read (S2-File.2) and the two hold actions of S2-File.3
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
@@ -147,7 +148,7 @@ describe('nothing else was broadened', () => {
     const stage184 = ['membership.approved', 'membership.rejected', 'membership.revoked', 'membership.admin_provisioned', 'join_code.created', 'join_code.revoked',
       'admin_invitation.created', 'admin_invitation.revoked', 'hierarchy.admin_operation_denied', 'invoice.issued', 'invoice.discarded', 'payment_request.created',
       'payment_request.cancelled'];
-    expect(member.sort()).toEqual([...stage184, 'payment.succeeded', 'payment.failed', 'organization.updated', 'hierarchy.reference_repair_denied', 'assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined'].sort());
+    expect(member.sort()).toEqual([...stage184, 'payment.succeeded', 'payment.failed', 'organization.updated', 'hierarchy.reference_repair_denied', 'assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined', 'assistance_request.settlement_requested', 'cash_return_obligation.return_reported'].sort());
     // Every other action refuses a member outright.
     for (const a of AUDIT_ACTIONS.filter((x) => !member.includes(x))) expect(ok(a, { actor: USER }), a).toThrow('invalid_actor');
   });

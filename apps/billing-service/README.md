@@ -104,6 +104,25 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   - **A cash report is evidence, never settlement.** It creates no invoice, payment, purchase, entitlement or domain event.
   - Restrictions (T1, T2, T3, inactivity) belong to S5d and are not evaluated here.
   - **Production refuses it:** the routes are not mounted, and the service refuses too.
+- **Assisted settlement and cash return (Core V2 S5b; register BIL-16 F, BIL-17 F; the Owner's E-1 to E-13; `db/migrations/0030`,
+  `src/assistance/assistance-settlement.*`, `cash-return-sweep.ts`) — DEVELOPMENT AND SIMULATION ONLY:**
+  - `POST /billing/assistance-requests/:id/settlement` (the Organization actor, never the beneficiary; money-command idempotency) only for
+    a `cash_collected` request before `settleBy`, with no purchase and no cash-return obligation. One transaction opens a settlement channel
+    and creates and issues an invoice under the reserved producer `billing-assistance` (refused at commit in any other shape): the
+    Organization pays the frozen **base** only (never the fee), at the frozen price (even if retired or archived since consent), routed
+    `assisted_settlement` to the beneficiary. It also creates the payment request; the dispatcher contacts Payment later (`paymentId` null
+    until then; Payment needs `payment.create.assisted_settlement`).
+  - One open or uncertain channel per request. A channel closes only on Payment's final failure, cancellation or expiry, and may be retried
+    before the deadline.
+  - Only Payment's verified `payment.succeeded` records the beneficiary's purchase, settles the channel and the request, and frees the
+    one-request slot. A success that can no longer apply is kept as `assistance_late_settlement` for S6h reconciliation.
+  - Once the deadline has passed, the cash-return sweep opens the one `cash_return_obligation` (the frozen total, fee included, owed by the
+    Organization to the beneficiary). It opens only with no purchase and no open or uncertain channel; an uncertain Payment holds it back
+    with no timeout.
+  - `POST /billing/cash-return-obligations/:id/return` `{returnedAt}` (the Organization actor) makes it `return_reported`. That is not a
+    discharge: the beneficiary confirms in S5c.
+  - The fee is re-validated against the cap when cash collection is recorded; settlement never re-checks or reprices it.
+  - **Production refuses it:** not mounted, the services refuse, and Payment refuses the grant in production configuration.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription
@@ -320,6 +339,7 @@ template. Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotatio
 | `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |
 | `BILLING_DISPATCH_INTERVAL_MS`, `BILLING_DISPATCH_BATCH_SIZE`, `BILLING_DISPATCH_STALE_SENDING_MS` | no | `PaymentDispatcher`'s poll interval, batch size and stale-`sending` retry threshold, which is also the interval between two attempts at the same request (defaults: 2000ms, 50, 60s). A pass renews its claims not sent yet every quarter of the stale window, so a slow Payment never makes another instance re-send them; the stale window must be at least twice `PAYMENT_TIMEOUT_MS` (refused at startup otherwise; Stage 15.8) |
 | `BILLING_RECONCILE_INTERVAL_MS`, `BILLING_RECONCILE_STALE_REQUESTED_MS` | no | `PaymentReconciler`'s poll interval and stale-`requested` threshold (defaults: 30s, 5min) |
+| `BILLING_ASSISTANCE_SWEEP_INTERVAL_MS` | no | Core V2 S5b: the cash-return sweep's poll interval (default 60s; 1s to 1h). Never runs in production (the module is not mounted) |
 | `BILLING_PAYMENT_EVENT_RETRY_MAX` | no | How many times a Payment event whose processing failed with a possibly-transient error is retried before it is dead-lettered (default 3, range 0-10; `0` = dead-letter on the first failure). A permanent failure is never retried. See "Dead-lettered Payment events" |
 | `BILLING_PAYMENT_EVENT_RETRY_DELAY_MS` | no | Wait between those retries (default 5000, range 100-300000) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | docs credentials; the password must be 16+ characters; without it the docs are not mounted |

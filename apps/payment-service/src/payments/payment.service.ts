@@ -10,7 +10,7 @@ import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-m
 import { isPaymentUncertain } from './payment-closing.js';
 import { ACCEPTED_PURPOSES, CORE_V2_LIVE_MODE, ORGANIZATION_PAYER_PURPOSES, type PaymentPurpose, type PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
-import { ORGANIZATION_PAYER_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
+import { ASSISTED_SETTLEMENT_CREATE_OPERATION, ORGANIZATION_PAYER_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 
@@ -78,9 +78,11 @@ export class PaymentService {
     // P-5, P-7: an unknown purpose, or an Organization-payer purpose whose workflow is not open yet, is 400 invalid_payment_request
     if (!(ACCEPTED_PURPOSES as readonly string[]).includes(dto.purpose)) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.purposeNotAccepted);
     // Core V2 S4e (A-5): an Organization payer, or an Organization-payer purpose, needs the default-denied creation grant (never implied by
-    // payment.create), checked before anything else about it so a caller without it learns nothing and writes nothing
-    const organizationPayer = dto.payer.type === 'organization' || (ORGANIZATION_PAYER_PURPOSES as readonly string[]).includes(dto.purpose);
-    if (organizationPayer && this.config.servicePolicy.of(producer)?.operations.has(ORGANIZATION_PAYER_CREATE_OPERATION) !== true) throw operationNotPermitted();
+    // payment.create), checked before anything else about it so a caller without it learns nothing and writes nothing. Core V2 S5b (E-2):
+    // the grant is purpose-bound: `assisted_settlement` needs exactly `payment.create.assisted_settlement`; every other Organization-payer
+    // case (recovery_settlement, S6f) still needs the broad, default-denied grant. Neither implies the other.
+    const requiredGrant = organizationPayerGrant(dto.purpose, dto.payer.type);
+    if (requiredGrant && this.config.servicePolicy.of(producer)?.operations.has(requiredGrant) !== true) throw operationNotPermitted();
     assertPurposePairing(dto.purpose, dto.payer, dto.beneficiaryUserId);
     if (dto.payer.type === 'organization') {
       // Core V2 S4e (A-4): the payer Organization IS the payment's Organization scope, immutable with the snapshot; the producer's scope over
@@ -198,6 +200,17 @@ export class PaymentService {
  * are paid by a user; `non_entitlement` by a user or a Company. A direct purchase names its beneficiary, who is the payer; no other
  * accepted purpose names one. A payer that does not fit the purpose is `422 payer_purpose_mismatch`; a missing or extra field is `400`.
  */
+/**
+ * Core V2 S4e (A-5) and S5b (E-2): the creation grant an Organization payer or an Organization-payer purpose needs, or null when none is
+ * needed. Purpose-bound: `assisted_settlement` needs exactly the narrow assisted grant; every other Organization-payer case (a recovery
+ * settlement, or an Organization payer with any other purpose, which the pairing then refuses) needs the broad, default-denied grant.
+ */
+export function organizationPayerGrant(purpose: string, payerType: string): string | null {
+  const organizationPayer = payerType === 'organization' || (ORGANIZATION_PAYER_PURPOSES as readonly string[]).includes(purpose);
+  if (!organizationPayer) return null;
+  return purpose === 'assisted_settlement' ? ASSISTED_SETTLEMENT_CREATE_OPERATION : ORGANIZATION_PAYER_CREATE_OPERATION;
+}
+
 function assertPurposePairing(purpose: PaymentPurpose, payer: { type: string; id: string }, beneficiaryUserId: string | undefined): void {
   const mismatch = () => paymentError(422, 'payer_purpose_mismatch', PAYMENT_MESSAGES.payerPurposeMismatch, { purpose });
   // DB-15 (Core V2 S4e opens it behind A-5): an Organization pays exactly the assisted and recovery settlements, and nothing else does

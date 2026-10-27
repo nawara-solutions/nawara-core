@@ -6,12 +6,14 @@
  *   purpose                    target         payer                  beneficiary   reference
  *   organization_subscription  organization   user                   —             the invoice's Organization, the product
  *   direct_purchase            personal       user (= beneficiary)   the payer     the product
+ *   assisted_settlement        personal       organization           the consenting beneficiary   the assistance request (DB-5)
  *   non_entitlement            none           any                    —             —   (no subscription line at all)
  *
- * `assisted_settlement` (an Organization paying a personal product for one of its members, S5a) and `recovery_settlement` (S6) need records that
- * do not exist yet: such invoices are refused. An invoice carries at most one subscription line.
+ * Core V2 S5b (E-3): `assisted_settlement` is routed only when the invoice is a settlement channel of an assistance request of THAT
+ * Organization (`assistance`, read by the repository from Billing's own channel row, never from a request); any other Organization payer of
+ * a personal product is still refused. `recovery_settlement` (S6) is refused. An invoice carries at most one subscription line.
  */
-export type RoutingPurpose = 'organization_subscription' | 'direct_purchase' | 'non_entitlement';
+export type RoutingPurpose = 'organization_subscription' | 'direct_purchase' | 'assisted_settlement' | 'non_entitlement';
 export type RoutingTarget = 'organization' | 'personal' | 'none';
 
 export interface RoutingLine {
@@ -25,6 +27,8 @@ export interface RoutingInput {
   payerId: string;
   organizationId: string | null;
   lines: readonly RoutingLine[];
+  /** Core V2 S5b: the assistance request whose settlement channel this invoice is, from Billing's own rows (null otherwise). */
+  assistance?: { id: string; beneficiaryUserId: string; organizationId: string; productId: string } | null;
 }
 
 export interface Routing {
@@ -35,6 +39,8 @@ export interface Routing {
   productId: string | null;
   /** The subscription product's Platform (null for `non_entitlement`): the issuing caller and the Organization must belong to it. */
   platformId: string | null;
+  /** Core V2 S5b: the assistance request an `assisted_settlement` references (DB-5); null for every other purpose. */
+  assistanceRequestId?: string | null;
 }
 
 /** Why an invoice cannot be routed (the `reason` of `422 invoice_routing_invalid`): codes, never client data. */
@@ -42,7 +48,7 @@ export type RoutingRefusal =
   | 'multiple_subscription_lines' // at most one entitlement-bearing line (B2)
   | 'organization_payer' // an Organization pays only assisted or recovery settlements (B7): never an Organization subscription, nor an ordinary invoice (S4a P-1)
   | 'organization_missing' // an Organization subscription names its Organization
-  | 'assisted_settlement_unavailable' // an Organization paying a personal product: an assisted settlement (S5a), not yet available
+  | 'assisted_settlement_unavailable' // an Organization paying a personal product outside an assistance request's settlement channel (S5b)
   | 'payer_not_user'; // a personal purchase is paid by its beneficiary, a user
 
 export type RoutingDecision = { routed: Routing } | { refused: RoutingRefusal };
@@ -61,7 +67,12 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
     if (input.organizationId === null) return { refused: 'organization_missing' };
     return { routed: { purpose: 'organization_subscription', target: 'organization', beneficiaryUserId: null, organizationId: input.organizationId, productId: line.productId, platformId: line.platformId } };
   }
-  if (input.payerType === 'organization') return { refused: 'assisted_settlement_unavailable' };
+  if (input.payerType === 'organization') {
+    // Core V2 S5b (E-3, B2, B7): the Organization pays its own request's frozen product, for that request's beneficiary
+    const a = input.assistance;
+    if (!a || a.organizationId !== input.organizationId || input.payerId !== a.organizationId || a.productId !== line.productId) return { refused: 'assisted_settlement_unavailable' };
+    return { routed: { purpose: 'assisted_settlement', target: 'personal', beneficiaryUserId: a.beneficiaryUserId, organizationId: a.organizationId, productId: line.productId, platformId: line.platformId, assistanceRequestId: a.id } };
+  }
   if (input.payerType !== 'user') return { refused: 'payer_not_user' };
   return { routed: { purpose: 'direct_purchase', target: 'personal', beneficiaryUserId: input.payerId, organizationId: null, productId: line.productId, platformId: line.platformId } };
 }

@@ -3473,8 +3473,8 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     }
     // the investigation's counts
     const counts = Object.fromEntries(Object.entries(out.identities).map(([s, id]) => [s, [id.write.keys.length, id.read.keys.length]]));
-    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9)
-    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [15, 4], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13)
+    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [18, 4], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
   });
 
   test('S1d-1 Payment: its five ordinary events and five audit actions; not the re-emission allow-list; no unregistered action', () => {

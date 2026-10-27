@@ -8,6 +8,9 @@ import { parseBillingServicePolicy, type BillingCallerPolicy } from '../admissio
 /** Core V2 S3f (D3): the reserved internal producer of direct-checkout invoices (never a service-token caller). */
 export const CHECKOUT_PRODUCER = 'billing-checkout';
 
+/** Core V2 S5b (E-3): the reserved internal producer of assisted-settlement invoices (never a service-token caller). */
+export const ASSISTANCE_PRODUCER = 'billing-assistance';
+
 /** Core V2 S3g (D-CAT-8): the reserved provenance of a product the verified Owner created (never a service-token caller). */
 export const OWNER_CATALOG_PRODUCER = 'billing-owner';
 
@@ -62,6 +65,8 @@ export interface BillingConfig extends BaseConfig {
   dispatch: { intervalMs: number; batchSize: number; staleSendingMs: number };
   /** Reconciler polling and staleness threshold for `requested` rows with no terminal event yet (SDD section 21.5): technical tuning, no business meaning. */
   reconcile: { intervalMs: number; staleRequestedMs: number };
+  /** Core V2 S5b (E-6): how often the cash-return sweep looks for requests past their deadline (never mounted in production). */
+  assistanceSweep: { intervalMs: number };
   /**
    * Retry policy of the Payment event consumer's RabbitMQ bus (audit M-07): how many times a possibly-transient processing failure is retried
    * (0 = dead-letter on the first failure) and how long each retry waits in `billing.payment-events.retry`. Technical tuning, no business meaning.
@@ -102,6 +107,8 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   // Core V2 S3f (D3): `billing-checkout` is Billing's own reserved producer for direct checkout; no service may hold a token in its name.
   if (serviceTokens.some((t) => t.caller === CHECKOUT_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${CHECKOUT_PRODUCER} is reserved by Billing`);
+  // Core V2 S5b (E-3): `billing-assistance` is Billing's own reserved producer for assisted settlements; no service may hold a token in its name.
+  if (serviceTokens.some((t) => t.caller === ASSISTANCE_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${ASSISTANCE_PRODUCER} is reserved by Billing`);
   // Core V2 S3g (D-CAT-8): so is `billing-owner`, the provenance of the Owner's products; a producer can never act as the Owner's catalog.
   if (serviceTokens.some((t) => t.caller === OWNER_CATALOG_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${OWNER_CATALOG_PRODUCER} is reserved by Billing`);
   const servicePolicy = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(serviceTokens));
@@ -130,6 +137,9 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
       intervalMs: reader.int('BILLING_DISPATCH_INTERVAL_MS', { default: 2000, min: 100, max: 300_000 }),
       batchSize: reader.int('BILLING_DISPATCH_BATCH_SIZE', { default: 50, min: 1, max: 1000 }),
       staleSendingMs: reader.int('BILLING_DISPATCH_STALE_SENDING_MS', { default: 60_000, min: 1000, max: 3_600_000 }),
+    },
+    assistanceSweep: {
+      intervalMs: reader.int('BILLING_ASSISTANCE_SWEEP_INTERVAL_MS', { default: 60_000, min: 1000, max: 3_600_000 }),
     },
     reconcile: {
       intervalMs: reader.int('BILLING_RECONCILE_INTERVAL_MS', { default: 30_000, min: 1000, max: 3_600_000 }),
