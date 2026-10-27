@@ -88,6 +88,14 @@ describe('BILLING_MESSAGES', () => {
       [en('memberNotEligible'), 'Only an active member may check out.'], // Core V2 S3f checkout
       [en('checkoutUncertain'), 'A checkout for this product is still in progress.'],
       [en('feeAmountRange'), 'amount must be an integer number of minor units from 0 to 9007199254740991'],
+      [en('assistanceMemberNotEligible'), 'Only an active member of the Organization may request assistance.'], // Core V2 S5a
+      [en('assistanceConsentRequired'), 'consent must be true'],
+      [en('mustBeTimestamp', { field: 'cashCollectedAt' }), 'cashCollectedAt must be an ISO 8601 date-time with a time zone'],
+      [en('assistanceRequestOpen'), 'An assistance request for this product is already open with this Organization.'],
+      [en('assistanceRequestNotPending'), 'The assistance request is no longer pending.'],
+      [en('cashCollectionAlreadyReported'), 'Cash collection was already reported for this request.'],
+      [en('cashCollectionTimeInvalid'), 'cashCollectedAt must be no earlier than the consent and no later than now.'],
+      [en('feeNotUsable'), "The Organization's approved fee is above the Platform's current cap."],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

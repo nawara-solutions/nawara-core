@@ -9,6 +9,7 @@ import { CallerAdmissionModule } from './admission/caller-admission.module.js';
 import { AuthClientModule } from './auth/auth-client.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
+import { AssistanceModule } from './assistance/assistance.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
 import type { BillingConfig } from './config/billing-config.js';
 import { BillingConfigModule } from './config/billing-config.module.js';
@@ -89,6 +90,7 @@ export class AppModule {
         SubscriptionsModule,
         PlatformsModule.register(config, overrides.ownerAuthority), // Core V2 S3d (register BIL-01)
         CheckoutModule.register(config), // Core V2 S3f (BIL-10): development and simulation only; never mounted in production
+        AssistanceModule.register(config), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
       ],
     };
   }

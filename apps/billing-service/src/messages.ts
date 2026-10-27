@@ -345,4 +345,45 @@ export const BILLING_MESSAGES = defineMessages({
     fr: 'amount doit être un nombre entier d’unités mineures de 0 à 9007199254740991',
     ar: 'يجب أن يكون amount عددًا صحيحًا من الوحدات الصغرى من 0 إلى 9007199254740991',
   },
+  // Core V2 S5a: Organization assistance (register BIL-13 to BIL-15)
+  assistanceMemberNotEligible: {
+    en: 'Only an active member of the Organization may request assistance.',
+    fr: "Seul un membre actif de l'organisation peut demander une aide.",
+    ar: 'لا يمكن طلب المساعدة إلا لعضو نشط في المنظمة.',
+  },
+  assistanceConsentRequired: {
+    en: 'consent must be true',
+    fr: 'consent doit valoir true',
+    ar: 'يجب أن تكون قيمة consent هي true',
+  },
+  mustBeTimestamp: {
+    en: '{field} must be an ISO 8601 date-time with a time zone',
+    fr: '{field} doit être une date-heure ISO 8601 avec un fuseau horaire',
+    ar: 'يجب أن يكون {field} تاريخًا ووقتًا بصيغة ISO 8601 مع منطقة زمنية',
+  },
+  assistanceRequestOpen: {
+    en: 'An assistance request for this product is already open with this Organization.',
+    fr: 'Une demande d’aide pour ce produit est déjà ouverte auprès de cette organisation.',
+    ar: 'يوجد بالفعل طلب مساعدة مفتوح لهذا المنتج لدى هذه المنظمة.',
+  },
+  assistanceRequestNotPending: {
+    en: 'The assistance request is no longer pending.',
+    fr: "La demande d’aide n'est plus en attente.",
+    ar: 'لم يعد طلب المساعدة قيد الانتظار.',
+  },
+  cashCollectionAlreadyReported: {
+    en: 'Cash collection was already reported for this request.',
+    fr: 'La collecte des espèces a déjà été déclarée pour cette demande.',
+    ar: 'سبق الإبلاغ عن تحصيل النقد لهذا الطلب.',
+  },
+  cashCollectionTimeInvalid: {
+    en: 'cashCollectedAt must be no earlier than the consent and no later than now.',
+    fr: 'cashCollectedAt ne doit être ni antérieur au consentement ni postérieur à maintenant.',
+    ar: 'يجب ألا يسبق cashCollectedAt وقت الموافقة وألا يتجاوز الوقت الحالي.',
+  },
+  feeNotUsable: {
+    en: "The Organization's approved fee is above the Platform's current cap.",
+    fr: "Les frais approuvés de l'organisation dépassent le plafond actuel de la plateforme.",
+    ar: 'الرسوم المعتمدة للمنظمة أعلى من الحد الأقصى الحالي للمنصة.',
+  },
 });

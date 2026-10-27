@@ -131,3 +131,29 @@ errs=$(cat "$outdir"/*.out | grep -ciE "error|deadlock" || true); rm -rf "$outdi
 rows=$(q "SELECT count(*) FROM subscription WHERE \"organizationId\" = '$org'")
 [ "$won" -eq 1 ] && [ "$errs" -eq 0 ] && [ "$rows" -eq 1 ] || fail "duplicate subscription creates: won=$won errors=$errs rows=$rows (want 1, 0, 1)"
 echo "PASS: race — $racers concurrent creates for one organization gave exactly one subscription"
+
+echo "== concurrency (Core V2 S5a): $racers concurrent requests for one (beneficiary, Organization, product) give exactly one; a cap lowered meanwhile is never bypassed"
+newdb assist; db="$DBNAME"; apply_all "$db"
+p="00000000-0000-4000-8000-00000000a5f1"; c="00000000-0000-4000-8000-00000000a5f2"; org="00000000-0000-4000-8000-00000000a5f3"
+q "INSERT INTO billing_platform (\"platformId\", \"companyId\", currency, \"createdBy\") VALUES ('$p', '$c', 'TND', gen_random_uuid())" >/dev/null
+prod=$(q "INSERT INTO product (producer, \"sellerType\", \"sellerId\", code, name, \"subscriptionTarget\", \"platformId\") VALUES ('billing-owner', 'company', '$c', 's5a', 'P', 'personal', '$p') RETURNING id")
+price=$(q "INSERT INTO price (\"productId\", \"clientReference\", currency, \"unitAmount\", \"interval\", \"intervalUnit\", \"intervalCount\", \"effectiveFrom\") VALUES ('$prod', 'r', 'TND', 9000, 'recurring', 'month', 1, '2020-01-01') RETURNING id")
+q "INSERT INTO fee_cap (\"platformId\", amount, currency, \"setBy\") VALUES ('$p', 500, 'TND', gen_random_uuid())" >/dev/null
+del=$(q "INSERT INTO fee_delegation (\"platformId\", \"operatorUserId\", \"grantedBy\") VALUES ('$p', gen_random_uuid(), gen_random_uuid()) RETURNING id")
+prop=$(q "INSERT INTO fee_proposal (\"platformId\", \"organizationId\", \"productId\", amount, currency, \"delegationId\", \"proposedBy\") SELECT '$p', '$org', '$prod', 400, 'TND', id, \"operatorUserId\" FROM fee_delegation WHERE id = '$del' RETURNING id")
+q "UPDATE fee_proposal SET status = 'approved', \"decidedBy\" = gen_random_uuid() WHERE id = '$prop'" >/dev/null
+# each racer freezes the terms it read (fee 400 under cap version 1); one more racer lowers the cap to 100 at the same time
+ins="INSERT INTO assistance_request (\"beneficiaryUserId\", \"organizationId\", \"platformId\", \"productId\", \"priceId\", currency, \"baseAmount\", \"feeAmount\", \"totalAmount\", \"feeProposalId\", \"feeCapVersion\", consent) VALUES ('00000000-0000-4000-8000-00000000a5f4', '$org', '$p', '$prod', '$price', 'TND', 9000, 400, 9400, '$prop', 1, true)"
+outdir="$(mktemp -d)"
+for i in $(seq 1 "$racers"); do ( psql -Atq -d "$db" >"$outdir/$i.out" 2>&1 -c "$ins" ) & done
+( psql -Atq -d "$db" >"$outdir/cap.out" 2>&1 -c "INSERT INTO fee_cap (\"platformId\", amount, currency, \"setBy\") VALUES ('$p', 100, 'TND', gen_random_uuid())" ) &
+wait
+dups=$(cat "$outdir"/[0-9]*.out | grep -c '^ERROR: .*assistance_request_unresolved_unique' || true)
+stale=$(cat "$outdir"/[0-9]*.out | grep -cE "^ERROR: +(the approved fee is above the platform's current cap|the assistance request does not freeze the current approved fee)" || true)
+other=$(cat "$outdir"/*.out | grep -iE "error|deadlock" | grep -vcE "assistance_request_unresolved_unique|the approved fee is above the platform's current cap|does not freeze the current approved fee" || true); rm -rf "$outdir"
+rows=$(q "SELECT count(*) FROM assistance_request")
+# a request that committed did so before the lowered cap (version 1); every racer after it is refused as stale or not usable
+bad=$(q "SELECT count(*) FROM assistance_request a WHERE a.\"feeAmount\" > (SELECT amount FROM fee_cap WHERE \"platformId\" = a.\"platformId\" AND version = a.\"feeCapVersion\")")
+[ "$rows" -le 1 ] && [ "$other" -eq 0 ] && [ "$bad" -eq 0 ] && [ $((rows + dups + stale)) -eq "$racers" ] \
+  || fail "assistance race: rows=$rows duplicates=$dups stale=$stale other=$other above-cap=$bad (want <=1 row, every other racer refused, no other error)"
+echo "PASS: race — $racers concurrent assistance requests gave rows=$rows (refused: $dups duplicate, $stale stale fee), none above its cap"

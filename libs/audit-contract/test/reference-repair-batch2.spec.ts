@@ -72,7 +72,8 @@ describe('A5.4-AC1 batch 2: additive only', () => {
     // Core V2 S2-Audit.2 later added the three authorization receipt actions (D1); batch 2 added exactly its two
     // + the two legal-hold actions of Core V2 S2-Audit.4
     // + the two evidence-grant actions of Core V2 S2-File.1 , file.granted_read (S2-File.2) and the two hold actions (S2-File.3)
-    const S2_AUDIT_2 = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided', 'audit_legal_hold.placed', 'audit_legal_hold.released', 'file.grant_issued', 'file.grant_revoked', 'file.granted_read', 'file.hold_placed', 'file.hold_released'];
+    // + the three assistance-request actions of Core V2 S5a (D-9)
+    const S2_AUDIT_2 = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided', 'audit_legal_hold.placed', 'audit_legal_hold.released', 'file.grant_issued', 'file.grant_revoked', 'file.granted_read', 'file.hold_placed', 'file.hold_released', 'assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined'];
     expect(AUDIT_ACTIONS).toHaveLength(58 + S2_AUDIT_2.length);
     expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE) && !S2_AUDIT_2.includes(a)).sort()).toEqual([MISMATCH, UNRESOLVED]);
   });

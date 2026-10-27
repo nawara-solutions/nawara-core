@@ -90,6 +90,20 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   identity. Only Payment's verified `payment.succeeded` records the purchase and grants entitlement. **Production refuses it** (not
   mounted under `NODE_ENV=production`; the service refuses too) until B-001 and B-007 are resolved and production activation is
   separately authorized.
+- **Organization assistance (Core V2 S5a; register BIL-13 F, BIL-14 F, BIL-15 F and G; the Owner's D-1 to D-12; `db/migrations/0029`,
+  `src/assistance/`) — DEVELOPMENT AND SIMULATION ONLY:** every caller uses their own bearer, verified live through `/auth/me` on each
+  request, plus the Organization reference (unavailable: `503`, nothing written). A beneficiary (an active ordinary member with an
+  active membership in the Organization on its Platform) consents explicitly through `POST /billing/assistance-requests`
+  `{organizationId, productId, priceId, consent: true}`. Billing freezes the price, the Organization's current approved fee (0 when
+  none; above the current cap `409 fee_not_usable`), the fee proposal, the cap version and the total. At most one unresolved request
+  exists per beneficiary, Organization and product. The beneficiary or an Organization actor (an administrator membership, the S4e
+  model) may `decline` a pending request, and the decline is final. Only an Organization actor who is not the beneficiary may report
+  `cash-collection` `{cashCollectedAt}`, which sets `settleBy` to exactly 72 hours later. `GET /billing/assistance-requests/:id`
+  derives `overdue` from the database clock. Commands use class-K idempotency, and each change carries its audit action in the same
+  transaction.
+  - **A cash report is evidence, never settlement.** It creates no invoice, payment, purchase, entitlement or domain event.
+  - Restrictions (T1, T2, T3, inactivity) belong to S5d and are not evaluated here.
+  - **Production refuses it:** the routes are not mounted, and the service refuses too.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

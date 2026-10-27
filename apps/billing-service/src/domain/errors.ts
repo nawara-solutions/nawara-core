@@ -40,7 +40,13 @@ export type BillingErrorCode =
   | 'idempotency_key_conflict'
   | 'invalid_checkout_request' // Core V2 S3f direct checkout (register BIL-10)
   | 'member_not_eligible'
-  | 'checkout_uncertain';
+  | 'checkout_uncertain'
+  | 'invalid_assistance_request' // Core V2 S5a Organization assistance (register BIL-13 to BIL-15)
+  | 'assistance_request_open'
+  | 'assistance_request_not_pending'
+  | 'cash_collection_time_invalid'
+  | 'cash_collection_already_reported'
+  | 'fee_not_usable';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

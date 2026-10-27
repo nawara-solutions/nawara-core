@@ -414,6 +414,36 @@ const SPEC = {
     changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A price stops being offered.',
   },
+  // Core V2 S5a (register BIL-13 to BIL-15; the Owner's D-9): an Organization assistance request, consented by its beneficiary with frozen
+  // terms, declined, or its physical cash collection reported. The actor is always the Auth-verified ordinary member (the beneficiary or
+  // the Organization actor); the Organization is the request's own. A cash-collection report is evidence, never settlement.
+  'assistance_request.created': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_request'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      price_id: { type: 'uuid', shape: 'value', required: true },
+      base_amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+      fee_amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
+      fee_proposal_id: { type: 'uuid', shape: 'value', required: false },
+    },
+    purpose: 'A member consented to have an Organization pay for a personal product, on frozen financial terms (base price and approved fee).',
+  },
+  'assistance_request.declined': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_request'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { declined_by: { type: 'code', shape: 'value', required: true, values: ['beneficiary', 'organization_actor'] } },
+    purpose: 'A pending assistance request was finally declined, by its beneficiary or by an administrator of the Organization.',
+  },
+  'assistance_request.cash_collection_reported': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_request'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      cash_collected_at: { type: 'timestamp', shape: 'value', required: true },
+      settle_by: { type: 'timestamp', shape: 'value', required: true },
+    },
+    purpose: 'An Organization administrator declared the physical cash collection, starting the 72-hour settlement deadline (not a settlement).',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {
