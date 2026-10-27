@@ -15,7 +15,8 @@ export type BillingAuditAction =
   | 'subscription.activated' | 'subscription.renewed'
   | 'invoice.issued' | 'invoice.discarded' | 'invoice.paid'
   | 'payment_request.created' | 'payment_request.cancelled'
-  | 'product.created' | 'product.archived' | 'price.created' | 'price.retired';
+  | 'product.created' | 'product.archived' | 'price.created' | 'price.retired'
+  | 'assistance_request.created' | 'assistance_request.declined' | 'assistance_request.cash_collection_reported'; // Core V2 S5a (D-9)
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in

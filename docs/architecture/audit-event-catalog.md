@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (11)
+## billing-service (14)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -76,6 +76,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `product.archived` | administrative | user (owner); service | as recorded (UUID or null) | product | — | succeeded | — | A product stops being sellable. |
 | `price.created` | administrative | user (owner); service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price (what an organization will be charged) is published. |
 | `price.retired` | administrative | user (owner); service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price stops being offered. |
+| `assistance_request.created` | commercial | user (member) | required | assistance_request | — | succeeded | `product_id`: uuid<br>`price_id`: uuid<br>`base_amount`: integer 1–9007199254740991<br>`fee_amount`: integer 0–9007199254740991<br>`fee_proposal_id`?: uuid | A member consented to have an Organization pay for a personal product, on frozen financial terms (base price and approved fee). |
+| `assistance_request.declined` | commercial | user (member) | required | assistance_request | — | succeeded | `declined_by`: beneficiary \| organization_actor | A pending assistance request was finally declined, by its beneficiary or by an administrator of the Organization. |
+| `assistance_request.cash_collection_reported` | commercial | user (member) | required | assistance_request | — | succeeded | `cash_collected_at`: timestamp<br>`settle_by`: timestamp | An Organization administrator declared the physical cash collection, starting the 72-hour settlement deadline (not a settlement). |
 
 ## payment-service (5)
 
@@ -121,4 +124,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 68 actions.**
+**Total: 71 actions.**

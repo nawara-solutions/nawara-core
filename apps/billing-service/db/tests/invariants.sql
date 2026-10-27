@@ -67,7 +67,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND data_type = 'bigint'
     AND table_name NOT IN ('invoice_number_sequence')
     AND NOT (table_name = 'subscription_purchase' AND column_name = 'ledgerSeq') -- S3c: the ledger's ORDER, not money
-    AND NOT (table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount')), '8'); -- S3f: school-fee configuration, checked below
+    AND NOT (table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount') -- S3f: school-fee configuration, checked below
+    AND NOT (table_name = 'assistance_request' AND column_name IN ('baseAmount', 'feeAmount', 'totalAmount'))), '8'); -- S5a: frozen assistance terms, checked below
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -911,6 +912,58 @@ SELECT pg_temp.assert_eq('S4a', 'no existing routing record was re-judged by the
   (SELECT convalidated::text FROM pg_constraint WHERE conname = 'invoice_entitlement_non_entitlement_payer'), 'false');
 SELECT pg_temp.assert_eq('S4a', 'existing payment requests keep their mapping version (no backfill)',
   (SELECT count(*)::text FROM payment_request WHERE "mappingVersion" NOT IN (1, 2)), '0');
+
+-- ------------------------------------------------------------------------------------------------------------- S5a Organization assistance (0029)
+-- Frozen terms (D-1), consent (D-3), one transition from pending (D-4, D-6), the FC-8 time order and deadline, one unresolved request
+-- (D-7), immutability and the derived overdue, whatever path writes. Reuses the S3f Platform, Owner product and (approved) fee above.
+\set a_org '00000000-0000-4000-8000-00000000a5a1'
+\set a_ben '00000000-0000-4000-8000-00000000a5b1'
+\set a_act '00000000-0000-4000-8000-00000000a5c1'
+INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount", "effectiveFrom") VALUES (:'f_prod', 's5a-r', 'TND', 9000, 'recurring', 'month', 1, '2020-01-01') RETURNING id AS a_price \gset
+SELECT version AS a_cap FROM billing_current_fee_cap(:'f_p') \gset
+-- the S3f Organization's approved fee (300) is above the current cap (100): unusable, so a request there is refused, never reduced
+SELECT pg_temp.expect_error('S5a', 'an approved fee above the current cap is refused, not reduced', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeProposalId", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 100, 9100, %L, %L, true)$$, :'a_ben', :'f_org', :'f_p', :'f_prod', :'a_price', :'f_prop', :'a_cap'), '23514', 'assistance_request_fee_not_usable');
+SELECT pg_temp.expect_error('S5a', 'a fee where none is approved is refused', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 50, 9050, %L, true)$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap'), '23514');
+SELECT pg_temp.expect_error('S5a', 'a base amount that is not the price is refused', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 8000, 0, 8000, %L, true)$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap'), '23514', 'assistance_request_offering');
+SELECT pg_temp.expect_error('S5a', 'a stale cap version is refused', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, 1, true)$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price'), '23514', 'assistance_request_fee_terms');
+SELECT pg_temp.expect_error('S5a', 'a total that is not base + fee is refused', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9001, %L, true)$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap'), '23514', 'assistance_request_amounts');
+SELECT pg_temp.expect_error('S5a', 'no implicit consent', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, false)$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap'), '23514', 'assistance_request_consent');
+SELECT pg_temp.expect_error('S5a', 'a request is never created cash_collected', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent, status, "cashCollectedAt", "reportedAt", "reportedBy", "settleBy")
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, true, 'cash_collected', now(), now(), %L, now() + interval '72 hours')$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap', :'a_act'), '23514', 'assistance_request_created_pending');
+INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent, "consentAt")
+  VALUES (:'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', 'TND', 9000, 0, 9000, :'a_cap', true, '2000-01-01') RETURNING id AS a_req \gset
+SELECT pg_temp.assert_eq('S5a', 'consentAt is the database''s time, never a supplied one', (SELECT ("consentAt" > '2020-01-01')::text FROM assistance_request WHERE id = :'a_req'), 'true');
+SELECT pg_temp.expect_error('S5a', 'one unresolved request per (beneficiary, Organization, product)', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, true)$$, :'a_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap'), '23505', 'assistance_request_unresolved_unique');
+SELECT pg_temp.expect_error('S5a', 'frozen terms never change', format($$UPDATE assistance_request SET "feeAmount" = 0, "totalAmount" = 9000 WHERE id = %L$$, :'a_req'), '23514');
+SELECT pg_temp.expect_error('S5a', 'a collection before the consent is refused', format($$UPDATE assistance_request SET status = 'cash_collected', "cashCollectedAt" = "consentAt" - interval '1 millisecond', "reportedBy" = %L WHERE id = %L$$, :'a_act', :'a_req'), '23514', 'assistance_request_cash_time_order');
+SELECT pg_temp.expect_error('S5a', 'a collection after the report time is refused', format($$UPDATE assistance_request SET status = 'cash_collected', "cashCollectedAt" = now() + interval '1 second', "reportedBy" = %L WHERE id = %L$$, :'a_act', :'a_req'), '23514', 'assistance_request_cash_time_order');
+SELECT pg_temp.expect_error('S5a', 'the beneficiary never reports their own collection', format($$UPDATE assistance_request SET status = 'cash_collected', "cashCollectedAt" = now(), "reportedBy" = %L WHERE id = %L$$, :'a_ben', :'a_req'), '23514', 'assistance_request_reporter_not_beneficiary');
+SELECT pg_temp.expect_error('S5a', 'a decline must name its role consistently', format($$UPDATE assistance_request SET status = 'declined', "declinedBy" = %L, "declinedByRole" = 'organization_actor' WHERE id = %L$$, :'a_ben', :'a_req'), '23514', 'assistance_request_decline_role');
+SELECT pg_temp.expect_ok('S5a', 'a report at the consent instant is admissible (consentAt <= cashCollectedAt <= reportedAt)', format($$UPDATE assistance_request SET status = 'cash_collected', "cashCollectedAt" = "consentAt", "reportedBy" = %L, "reportedAt" = '2000-01-01', "settleBy" = '2000-01-01' WHERE id = %L$$, :'a_act', :'a_req'));
+SELECT pg_temp.assert_eq('S5a', 'reportedAt is the database time and settleBy exactly cashCollectedAt + 72 hours, whatever was supplied',
+  (SELECT ("reportedAt" > '2020-01-01' AND "reportedAt" <= now() AND "settleBy" = "cashCollectedAt" + interval '72 hours' AND extract(epoch FROM "settleBy" - "cashCollectedAt") = 259200)::text FROM assistance_request WHERE id = :'a_req'), 'true');
+SELECT pg_temp.expect_error('S5a', 'a reported collection is final in S5a (no decline, no second report)', format($$UPDATE assistance_request SET status = 'declined', "declinedBy" = %L, "declinedByRole" = 'beneficiary', "cashCollectedAt" = NULL, "reportedAt" = NULL, "reportedBy" = NULL, "settleBy" = NULL WHERE id = %L$$, :'a_ben', :'a_req'), '23514');
+SELECT pg_temp.expect_error('S5a', 'the reported time is immutable once recorded', format($$UPDATE assistance_request SET "cashCollectedAt" = "cashCollectedAt" + interval '1 second' WHERE id = %L$$, :'a_req'), '23514', 'assistance_request_not_pending');
+SELECT pg_temp.expect_error('S5a', 'an assistance request is never deleted', format($$DELETE FROM assistance_request WHERE id = %L$$, :'a_req'), '23514');
+SELECT pg_temp.expect_error('S5a', 'an assistance request is never truncated', $$TRUNCATE assistance_request$$, '23514');
+SELECT pg_temp.assert_eq('S5a', 'overdue is derived: unresolved and past settleBy at the database''s current time; never for pending or declined',
+  (SELECT (billing_assistance_overdue('cash_collected', now() - interval '1 millisecond') AND NOT billing_assistance_overdue('cash_collected', now() + interval '1 hour')
+           AND NOT billing_assistance_overdue('pending', now() - interval '1 hour') AND NOT billing_assistance_overdue('declined', now() - interval '1 hour'))::text), 'true');
+SELECT pg_temp.assert_eq('S5a', 'no overdue column is stored', (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'assistance_request' AND column_name ILIKE '%overdue%'), '0');
+SELECT pg_temp.assert_eq('S5a', 'an assistance request references no invoice, payment or purchase (a cash report is never settlement)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'assistance_request' AND column_name ~* '(invoice|payment|purchase|subscription|settled)'), '0');
+SELECT pg_temp.expect_error('S5a', 'an assistance idempotency record is never changed', format($$
+  INSERT INTO assistance_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s5a-0001', 'assistance_request.create', repeat('a', 64), 201, '{}');
+  UPDATE assistance_command_idempotency SET "responseStatus" = 200 WHERE "actorUserId" = %L$$, :'a_ben', :'a_ben'), '23514');
+SELECT pg_temp.expect_error('S5a', 'an unknown assistance command is refused', format($$
+  INSERT INTO assistance_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s5a-0002', 'assistance_request.settle', repeat('a', 64), 201, '{}')$$, :'a_ben'), '23514', 'assistance_command_idempotency_operation');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
