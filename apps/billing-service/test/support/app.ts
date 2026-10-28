@@ -11,6 +11,7 @@ import type { PaymentClient } from '../../src/payment-integration/payment-client
 import { ProbeModule } from './probe.js';
 import { BILLING_OPERATIONS } from '../../src/admission/caller-admission.policy.js';
 import { TrustedDeliveryBus } from './trusted-delivery-bus.js';
+import { BillingExceptionFilter } from '../../src/errors/billing-exception.filter.js';
 import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/owner-authority.client.js';
 
 export interface TestApp {
@@ -105,7 +106,7 @@ export async function createTestApp(opts: {
   const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false, logger: false });
-  configureApp(app, config, logger);
+  configureApp(app, config, logger, { exceptionFilter: new BillingExceptionFilter(logger) }); // Core V2 S5d: the default filter plus BIL-13's documented fields
   mountDocs(app, config);
   await app.listen(0, '127.0.0.1');
   return { app, config, registry: app.get(ReadinessRegistry), logs, bus: app.get<TrustedDeliveryBus>(EVENT_BUS) };

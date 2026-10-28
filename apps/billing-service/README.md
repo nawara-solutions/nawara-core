@@ -136,6 +136,17 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     record stay unchanged. The only resolution closes a timestamp dispute on a matching later correction; a cash-not-returned or
     collection-not-made dispute stays open.
   - Nothing here creates, pays, refunds or reverses anything, and no Owner action discharges an obligation (`resolved_by_owner` is reserved).
+- **Organization financial restrictions T1 and T2 (Core V2 S5d; register BIL-13 H, BIL-26 F; the Owner's S5D-1 to S5D-8;
+  `db/migrations/0032`, `src/assistance/assistance-restrictions.ts`) — DEVELOPMENT AND SIMULATION ONLY:**
+  - Derived, never stored, by one database function: **T1** a request still `cash_collected` past `settleBy` (cleared by a verified
+    settlement or the beneficiary's confirmation); **T2** a cash-return obligation not confirmed by the beneficiary (`open` or
+    `return_reported`). Organization scope only.
+  - A new assistance request in a restricted Organization is `409 assistance_restricted` with `restrictions` (kinds only) and
+    `restriction`; the database refuses it too, under an Organization advisory lock and the database's current clock. Nothing else is
+    restricted: every discharge action, cash collection on an already-pending request and every read stay available.
+  - `GET /billing/organizations/:organizationId/restrictions`: the Owner of the Platform, the Organization actor, or a service holding
+    `restriction.read` for the Platform.
+  - **Not provided:** T3 (S6f) and Organization inactivity (D6, needs V-4's lifecycle state) are reserved and never returned.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

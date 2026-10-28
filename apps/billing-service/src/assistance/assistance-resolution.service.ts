@@ -8,6 +8,7 @@ import { billingError, notFound, operationNotPermitted } from '../domain/errors.
 import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type BillingStepUpPurpose, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import { AssistanceAuthority, type AssistanceParties } from './assistance-authority.js';
+import { lockOrganization } from './assistance-restrictions.js';
 import { AssistanceCommandIdempotency, type AssistanceCommandResult, type AssistanceOperation } from './assistance-idempotency.js';
 import type { CORRECTION_REASONS, CorrectableField, DisputeReason } from './assistance-input.js';
 import { CORRECTION_COLUMNS, DISPUTE_COLUMNS, OBLIGATION_COLUMNS, representCashReturnObligation, representCorrection, representDispute } from './assistance-settlement.view.js';
@@ -77,6 +78,7 @@ export class AssistanceResolutionService {
     if (!parties) throw notFound();
     await this.beneficiary(identity, parties);
     return this.idempotency.run(identity.id, key, 'cash_return_obligation.confirm', { id: obligationId }, async (q): Promise<AssistanceCommandResult> => {
+      await lockOrganization(q, parties.organizationId); // Core V2 S5d (S5D-5): the confirmation clears T1 and T2
       await q.query(`SELECT 1 FROM assistance_request WHERE id = $1 FOR UPDATE`, [parties.assistanceRequestId]);
       const o = (await q.query<{ status: string }>(`SELECT status FROM cash_return_obligation WHERE id = $1 FOR UPDATE`, [obligationId])).rows[0]!;
       if (o.status === 'open') throw billingError(409, 'cash_return_not_reported', BILLING_MESSAGES.cashReturnNotReported);

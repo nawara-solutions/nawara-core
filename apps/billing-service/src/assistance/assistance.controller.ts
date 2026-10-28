@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Header, Headers, Inject, Param, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiHeader, ApiOperation, ApiParam, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { RateLimitService, resolveLocale, type AuthIdentity } from '@nawara/service-kit';
+import { RateLimitService, RequireServiceOperation, ServiceOperationGuard, resolveLocale, type AuthIdentity } from '@nawara/service-kit';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { requestTransitionContext } from '../domain/actors.js';
@@ -14,7 +14,10 @@ import {
 } from './assistance-input.js';
 import { AssistanceOwner, AssistanceOwnerGuard } from './assistance-owner.guard.js';
 import { AssistanceResolutionService, type VerifiedAssistanceOwner } from './assistance-resolution.service.js';
+import { AssistanceRestrictionService } from './assistance-restriction.service.js';
+import { RESTRICTION_KINDS } from './assistance-restrictions.js';
 import { AssistanceSettlementService } from './assistance-settlement.service.js';
+import { Reader, RestrictionReaderGuard, type RestrictionReader } from './restriction-reader.guard.js';
 import { AssistanceUser, AssistanceUserGuard } from './assistance-user.guard.js';
 import { AssistanceService } from './assistance.service.js';
 
@@ -163,7 +166,7 @@ export class AssistanceController {
   @ApiResponse({ status: 400, description: 'invalid_assistance_request (consent must be true) | idempotency_key_required' })
   @ApiResponse(R401)
   @ApiResponse({ status: 403, description: 'member_not_eligible: inactive, an Owner or Operator, or no active membership in that Organization on its Platform' })
-  @ApiResponse({ status: 409, description: 'platform_not_configured | product_not_available | fee_not_usable | assistance_request_open | idempotency_key_conflict' })
+  @ApiResponse({ status: 409, description: 'assistance_restricted (Core V2 S5d: the Organization is under T1 and/or T2; the body adds `restrictions` (every kind, deterministic) and `restriction` (the first); kinds only) | platform_not_configured | product_not_available | fee_not_usable | assistance_request_open | idempotency_key_conflict' })
   @ApiResponse({ status: 422, description: 'price_not_available' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
   @ApiResponse(R503)
@@ -438,5 +441,45 @@ export class AssistanceAdminController {
     const input = normaliseResolutionInput(body);
     if (!isAssistanceId(id)) throw notFound();
     return answer(res, await this.resolution.resolve(owner, k, id.toLowerCase(), input, stepUp, requestTransitionContext({ type: 'user', id: owner.userId, userKind: 'owner' })));
+  }
+}
+
+class RestrictionDto {
+  @ApiProperty({ enum: RESTRICTION_KINDS, description: 'T1: a request past its settlement deadline, not settled and not confirmed returned. T2: a cash-return obligation not confirmed by the beneficiary. (T3 and inactive are reserved and never returned in Core V2 S5d.)' }) kind!: string;
+  @ApiProperty({ format: 'uuid', description: 'The assistance request (T1) or the cash-return obligation (T2).' }) sourceId!: string;
+  @ApiProperty({ format: 'date-time', description: 'settleBy (T1) or the obligation\'s opening (T2).' }) since!: string;
+}
+
+class RestrictionsDto {
+  @ApiProperty({ type: [RestrictionDto], description: 'Ordered by kind, then since, then sourceId. Empty when unrestricted.' }) restrictions!: RestrictionDto[];
+}
+
+/**
+ * Core V2 S5d (register BIL-26; S5D-6): an Organization's current financial restrictions, derived at the database's clock. Read-only.
+ * Simulation only, as above.
+ */
+@ApiTags('organization assistance')
+@ApiBearerAuth()
+@Controller('billing/organizations')
+@UseGuards(RestrictionReaderGuard, ServiceOperationGuard)
+export class OrganizationRestrictionsController {
+  constructor(private readonly restrictions: AssistanceRestrictionService) {}
+
+  @Get(':organizationId/restrictions')
+  @Header('Cache-Control', 'no-store')
+  @RequireServiceOperation('restriction.read')
+  @ApiOperation({
+    summary: "An Organization's financial restrictions (T1, T2): the Owner of its Platform, its administrator, or a service holding restriction.read.",
+    description: 'Restrictions block NEW assistance requests only; every discharge action stays available. Nothing here creates, clears or stores a restriction.',
+  })
+  @ApiParam({ name: 'organizationId', format: 'uuid' })
+  @ApiResponse({ status: 200, type: RestrictionsDto })
+  @ApiResponse(R401)
+  @ApiResponse({ status: 403, description: 'operation_not_permitted (a service without restriction.read) | organization_not_permitted (a service whose Platforms do not include it)' })
+  @ApiResponse({ status: 404, description: 'an unknown Organization, or you are neither the Owner of its Platform nor its administrator (one answer)' })
+  @ApiResponse({ status: 503, description: 'Auth or the Organization reference could not answer; nothing was read' })
+  async read(@Reader() reader: RestrictionReader, @Param('organizationId') organizationId: string) {
+    if (!isAssistanceId(organizationId)) throw notFound();
+    return this.restrictions.read(reader, organizationId.toLowerCase());
   }
 }

@@ -41,8 +41,10 @@ class FakePaymentClient implements PaymentClient {
 
 const COMPANY = randomUUID();
 const PLATFORM = randomUUID();
-const ORG = randomUUID();
-const ORG2 = randomUUID();
+// Core V2 S5d: a fresh Organization per test (beforeEach). T1/T2 (S5D-1, S5D-2) restrict an Organization's NEW requests, so one test's
+// overdue or unconfirmed fixtures must never restrict the next one's; restrictions are derived and never cleared by a test.
+let ORG = randomUUID();
+let ORG2 = randomUUID();
 const U = { b1: randomUUID(), b2: randomUUID(), a1: randomUUID(), a2: randomUUID(), adminBeneficiary: randomUUID(), m1: randomUUID(), owner: randomUUID() };
 const membership = (organizationId: string, o: { admin?: boolean; status?: AuthMembership['status'] } = {}): AuthMembership => ({
   id: randomUUID(), organization: { id: organizationId }, platform: { id: PLATFORM }, status: o.status ?? 'active', isOrganizationAdmin: o.admin ?? false,
@@ -204,7 +206,11 @@ describeWithEnv('assisted settlement and cash return (Core V2 S5b, simulation) â
       env: { BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'test-producer': { operations: [...BILLING_OPERATIONS], allowedPlatforms: [PLATFORM] } } }) },
     });
   });
-  beforeEach(() => resetIdentities());
+  beforeEach(() => {
+    ORG = randomUUID();
+    ORG2 = randomUUID();
+    resetIdentities();
+  });
   afterAll(async () => {
     await t?.app.close();
     await admin?.end();
@@ -290,7 +296,8 @@ describeWithEnv('assisted settlement and cash return (Core V2 S5b, simulation) â
     expect((await one(`SELECT "returnReportedBy" FROM cash_return_obligation WHERE id = $1`, [o.id])).returnReportedBy).toBe(U.a1);
     expect((await audit(o.id)).map((e) => e.name)).toEqual(['audit.cash_return_obligation.opened', 'audit.cash_return_obligation.return_reported']);
     // reported, not discharged: the request stays unresolved (D-7, E-10) and overdue; no purchase, no entitlement, ever
-    expect((await create({ organizationId: ORG, productId: r.productId, priceId: r.priceId, consent: true }, 'b2')).body.code).toBe('assistance_request_open');
+    // (Core V2 S5d: the Organization is now under T1 and T2, which refuses any new request before the D-7 slot is even considered)
+    expect((await create({ organizationId: ORG, productId: r.productId, priceId: r.priceId, consent: true }, 'b2')).body).toMatchObject({ code: 'assistance_restricted', restrictions: ['T1', 'T2'] });
     expect((await read(r.id, 'b2')).body).toMatchObject({ status: 'cash_collected', overdue: true, cashReturnObligation: { status: 'return_reported' } });
     expect(await purchases(r.id)).toBe(0);
     expect((await entitlement(U.b2, r.productId).expect(200)).body).toEqual({ valid: false, expiresAt: null });
@@ -414,6 +421,8 @@ describeWithEnv('assisted settlement and cash return (Core V2 S5b, simulation) â
         expect([await purchases(r.id), await obligations(r.id)]).toEqual([1, 0]); // the open channel holds the obligation back
       }
       for (let i = 0; i < 4; i++) {
+        ORG = randomUUID(); // Core V2 S5d: each obligation restricts its Organization (T2), so every round uses a fresh one
+        resetIdentities();
         const r = await collected();
         const s = await started(r.id);
         await expireDeadline(r.id);

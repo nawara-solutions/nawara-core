@@ -41,6 +41,10 @@ const PAYMENT_URL = `http://127.0.0.1:${PAYMENT_PORT}`;
 const BILLING_QUEUE = 'billing.payment-events';
 const BILLING_DEAD_QUEUE = `${BILLING_QUEUE}.dead`;
 const ORGANIZATION = '0a0a0a0a-0000-4000-8000-0000000055b1';
+// Core V2 S5d: T1/T2 restrict an Organization's NEW requests, so every scenario that leaves an obligation behind uses its own Organization
+const ORGANIZATION_B = '0a0a0a0a-0000-4000-8000-0000000055c1';
+const ORGANIZATION_C = '0a0a0a0a-0000-4000-8000-0000000055c2';
+const ORGANIZATION_D = '0a0a0a0a-0000-4000-8000-0000000055c3';
 const COMPANY = 'aaaaaaaa-0000-4000-8000-00000000c0de';
 const ADMIN_TOKEN = 'e2e-s5b-org-admin-jwt';
 const ADMIN_ID = 'e2e0e2e0-0000-4000-8000-0000000055b2';
@@ -68,7 +72,8 @@ describeWithEnv(
     const producerToken = generateServiceToken();
     const billingToPaymentToken = generateServiceToken();
     const harnessToken = generateServiceToken();
-    const member = (organizationAdmin: boolean) => [{ id: randomUUID(), organization: { id: ORGANIZATION }, platform: { id: TEST_PLATFORM }, status: 'active' as const, isOrganizationAdmin: organizationAdmin }];
+    const member = (organizationAdmin: boolean) => [ORGANIZATION, ORGANIZATION_B, ORGANIZATION_C, ORGANIZATION_D]
+      .map((organization) => ({ id: randomUUID(), organization: { id: organization }, platform: { id: TEST_PLATFORM }, status: 'active' as const, isOrganizationAdmin: organizationAdmin }));
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -174,8 +179,8 @@ describeWithEnv(
     const paymentCall = (token: string, path: string, body: unknown) => call(PAYMENT_URL, 'POST', token, path, body);
 
     /** A consented request whose cash the Organization collected; then its electronic settlement, dispatched to Payment. */
-    async function settlementAtPayment(beneficiaryToken: string) {
-      const created = await billingCall('POST', beneficiaryToken, '/billing/assistance-requests', { organizationId: ORGANIZATION, productId, priceId, consent: true });
+    async function settlementAtPayment(beneficiaryToken: string, organizationId = ORGANIZATION) {
+      const created = await billingCall('POST', beneficiaryToken, '/billing/assistance-requests', { organizationId, productId, priceId, consent: true });
       expect(created.status, JSON.stringify(created.json)).toBe(201);
       await new Promise((r) => setTimeout(r, 20)); // the collection is after the consent
       const cash = await billingCall('POST', ADMIN_TOKEN, `/billing/assistance-requests/${created.json.id}/cash-collection`, { cashCollectedAt: new Date().toISOString() });
@@ -217,8 +222,8 @@ describeWithEnv(
     }, 90_000);
 
     /** A final failure at Payment, then the deadline (a test-only move of the collection into the past, as a superuser): the sweep's obligation. */
-    async function obligationAfterFailure(beneficiaryToken: string) {
-      const s = await settlementAtPayment(beneficiaryToken);
+    async function obligationAfterFailure(beneficiaryToken: string, organizationId: string) {
+      const s = await settlementAtPayment(beneficiaryToken, organizationId);
       await capture(s.paymentId, 'failed');
       await waitFor(async () => (await billingAdmin.query(`SELECT status FROM assistance_settlement_channel WHERE "invoiceId" = $1`, [s.invoiceId])).rows[0]?.status === 'closed',
         20_000, 'the channel to close on Payment\'s final failure');
@@ -237,7 +242,7 @@ describeWithEnv(
     }
 
     it('S5c: an open dispute blocks the confirmation; the beneficiary confirms the reported return; the audit evidence leaves over the real relay; never a purchase', async () => {
-      const s = await obligationAfterFailure(BENEFICIARY3_TOKEN);
+      const s = await obligationAfterFailure(BENEFICIARY3_TOKEN, ORGANIZATION_C);
       const rr = await billingCall('POST', ADMIN_TOKEN, `/billing/cash-return-obligations/${s.obligationId}/return`, { returnedAt: new Date(Date.now() - 60_000).toISOString() });
       expect(rr.json, JSON.stringify(rr.json)).toMatchObject({ status: 'return_reported' });
       const d = await billingCall('POST', BENEFICIARY3_TOKEN, `/billing/assistance-requests/${s.requestId}/disputes`, { reasonCode: 'collection_time_incorrect' });
@@ -249,7 +254,7 @@ describeWithEnv(
       expect((await billingCall('POST', ADMIN_TOKEN, `/billing/cash-return-obligations/${s.obligationId}/confirm`)).status).toBe(403); // never the Organization
 
       // another beneficiary's request, with no dispute: the confirmation resolves it
-      const s2 = await obligationAfterFailure(BENEFICIARY2_TOKEN);
+      const s2 = await obligationAfterFailure(BENEFICIARY2_TOKEN, ORGANIZATION_D);
       await billingCall('POST', ADMIN_TOKEN, `/billing/cash-return-obligations/${s2.obligationId}/return`, { returnedAt: new Date(Date.now() - 60_000).toISOString() });
       const ok = await billingCall('POST', BENEFICIARY2_TOKEN, `/billing/cash-return-obligations/${s2.obligationId}/confirm`);
       expect(ok.json, JSON.stringify(ok.json)).toMatchObject({ status: 'confirmed_returned', confirmedAt: expect.any(String) });
@@ -262,7 +267,7 @@ describeWithEnv(
     }, 120_000);
 
     it('UNSUCCESSFUL: a final failure, then the deadline: the sweep opens the cash-return obligation and the Organization reports the return; never a purchase', async () => {
-      const s = await settlementAtPayment(BENEFICIARY2_TOKEN);
+      const s = await settlementAtPayment(BENEFICIARY2_TOKEN, ORGANIZATION_B);
       await capture(s.paymentId, 'failed');
       await waitFor(async () => (await billingAdmin.query(`SELECT status FROM assistance_settlement_channel WHERE "invoiceId" = $1`, [s.invoiceId])).rows[0]?.status === 'closed',
         20_000, 'the channel to close on Payment\'s final failure');

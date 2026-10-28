@@ -17,6 +17,7 @@ import { SubscriptionRepository } from '../subscriptions/subscription.repository
 import { BILLING_MESSAGES } from '../messages.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { ASSISTANCE_PRODUCER, type BillingConfig } from '../config/billing-config.js';
+import { lockOrganization } from '../assistance/assistance-restrictions.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;
@@ -474,6 +475,9 @@ export class PaymentRequestRepository {
     q: Queryable, invoiceId: string, routing: { beneficiaryUserId: string; productId: string; assistanceRequestId: string },
     paymentRequestId: string, receiptId: string, settledAt: Date,
   ): Promise<SubscriptionSettlementOutcome> {
+    // Core V2 S5d (S5D-5): a settlement clears T1, so the Organization lock comes before the request row lock (the documented order)
+    const organizationId = (await q.query<{ organizationId: string }>(`SELECT "organizationId" FROM assistance_request WHERE id = $1`, [routing.assistanceRequestId])).rows[0]!.organizationId;
+    await lockOrganization(q, organizationId);
     const request = (await q.query<{ status: string; organizationId: string }>(`SELECT status, "organizationId" FROM assistance_request WHERE id = $1 FOR UPDATE`, [routing.assistanceRequestId])).rows[0]!;
     const channel = (await q.query<{ id: string; status: string }>(`SELECT id, status FROM assistance_settlement_channel WHERE "invoiceId" = $1 FOR UPDATE`, [invoiceId])).rows[0];
     const purchased = (await q.query(`SELECT 1 FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [routing.assistanceRequestId])).rows.length > 0;

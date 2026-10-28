@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { EVENT_BUS, JsonLogger, RabbitMqEventBus, ReadinessRegistry, configureApp } from '@nawara/service-kit';
+import { BillingExceptionFilter } from './errors/billing-exception.filter.js';
 import { AppModule } from './app.module.js';
 import { loadBillingConfig } from './config/billing-config.js';
 import { mountDocs } from './docs/mount-docs.js';
@@ -12,7 +13,7 @@ async function bootstrap() {
 
   // bodyParser: false lets the kit install its own bounded JSON parser (size limit) inside configureApp.
   const app = await NestFactory.create<NestExpressApplication>(AppModule.register(config), { bodyParser: false, bufferLogs: true });
-  configureApp(app, config, logger);
+  configureApp(app, config, logger, { exceptionFilter: new BillingExceptionFilter(logger) }); // Core V2 S5d: the default filter plus BIL-13's documented fields
 
   if (config.rabbitmqUrl) {
     const bus = app.get(EVENT_BUS);

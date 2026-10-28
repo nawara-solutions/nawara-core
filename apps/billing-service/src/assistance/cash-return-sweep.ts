@@ -4,6 +4,7 @@ import { BillingAudit } from '../audit/billing-audit.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import type { TransitionContext } from '../domain/actors.js';
+import { lockOrganization } from './assistance-restrictions.js';
 
 /** A request past its deadline whose settlement side is definitively unsuccessful (E-6 conditions 1 to 5, at the database's time). */
 const DUE = `a.status = 'cash_collected' AND now() > a."settleBy"
@@ -62,7 +63,11 @@ export class CashReturnSweep {
 
   private openOne(requestId: string): Promise<boolean> {
     return this.db.tx(async (q) => {
-      // the request row lock first (the assisted purchase's lock), then every condition again under it
+      // Core V2 S5d (S5D-5): the Organization lock first (an obligation is T2), then the request row lock (the assisted purchase's lock),
+      // then every condition again under them
+      const org = (await q.query<{ organizationId: string }>(`SELECT "organizationId" FROM assistance_request WHERE id = $1`, [requestId])).rows[0];
+      if (!org) return false;
+      await lockOrganization(q, org.organizationId);
       const r = (await q.query<{ id: string }>(`SELECT a.id FROM assistance_request a WHERE a.id = $1 FOR UPDATE`, [requestId])).rows[0];
       if (!r) return false;
       const still = (await q.query(`SELECT 1 FROM assistance_request a WHERE a.id = $1 AND ${DUE}`, [requestId])).rows.length > 0;

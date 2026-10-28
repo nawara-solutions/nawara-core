@@ -9,7 +9,9 @@ import { AssistanceUserGuard } from './assistance-user.guard.js';
 import { HttpOwnerAuthority, OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import { AssistanceOwnerGuard } from './assistance-owner.guard.js';
 import { AssistanceResolutionService } from './assistance-resolution.service.js';
-import { AssistanceAdminController, AssistanceController, AssistanceDisputeController, CashReturnObligationController } from './assistance.controller.js';
+import { AssistanceAdminController, AssistanceController, AssistanceDisputeController, CashReturnObligationController, OrganizationRestrictionsController } from './assistance.controller.js';
+import { AssistanceRestrictionService } from './assistance-restriction.service.js';
+import { RestrictionReaderGuard } from './restriction-reader.guard.js';
 import { AssistanceService } from './assistance.service.js';
 import { CashReturnSweep, CashReturnSweepService } from './cash-return-sweep.js';
 
@@ -26,11 +28,13 @@ export class AssistanceModule {
     return {
       module: AssistanceModule,
       imports: [RateLimitModule, InvoicesModule],
-      controllers: [AssistanceController, CashReturnObligationController, AssistanceDisputeController, AssistanceAdminController],
+      controllers: [AssistanceController, CashReturnObligationController, AssistanceDisputeController, AssistanceAdminController, OrganizationRestrictionsController],
       providers: [
         AssistanceService, AssistanceSettlementService, AssistanceAuthority, AssistanceCommandIdempotency, AssistanceUserGuard, CashReturnSweep, CashReturnSweepService,
         // Core V2 S5c (BIL-18 to BIL-22): the resolution commands; the Owner path uses Auth's live Owner, Platform and step-up checks
         AssistanceResolutionService, AssistanceOwnerGuard,
+        // Core V2 S5d (BIL-26): the restriction read
+        AssistanceRestrictionService, RestrictionReaderGuard,
         { provide: OWNER_AUTHORITY, useValue: ownerAuthority ?? new HttpOwnerAuthority({ baseUrl: config.authServiceUrl }) },
       ],
     };

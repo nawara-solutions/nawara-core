@@ -21,8 +21,10 @@ const OTHER_COMPANY = randomUUID();
 const PLATFORM = randomUUID();
 const OTHER_PLATFORM = randomUUID();
 const UNCONFIGURED_PLATFORM = randomUUID();
-const ORG = randomUUID(); // on PLATFORM
-const ORG2 = randomUUID(); // on PLATFORM
+// Core V2 S5d: a fresh Organization per test (beforeEach). T1/T2 (S5D-1, S5D-2) restrict an Organization's NEW requests, so one test's
+// overdue or unconfirmed fixtures must never restrict the next one's; restrictions are derived and never cleared by a test.
+let ORG = randomUUID(); // on PLATFORM
+let ORG2 = randomUUID(); // on PLATFORM
 const ORG_OTHER = randomUUID(); // on OTHER_PLATFORM
 const ORG_UNCONFIGURED = randomUUID(); // on a Platform with no billing configuration
 const ORG_UNKNOWN = randomUUID(); // Organization Service does not know it
@@ -159,7 +161,15 @@ describeWithEnv('Organization assistance (Core V2 S5a, simulation) — real Post
     delegation = (await admin.query(`INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES ($1, $2, $3) RETURNING id`, [PLATFORM, operator, randomUUID()])).rows[0].id;
     t = await createTestApp({ databaseUrl: db.url, authClient, organizationReference: reference, tokens: [{ caller: 'test-producer', digest: service.digest }] });
   });
-  beforeEach(() => resetIdentities());
+  beforeEach(() => {
+    ORG = randomUUID();
+    ORG2 = randomUUID();
+    REFERENCE[ORG] = PLATFORM;
+    REFERENCE[ORG2] = PLATFORM;
+    PLATFORM_OF[ORG] = PLATFORM;
+    PLATFORM_OF[ORG2] = PLATFORM;
+    resetIdentities();
+  });
   afterAll(async () => {
     await t?.app.close();
     await admin?.end();
@@ -544,7 +554,7 @@ describeWithEnv('Organization assistance (Core V2 S5a, simulation) — real Post
       await expect(svc.read(who, ORG)).rejects.toMatchObject({ status: 404 });
       await expect(svc.decline(who, 'k-12345678', ORG, null as never)).rejects.toMatchObject({ status: 404 });
       await expect(svc.reportCashCollection(who, 'k-12345678', ORG, { cashCollectedAt: ago(0) }, null as never)).rejects.toMatchObject({ status: 404 });
-      expect(AssistanceModule.register({ isProduction: false } as BillingConfig).controllers).toHaveLength(4); // + S5b's cash-return controller, + S5c's dispute and Owner controllers
+      expect(AssistanceModule.register({ isProduction: false } as BillingConfig).controllers).toHaveLength(5); // + S5b's cash-return controller, + S5c's dispute and Owner controllers, + S5d's restriction read
     });
   });
 });

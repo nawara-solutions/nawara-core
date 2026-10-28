@@ -36,6 +36,7 @@ const SURFACE: [string, string, string][] = [
   ['get', `/billing/payment-requests/${U(1)}`, 'payment_request.read'],
   ['post', `/billing/payment-requests/${U(1)}/cancel`, 'payment_request.cancel'],
   ['get', `/billing/organizations/${ORG.inScope}/entitlement`, 'entitlement.read'],
+  ['get', `/billing/organizations/${ORG.inScope}/restrictions`, 'restriction.read'], // Core V2 S5d (BIL-26)
 ];
 
 const payer: AuthIdentity = { id: '1a1a1a1a-0000-4000-8000-000000000001', adminTier: null, isActive: true, memberships: [] };

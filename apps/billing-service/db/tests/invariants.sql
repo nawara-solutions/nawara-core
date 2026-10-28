@@ -1067,6 +1067,46 @@ SELECT pg_temp.expect_ok('S5c', 'a returned request frees the one-unresolved-req
 SELECT pg_temp.assert_eq('S5c', 'no S5c table references a subscription, payment or purchase (no Owner or dispute action pays, grants or reverses)',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('assistance_dispute', 'assistance_dispute_response', 'assistance_correction') AND column_name ~* '(entitlement|subscription|payment|purchase|invoice|amount)'), '0');
 
+-- ------------------------------------------------------------------------------------------------------------- S5d restrictions T1/T2 (0032)
+-- A fresh Organization: one request past its deadline (T1), then its obligation (T1 + T2); fixtures written as a superuser.
+\set d_org '00000000-0000-4000-8000-00000000d5d0'
+\set d_ben '00000000-0000-4000-8000-00000000d5d1'
+SELECT pg_temp.assert_eq('S5d', 'an Organization with no assistance has no restriction', (SELECT count(*)::text FROM billing_assistance_restrictions(:'d_org', now())), '0');
+INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (:'d_ben', :'d_org', :'f_p', :'f_prod', :'a_price', 'TND', 9000, 0, 9000, :'a_cap', true) RETURNING id AS d_req \gset
+SELECT pg_temp.assert_eq('S5d', 'a pending request restricts nothing', (SELECT count(*)::text FROM billing_assistance_restrictions(:'d_org', now() + interval '1000 hours')), '0');
+SET session_replication_role = replica;
+UPDATE assistance_request SET "consentAt" = now() - interval '200 hours', status = 'cash_collected', "cashCollectedAt" = now() - interval '100 hours', "reportedAt" = now() - interval '100 hours',
+  "reportedBy" = :'a_act', "settleBy" = now() - interval '28 hours' WHERE id = :'d_req';
+SET session_replication_role = origin;
+SELECT pg_temp.assert_eq('S5d', 'T1 at settleBy does not apply; one microsecond later it does (strictly after)',
+  (SELECT (NOT EXISTS (SELECT 1 FROM billing_assistance_restrictions(:'d_org', a."settleBy")) AND EXISTS (SELECT 1 FROM billing_assistance_restrictions(:'d_org', a."settleBy" + interval '1 microsecond')))::text
+     FROM assistance_request a WHERE a.id = :'d_req'), 'true');
+SELECT pg_temp.assert_eq('S5d', 'T1: the request is the source and settleBy the since',
+  (SELECT (r.kind = 'T1' AND r."sourceId" = a.id AND r.since = a."settleBy")::text FROM billing_assistance_restrictions(:'d_org', now()) r, assistance_request a WHERE a.id = :'d_req'), 'true');
+SELECT pg_temp.expect_error('S5d', 'the database refuses a new request into a T1-restricted Organization', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (gen_random_uuid(), %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, true)$$, :'d_org', :'f_p', :'f_prod', :'a_price', :'a_cap'), '23514', 'assistance_request_restricted');
+SELECT pg_temp.expect_ok('S5d', 'another Organization is unaffected (S5D-3)', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, gen_random_uuid(), %L, %L, %L, 'TND', 9000, 0, 9000, %L, true)$$, :'d_ben', :'f_p', :'f_prod', :'a_price', :'a_cap'));
+INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt")
+  SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt" FROM assistance_request WHERE id = :'d_req' RETURNING id AS d_ob \gset
+SELECT pg_temp.assert_eq('S5d', 'T1 and T2 coexist, in the deterministic order T1, T2', (SELECT string_agg(kind, ',') FROM billing_assistance_restrictions(:'d_org', now())), 'T1,T2');
+SELECT pg_temp.assert_eq('S5d', 'T2: the obligation is the source and openedAt the since',
+  (SELECT (r."sourceId" = o.id AND r.since = o."openedAt")::text FROM billing_assistance_restrictions(:'d_org', now()) r, cash_return_obligation o WHERE r.kind = 'T2' AND o.id = :'d_ob'), 'true');
+UPDATE cash_return_obligation SET status = 'return_reported', "returnedAt" = now() - interval '1 hour', "returnReportedBy" = :'a_act' WHERE id = :'d_ob';
+SELECT pg_temp.assert_eq('S5d', 'a reported (unconfirmed) return keeps T1 and T2 (S5D-1, S5D-2)', (SELECT string_agg(kind, ',') FROM billing_assistance_restrictions(:'d_org', now())), 'T1,T2');
+BEGIN;
+UPDATE cash_return_obligation SET status = 'confirmed_returned', "confirmedBy" = :'d_ben' WHERE id = :'d_ob';
+UPDATE assistance_request SET status = 'returned' WHERE id = :'d_req';
+COMMIT;
+SELECT pg_temp.assert_eq('S5d', 'the beneficiary''s confirmation clears T1 and T2; the missed deadline stays on record',
+  (SELECT (NOT EXISTS (SELECT 1 FROM billing_assistance_restrictions(:'d_org', now())) AND a."settleBy" < now())::text FROM assistance_request a WHERE a.id = :'d_req'), 'true');
+SELECT pg_temp.expect_ok('S5d', 'an unrestricted Organization admits a new request again', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, true)$$, :'d_ben', :'d_org', :'f_p', :'f_prod', :'a_price', :'a_cap'));
+SELECT pg_temp.assert_eq('S5d', 'the reserved kinds (T3, inactive) have no source in the model', (SELECT (prosrc NOT LIKE '%''T3''%' AND prosrc NOT LIKE '%''inactive''%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+SELECT pg_temp.assert_eq('S5d', 'no restriction or violation state is stored (FC-9)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')), '0');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail
