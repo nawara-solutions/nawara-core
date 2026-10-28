@@ -13,6 +13,7 @@ import { BILLING_OPERATIONS } from '../../src/admission/caller-admission.policy.
 import { TrustedDeliveryBus } from './trusted-delivery-bus.js';
 import { BillingExceptionFilter } from '../../src/errors/billing-exception.filter.js';
 import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/owner-authority.client.js';
+import type { DisputeExposure } from '../../src/refunds/dispute-exposure.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -68,6 +69,8 @@ export async function createTestApp(opts: {
   organizationReference?: OrganizationReferenceResolver;
   /** Core V2 S3d: the Owner check of the Platform configuration (default: an Auth that answers nothing, so every Owner call is a 503). */
   ownerAuthority?: OwnerAuthority;
+  /** Core V2 S6a: the refund cases' dispute-exposure boundary (default: the pre-S6e adapter). */
+  disputeExposure?: DisputeExposure;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
   const config = loadBillingConfig({
@@ -98,6 +101,7 @@ export async function createTestApp(opts: {
         migrationsDirs: opts.migrationsDirs ?? [kitMigrationsDir, billingMigrationsDir],
         organizationReference: opts.organizationReference ?? anyOrganizationReference,
         ownerAuthority: opts.ownerAuthority ?? unreachableOwnerAuthority,
+        disputeExposure: opts.disputeExposure,
       }),
       ProbeModule,
     ],

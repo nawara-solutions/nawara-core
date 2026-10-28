@@ -469,4 +469,25 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Cette organisation ne peut pas accepter de nouvelles demandes d'aide tant qu'une restriction financière s'applique.",
     ar: 'لا يمكن لهذه المنظمة قبول طلبات مساعدة جديدة ما دام هناك قيد مالي سارٍ.',
   },
+  // Core V2 S6a: refund cases (register BIL-23, BIL-25)
+  refundNotEligible: {
+    en: 'This payment is not eligible for a refund case.',
+    fr: "Ce paiement n'est pas éligible à un dossier de remboursement.",
+    ar: 'هذه الدفعة غير مؤهلة لملف استرداد.',
+  },
+  refundCaseExists: {
+    en: 'This payment already has an open or completed refund case.',
+    fr: 'Ce paiement a déjà un dossier de remboursement ouvert ou terminé.',
+    ar: 'لهذه الدفعة بالفعل ملف استرداد مفتوح أو مكتمل.',
+  },
+  refundDisputeOpen: {
+    en: 'A dispute on this payment is open: no refund case can be opened.',
+    fr: "Un litige sur ce paiement est ouvert : aucun dossier de remboursement ne peut être ouvert.",
+    ar: 'يوجد نزاع مفتوح على هذه الدفعة: لا يمكن فتح ملف استرداد.',
+  },
+  refundCaseNotOpen: {
+    en: 'The refund case is not open.',
+    fr: "Le dossier de remboursement n'est pas ouvert.",
+    ar: 'ملف الاسترداد غير مفتوح.',
+  },
 });
