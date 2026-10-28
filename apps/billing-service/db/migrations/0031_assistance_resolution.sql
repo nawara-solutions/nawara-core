@@ -159,7 +159,7 @@ BEGIN
     RAISE EXCEPTION 'assistance request %: the corrected time breaks the recorded time order', r.id USING ERRCODE = '23514', CONSTRAINT = 'assistance_correction_time_order';
   END IF;
   NEW.sequence := coalesce((SELECT max(c.sequence) FROM assistance_correction c WHERE c."assistanceRequestId" = r.id), 0) + 1;
-  NEW."correctedAt" := now();
+  NEW."correctedAt" := clock_timestamp(); -- after the request lock: the recorded order is the commit order (never the transaction's start)
   RETURN NEW;
 END $$;
 CREATE TRIGGER assistance_correction_05_insert_guard BEFORE INSERT ON assistance_correction FOR EACH ROW EXECUTE FUNCTION billing_assistance_correction_insert_guard();
@@ -183,7 +183,7 @@ BEGIN
      OR (NEW."reasonCode" = 'return_time_incorrect' AND o."returnedAt" IS NULL) THEN
     RAISE EXCEPTION 'assistance request %: the % dispute concerns no recorded evidence', r.id, NEW."reasonCode" USING ERRCODE = '23514', CONSTRAINT = 'assistance_dispute_not_permitted';
   END IF;
-  NEW."openedAt" := now();
+  NEW."openedAt" := clock_timestamp(); -- after the request lock: a dispute serialized after a confirmation is recorded after it
   RETURN NEW;
 END $$;
 CREATE TRIGGER assistance_dispute_05_insert_guard BEFORE INSERT ON assistance_dispute FOR EACH ROW EXECUTE FUNCTION billing_assistance_dispute_insert_guard();
@@ -204,7 +204,7 @@ BEGIN
      OR NOT ((OLD."reasonCode" = 'collection_time_incorrect' AND c.field = 'cashCollectedAt') OR (OLD."reasonCode" = 'return_time_incorrect' AND c.field = 'returnedAt')) THEN
     RAISE EXCEPTION 'dispute %: no permitted nonfinancial resolution', OLD.id USING ERRCODE = '23514', CONSTRAINT = 'assistance_dispute_resolution_not_permitted';
   END IF;
-  NEW."resolvedAt" := now();
+  NEW."resolvedAt" := clock_timestamp();
   RETURN NEW;
 END $$;
 CREATE TRIGGER assistance_dispute_20_transition BEFORE UPDATE ON assistance_dispute FOR EACH ROW EXECUTE FUNCTION billing_assistance_dispute_transition_guard();
@@ -281,7 +281,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM assistance_dispute d WHERE d."assistanceRequestId" = OLD."assistanceRequestId" AND d.status = 'open') THEN
       RAISE EXCEPTION 'cash-return obligation %: a dispute of its request is open', OLD.id USING ERRCODE = '23514', CONSTRAINT = 'assistance_dispute_open';
     END IF;
-    NEW."confirmedAt" := now();
+    NEW."confirmedAt" := clock_timestamp(); -- after the request lock (see the dispute guard)
     RETURN NEW;
   END IF;
   IF OLD.status = 'open' THEN
