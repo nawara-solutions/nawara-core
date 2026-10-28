@@ -12,7 +12,7 @@ export interface EventActor {
 
 /** What caused it (SDD section 11: `cause{type,id}`): the request, webhook event, sweep or resolver run. */
 export interface EventCause {
-  type: 'request' | 'webhook_event' | 'expiry_sweep' | 'attempt_resolver';
+  type: 'request' | 'webhook_event' | 'expiry_sweep' | 'attempt_resolver' | 'refund_worker'; // Core V2 S6b: the refund worker's runs
   id: string | null;
 }
 
@@ -38,7 +38,7 @@ export function requestContext(actor: EventActor): EventContext {
 }
 
 /** Context for one run of a background job. The fresh run id doubles as cause id and correlation id. */
-export function jobContext(cause: 'expiry_sweep' | 'attempt_resolver'): EventContext {
+export function jobContext(cause: 'expiry_sweep' | 'attempt_resolver' | 'refund_worker'): EventContext {
   const runId = randomUUID();
   return { actor: { type: 'system', id: null }, cause: { type: cause, id: runId }, correlationId: runId };
 }

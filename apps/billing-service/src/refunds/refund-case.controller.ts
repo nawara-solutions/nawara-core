@@ -6,7 +6,8 @@ import { notFound } from '../domain/errors.js';
 import { idempotencyKey } from '../fees/fee-input.js';
 import { RefundCaseService } from './refund-case.service.js';
 import type { RefundCommandResult } from './refund-idempotency.js';
-import { REFUND_REASONS, isRefundId, normaliseEmptyInput, normaliseRefundCaseInput } from './refund-input.js';
+import { REFUND_REASONS, isRefundId, normaliseEmptyInput, normaliseRefundAuthorizationInput, normaliseRefundCaseInput } from './refund-input.js';
+import { RefundAuthorizationService } from './refund-authorization.service.js';
 import { RefundOwner, RefundOwnerGuard, type VerifiedRefundOwner } from './refund-owner.guard.js';
 
 class RefundCaseCreateDto {
@@ -30,7 +31,12 @@ class RefundCaseDto {
   @ApiProperty({ format: 'date-time' }) openedAt!: string;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) cancelledAt!: string | null;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) completedAt!: string | null;
-  @ApiProperty({ type: [Object], description: 'Refund attempts (a later stage): always empty today.' }) attempts!: unknown[];
+  @ApiProperty({ type: [Object], description: 'Core V2 S6b: the authorization relays, each {refundAttemptId, status (Payment\'s authoritative attempt status, or unconfirmed), refusal, requestedAt, statusAt}.' }) attempts!: unknown[];
+}
+
+class RefundAuthorizationDto {
+  @ApiProperty({ description: 'The secret of the Auth refund authorization receipt you obtained for exactly this case (AUTH-01, factor step-up). Relayed to Payment in memory only; never stored.' })
+  receiptSecret!: string;
 }
 
 const KEY = { name: 'Idempotency-Key', required: true, description: 'Required: 8-128 of [A-Za-z0-9._:-], bound to you and this exact command. The same key and command replays the first success (Idempotent-Replayed: true); another command with it is 409 idempotency_key_conflict.' };
@@ -54,7 +60,7 @@ function answer(res: Response, r: RefundCommandResult & { replayed: boolean }) {
 @Controller('billing/admin/refund-cases')
 @UseGuards(RefundOwnerGuard)
 export class RefundCaseController {
-  constructor(private readonly cases: RefundCaseService) {}
+  constructor(private readonly cases: RefundCaseService, private readonly authorizations: RefundAuthorizationService) {}
 
   @Post()
   @Header('Cache-Control', 'no-store')
@@ -92,9 +98,35 @@ export class RefundCaseController {
     return this.cases.read(owner, id.toLowerCase());
   }
 
+  @Post(':id/authorizations')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'BIL-24: relay your refund authorization receipt for this case to Payment, as one refund attempt (the Owner of its Company).',
+    description: 'Billing records the relay and its refund attempt id first, then Payment verifies the payment and its capture, consumes the receipt at Auth and '
+      + 'answers. The provider refund is sent asynchronously; completion is a later stage. Retry with the same Idempotency-Key and receipt when the answer is 503.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiHeader({ ...KEY, description: 'Required (class M): bound to you and this case. The fingerprint never covers the receipt secret; the same key resumes the same relay.' })
+  @ApiBody({ type: RefundAuthorizationDto })
+  @ApiResponse({ status: 201, type: RefundCaseDto, description: 'Authorized (or later): the case with its attempts.' })
+  @ApiResponse({ status: 200, type: RefundCaseDto, description: 'A retry of this key (Idempotent-Replayed: true): the current state.' })
+  @ApiResponse({ status: 400, description: 'invalid_refund_request (anything but receiptSecret) | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse(R403)
+  @ApiResponse({ status: 404, description: 'an unknown case, or another Company\'s (one answer)' })
+  @ApiResponse({ status: 409, description: 'refund_case_completed | refund_case_not_open | refund_dispute_open | refund_authorization_in_progress | refund_authorization_invalid | refund_authorization_expired | refund_authorization_conflict | refund_rejected_by_payment | idempotency_key_conflict' })
+  @ApiResponse({ status: 503, description: 'refund_authorization_unresolved | refund_payment_unavailable (the relay is recorded; its outcome is confirmed from Payment) | auth_timeout | auth_unavailable' })
+  async authorize(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    const { receiptSecret } = normaliseRefundAuthorizationInput(body);
+    if (!isRefundId(id)) throw notFound();
+    const r = await this.authorizations.relay(owner, k, id.toLowerCase(), receiptSecret, requestTransitionContext({ type: 'user', id: owner.userId, userKind: 'owner' }));
+    return answer(res, r);
+  }
+
   @Post(':id/cancel')
   @Header('Cache-Control', 'no-store')
-  @ApiOperation({ summary: 'Cancel an open refund case before any refund processing (the Owner of its Company). The payment may get a new case.' })
+  @ApiOperation({ summary: 'Cancel an open refund case before any refund processing (the Owner of its Company). Refused once a refund authorization was relayed, unless Payment proved every one ended unconsumed. The payment may get a new case.' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader(KEY)
   @ApiResponse({ status: 200, type: RefundCaseDto, description: 'Cancelled (or a replay of this key).' })
@@ -102,7 +134,7 @@ export class RefundCaseController {
   @ApiResponse(R401)
   @ApiResponse(R403)
   @ApiResponse({ status: 404, description: 'an unknown case, or another Company\'s (one answer)' })
-  @ApiResponse({ status: 409, description: 'refund_case_not_open | idempotency_key_conflict' })
+  @ApiResponse({ status: 409, description: 'refund_case_not_open | refund_processing_started | idempotency_key_conflict' })
   @ApiResponse(R503)
   async cancel(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const k = idempotencyKey(key);

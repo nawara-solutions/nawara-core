@@ -4,8 +4,8 @@ import type { Response } from 'express';
 import { RequireServiceOperation, ServiceOperationGuard, ServiceTokenGuard } from '@nawara/service-kit';
 import { notFound } from '../errors.js';
 import { SIMULATION_RESOLVE_OPERATION } from '../authorization/caller-admission.policy.js';
-import { SimulationInitiationDto, SimulationOutcomeDto } from './dto/simulation-command.dto.js';
-import { SimulationService, type SimulationCommandResult } from './simulation.service.js';
+import { SimulationInitiationDto, SimulationOutcomeDto, SimulationRefundDispatchPlanDto, SimulationRefundOutcomeDto } from './dto/simulation-command.dto.js';
+import { SimulationService, type SimulationCommandResult, type SimulationRefundCommandResult } from './simulation.service.js';
 
 const COMMAND_ID = /^[A-Za-z0-9._:-]{8,128}$/;
 
@@ -65,6 +65,58 @@ export class SimulationController {
     if (!COMMAND_ID.test(commandId)) throw notFound();
     return represent(await this.simulation.deliver(commandId), res, 200);
   }
+
+  // ───────────────────────────────────────────────────────────── Core V2 S6b (R6B-6): the simulated provider's refunds
+
+  @Post('payments/:paymentId/refund-dispatch-plan')
+  @ApiOperation({ summary: 'Set how the simulation provider answers the refund dispatches of this payment (non-production only).' })
+  @ApiResponse({ status: 201, description: 'Recorded.' })
+  @ApiResponse({ status: 200, description: 'Identical replay of the same commandId (Idempotent-Replayed: true).' })
+  @ApiResponse({ status: 400, description: 'validation_error / invalid_simulation_command' })
+  @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted' })
+  @ApiResponse({ status: 404, description: 'not_found: no such (non-live) payment' })
+  @ApiResponse({ status: 409, description: 'simulation_command_conflict' })
+  async refundDispatchPlan(@Param('paymentId', new ParseUUIDPipe()) paymentId: string, @Body() dto: SimulationRefundDispatchPlanDto, @Res({ passthrough: true }) res: Response) {
+    return representRefund(await this.simulation.planRefundDispatch(paymentId, dto), res);
+  }
+
+  @Post('refunds/:refundAttemptId/outcomes')
+  @ApiOperation({ summary: "Set the simulation provider's answer for one refund it received and, for a notifying outcome, deliver or hold its signed notification." })
+  @ApiResponse({ status: 201, description: 'Recorded (and delivered, when `delivered` is present).' })
+  @ApiResponse({ status: 200, description: 'Identical replay of the same commandId (Idempotent-Replayed: true): nothing changed, nothing delivered.' })
+  @ApiResponse({ status: 400, description: 'validation_error / invalid_simulation_command' })
+  @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted' })
+  @ApiResponse({ status: 404, description: 'not_found: no refund of the simulation provider that it received' })
+  @ApiResponse({ status: 409, description: 'simulation_command_conflict' })
+  async refundOutcome(@Param('refundAttemptId', new ParseUUIDPipe()) refundAttemptId: string, @Body() dto: SimulationRefundOutcomeDto, @Res({ passthrough: true }) res: Response) {
+    return representRefund(await this.simulation.recordRefundOutcome(refundAttemptId, dto), res);
+  }
+
+  @Post('refund-commands/:commandId/deliver')
+  @HttpCode(200)
+  @ApiOperation({ summary: "Deliver a refund command's notification (a held one late, or again): delayed, duplicate and out-of-order delivery." })
+  @ApiResponse({ status: 200, description: 'Delivered; `delivered.status` is the webhook pipeline answer.' })
+  @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted' })
+  @ApiResponse({ status: 404 })
+  @ApiResponse({ status: 409, description: 'simulation_nothing_to_deliver' })
+  async deliverRefund(@Param('commandId') commandId: string, @Res({ passthrough: true }) res: Response) {
+    if (!COMMAND_ID.test(commandId)) throw notFound();
+    return representRefund(await this.simulation.deliverRefund(commandId), res, 200);
+  }
+}
+
+function representRefund(result: SimulationRefundCommandResult, res: Response, status?: number) {
+  res.status(status ?? (result.replayed ? 200 : 201));
+  if (result.replayed) res.setHeader('Idempotent-Replayed', 'true');
+  const c = result.command;
+  return {
+    commandId: c.commandId, kind: c.kind, paymentId: c.paymentId, refundAttemptId: c.refundAttemptId, instruction: c.instruction, failureCode: c.failureCode,
+    amount: c.amount === null ? null : Number(c.amount), currency: c.currency, providerRefundId: c.providerRefundId, eventId: c.eventBody ? `simr_${c.commandId}` : null,
+    delivery: c.delivery, createdAt: c.createdAt, delivered: result.delivered,
+  };
 }
 
 function represent(result: SimulationCommandResult, res: Response, status?: number) {

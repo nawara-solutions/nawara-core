@@ -77,6 +77,17 @@ transaction derived from its own rows. Provider session expiry joins the evidenc
 `payment.expired`): a submitted attempt expires definitively (F-3), and it confirms an inferred failure. The harness module is mounted only
 where the provider is enabled outside production and its service refuses otherwise.
 
+**Core V2 S6b (refund attempts; ADR-0067 decisions 3 to 7; S0 FC-1, FC-5, FC-7; the Owner's R6B-1 to R6B-10; register PAY-07 F, PAY-08 F,
+PAY-05 G, PAY-14 G):** for Core V2 development and simulation only, this replaces sections 4.4, 4.5, 5.4, 5.5 and endpoints 10 and 11 (the
+pre-V2 refund design: a natural key, a user bearer and a cap trigger, never built). A refund is relayed by Billing (`payment.refund.create`,
+`billing-service` only, never in production) as one refund attempt whose id Billing chose; that id is the Auth receipt `consumeRef` and the
+provider idempotency key. Payment verifies the payment and its S4d capture fact itself, commits the intent, consumes the receipt at Auth
+(Payment's only service call to Auth, ADR-0035 C4) and commits `authorized` with Auth's approver; only Auth's definitive refusal or expiry
+ends an authorization. A worker dispatches with the stable key and resends an uncertain refund only with that key; a provider "no record" is
+never a failure. A provider-reported refund is an immutable `refund` fact first; only a fact of exactly the full amount succeeds the attempt,
+anything else is `discrepancy`. One potentially effective attempt per payment; full refunds only (D4). No `refund.*` event, allocation,
+completion or reversal (S6c, S6d). Implemented in `apps/payment-service/db/migrations/0017_refund_attempt.sql` and `src/refunds/`.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.

@@ -16,6 +16,8 @@ const CORRELATION = /^[A-Za-z0-9._:-]{8,128}$/;
  * verified user's attempt sync and the attempt resolver are real settling paths).
  */
 export type PaymentAuditAction = 'payment.created' | 'payment.cancelled' | 'payment.expired' | 'payment.succeeded' | 'payment.failed';
+/** Core V2 S6b (R6B-7): the refund attempt actions (version 1, no trusted scope, no `approvedBy`: the approver stays on Payment's own row). */
+export type RefundAuditAction = 'refund_attempt.authorized' | 'refund_attempt.failed' | 'refund_attempt.succeeded';
 
 /**
  * The catalog actor of a Payment transition, from Payment's own verified attribution (never a request value). A service caller is the
@@ -28,6 +30,7 @@ export function auditActor(ctx: EventContext): AuditActor {
   if (ctx.actor.type === 'system' && ctx.cause.type === 'attempt_resolver') return { type: 'system', id: 'payment_attempt_resolver' };
   if (ctx.actor.type === 'system' && ctx.cause.type === 'expiry_sweep') return { type: 'system', id: 'payment_expiry_sweep' };
   if (ctx.actor.type === 'provider' && ctx.cause.type === 'webhook_event') return { type: 'system', id: 'payment_webhook' };
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'refund_worker') return { type: 'system', id: 'payment_refund_worker' }; // Core V2 S6b
   throw new Error(`payment_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 
@@ -52,6 +55,23 @@ export class PaymentAudit {
       q,
       { action, actor: auditActor(ctx), organizationId: payment.organizationId, resource: { type: 'payment', id: payment.id }, outcome: 'succeeded', ...changes } as never,
       { eventId: deterministicEventId(payment.id, `audit.${action}`), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /**
+   * Core V2 S6b (R6B-7): the central audit intent of a refund attempt transition, on the transition's own transaction. Identifiers only (the
+   * attempt is the resource; its payment, case and, for a success, its verified refund fact); never an amount, the receipt, its secret or the
+   * approver (kept on Payment's row: `approvedBy` v2 is not granted). The event id is derived from (attempt, action): written once.
+   */
+  async recordRefund(q: Queryable, action: RefundAuditAction, attempt: { id: string; paymentId: string; refundCaseId: string; succeededFactId?: string | null },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    const changes = action === 'refund_attempt.succeeded'
+      ? { payment_id: attempt.paymentId, refund_case_id: attempt.refundCaseId, fact_id: attempt.succeededFactId as string }
+      : { payment_id: attempt.paymentId, refund_case_id: attempt.refundCaseId };
+    await this.writer.write(
+      q,
+      { action, actor: auditActor(ctx), organizationId, resource: { type: 'refund_attempt', id: attempt.id }, outcome: 'succeeded', changes } as never,
+      { eventId: deterministicEventId(attempt.id, `audit.${action}`), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
 }

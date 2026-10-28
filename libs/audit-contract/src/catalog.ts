@@ -546,6 +546,20 @@ const SPEC = {
     },
     purpose: 'The Owner of the seller Company cancelled an open refund case before any refund processing (the payment may get a new case).',
   },
+  // Core V2 S6b (register BIL-24; ADR-0067 decision 5; the Owner's R6B-7, R6B-10): the Owner relayed an Auth refund authorization receipt for
+  // the case to Payment, as one refund attempt Billing identified first. Version 1, no trusted scope (S2-Audit D3): the Company and Platform
+  // are changes. The receipt and its secret never appear.
+  'refund_case.authorization_relayed': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'optional',
+    resource: ['refund_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
+      company_id: { type: 'uuid', shape: 'value', required: true },
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization).',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {
@@ -576,6 +590,31 @@ const SPEC = {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_expiry_sweep'] }, organization: 'optional',
     resource: ['payment'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A collection lapsed unpaid.',
+  },
+  // Core V2 S6b (register PAY-07; ADR-0067 decisions 5 to 7; the Owner's R6B-7): a refund attempt's authorization by Auth's consumed receipt,
+  // its provider-confirmed failure and its verified full-amount success. Version 1, no trusted scope and no `approvedBy` (the approver is kept
+  // on Payment's own row; S2-Audit D3, D5). Allocation, completion and reversal are later stages (S6c, S6d).
+  'refund_attempt.authorized': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true, system: ['payment_refund_worker'] }, organization: 'optional',
+    resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { payment_id: { type: 'uuid', shape: 'value', required: true }, refund_case_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'Auth confirmed the Owner\'s single-use refund authorization for exactly this refund attempt: the refund may now be sent to the provider.',
+  },
+  'refund_attempt.failed': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
+    resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { payment_id: { type: 'uuid', shape: 'value', required: true }, refund_case_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'The provider definitively refused or failed an authorized refund (a further attempt needs a new authorization).',
+  },
+  'refund_attempt.succeeded': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
+    resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      refund_case_id: { type: 'uuid', shape: 'value', required: true },
+      fact_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The provider\'s verified evidence shows the full refund was made (money returned); its commercial effects are later stages.',
   },
 
   // ------------------------------------------------------------------------------------------------------------------------------- file-service

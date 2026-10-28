@@ -16,19 +16,25 @@ const notEligible = () => billingError(409, 'refund_not_eligible', BILLING_MESSA
 const caseExists = () => billingError(409, 'refund_case_exists', BILLING_MESSAGES.refundCaseExists);
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
-interface CaseRow {
+export interface CaseRow {
   id: string; paymentId: string; companyId: string; platformId: string; organizationId: string | null; amount: string; currency: string;
   status: string; eligibility: string; reason: string; legalOverride: boolean; openedAt: Date; cancelledAt: Date | null; completedAt: Date | null;
 }
 const CASE_COLUMNS = `id, "paymentId", "companyId", "platformId", "organizationId", amount, trim(currency) AS currency, status, eligibility, reason,
   "legalOverride", "openedAt", "cancelledAt", "completedAt"`;
 
-/** A refund case as its Owner reads it (BIL-23, BIL-25). Refund attempts are S6b: none can exist yet. */
-function representCase(c: CaseRow) {
+interface RelayView { id: string; attemptStatus: string | null; refusal: string | null; requestedAt: Date; statusAt: Date | null }
+
+/**
+ * A refund case as its Owner reads it (BIL-23, BIL-25). Core V2 S6b: `attempts` are the authorization relays, each with Payment's
+ * authoritative attempt status as last confirmed (`unconfirmed` until Payment's answer proved one); never a receipt or its secret.
+ */
+function representCase(c: CaseRow, relays: RelayView[]) {
   return {
     id: c.id, paymentId: c.paymentId, companyId: c.companyId, platformId: c.platformId, organizationId: c.organizationId,
     amount: Number(c.amount), currency: c.currency, status: c.status, eligibility: c.eligibility, reason: c.reason, legalOverride: c.legalOverride,
-    openedAt: iso(c.openedAt), cancelledAt: iso(c.cancelledAt), completedAt: iso(c.completedAt), attempts: [] as unknown[],
+    openedAt: iso(c.openedAt), cancelledAt: iso(c.cancelledAt), completedAt: iso(c.completedAt),
+    attempts: relays.map((r) => ({ refundAttemptId: r.id, status: r.attemptStatus ?? 'unconfirmed', refusal: r.refusal, requestedAt: iso(r.requestedAt), statusAt: iso(r.statusAt) })),
   };
 }
 
@@ -103,13 +109,15 @@ export class RefundCaseService {
         changes: { payment_id: c.paymentId, company_id: c.companyId, platform_id: c.platformId, amount: Number(c.amount), eligibility: c.eligibility as never, reason: c.reason as never,
           legal_override: c.legalOverride },
       }, ctx);
-      return { status: 201, body: representCase(c) };
+      return { status: 201, body: representCase(c, []) };
     });
   }
 
   /**
-   * R6A-6: `POST /billing/admin/refund-cases/:id/cancel` → `200` the case, `cancelled`. Only an `open` case (`409 refund_case_not_open`);
-   * no refund attempt can exist before S6b (which must refuse a cancellation once refund processing has begun). The payment may get a new
+   * R6A-6: `POST /billing/admin/refund-cases/:id/cancel` → `200` the case, `cancelled`. Only an `open` case (`409 refund_case_not_open`).
+   * Core V2 S6b (R6B-10): refused (`409 refund_processing_started`) once refund processing has begun, i.e. unless EVERY relay of the case
+   * is proven by Payment to have ended without a consumed receipt and without a dispatch (`authorization_expired`, `authorization_refused`,
+   * `rejected`); an unconfirmed relay is never treated as refused. The database enforces it too (migration 0034). The payment may get a new
    * case afterwards. Same authority as opening; the collapsed 404 otherwise.
    */
   async cancel(owner: VerifiedRefundOwner, key: string, id: string, ctx: TransitionContext) {
@@ -118,23 +126,32 @@ export class RefundCaseService {
     return this.idempotency.run(owner.userId, key, 'refund_case.cancel', { id }, async (q): Promise<RefundCommandResult> => {
       const current = (await q.query<{ status: string }>(`SELECT status FROM refund_case WHERE id = $1 FOR UPDATE`, [id])).rows[0]!;
       if (current.status !== 'open') throw billingError(409, 'refund_case_not_open', BILLING_MESSAGES.refundCaseNotOpen);
+      const started = await q.query(`SELECT 1 FROM refund_authorization_relay WHERE "refundCaseId" = $1
+          AND ("attemptStatus" IS NULL OR "attemptStatus" NOT IN ('authorization_expired', 'authorization_refused', 'rejected'))`, [id]);
+      if (started.rows.length > 0) throw billingError(409, 'refund_processing_started', BILLING_MESSAGES.refundProcessingStarted);
       await q.query(`UPDATE refund_case SET status = 'cancelled', "cancelledBy" = $2 WHERE id = $1`, [id, owner.userId]);
       const c = await this.load(q, id);
       await this.audit.record(q, 'refund_case.cancelled', {
         organizationId: c0.organizationId, resource: { type: 'refund_case', id },
         changes: { payment_id: c0.paymentId, company_id: c0.companyId, platform_id: c0.platformId },
       }, ctx);
-      return { status: 200, body: representCase(c) };
+      return { status: 200, body: representCase(c, await this.relays(q, id)) };
     });
   }
 
   /** BIL-25: `GET /billing/admin/refund-cases/:id`, the Owner of its Company and Platform (live); everyone else the collapsed 404. */
   async read(owner: VerifiedRefundOwner, id: string) {
     this.refuseInProduction();
-    return representCase(await this.authorizedCase(owner, id));
+    return representCase(await this.authorizedCase(owner, id), await this.relays(this.db, id));
   }
 
-  private async authorizedCase(owner: VerifiedRefundOwner, id: string): Promise<CaseRow> {
+  private async relays(q: Queryable, caseId: string): Promise<RelayView[]> {
+    return (await q.query<RelayView>(
+      `SELECT id, "attemptStatus", refusal, "requestedAt", "statusAt" FROM refund_authorization_relay WHERE "refundCaseId" = $1 ORDER BY "requestedAt", id`, [caseId])).rows;
+  }
+
+  /** The case, if the Owner holds its Company and (live) its Platform; the collapsed 404 otherwise. Also BIL-24's authority check. */
+  async authorizedCase(owner: VerifiedRefundOwner, id: string): Promise<CaseRow> {
     const c = (await this.db.query<CaseRow>(`SELECT ${CASE_COLUMNS} FROM refund_case WHERE id = $1`, [id])).rows[0];
     if (!c || c.companyId !== owner.companyId || !(await this.owners.platformAllowed(owner.bearer, c.platformId, this.deadline()))) throw notFound();
     return c;

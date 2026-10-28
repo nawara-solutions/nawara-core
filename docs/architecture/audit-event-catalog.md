@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (24)
+## billing-service (25)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -89,8 +89,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `assistance_request.corrected` | commercial | user (owner) | required | assistance_request | — | succeeded | `correction_id`: uuid<br>`field`: cash_collected_at \| returned_at<br>`corrected_value`: timestamp<br>`superseded_value`: timestamp<br>`reason_code`: actor_entry_error \| evidence_contradicts_report | The Owner, with a factor step-up, appended a correction of an Organization-asserted time (the original evidence is kept; no financial term changes). |
 | `refund_case.opened` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid<br>`amount`: integer 1–9007199254740991<br>`eligibility`: personal_purchase \| late_assisted_settlement \| non_entitlement<br>`reason`: duplicate_charge \| service_not_provided \| customer_request \| late_settlement_unapplied \| legal_requirement<br>`legal_override`: boolean | The Owner of the seller Company opened a refund case for one verified captured payment, in full (no refund attempt yet; nothing moved). |
 | `refund_case.cancelled` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company cancelled an open refund case before any refund processing (the payment may get a new case). |
+| `refund_case.authorization_relayed` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_attempt_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization). |
 
-## payment-service (5)
+## payment-service (8)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -99,6 +100,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `payment.succeeded` | commercial | user (member, owner, operator); service; system (`payment_webhook`, `payment_attempt_resolver`) | as recorded (UUID or null) | payment | — | succeeded | `settled_method`: gateway | Money is accepted as settled. |
 | `payment.failed` | commercial | user (member, owner, operator); service; system (`payment_webhook`, `payment_attempt_resolver`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection definitively failed. |
 | `payment.expired` | commercial | system (`payment_expiry_sweep`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection lapsed unpaid. |
+| `refund_attempt.authorized` | commercial | service; system (`payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid | Auth confirmed the Owner's single-use refund authorization for exactly this refund attempt: the refund may now be sent to the provider. |
+| `refund_attempt.failed` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid | The provider definitively refused or failed an authorized refund (a further attempt needs a new authorization). |
+| `refund_attempt.succeeded` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid<br>`fact_id`: uuid | The provider's verified evidence shows the full refund was made (money returned); its commercial effects are later stages. |
 
 ## file-service (7)
 
@@ -134,4 +138,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 81 actions.**
+**Total: 85 actions.**

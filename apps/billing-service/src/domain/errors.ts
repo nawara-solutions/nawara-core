@@ -66,7 +66,17 @@ export type BillingErrorCode =
   | 'refund_not_eligible'
   | 'refund_case_exists'
   | 'refund_dispute_open'
-  | 'refund_case_not_open';
+  | 'refund_case_not_open'
+  // Core V2 S6b refund authorization relay (register BIL-24; R6B-10)
+  | 'refund_case_completed'
+  | 'refund_authorization_in_progress'
+  | 'refund_authorization_invalid'
+  | 'refund_authorization_expired'
+  | 'refund_authorization_unresolved'
+  | 'refund_authorization_conflict'
+  | 'refund_rejected_by_payment'
+  | 'refund_payment_unavailable'
+  | 'refund_processing_started';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

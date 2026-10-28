@@ -3473,14 +3473,16 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     }
     // the investigation's counts
     const counts = Object.fromEntries(Object.entries(out.identities).map(([s, id]) => [s, [id.write.keys.length, id.read.keys.length]]));
-    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c) + the two refund-case actions (S6a)
-    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [25, 4], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c) + the two refund-case actions (S6a) + refund_case.authorization_relayed (S6b); payment-service: 10 + the three refund-attempt actions (S6b, R6B-7)
+    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [26, 4], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [13, 0], 'release-service': [4, 0] });
   });
 
-  test('S1d-1 Payment: its five ordinary events and five audit actions; not the re-emission allow-list; no unregistered action', () => {
+  test('S1d-1 Payment: its five ordinary events and five audit actions (+ the three refund-attempt actions of S6b); not the re-emission allow-list; no unregistered action', () => {
     const p = gen().identities['payment-service'];
     assert.deepEqual(p.write.keys, ['audit.payment.cancelled', 'audit.payment.created', 'audit.payment.expired', 'audit.payment.failed', 'audit.payment.succeeded',
+      'audit.refund_attempt.authorized', 'audit.refund_attempt.failed', 'audit.refund_attempt.succeeded', // Core V2 S6b (R6B-7): audit only, no refund.* event
       'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded']);
+    assert.ok(!p.write.keys.some((k) => k.startsWith('refund.'))); // Core V2 S6b: refund.* domain events are deferred to S6c
     assert.ok(p.write.keys.includes('payment.created')); // the producer catalog, not the S0-C4 re-emission allow-list
     assert.ok(!p.write.keys.some((k) => /reemit/.test(k)));
     assert.deepEqual(p.read, { keys: [], regex: tp.DENY_ALL }); // producer only

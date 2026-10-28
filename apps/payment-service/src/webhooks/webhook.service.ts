@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
+import { HttpException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import { AttemptService } from '../attempts/attempt.service.js';
 import { webhookContext } from '../events/payment-events.js';
 import type { AttemptRow } from '../attempts/attempt.types.js';
-import type { FetchStatusResult, PaymentProvider } from '../providers/provider.port.js';
+import type { FetchStatusResult, PaymentProvider, RefundStatusResult } from '../providers/provider.port.js';
+import { RefundEvidenceService } from '../refunds/refund-evidence.service.js';
 import type { WebhookEventRow } from './webhook-event.types.js';
 
 export interface WebhookResult {
@@ -25,6 +26,8 @@ export class WebhookService {
   constructor(
     @Inject(DbService) private readonly db: DbService,
     private readonly attempts: AttemptService,
+    /** Core V2 S6b: present only where refunds are configured (never production); without it a refund notification is never applied. */
+    @Optional() @Inject(RefundEvidenceService) private readonly refunds?: RefundEvidenceService,
   ) {}
 
   async receive(provider: PaymentProvider, rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<WebhookResult> {
@@ -87,6 +90,7 @@ export class WebhookService {
     parsed: { providerEventId: string; type: string; reference: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date },
     claim?: Queryable,
   ): Promise<WebhookResult> {
+    if (parsed.type.startsWith('refund.')) return this.processRefund(eventId, provider, parsed, claim);
     const status = this.toStatus(parsed);
     if (!status) {
       await this.markState(eventId, 'ignored', `unknown_event_type:${parsed.type}`, undefined, claim);
@@ -112,6 +116,37 @@ export class WebhookService {
       }
       await this.markState(eventId, 'failed', 'transient_error', attempt.id, claim);
       return { status: 500 }; // transient: let the provider retry
+    }
+  }
+
+  /**
+   * Core V2 S6b (register PAY-05, PAY-07; R6B-5): a verified refund notification, through the same pipeline (signature, permanent event key,
+   * then evidence). It names one refund attempt OF THIS PROVIDER (its key or its provider refund reference); the evidence rules are
+   * `RefundEvidenceService`'s. Where refunds are not configured nothing is applied (`ignored`).
+   */
+  private async processRefund(
+    eventId: string,
+    provider: PaymentProvider,
+    parsed: { type: string; reference: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date },
+    claim?: Queryable,
+  ): Promise<WebhookResult> {
+    const status = toRefundStatus(parsed);
+    if (!this.refunds || !status) {
+      await this.markState(eventId, 'ignored', this.refunds ? `unknown_event_type:${parsed.type}` : 'refunds_not_enabled', undefined, claim);
+      return { status: 200 };
+    }
+    const attempt = await this.refunds.findByReference(provider.id, parsed.reference);
+    if (!attempt) {
+      await this.markState(eventId, 'unmatched', null, undefined, claim);
+      return { status: 200 };
+    }
+    try {
+      await this.refunds.apply(attempt.id, status, webhookContext(provider.id, eventId));
+      await this.markState(eventId, 'processed', `refund_attempt:${attempt.id}`, undefined, claim);
+      return { status: 200 };
+    } catch {
+      await this.markState(eventId, 'failed', 'transient_error', undefined, claim);
+      return { status: 500 };
     }
   }
 
@@ -142,6 +177,19 @@ export class WebhookService {
       [id, state, outcome, matchedAttemptId ?? null],
     );
   }
+}
+
+/** Core V2 S6b: a refund notification's claim, as the port's status shape; a success without amount, currency or reference is not one. */
+function toRefundStatus(parsed: { type: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date }): RefundStatusResult | null {
+  if (parsed.type === 'refund.succeeded') {
+    if (typeof parsed.amount !== 'number' || typeof parsed.currency !== 'string' || !parsed.providerTransactionId) return null;
+    return { kind: 'succeeded', amount: parsed.amount, currency: parsed.currency, providerRefundId: parsed.providerTransactionId, providerOccurredAt: parsed.providerOccurredAt };
+  }
+  if (parsed.type === 'refund.failed') {
+    const data = (parsed.data ?? {}) as { failureCode?: unknown };
+    return { kind: 'failed', failureCode: typeof data.failureCode === 'string' ? data.failureCode : 'provider_failure', providerRefundId: parsed.providerTransactionId };
+  }
+  return null;
 }
 
 function hashOf(buf: Buffer): string {

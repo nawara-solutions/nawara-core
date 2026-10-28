@@ -4,7 +4,9 @@ import { DbService } from '@nawara/service-kit';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentRow } from '../payments/payment.types.js';
-import type { FetchStatusResult, InitiateResult, ParsedWebhookBody, PaymentProvider, ProviderCapabilities, VerifyWebhookResult } from './provider.port.js';
+import type {
+  FetchStatusResult, InitiateResult, ParsedWebhookBody, PaymentProvider, ProviderCapabilities, RefundDispatch, RefundDispatchResult, RefundStatusResult, VerifyWebhookResult,
+} from './provider.port.js';
 
 export const SIMULATION_PROVIDER_ID = 'simulation';
 export const SIMULATION_SIGNATURE_HEADER = 'x-simulation-signature';
@@ -12,6 +14,30 @@ export const SIMULATION_SIGNATURE_HEADER = 'x-simulation-signature';
 /** This provider's transaction reference for an attempt: derived, never supplied by a caller. */
 export function simulationTransactionId(attemptId: string): string {
   return `sim_${attemptId}`;
+}
+
+/** Core V2 S6b (R6B-6): this provider's refund reference for a refund attempt: derived, never supplied by a caller. */
+export function simulationRefundId(refundAttemptId: string): string {
+  return `simr_${refundAttemptId}`;
+}
+
+/** Core V2 S6b: one row of `simulation_refund_command` (migration 0017). */
+export interface SimulationRefundCommandRow {
+  commandId: string;
+  kind: 'dispatch_plan' | 'outcome';
+  paymentId: string;
+  refundAttemptId: string | null;
+  capturedAttemptId: string | null;
+  provider: string;
+  instruction: string;
+  failureCode: string | null;
+  amount: string | null;
+  currency: string | null;
+  providerRefundId: string | null;
+  eventBody: Buffer | null;
+  delivery: 'immediate' | 'held' | null;
+  createdAt: Date;
+  seq: string;
 }
 
 /** One row of `simulation_provider_command` (migration 0015). */
@@ -45,7 +71,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export class SimulationPaymentProvider implements PaymentProvider {
   readonly id = SIMULATION_PROVIDER_ID;
   readonly capabilities: ProviderCapabilities = {
-    refunds: false,
+    refunds: true, // Core V2 S6b (R6B-6): full refunds only
     partialRefunds: false,
     notFoundIsAuthoritative: true,
     visibilityLagMs: 50,
@@ -90,6 +116,70 @@ export class SimulationPaymentProvider implements PaymentProvider {
         return { kind: 'notFound' };
       default:
         return { kind: 'pending' };
+    }
+  }
+
+  /**
+   * Core V2 S6b (R6B-3, R6B-4, R6B-6): the simulated provider receives one refund dispatch. Like a real provider it keys the request on the
+   * idempotency key: it records what it received once (`simulation_refund_dispatch`) and answers a repeat of the same key consistently. The
+   * harness's latest dispatch plan for the payment decides the answer of a key it has not answered definitively: `rejected` (declined;
+   * definitive, kept for every repeat), `ambiguous` (it recorded the refund but its answer is lost) or, by default, `accepted`.
+   */
+  async refund(dispatch: RefundDispatch): Promise<RefundDispatchResult> {
+    if (!UUID.test(dispatch.idempotencyKey) || dispatch.idempotencyKey !== dispatch.refundAttemptId) return { kind: 'ambiguous' };
+    const { rows: plans } = await this.db.query<SimulationRefundCommandRow>(
+      `SELECT * FROM simulation_refund_command WHERE "paymentId" = $1 AND kind = 'dispatch_plan' ORDER BY seq DESC LIMIT 1`, [dispatch.paymentId]);
+    const planned = plans[0]?.instruction ?? 'accepted';
+    const { rows: first } = await this.db.query<{ answer: string; failureCode: string | null }>(
+      `INSERT INTO simulation_refund_dispatch ("idempotencyKey", answer, "failureCode") VALUES ($1, $2, $3)
+       ON CONFLICT ("idempotencyKey") DO UPDATE SET received = simulation_refund_dispatch.received + 1
+       RETURNING answer, "failureCode"`,
+      [dispatch.idempotencyKey, planned, planned === 'rejected' ? (plans[0]!.failureCode ?? 'declined') : null],
+    );
+    const answer = first[0]!;
+    if (answer.answer === 'rejected') return { kind: 'rejected', failureCode: answer.failureCode ?? 'declined' };
+    // a key it already recorded is never declined afterwards; a repeat follows the current plan between ambiguous and accepted
+    if (planned === 'ambiguous') return { kind: 'ambiguous' };
+    return { kind: 'accepted', providerRefundId: simulationRefundId(dispatch.refundAttemptId) };
+  }
+
+  /** Core V2 S6b: the provider's answer for one refund: its latest outcome command, else pending if it holds the dispatch, else no record. */
+  async fetchRefundStatus(refundAttemptId: string): Promise<RefundStatusResult> {
+    if (!UUID.test(refundAttemptId)) return { kind: 'notFound' };
+    const { rows } = await this.db.query<SimulationRefundCommandRow>(
+      `SELECT * FROM simulation_refund_command WHERE "refundAttemptId" = $1 AND kind = 'outcome' ORDER BY seq DESC LIMIT 1`, [refundAttemptId]);
+    const outcome = rows[0];
+    switch (outcome?.instruction) {
+      case 'succeeded':
+      case 'amount_mismatch':
+        return { kind: 'succeeded', amount: Number(outcome.amount), currency: outcome.currency!, providerRefundId: outcome.providerRefundId! };
+      case 'failed':
+        return { kind: 'failed', failureCode: outcome.failureCode!, providerRefundId: outcome.providerRefundId! };
+      case 'no_record':
+        return { kind: 'notFound' };
+      case 'pending':
+        return { kind: 'pending' };
+      default: {
+        const { rows: d } = await this.db.query<{ answer: string; failureCode: string | null }>(
+          `SELECT answer, "failureCode" FROM simulation_refund_dispatch WHERE "idempotencyKey" = $1`, [refundAttemptId]);
+        if (!d[0]) return { kind: 'notFound' };
+        if (d[0].answer === 'rejected') return { kind: 'failed', failureCode: d[0].failureCode ?? 'declined' };
+        return { kind: 'pending' };
+      }
+    }
+  }
+
+  /** Core V2 S6b: the signed refund notification an outcome command produces; `simr_<commandId>` is its event id. */
+  static refundNotificationBody(command: { commandId: string; refundAttemptId: string; instruction: string; failureCode?: string | null; amount?: number; currency?: string; providerRefundId: string }): Buffer | null {
+    const base = { eventId: `simr_${command.commandId}`, reference: command.refundAttemptId, providerTransactionId: command.providerRefundId };
+    switch (command.instruction) {
+      case 'succeeded':
+      case 'amount_mismatch':
+        return Buffer.from(JSON.stringify({ ...base, type: 'refund.succeeded', amount: command.amount, currency: command.currency }), 'utf8');
+      case 'failed':
+        return Buffer.from(JSON.stringify({ ...base, type: 'refund.failed', data: { failureCode: command.failureCode } }), 'utf8');
+      default:
+        return null;
     }
   }
 

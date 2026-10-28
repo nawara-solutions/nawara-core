@@ -490,4 +490,50 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Le dossier de remboursement n'est pas ouvert.",
     ar: 'ملف الاسترداد غير مفتوح.',
   },
+  // Core V2 S6b: refund authorization relay (register BIL-24). `{reason}` is Payment's closed refusal code, never translated (D10).
+  refundCaseCompleted: {
+    en: 'The refund case is completed: it accepts no new refund attempt.',
+    fr: "Le dossier de remboursement est clôturé : il n'accepte aucune nouvelle tentative de remboursement.",
+    ar: 'اكتمل ملف الاسترداد: لا يقبل أي محاولة استرداد جديدة.',
+  },
+  refundAuthorizationInProgress: {
+    en: 'A refund authorization for this case is still unresolved or in effect.',
+    fr: 'Une autorisation de remboursement pour ce dossier est encore non résolue ou en vigueur.',
+    ar: 'يوجد تفويض استرداد لهذا الملف لم يُحسم بعد أو ما زال ساريًا.',
+  },
+  refundAuthorizationInvalid: {
+    en: 'The refund authorization receipt is not valid for this refund case.',
+    fr: "Le reçu d'autorisation de remboursement n'est pas valide pour ce dossier.",
+    ar: 'إيصال تفويض الاسترداد غير صالح لملف الاسترداد هذا.',
+  },
+  refundAuthorizationExpired: {
+    en: 'The refund authorization receipt expired before it was used: authorize the refund again.',
+    fr: "Le reçu d'autorisation de remboursement a expiré avant d'être utilisé : autorisez à nouveau le remboursement.",
+    ar: 'انتهت صلاحية إيصال تفويض الاسترداد قبل استخدامه: فوّض الاسترداد من جديد.',
+  },
+  refundAuthorizationUnresolved: {
+    en: 'The refund authorization is not confirmed yet; retry with the same Idempotency-Key and receipt.',
+    fr: "L'autorisation de remboursement n'est pas encore confirmée ; réessayez avec la même Idempotency-Key et le même reçu.",
+    ar: 'لم يُؤكَّد تفويض الاسترداد بعد؛ أعد المحاولة بقيمة Idempotency-Key نفسها والإيصال نفسه.',
+  },
+  refundAuthorizationConflict: {
+    en: 'This refund authorization is already bound to another receipt.',
+    fr: "Cette autorisation de remboursement est déjà liée à un autre reçu.",
+    ar: 'تفويض الاسترداد هذا مرتبط بالفعل بإيصال آخر.',
+  },
+  refundRejectedByPayment: {
+    en: 'The payment service refused this refund attempt ({reason}).',
+    fr: 'Le service de paiement a refusé cette tentative de remboursement ({reason}).',
+    ar: 'رفضت خدمة الدفع محاولة الاسترداد هذه ({reason}).',
+  },
+  refundPaymentUnavailable: {
+    en: 'The payment service did not confirm the refund attempt; its outcome will be confirmed from Payment, or retry with the same Idempotency-Key and receipt.',
+    fr: "Le service de paiement n'a pas confirmé la tentative de remboursement ; son issue sera confirmée par Payment, ou réessayez avec la même Idempotency-Key et le même reçu.",
+    ar: 'لم تؤكد خدمة الدفع محاولة الاسترداد؛ ستُؤكَّد نتيجتها من خدمة الدفع، أو أعد المحاولة بقيمة Idempotency-Key نفسها والإيصال نفسه.',
+  },
+  refundProcessingStarted: {
+    en: 'Refund processing has begun for this case: it can no longer be cancelled.',
+    fr: "Le traitement du remboursement a commencé pour ce dossier : il ne peut plus être annulé.",
+    ar: 'بدأت معالجة الاسترداد لهذا الملف: لم يعد من الممكن إلغاؤه.',
+  },
 });

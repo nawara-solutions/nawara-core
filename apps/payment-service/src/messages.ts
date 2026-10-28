@@ -150,6 +150,67 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: 'Un succès tardif est en conflit avec un échec confirmé par le prestataire.',
     ar: 'يتعارض نجاح متأخر مع فشل أكّده مزوّد الدفع.',
   },
+  // Core V2 S6b refunds (register PAY-07, PAY-08)
+  invalidRefundRequest: {
+    en: 'The refund request is malformed.',
+    fr: 'La demande de remboursement est mal formée.',
+    ar: 'طلب الاسترداد غير صحيح البنية.',
+  },
+  paymentNotRefundable: {
+    en: 'This payment cannot be refunded.',
+    fr: 'Ce paiement ne peut pas être remboursé.',
+    ar: 'لا يمكن استرداد عملية الدفع هذه.',
+  },
+  refundCaptureUnverified: {
+    en: 'This payment has no verified capture to refund.',
+    fr: "Ce paiement n'a pas de capture vérifiée à rembourser.",
+    ar: 'لا توجد لعملية الدفع هذه عملية تحصيل موثّقة يمكن استردادها.',
+  },
+  refundAmountNotFull: {
+    en: 'Only a full refund of the captured amount, in its currency, is supported.',
+    fr: 'Seul un remboursement intégral du montant capturé, dans sa devise, est pris en charge.',
+    ar: 'لا يُدعم إلا الاسترداد الكامل للمبلغ المحصَّل وبعملته.',
+  },
+  refundDisputeOpen: {
+    en: 'A dispute on this payment blocks a new refund attempt.',
+    fr: 'Un litige sur ce paiement empêche une nouvelle tentative de remboursement.',
+    ar: 'يمنع نزاع قائم على عملية الدفع هذه محاولة استرداد جديدة.',
+  },
+  refundDisputeUnavailable: {
+    en: 'The dispute status of this payment could not be verified; nothing was changed.',
+    fr: "L'état des litiges de ce paiement n'a pas pu être vérifié ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من حالة النزاعات على عملية الدفع هذه؛ لم يتغيّر شيء.',
+  },
+  refundInProgress: {
+    en: 'Another refund attempt for this payment is unresolved or may still take effect.',
+    fr: 'Une autre tentative de remboursement de ce paiement est non résolue ou peut encore prendre effet.',
+    ar: 'توجد محاولة استرداد أخرى لعملية الدفع هذه لم تُحسم أو قد تنفذ بعد.',
+  },
+  refundAlreadyRecorded: {
+    en: 'Refund evidence already exists for this payment.',
+    fr: 'Une preuve de remboursement existe déjà pour ce paiement.',
+    ar: 'يوجد بالفعل دليل استرداد لعملية الدفع هذه.',
+  },
+  refundAttemptConflict: {
+    en: 'This refund attempt already exists with different content or another authorization receipt.',
+    fr: "Cette tentative de remboursement existe déjà avec un contenu différent ou un autre reçu d'autorisation.",
+    ar: 'محاولة الاسترداد هذه موجودة بالفعل بمحتوى مختلف أو بإيصال تفويض آخر.',
+  },
+  refundAuthorizationInvalid: {
+    en: 'The refund authorization receipt is not valid for this refund.',
+    fr: "Le reçu d'autorisation de remboursement n'est pas valide pour ce remboursement.",
+    ar: 'إيصال تفويض الاسترداد غير صالح لهذا الاسترداد.',
+  },
+  refundAuthorizationExpired: {
+    en: 'The refund authorization receipt expired before it was used.',
+    fr: "Le reçu d'autorisation de remboursement a expiré avant d'être utilisé.",
+    ar: 'انتهت صلاحية إيصال تفويض الاسترداد قبل استخدامه.',
+  },
+  refundAuthorizationUnresolved: {
+    en: 'The refund authorization could not be confirmed yet; retry with the same key and receipt.',
+    fr: "L'autorisation de remboursement n'a pas encore pu être confirmée ; réessayez avec la même clé et le même reçu.",
+    ar: 'تعذّر تأكيد تفويض الاسترداد بعد؛ أعد المحاولة بالمفتاح نفسه والإيصال نفسه.',
+  },
   cannotFailSucceeded: {
     en: 'Cannot fail an attempt that already succeeded.',
     fr: "Impossible de faire échouer une tentative qui a déjà réussi.",

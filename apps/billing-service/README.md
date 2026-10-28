@@ -156,7 +156,16 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     payments are not. Billing computes the full amount; no partial refund.
   - One `open` or `completed` case per payment; `cancelled` frees it; `completed` is reserved for S6c. An open dispute blocks a case; the
     dispute boundary has no source before S6e.
-  - Nothing is refunded: no attempt, no call to Payment or Auth's receipts, no change to any purchase, entitlement or obligation.
+  - Opening a case refunds nothing and changes no purchase, entitlement or obligation.
+- **Refund authorization relay (Core V2 S6b; register BIL-24 F, BIL-25 G; the Owner's R6B-7, R6B-10; `db/migrations/0034`,
+  `src/refunds/refund-authorization.service.ts`, `refund-relay-reconciler.ts`) — DEVELOPMENT AND SIMULATION ONLY:**
+  - `POST /billing/admin/refund-cases/:id/authorizations` `{receiptSecret}` + `Idempotency-Key` (class M): the Owner relays the Auth
+    receipt they obtained after a factor step-up (AUTH-01). Billing records a durable relay with a refund attempt id it generates, under
+    the case's row lock and before calling Payment (PAY-07, Billing's own `PAYMENT_SERVICE_TOKEN`); the secret is held in memory for the
+    request only. Payment's answer is mirrored only when it proves something; a lost answer leaves the relay `unconfirmed`.
+  - A `RefundRelayReconciler` mirrors Payment's authoritative attempt status (PAY-08); the case's `attempts` show it.
+  - Cancellation is refused (`409 refund_processing_started`) unless Payment proved every relay ended unconsumed and undispatched.
+  - No case is completed and nothing is reversed (S6c, S6d); no `refund.*` event exists yet.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

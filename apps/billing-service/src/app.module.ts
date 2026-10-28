@@ -20,6 +20,7 @@ import { PlatformsModule } from './platforms/platforms.module.js';
 import type { OwnerAuthority } from './platforms/owner-authority.client.js';
 import type { DisputeExposure } from './refunds/dispute-exposure.js';
 import { RefundModule } from './refunds/refund.module.js';
+import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
@@ -45,6 +46,9 @@ export interface AppModuleOverrides {
   ownerAuthority?: OwnerAuthority;
   /** Core V2 S6a: tests replace the dispute-exposure boundary of refund cases (default: no dispute source exists before S6e). */
   disputeExposure?: DisputeExposure;
+  /** Core V2 S6b: the refund port to Payment (tests only) and whether the relay reconciler runs its passes (default true). */
+  paymentRefundClient?: PaymentRefundClient;
+  refundRelayReconciler?: boolean;
 }
 
 /**
@@ -95,7 +99,8 @@ export class AppModule {
         PlatformsModule.register(config, overrides.ownerAuthority), // Core V2 S3d (register BIL-01)
         CheckoutModule.register(config), // Core V2 S3f (BIL-10): development and simulation only; never mounted in production
         AssistanceModule.register(config, overrides.ownerAuthority), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
-        RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure), // Core V2 S6a (BIL-23, BIL-25): development and simulation only
+        // Core V2 S6a (BIL-23, BIL-25) and S6b (BIL-24): development and simulation only
+        RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler }),
       ],
     };
   }

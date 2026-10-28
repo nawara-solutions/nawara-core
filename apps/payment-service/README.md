@@ -68,6 +68,27 @@ no production traffic can reach any of this (the test provider refuses to start 
   derived from Payment's rows. Each `commandId` is a stable identity: an identical replay answers `200` (`Idempotent-Replayed`) and changes
   nothing; other content under it is `409 simulation_command_conflict`. A provider session expiry (`expired`) is now an evidence class of
   the shared pipeline: a submitted attempt expires definitively.
+- **Refund attempts (Core V2 S6b, register PAY-07, PAY-08; ADR-0067 decisions 3 to 7; the Owner's R6B-1 to R6B-10), DEVELOPMENT AND
+  SIMULATION ONLY** (`src/refunds/`, migration 0017). Mounted only where `PAYMENT_SERVICE_POLICY` grants `payment.refund.create` (to
+  `billing-service` alone; production configuration refuses it, and then nothing is mounted). `POST /payment/payments/:paymentId/refunds`
+  (`Idempotency-Key`, class M; the fingerprint never covers the secret) `{refundAttemptId, refundCaseId, amount, currency, reason,
+  legalOverride, receiptSecret}`: Payment verifies the payment itself (succeeded, `gateway`, a Company seller, a refundable purpose,
+  `liveMode=false`, exactly one uncontested S4d capture fact of the full amount, the full amount and currency, no refund fact and no other
+  attempt that may still refund, no dispute exposure), commits the durable intent (the attempt id is the receipt `consumeRef` and the
+  provider idempotency key; the attempt is bound to its receipt by a digest, never the secret), consumes the receipt at Auth (AUTH-02, with
+  `AUTH_SERVICE_TOKEN`), then commits `authorized` with Auth's approver. Only Auth's definitive answers end an authorization
+  (`receipt_invalid` / `receipt_binding_invalid` → `authorization_refused`, `receipt_expired` → `authorization_expired`); anything else
+  stays `authorization_pending` (503 `refund_authorization_unresolved`), recovered by the same receipt or by the worker's AUTH-03 lookup; no
+  expiry margin is invented. A refusal before any attempt is permanent for that id (`refund_attempt_refusal`). The `RefundWorker` dispatches
+  with the stable key (`dispatching` is durable before the call), resends an `unknown` refund only with the same key, never fails one on "no
+  record", and applies provider evidence: a verified refund is first an immutable `provider_transaction_fact` of kind `refund`; only a fact of
+  exactly the full amount succeeds the attempt, anything else is `discrepancy`; a provider-confirmed failure is `failed`. `GET
+  /payment/payments/:paymentId/refunds` (PAY-08): the producer (with its refusals) or the payer. Audit `refund_attempt.authorized`,
+  `.failed`, `.succeeded` (version 1, no scope; the approver stays on Payment's row). No `refund.*` domain event, no allocation, completion
+  or reversal (S6c, S6d). The simulation provider gains refunds: `POST /payment/simulation/payments/:paymentId/refund-dispatch-plan`
+  (`accepted | ambiguous | rejected`), `POST /payment/simulation/refunds/:refundAttemptId/outcomes` (`succeeded | amount_mismatch | failed |
+  no_record | pending`, `immediate | held`) and `POST /payment/simulation/refund-commands/:commandId/deliver`, under the same harness
+  authority; refund outcomes reach Payment only through the signed notification or the status read.
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
@@ -93,8 +114,8 @@ no production traffic can reach any of this (the test provider refuses to start 
 
 - Cash submissions and their confirm/reject flow — **O-4** (who may submit), **O-5** (who may
   confirm/reject).
-- Refunds — **O-6** (who may refund; whether partial refunds are approved). FI-07/FI-08/FI-10/FI-14
-  (the refund invariants) have no enforcement yet because there is no refund table.
+- Refunds beyond Core V2 S6b's simulation scope: partial refunds stay deferred (S0 D4); real provider refunds, allocation and completion
+  (S6c), reversal (S6d), disputes (S6e) and reconciliation (S6h) are later stages.
 - Producer service-token scopes and non-test-fixture producers — **O-13**, **O-14**.
 - Organization/platform/company hierarchy validation with no user context — **O-15**.
 - Any currency beyond the configured list, and a default/maximum payment lifetime — **O-10**, **O-16**.
@@ -144,6 +165,7 @@ Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
 | `PAYMENT_RETURN_URL_ALLOWLIST` | no | empty | no | allowed return-URL prefixes |
 | `PAYMENT_TEST_PROVIDER` | no | `false` | no | the development test gateway (payer-chosen `scenario`s); **refused in production** |
 | `PAYMENT_SIMULATION_PROVIDER` | no | `false` | no | Core V2 S4f: the `simulation` provider and its harness routes (certification only); **refused in production** and together with `PAYMENT_TEST_PROVIDER` |
+| `AUTH_SERVICE_TOKEN` | when `PAYMENT_SERVICE_POLICY` grants `payment.refund.create` | none | **yes** | Payment's own service token for Auth's receipt consumption and lookup (AUTH-02, AUTH-03; Core V2 S6b); at least 32 characters, never a published value; refused in production |
 | `PAYMENT_SIMULATION_WEBHOOK_SECRET` | when the simulation provider is on | none | **yes** | the simulation provider's notification signing secret (at least 32 characters; a value published in this repository is refused); refused in production |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes** | API docs; mounted only with a password of at least 16 characters |
 
