@@ -359,8 +359,8 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
   | S5a | assistance requests: consent, decline, cash collection with `consentAt ≤ cashCollectedAt ≤ reportedAt`, `settleBy = cashCollectedAt + 72h`, a late report born overdue |
   | S5b | the assisted settlement channel (DB-5, DB-13) and the full cash-return obligation, including the school's fee, on a failed settlement |
   | S5c | append-only, Owner-only corrections with step-up (`superseded_by_correction`); student disputes without cutoff (7 days is an escalation target only); the school's dispute response |
-  | S5d | the restriction framework: T1, T2 and D6 inactivity block **new** requests only; each clears on verified resolution when no other restriction applies; no persistent repeat-violation state. T3's source arrives in S6 |
-  | S5e | the DN-1 closed set of discharge actions in inactive scopes, with live authority per request and fail-closed behaviour |
+  | S5d | the restriction framework: T1, T2 and D6 inactivity block **new** requests only; each clears on verified resolution when no other restriction applies; no persistent repeat-violation state. T3's source arrives in S6. **Status (2026-10-28): T1/T2 implemented for simulation (PR #384); the D6 `inactive` restriction is not active until V-4; T3 deferred to S6f** |
+  | S5e | the DN-1 closed set of discharge actions in inactive scopes, with live authority per request and fail-closed behaviour. **V-5 policy Owner-approved (V5-1 to V5-9, 2026-10-28; [register](./core-v2-d-a2-contract-register.md) §7.1); runtime implementation deferred until V-4 and OD-R6a (V5-9)** |
 
 - **Prerequisites.** S3, S4; **V-5** (school actor set) before S5e; **V-4** (effective-state contract) before D6 enforcement; DOC-2.
 - **Invariants.** Cash alone never activates and never settles a payment (ADR-0068, ADR-0035 C1); violations are never erased;
@@ -448,7 +448,7 @@ part of an S-stage, a work package or S-INT.
 | G-3 | R-6a specification (DOC-1) and AR-04.6 contract register (DOC-2) in the repository (§1.4) | S2-Auth R-6a; route-changing packages of S2 to S6 |
 | C-4 | historical Auth → Audit dead letters: inventory and disposition, separately authorized | S1-R enforcement |
 | V-4 | effective-state contract to Billing; the ADR-0060 lifecycle runtime is MOVE V3 in the current roadmap, so D6 has no inactive scope to enforce until it exists (DN-1.4, S-9) | S5 D6 enforcement; first lifecycle release |
-| V-5 | school actor set for discharge in inactive Organizations | S5e |
+| V-5 | school actor set for discharge in inactive Organizations. **Policy Owner-approved (V5-1 to V5-9, 2026-10-28; register §7.1); S5e runtime deferred** | S5e |
 | Catalog | Premium catalog products, plan durations and prices | S3g and any catalog configuration |
 | Simulation adapter | whether the simulation adapter is new beside the existing `test` provider or replaces it; both are refused in production (FC-10) | S4f |
 | G-7 | G6 baseline: new Auth, Organization or Audit migrations change the fingerprints G6 matched; no such image reaches production before M3, or the Owner authorizes the G6 baseline refresh first | any Auth, Organization or Audit production deployment of S-stage code |

@@ -1019,6 +1019,31 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 Every route name, DTO, error code and idempotency class marked PROPOSED in §4 to §6 also awaits Owner approval at implementation
 review (S0 §3.10), even when it is not listed here.
 
+### 7.1 V-5: inactive-Organization discharge policy (Owner decisions V5-1 to V5-9, 2026-10-28)
+
+**Status: V-5 policy Owner-approved. S5e runtime implementation DEFERRED (V5-9).** Nothing below is implemented or certified; behaviour is
+unchanged, because no Organization, Platform or Company scope can be inactive until V-4 (S0 §3.6.4). V-4 is **open**, OD-R6a is **open**,
+the D6 lifecycle restriction (`inactive`) is **not active**, and T3 is **deferred to S6f**. The policy refines DN-1 (S0 §3.6); it amends
+no ADR.
+
+| Id | Decision |
+|---|---|
+| V5-1 | **Classification.** New assistance activity (a new request, BIL-13; new cash collection on a pending request, V5-5) requires an effectively `ACTIVE` Organization. Existing obligations stay dischargeable in `ACTIVE`, `SUSPENDED` and `ARCHIVED` by their authorized actors: electronic settlement of collected cash (BIL-16, including the Organization actor's attempt at Payment, PAY-03), Payment synchronization and verified success, Billing's sweep and late evidence (L-1), the cash-return report (BIL-17), the beneficiary's confirmation (BIL-18) and disputes (BIL-20), the Organization's dispute response (BIL-21), the Owner's corrections and permitted resolutions (BIL-19, BIL-22), and recovery and reconciliation (S6). S5b's settlement-deadline rule is unchanged. Discharge authority grants no general administration (DN-1.2) |
+| V5-2 | **Organization actor (V-5).** An Organization actor with a valid live membership and Organization-administrator authority in that Organization (the D-5 / A-2 actor, verified live per request) may perform the closed discharge set of V5-1 for an inactive Organization, and nothing more. Every existing Billing and Payment authorization, purpose and scope restriction stays mandatory. **Activation requires OD-R6a certification and authoritative V-4 lifecycle integration** |
+| V5-3 | **Beneficiary.** The beneficiary acts on and reads their own existing assistance obligations even after leaving the Organization, subject to their own live account authorization (today's relation needs no current membership). A suspended account never bypasses Auth suspension; the debt is preserved. Resolution of obligations that cannot be confirmed because the beneficiary is suspended or unavailable is left to a future, separately authorized mechanism; none is created here |
+| V5-4 | **Owner.** Only the existing, explicitly authorized correction, dispute-resolution and (S6) reconciliation powers, in every lifecycle state. No impersonation of the beneficiary or the Organization actor; no new financial-discharge authority (J-2) |
+| V5-5 | **Cash collection.** Collecting new cash on an existing pending request is refused when the Organization is effectively `SUSPENDED` or `ARCHIVED` (new money intake, not discharge), enforced through the authoritative effective lifecycle state once V-4 exists; existing financial evidence is preserved. Until then S5D-8 applies unchanged |
+| V5-6 | **Decline.** The beneficiary or the authorized Organization actor may decline an eligible pending request whatever the Organization's lifecycle state, under every existing request-state and authorization guard (BIL-14 F) |
+| V5-7 | **Reads.** Authorized Organization actors may read the existing financial records needed to manage and discharge obligations in an inactive Organization, through the existing narrow relationships (the assistance read, BIL-26); no Organization-wide financial access |
+| V5-8 | **Inactivity provenance.** The future V-4 / ADR-0060 L3 reference contract must supply the effective lifecycle status, an authoritative `effectiveSince`, and enough provenance to tell whether the Organization became effectively inactive through its own lifecycle or an ancestor's. Billing never infers status or timestamps from membership data. Once V-4 is active, unknown effective lifecycle information fails closed (ADR-0060 §8) |
+| V5-9 | **Timing (option A).** No lifecycle-aware S5e runtime before V-4: no temporary always-active adapter, no unbound lifecycle port and no speculative operation registry. Existing discharge behaviour stays as implemented in S5a to S5d |
+
+**Dependency sequence (each separately authorized; this decision starts none of them):** (1) OD-R6a, Auth's Organization-administrator
+authority correction; (2) PR #319 reconciliation within its approved S8 boundary; (3) the F6 / F7 authority prerequisites; (4) ADR-0060
+lifecycle authority and the V-4 / L2 / L3 contracts (V5-8); (5) the shared authoritative effective-lifecycle reference; (6) Billing and
+Payment lifecycle-aware S5e integration (D6 for BIL-13, V5-5, the `inactive` kind of BIL-26, Payment's A-6 extension point); (7) the S0
+§8 inactive-Organization discharge certification.
+
 ## 8. Gates and dependencies
 
 The gates are those of the [roadmap](./core-v2-s-execution-roadmap.md) §7; this register adds only the open decisions of §7 above.
@@ -1032,7 +1057,7 @@ The gates are those of the [roadmap](./core-v2-s-execution-roadmap.md) §7; this
 | S2-Rel | REL-01 to REL-03 | none | G-1 |
 | S3 | BIL-01 to BIL-12, EVT-05 | OD-01 to OD-03, OD-05, Q10, Q11 | S1, G-2 (DOC-3), DOC-5, catalog |
 | S4 | PAY-01 to PAY-06, PAY-14, PAY-15, EVT-01 | OD-06, OD-08 | S1, G-2 (DOC-3), DOC-6, simulation adapter |
-| S5 | BIL-13 to BIL-22, BIL-26 | OD-04, OD-07 to OD-09 | V-4, V-5 |
+| S5 | BIL-13 to BIL-22, BIL-26 | OD-04, OD-07 to OD-09 | V-4 (open), V-5 (policy Owner-approved, §7.1; S5e runtime deferred until V-4 and OD-R6a) |
 | S6 | BIL-23 to BIL-25, BIL-27 to BIL-35, PAY-07 to PAY-13, EVT-02, EVT-03, EVT-06 | Q1, Q2, Q8, OD-10 to OD-12, OD-FILE | S2-Auth, S2-Audit, S2-File, S3 to S5, DOC-4 |
 | S7 | AUTH-09, NOT-01 | — | C-3, C-6, DG-3 |
 | S8 | ORG-00 (no Core V2 contract) | — | PR #319, C-5, A5.4-G1, F7 |
