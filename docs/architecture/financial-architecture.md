@@ -11,9 +11,134 @@
   [ADR-0044](../adr/0044-subscription-entitlement-final-model.md) for what was, and
   [`docs/sdd/billing-service.md`](../sdd/billing-service.md) for the current technical contract, which is now the
   living document; this one stays as a historical snapshot of the pre-implementation design decisions).
+- **Core V2 update (DOC-4, 2026-10-28):** **§0 below is the current Core V2 financial architecture**, written from the frozen
+  [S0 architecture freeze](./core-v2-s0-architecture-freeze.md), the [execution roadmap](./core-v2-s-execution-roadmap.md) and the
+  [D-A2 contract register](./core-v2-d-a2-contract-register.md), which stay authoritative for every detail. It removes Nawara cash
+  settlement (S0 D1, FC-11; [ADR-0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md)) and records explicit settlement
+  routing (S0 §6.1). Sections 1 to 12 are kept as the historical 2026-09-19 design; where they describe cash settlement of
+  Nawara-sold products they are superseded (marked inline).
 - **Related:** [core-architecture.md](./core-architecture.md); this document **replaces the financial parts** of
   `docs/add/payment-service.md` and `docs/sdd/payment-service.md`, which pre-date multi-organization membership
   ([ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md)) and the broader requirements below.
+
+## 0. Core V2 financial architecture (DOC-4, current)
+
+This section summarizes; it decides nothing. Every rule cites its source, and the [contract register](./core-v2-d-a2-contract-register.md)
+(routes, DTOs, errors, idempotency classes, the Owner's decisions) and the [Billing](../sdd/billing-service.md) and
+[Payment](../sdd/payment-service.md) SDDs hold the details. Core V2 is implemented and certified against a **simulation provider only**
+(S0 §1.1); nothing below is in production, and production stays blocked by B-001 / B-007 (the legal seller), a real provider and a
+separate Owner activation.
+
+**Status legend.** **IMPLEMENTED** — merged, development and simulation only (not mounted or refused in production unless stated).
+**FROZEN** — required by S0 or an accepted contract, not implemented yet. **OWNER-APPROVED** — an Owner decision recorded in the register,
+not implemented yet. **OPEN** — needs an Owner decision; nothing is assumed.
+
+### 0.1 Services and boundaries
+
+| Service | Owns in Core V2 | Never |
+|---|---|---|
+| billing-service | what is owed and why: products, prices, invoices, payment requests, settlement routing, the Organization Subscription and the Personal Subscription ledger with their entitlements, fees, assistance requests, cash-return obligations, restrictions, refund cases (S6a) | how money moved |
+| payment-service | how money moved: payments, attempts, provider transaction facts, finality, refunds (S6b), disputes (S6e) | what is owed; entitlements |
+| auth-service | identity, live membership and administrator facts, Owner step-up, authorization receipts (ADR-0067) | billing or payment authority |
+| audit-service | append-only accountability records from verified producers (ADR-0069) | business state |
+
+Payment never calls Billing (C4): Billing learns outcomes only from Payment's verified `payment.*` events (S1) or its own reconciler. No
+accounting-service, ledger, wallet or cash-service exists (S0 §1.1: no wallets, seats or manual settlement).
+
+### 0.2 Parties, purposes and immutable routing
+
+- **Payer, beneficiary and seller are separate, typed parties.** The seller of a Nawara-sold product is the Platform's Company (a
+  simulation commercial reference until B-001 / B-007 name the legal seller). The payer is a user, or an Organization only for the
+  assisted and recovery purposes. The beneficiary of a personal purchase is a user. **IMPLEMENTED** (S3a, S4a, S4e; S0 S-6).
+- **Purposes and targets (ADR-0044 B2):** `organization_subscription` → `organization`; `direct_purchase` and `assisted_settlement` →
+  `personal`; `recovery_settlement` → `none`; plus `non_entitlement` → `none` for invoices that grant nothing (S3a Option C).
+  **IMPLEMENTED** for all but `recovery_settlement`, which is FROZEN (S6f).
+- **Routing is fixed when the invoice is created** (`invoice_entitlement`, register BIL-08) and never changes. Payer, purpose, beneficiary,
+  amount, currency and seller of a payment are immutable (S-6); Billing and Payment each enforce the Organization-payer rule
+  independently. **IMPLEMENTED** (S3a, S4a; DB-15 pairing).
+- **Money:** `bigint` minor units with an ISO 4217 currency, one currency per Platform (TND first) (S3d). **IMPLEMENTED**.
+
+### 0.3 Subscriptions and entitlement
+
+- **Organization Subscription:** one row per Organization, activated or extended only by a verified settlement routed `organization`;
+  the settlement check fires only on period start or extension (S-4); fixed 24-hour grace (S3e). **IMPLEMENTED** (S3b, S3e).
+- **Personal Subscription:** owned by the named user, scoped to user + Platform + product, portable across that Platform's
+  Organizations; an append-only purchase ledger (`subscription_purchase`) laid by one fold; no personal grace; at most one reversal per
+  purchase, re-laid under K-3 Option D. **IMPLEMENTED** (S3c): the reversal record and its fold exist, but **no flow writes a reversal
+  yet** (refund completion and final-lost chargebacks are S6d).
+- **Entitlement never depends on authentication** (§7 below), and lifecycle never derives from commercial state (DN-1.5).
+
+### 0.4 Verified settlement, uncertainty and finality
+
+- **Only verified Payment outcomes settle.** Billing consumes `payment.succeeded` only from a verified producer through provenance-checked
+  delivery (S1, ADR-0057 §13); a cash declaration, a client claim or a report never settles, pays or activates (ADR-0068, ADR-0035 C1).
+  **IMPLEMENTED** (S1, S3b).
+- **Uncertainty:** a payment being sent is uncertain; no second checkout while a payment is uncertain (S0 §1.1, S4c), no cash-return obligation
+  while an assisted settlement is uncertain (S5b E-6), with no release timeout. **IMPLEMENTED**.
+- **Finality (S4c):** `closing` and final states; once final, Payment emits no later success (F-4). A late provider success is therefore
+  never a `payment.succeeded` event; it reaches reconciliation instead (S6h). **IMPLEMENTED** (S4c).
+- **Provider transaction facts (FC-1):** every distinct provider money movement is an immutable `provider_transaction_fact`
+  (`capture` kind today), committed in its own transaction independently of allocation, never refused, edited or deleted. **IMPLEMENTED**
+  for captures (S4d); refund and chargeback kinds are FROZEN (S6b, S6e).
+- **Idempotency:** money commands are class M (90 days, S0 D7) backed by permanent uniqueness keys; other commands class K. **IMPLEMENTED**
+  (S4g, S3f, S5).
+- **Simulation:** a non-production simulation provider and harness; production refuses them; clients never choose outcomes (FC-10).
+  **IMPLEMENTED** (S4f).
+
+### 0.5 No Nawara cash settlement
+
+Nawara-sold products are never settled in cash, manually or on trust (S0 D1, FC-11; ADR-0068 **Proposed**; DB-16 forbids
+`settledMethod = 'cash'` with a Company seller). Cash for other sellers is deferred (S0 §5). **IMPLEMENTED** as a database guard (S4b).
+The cash workflow of §3 and §5 below (`cash_payment`, cash confirmation) therefore does **not** apply to Nawara-sold products.
+
+### 0.6 Organization assistance ("Pay with School" in S0)
+
+| Step | Rule | Status |
+|---|---|---|
+| Request and consent (BIL-13) | the beneficiary consents to frozen terms: the price, the Organization's approved fee (≤ the current cap), their total | IMPLEMENTED (S5a) |
+| Decline (BIL-14) | the beneficiary or the Organization actor, while pending | IMPLEMENTED (S5a) |
+| Cash collection report (BIL-15) | the Organization actor asserts `cashCollectedAt`; `consentAt ≤ cashCollectedAt ≤ reportedAt`; `settleBy = cashCollectedAt + 72h`; overdue is derived, never stored; evidence only, never settlement | IMPLEMENTED (S5a) |
+| Electronic settlement (BIL-16) | the Organization pays Nawara the frozen **base** (never the fee) through an invoice of the reserved producer `billing-assistance`, routed `assisted_settlement` to the beneficiary; one open or uncertain channel per request; only Payment's verified success records the beneficiary's purchase (one per request, DB-12) | IMPLEMENTED (S5b) |
+| Cash-return obligation (BIL-17) | opened only by Billing's sweep past `settleBy` with no purchase and no open or uncertain channel; the Organization owes the beneficiary the full frozen total (base + fee); a report by the Organization does not discharge it | IMPLEMENTED (S5b) |
+| Confirmation, disputes, corrections (BIL-18 to BIL-22) | only the beneficiary confirms (the request is then `returned`); beneficiary disputes without cutoff (open disputes block confirmation); the Organization's response is evidence only; the Owner appends timestamp corrections and closes timestamp disputes with dedicated step-ups; no Owner action discharges an obligation (`resolved_by_owner` reserved) | IMPLEMENTED (S5c) |
+| Late assisted settlement | a verified success that can no longer apply is kept as evidence (`assistance_late_settlement`), creates no purchase and changes no obligation (L-1 to L-3) | record IMPLEMENTED (S5b); its reconciliation, the default full refund (L-3) and the L-4 exception are FROZEN (S6g, S6h) |
+
+### 0.7 Financial restrictions
+
+- **T1** (a request past `settleBy`, not settled and not confirmed returned) and **T2** (a cash-return obligation not confirmed by the
+  beneficiary) restrict an Organization's **new** assistance requests only, derived from durable rows, never stored, with no
+  repeat-violation state (FC-9). **IMPLEMENTED** (S5d, register BIL-13 H, BIL-26 F).
+- **T3** (recovery after an assisted purchase lost at final stage) is **FROZEN** (S6f). **D6 inactivity** is **FROZEN, not active** until
+  V-4 supplies the authoritative effective lifecycle state (S0 DN-1.4, S-9).
+- **Inactive Organizations:** existing obligations stay dischargeable by their authorized actors; new activity needs an effectively active
+  Organization. **OWNER-APPROVED** policy (V5-1 to V5-9, register §7.1); runtime deferred until V-4 and OD-R6a.
+
+### 0.8 Refunds, receipts and reversals
+
+| Element | Rule | Status |
+|---|---|---|
+| Authorization receipts (ADR-0067 **Proposed**; AUTH-01 to AUTH-03) | Owner-only, factor step-up `refund.authorize`, bound to `{operation, audience, companyId, refundCaseId, paymentId, amount, currency, reason, legalOverride}`, 10 minutes, single use, consumed by payment-service | IMPLEMENTED in Auth (S2-Auth); no consumer yet |
+| Refund case (BIL-23, BIL-25) | Owner of the seller Company only; a full refund of a verified personal purchase (`direct_purchase`, `assisted_settlement`) or of a verified captured payment that produced no entitlement (eligible late assisted settlements, `non_entitlement`); Organization-subscription refunds excluded; Billing computes the amount; closed reason codes; `legalOverride` grants nothing; states `open`, `cancelled`, `completed`; opening needs no step-up; no new case while a dispute on the payment is open (D3) | OWNER-APPROVED (R6A-1 to R6A-9), S6a |
+| Refund attempt (PAY-07) | a durable intent (`consumeRef` = the attempt) → receipt consumption → `authorized`; asynchronous provider dispatch with a stable key; `authorization_expired` recovery | FROZEN (S6b) |
+| Allocation and completion (FC-2, FC-3) | lock order `payment` → `refund_authorization`; bounded counter and deferred sum check; `completedAt` set once; a completed case refuses every new attempt (`409 refund_case_completed`) | FROZEN (S6c) |
+| Reversal (FC-4) | at most one per purchase; causes appended separately; an assisted purchase lost at final stage is never reversed | mechanism IMPLEMENTED (S3c), flows FROZEN (S6d) |
+| Assisted refund | the base returns to the Organization's card electronically, and the Organization owes the beneficiary the full cash; that obligation arises only from a completed refund (S6c / S6d), never from opening a case | FROZEN (S0 §1.1); OWNER-APPROVED boundary R6A-8 |
+| Scope | full refunds only; partial refunds deferred (S0 D4) | FROZEN |
+
+### 0.9 Disputes, recovery, reconciliation and losses (S6)
+
+All **FROZEN, not implemented**: provider disputes, evidence and decisions; fraud holds (evidence-based, Owner step-up, 14-day review)
+(S6e; OD-10, OD-11 **OPEN**); recovery obligations after an assisted final-lost chargeback, recovery settlement for the base amount only,
+`recovery_surplus` (R-1 to R-5) and T3 (S6f); late assisted settlement L-1 to L-6 including L-4's five conditions (S6g); reconciliation
+cases, fact association, balances that are never clamped (FC-5) and `FinancialLoss` only from evidence (FC-6) (S6h). Payment has no
+dispute or refund records today; S6a's dispute check is an integration boundary that S6e must supply before disputes are active
+(R6A-3).
+
+### 0.10 Open items that block production
+
+V-4 (effective lifecycle), V-5 activation (with OD-R6a), T3, B-001 / B-007 (the legal seller and invoice content), real providers (their
+idempotency, refund and dispute formats), OD-10 to OD-12, Q8, and the Owner's production activation. §10 below keeps the original
+business, legal and provider questions; items 1, 4, 5 and 12 are still open.
 
 ## 1. Assessment
 
@@ -39,7 +164,7 @@
 | A5 | `payerId` / `organizationId` are ambiguous | Cannot express organization → Nawara versus customer → organization | explicit typed parties ([ADR-0036](../adr/0036-money-parties-and-source-references.md)) |
 | A6 | One `status`, `refunded` as a flag | Loses financial history | separate `Refund` records; database-enforced state machines |
 | A7 | Events are fire-and-forget | Accounting needs exactly-once *effect* | outbox + inbox ([ADR-0037](../adr/0037-reliable-events-outbox-inbox.md)) |
-| A8 | One "admin" role confirms cash | Two cases: organization-collected cash and Nawara-collected cash | authority derived from who the **seller** is |
+| A8 | One "admin" role confirms cash | Two cases: organization-collected cash and Nawara-collected cash | authority derived from who the **seller** is. **Superseded for Nawara-sold products (§0.5):** no cash settlement at all (S0 D1, ADR-0068) |
 | A9 | Gateway flow "out of scope" | Webhooks, idempotency and reconciliation are the core of a payment service | designed in section 6 |
 | A10 | Auth calls `GET /payment/licenses/:org/status` at registration and joining | Entitlement moves to billing | **Resolved, Stage 12.1 (`f1901f9`):** removed outright, never repointed — Auth makes no synchronous commercial check at all |
 
@@ -81,7 +206,7 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
 - **Organization sells to a user** (a service): invoice (seller = the organization, payer = the user) → payment → invoice paid.
 - **Nawara processes payments for an organization** (**subject to open decisions 4 and 5**: merchant of record and custody of funds): the same payment records, with the organization as beneficiary; the
   organization's payment account and settlement are Stage 6 and **not designed in detail** (section 9).
-- **Cash:** `Invoice → payment request → cash submission → review → confirm | reject → payment succeeded`. Cash is a payment *method*, not an
+- **Cash** *(superseded for Nawara-sold products by §0.5: no cash settlement, S0 D1; cash for other sellers deferred)*: `Invoice → payment request → cash submission → review → confirm | reject → payment succeeded`. Cash is a payment *method*, not an
   exception. Who confirms: **explicitly designated seller-side authority**, modeled in payment-service (whether that draws on an Auth capability, an
   owner or an assigned operator is undecided). **These authority rules are a proposed policy, not settled** (open decision 7); the generic controls proposed are that a payer cannot confirm their own cash payment (a CHECK `confirmer <> payer` is enforceable only when the payer is a `user`) and that confirmation cannot happen twice.
 
@@ -127,7 +252,7 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
 |---|---|
 | `payment` | id, the payment-request snapshot (paymentRequestId, sourceType/sourceId, payer, seller, organizationId, amount, currency, expiresAt, description, reference), settledMethod (`gateway` or `cash`, set on success), succeededAttemptId, status `created`, `pending`, then `succeeded`, `failed`, `cancelled` or `expired` (the state machine is defined in the [payment SDD](../sdd/payment-service.md), which is authoritative), natural idempotency key `(producer, paymentRequestId)`; state moves enforced by trigger |
 | `payment_attempt` | payment, provider, providerTransactionId (**unique per provider**), state, error class, timestamps; one payment may have several attempts |
-| `cash_payment` | payment, submittedBy, submittedAt, confirmedBy, confirmedAt, rejectedBy, rejectedAt; `submitted → confirmed \| rejected`, final; confirmer ≠ payer when the payer is a user |
+| `cash_payment` | *(not used for Nawara-sold products, §0.5; DB-16)* payment, submittedBy, submittedAt, confirmedBy, confirmedAt, rejectedBy, rejectedAt; `submitted → confirmed \| rejected`, final; confirmer ≠ payer when the payer is a user |
 | `refund`, `refund_attempt` | refund amount, provider refund reference; CHECK sum of refunds ≤ paid amount; history is never overwritten |
 | `webhook_event` | provider, providerEventId (**unique**), raw body, signature verified, processing state, attempts |
 | `idempotency_key` | scope, key, request hash, stored response |
@@ -153,11 +278,12 @@ A correction is a **reversing entry**, never an update or delete.
 - **Webhooks:** a provider event is stored raw, its **signature is verified server-side**, its `providerEventId` is unique
   (duplicates are no-ops), processing is retried, and out-of-order delivery is tolerated (state moves are validated, not assumed).
   A payment is **never** marked succeeded on a client's claim; only a verified provider confirmation, a verified webhook, or an
-  authorized cash confirmation can do it.
+  authorized cash confirmation can do it (*Core V2, §0.5: never a cash confirmation for a Nawara-sold product*).
 - **Providers** (Flouci, Konnect, Paymee, Stripe) sit behind one port. No adapter is built until contracts and sandbox
   credentials exist. Provider secrets are never in business tables (`NAME_FILE`/environment, like Auth).
 - **Refunds** are separate records bounded by what was paid; each has provider references; accounting receives a reversal
-  event. Partial refunds are supported by the model even if not built first.
+  event. Partial refunds are supported by the model even if not built first. (*Core V2, §0.8: full refunds only, partial refunds deferred,
+  S0 D4; Owner receipts per ADR-0067.*)
 - **Reconciliation:** provider records compared with payments; discrepancies are surfaced, not auto-corrected. (Deferred.)
 
 ## 7. Entitlement is not authentication ([ADR-0038](../adr/0038-entitlement-in-billing-service.md))
