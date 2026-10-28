@@ -463,4 +463,10 @@ export const BILLING_MESSAGES = defineMessages({
     fr: 'Une nouvelle vérification renforcée pour cette opération est requise.',
     ar: 'يلزم تحقق معزز جديد لهذه العملية.',
   },
+  // Core V2 S5d: Organization financial restrictions (register BIL-13 C, BIL-26)
+  assistanceRestricted: {
+    en: 'This Organization cannot accept new assistance requests while a financial restriction applies.',
+    fr: "Cette organisation ne peut pas accepter de nouvelles demandes d'aide tant qu'une restriction financière s'applique.",
+    ar: 'لا يمكن لهذه المنظمة قبول طلبات مساعدة جديدة ما دام هناك قيد مالي سارٍ.',
+  },
 });

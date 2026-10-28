@@ -12,6 +12,9 @@ export const BILLING_OPERATIONS = [
   'invoice.create', 'invoice.read', 'invoice.list', 'invoice.issue', 'invoice.discard',
   'payment_request.create', 'payment_request.read', 'payment_request.cancel',
   'entitlement.read',
+  // Core V2 S5d (register BIL-26; S5D-6): read an Organization's financial restrictions. Exact name only (no wildcard or prefix); a caller
+  // holds it only through an explicit policy entry, and the Organization must be within its allowedPlatforms.
+  'restriction.read',
 ] as const;
 export type BillingOperation = (typeof BILLING_OPERATIONS)[number];
 

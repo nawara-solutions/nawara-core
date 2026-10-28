@@ -9,6 +9,7 @@ import { BILLING_MESSAGES } from '../messages.js';
 import { AssistanceAuthority, type AssistanceParties } from './assistance-authority.js';
 import { AssistanceCommandIdempotency, type AssistanceCommandResult } from './assistance-idempotency.js';
 import type { AssistanceCreateInput } from './assistance-input.js';
+import { assistanceRestricted, lockOrganization, organizationRestrictions } from './assistance-restrictions.js';
 import { loadSettlementView } from './assistance-settlement.view.js';
 
 /** The row as stored, plus the overdue state the database derives at read time (D-6). */
@@ -110,6 +111,11 @@ export class AssistanceService {
     if (!platformId) throw memberNotEligible();
     const beneficiary = identity.id;
     return this.idempotency.run(beneficiary, key, 'assistance_request.create', { ...input }, async (q): Promise<AssistanceCommandResult> => {
+      // Core V2 S5d (S5D-4, S5D-5): the Organization lock first, then the restrictions at the database's current clock (T1, T2); the
+      // insert guard re-evaluates the same model, so no path admits a request into a restricted Organization
+      await lockOrganization(q, input.organizationId);
+      const restrictions = await organizationRestrictions(q, input.organizationId);
+      if (restrictions.length > 0) throw assistanceRestricted(restrictions);
       // D-7: one beneficiary's requests for one (Organization, product) are serialized whatever the key, so two can never both be created
       await q.query(`SELECT pg_advisory_xact_lock(hashtextextended('billing.assistance_open:' || $1 || ':' || $2 || ':' || $3, 0))`, [beneficiary, input.organizationId, input.productId]);
       const platform = (await q.query<{ companyId: string; currency: string }>(`SELECT "companyId", trim(currency) AS currency FROM billing_platform WHERE "platformId" = $1`, [platformId])).rows[0];
@@ -197,6 +203,8 @@ export class AssistanceService {
     if (!relation.beneficiary && !relation.organizationActor) throw notFound();
     if (relation.beneficiary) throw operationNotPermitted(); // D-5: the beneficiary never reports their own collection, administrator or not
     return this.idempotency.run(identity.id, key, 'assistance_request.cash_collection', { id, ...input }, async (q): Promise<AssistanceCommandResult> => {
+      // Core V2 S5d (S5D-5): a late report starts T1 at once, so the Organization lock comes first. No restriction is checked here (S5D-8).
+      await lockOrganization(q, parties.organizationId);
       const current = (await this.load(q, id, true))!;
       if (current.status === 'cash_collected' || current.status === 'settled' || current.status === 'returned') throw billingError(409, 'cash_collection_already_reported', BILLING_MESSAGES.cashCollectionAlreadyReported);
       if (current.status !== 'pending') throw billingError(409, 'assistance_request_not_pending', BILLING_MESSAGES.assistanceRequestNotPending);

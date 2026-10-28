@@ -43,6 +43,7 @@ const BILLING_MIGRATIONS = [
   '0029_assistance_request.sql', // Core V2 S5a: assistance_request (frozen terms, consent, decline, cash collection) and assistance_command_idempotency
   '0030_assisted_settlement.sql', // Core V2 S5b: assistance_settlement_channel, cash_return_obligation, assistance_late_settlement; the assisted routing and purchase arms
   '0031_assistance_resolution.sql', // Core V2 S5c: assistance_dispute, assistance_dispute_response, assistance_correction; confirmed_returned / returned
+  '0032_assistance_restrictions.sql', // Core V2 S5d: the T1/T2 restriction model, the Organization lock and the creation guard, no table
 ];
 /** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022) and S3d's billing_platform (0023) and S3f's fee tables (0025) and checkout_idempotency (0026) and S5a's assistance tables (0029) and S5b's settlement channel, cash-return obligation and late-settlement record (0030) and S5c's disputes, dispute responses and corrections (0031). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [

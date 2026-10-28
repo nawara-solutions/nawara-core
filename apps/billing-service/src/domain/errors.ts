@@ -60,7 +60,8 @@ export type BillingErrorCode =
   | 'correction_not_permitted'
   | 'correction_time_invalid'
   | 'resolution_not_permitted'
-  | 'step_up_required';
+  | 'step_up_required'
+  | 'assistance_restricted'; // Core V2 S5d (register BIL-13 C; S5D-4)
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

@@ -52,6 +52,17 @@ export class AssistanceAuthority {
     return { beneficiary, organizationActor: platformId !== null && platformId === parties.platformId };
   }
 
+  /**
+   * Core V2 S5d (BIL-26; S5D-6): whether the caller is, right now, the Organization actor (D-5) of exactly this Organization: an active
+   * ordinary member with an `active` membership carrying `isOrganizationAdmin` there, anchored to the Organization reference's Platform. A
+   * revoked administrator, another Organization's, an Owner or Operator tier, or an unknown Organization: false. Outside any transaction.
+   */
+  async isOrganizationActor(identity: AuthIdentity, organizationId: string): Promise<boolean> {
+    if (!isOrdinaryActiveMember(identity)) return false;
+    const membership = identity.memberships.find((m) => m.organization.id === organizationId && m.status === 'active' && m.isOrganizationAdmin === true);
+    return membership ? (await this.anchored(membership, organizationId, 'organization_actor')) !== null : false;
+  }
+
   /** The membership's Platform when it is the Organization reference's Platform; null otherwise (an unknown Organization included). */
   private async anchored(membership: AuthMembership, organizationId: string, as: AssistanceRelation): Promise<string | null> {
     const ref = await this.reference.resolve(organizationId); // throws (503 hierarchy_unavailable) when the authority cannot answer

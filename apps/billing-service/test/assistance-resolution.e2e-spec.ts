@@ -42,8 +42,10 @@ class FakePaymentClient implements PaymentClient {
 
 const COMPANY = randomUUID();
 const PLATFORM = randomUUID();
-const ORG = randomUUID();
-const ORG2 = randomUUID();
+// Core V2 S5d: a fresh Organization per test (beforeEach). T1/T2 (S5D-1, S5D-2) restrict an Organization's NEW requests, so one test's
+// overdue or unconfirmed fixtures must never restrict the next one's; restrictions are derived and never cleared by a test.
+let ORG = randomUUID();
+let ORG2 = randomUUID();
 const U = { b1: randomUUID(), b2: randomUUID(), a1: randomUUID(), a2: randomUUID(), adminBeneficiary: randomUUID(), m1: randomUUID(), owner: randomUUID(), foreignOwner: randomUUID(), operator: randomUUID() };
 const membership = (organizationId: string, o: { admin?: boolean; status?: AuthMembership['status'] } = {}): AuthMembership => ({
   id: randomUUID(), organization: { id: organizationId }, platform: { id: PLATFORM }, status: o.status ?? 'active', isOrganizationAdmin: o.admin ?? false,
@@ -213,6 +215,8 @@ describeWithEnv('assistance resolution (Core V2 S5c, simulation) — real Postgr
     });
   });
   beforeEach(() => {
+    ORG = randomUUID();
+    ORG2 = randomUUID();
     resetIdentities();
     auth.reset();
   });
@@ -251,7 +255,7 @@ describeWithEnv('assistance resolution (Core V2 S5c, simulation) — real Postgr
   const disputeRow = (id: string) => one(`SELECT * FROM assistance_dispute WHERE id = $1`, [id]);
 
   /** A collected request whose deadline passed with no settlement: the sweep opened its obligation (collected 73 hours ago). */
-  const owed = async (o: { beneficiary?: string; fee?: number } = {}) => {
+  const owed = async (o: { beneficiary?: string; fee?: number; organizationId?: string } = {}) => {
     const r = await collected(o);
     await expireDeadline(r.id);
     await sweep();
@@ -260,9 +264,9 @@ describeWithEnv('assistance resolution (Core V2 S5c, simulation) — real Postgr
     return { ...r, obligationId: ob.id as string };
   };
   /** ...and the Organization reported the full return a minute ago. */
-  const reported = async (o: { beneficiary?: string; fee?: number } = {}) => {
+  const reported = async (o: { beneficiary?: string; fee?: number; organizationId?: string } = {}) => {
     const r = await owed(o);
-    const rr = await reportReturn(r.obligationId, ago(60_000));
+    const rr = await reportReturn(r.obligationId, ago(60_000), (o.organizationId ?? ORG) === ORG ? 'a1' : 'a2');
     expect(rr.status, JSON.stringify(rr.body)).toBe(200);
     return r;
   };
@@ -555,7 +559,8 @@ describeWithEnv('assistance resolution (Core V2 S5c, simulation) — real Postgr
         expect((await correct(r.id, bad)).status, JSON.stringify(bad)).toBe(400);
       }
       const productId = await productOf();
-      const pending = await create({ organizationId: ORG, productId, priceId: await priceOf(productId), consent: true });
+      const pending = await create({ organizationId: ORG2, productId, priceId: await priceOf(productId), consent: true }); // ORG is now restricted (S5d)
+      expect(pending.status).toBe(201);
       const onPending = await correct(pending.body.id, { field: 'cashCollectedAt', value: ago(HOUR), reasonCode: 'actor_entry_error' });
       expect([onPending.status, onPending.body.code], JSON.stringify(onPending.body)).toEqual([409, 'correction_not_permitted']);
       expect(await count(`SELECT count(*) AS n FROM assistance_correction WHERE "assistanceRequestId" IN ($1, $2)`, [r.id, pending.body.id])).toBe(1); // the one valid correction
@@ -599,9 +604,9 @@ describeWithEnv('assistance resolution (Core V2 S5c, simulation) — real Postgr
       expect((await confirm(r.obligationId)).body.code).toBe('assistance_dispute_open'); // the debt is not released (J-2)
 
       // a collection-time dispute with a correction made BEFORE it opened, or of the other field: refused
-      const r2 = await reported({ beneficiary: 'b2' });
+      const r2 = await reported({ organizationId: ORG2 }); // a second Organization: ORG is restricted now (S5d)
       const before = (await correct(r2.id, { field: 'cashCollectedAt', value: new Date(Date.now() - 100 * HOUR).toISOString(), reasonCode: 'actor_entry_error' })).body;
-      const d2 = (await dispute(r2.id, 'collection_time_incorrect', 'b2')).body;
+      const d2 = (await dispute(r2.id, 'collection_time_incorrect', 'b1')).body;
       expect((await resolve(d2.id, { outcome: 'timestamp_corrected', correctionId: before.id })).body.code).toBe('resolution_not_permitted');
       const other = (await correct(r2.id, { field: 'returnedAt', value: ago(2 * HOUR), reasonCode: 'actor_entry_error' })).body;
       expect((await resolve(d2.id, { outcome: 'timestamp_corrected', correctionId: other.id })).body.code).toBe('resolution_not_permitted');
@@ -638,6 +643,8 @@ describeWithEnv('assistance resolution (Core V2 S5c, simulation) — real Postgr
 
     it('confirmation racing a dispute: either the confirmation wins (the dispute follows a returned request) or the dispute wins (the confirmation is refused); never both against the rule', async () => {
       for (let i = 0; i < 6; i += 1) {
+        ORG = randomUUID(); // Core V2 S5d: each round's obligation restricts its Organization, so every round uses a fresh one
+        resetIdentities();
         const r = await reported();
         const [c, d] = await Promise.all([confirm(r.obligationId), dispute(r.id, 'cash_not_returned')]);
         expect(d.status).toBe(201); // disputes have no cutoff, so the dispute always lands

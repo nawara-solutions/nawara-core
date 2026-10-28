@@ -111,6 +111,7 @@ describe('BILLING_MESSAGES', () => {
       [en('correctionTimeInvalid'), 'The corrected time breaks the recorded time order.'],
       [en('resolutionNotPermitted'), 'This dispute has no permitted nonfinancial resolution with this correction.'],
       [en('stepUpRequired'), 'A fresh step-up for this operation is required.'],
+      [en('assistanceRestricted'), 'This Organization cannot accept new assistance requests while a financial restriction applies.'], // Core V2 S5d
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

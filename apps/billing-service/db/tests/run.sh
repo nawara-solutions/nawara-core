@@ -187,6 +187,7 @@ ordered=$(q "SELECT count(*) FROM cash_return_obligation o JOIN assistance_dispu
 echo "PASS: race — confirmation vs $racers disputes ended $state with exactly one dispute, no deadlock, never a confirmation after an open dispute"
 
 echo "== ordering (Core V2 S5c): a dispute whose transaction began before a confirmation committed, but serialized after it, is recorded after it"
+org="00000000-0000-4000-8000-00000000c5f5" # Core V2 S5d: its own Organization (the previous race leaves its Organization under T1/T2)
 req2=$(q "INSERT INTO assistance_request (\"beneficiaryUserId\", \"organizationId\", \"platformId\", \"productId\", \"priceId\", currency, \"baseAmount\", \"feeAmount\", \"totalAmount\", \"feeCapVersion\", consent) VALUES ('00000000-0000-4000-8000-00000000c5f4', '$org', '$p', '$prod', '$price', 'TND', 9000, 0, 9000, (SELECT max(version) FROM fee_cap WHERE \"platformId\" = '$p'), true) RETURNING id")
 psql -Atq -v ON_ERROR_STOP=1 -d "$db" >/dev/null <<SQL
 SET session_replication_role = replica;
@@ -205,3 +206,23 @@ state=$(q "SELECT o.status FROM cash_return_obligation o WHERE o.\"assistanceReq
 after=$(q "SELECT (d.\"openedAt\" > o.\"confirmedAt\")::text FROM assistance_dispute d JOIN cash_return_obligation o ON o.\"assistanceRequestId\" = d.\"assistanceRequestId\" WHERE d.\"assistanceRequestId\" = '$req2'")
 [ "$errors" -eq 0 ] && [ "$state" = "confirmed_returned" ] && [ "$after" = "true" ] || fail "S5c ordering: errors=$errors state=$state dispute-recorded-after-confirmation=$after"
 echo "PASS: ordering — the confirmation committed first and the dispute that waited for it is recorded after it"
+
+echo "== concurrency (Core V2 S5d): $racers new requests racing a late cash report in one Organization: none is admitted after the report committed"
+# reuses the S5a race database; a fresh Organization with one pending request whose consent is long past (triggers off, as a superuser)
+o5="00000000-0000-4000-8000-00000000d5f1"
+pend=$(q "INSERT INTO assistance_request (\"beneficiaryUserId\", \"organizationId\", \"platformId\", \"productId\", \"priceId\", currency, \"baseAmount\", \"feeAmount\", \"totalAmount\", \"feeCapVersion\", consent) VALUES (gen_random_uuid(), '$o5', '$p', '$prod', '$price', 'TND', 9000, 0, 9000, (SELECT max(version) FROM fee_cap WHERE \"platformId\" = '$p'), true) RETURNING id")
+psql -Atq -v ON_ERROR_STOP=1 -d "$db" >/dev/null -c "SET session_replication_role = replica; UPDATE assistance_request SET \"consentAt\" = now() - interval '200 hours' WHERE id = '$pend';"
+# the late report (born overdue: T1 at once) takes the Organization lock first, as the service does
+late="BEGIN; SELECT billing_assistance_organization_lock('$o5'); SELECT 1 FROM assistance_request WHERE id = '$pend' FOR UPDATE; SELECT pg_sleep(0.2);
+  UPDATE assistance_request SET status = 'cash_collected', \"cashCollectedAt\" = now() - interval '100 hours', \"reportedBy\" = gen_random_uuid() WHERE id = '$pend'; COMMIT;"
+new="INSERT INTO assistance_request (\"beneficiaryUserId\", \"organizationId\", \"platformId\", \"productId\", \"priceId\", currency, \"baseAmount\", \"feeAmount\", \"totalAmount\", \"feeCapVersion\", consent) VALUES (gen_random_uuid(), '$o5', '$p', '$prod', '$price', 'TND', 9000, 0, 9000, (SELECT max(version) FROM fee_cap WHERE \"platformId\" = '$p'), true) RETURNING \"createdAt\""
+outdir="$(mktemp -d)"
+( psql -Atq -d "$db" >"$outdir/late.out" 2>&1 -c "$late" ) &
+for i in $(seq 1 "$racers"); do ( sleep 0.05; psql -Atq -d "$db" >"$outdir/$i.out" 2>&1 -c "$new" ) & done
+wait
+refused=$(cat "$outdir"/[0-9]*.out | grep -c 'assistance_request_restricted\|the Organization is restricted' || true)
+others=$(cat "$outdir"/*.out | grep -iE "error|deadlock" | grep -vc "the Organization is restricted" || true); rm -rf "$outdir"
+admitted=$(q "SELECT count(*) FROM assistance_request WHERE \"organizationId\" = '$o5' AND id <> '$pend'")
+[ "$others" -eq 0 ] && [ $((admitted + refused)) -eq "$racers" ] && [ "$refused" -ge 1 ] \
+  || fail "S5d race: admitted=$admitted refused=$refused other-errors=$others (want every racer either admitted before the report or refused after it)"
+echo "PASS: race — $racers requests vs a late report: $admitted admitted before it, $refused refused after it, no deadlock"
