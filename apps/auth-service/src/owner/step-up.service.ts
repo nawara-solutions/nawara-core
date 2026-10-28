@@ -62,6 +62,12 @@ export const STEP_UP_METHODS = {
   // (the Owner's own bearer): bound to this owner, session and exact purpose, single use, so a place proof never releases and vice versa.
   'audit.legal_hold.place': ['totp', 'webauthn'],
   'audit.legal_hold.release': ['totp', 'webauthn'],
+  // Core V2 S5c prerequisite (Owner decision H-1, option B; register AUTH-04): an Owner's correction of an assistance record and an
+  // Owner's resolution of an assistance dispute, each with a fresh, factor-only proof, never the bare key. Verified and consumed by
+  // billing-service through POST /auth/step-up/verify (the Owner's own bearer): bound to this owner, session and exact purpose, single
+  // use, so a correction proof never resolves a dispute and vice versa. Declaring them activates no Billing operation.
+  'billing.assistance.correct': ['totp', 'webauthn'],
+  'billing.assistance.dispute.resolve': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
