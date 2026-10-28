@@ -106,16 +106,21 @@ export class AssistanceSettlementService {
    */
   async reportReturn(identity: AuthIdentity, key: string, obligationId: string, input: { returnedAt: string }, ctx: TransitionContext) {
     if (this.config.isProduction) throw notFound();
-    const parties = (await this.db.query<{ beneficiaryUserId: string; organizationId: string; platformId: string }>(
-      `SELECT a."beneficiaryUserId", a."organizationId", a."platformId" FROM cash_return_obligation o JOIN assistance_request a ON a.id = o."assistanceRequestId" WHERE o.id = $1`,
+    const parties = (await this.db.query<{ assistanceRequestId: string; beneficiaryUserId: string; organizationId: string; platformId: string }>(
+      `SELECT o."assistanceRequestId", a."beneficiaryUserId", a."organizationId", a."platformId" FROM cash_return_obligation o JOIN assistance_request a ON a.id = o."assistanceRequestId" WHERE o.id = $1`,
       [obligationId])).rows[0];
     if (!parties) throw notFound();
     await this.organizationActor(identity, parties);
     return this.idempotency.run(identity.id, key, 'cash_return_obligation.return', { id: obligationId, ...input }, async (q): Promise<AssistanceCommandResult> => {
+      // Core V2 S5c (H-7): the request row first, then the obligation. A report during an open dispute is allowed (J-5): evidence only.
+      await q.query(`SELECT 1 FROM assistance_request WHERE id = $1 FOR UPDATE`, [parties.assistanceRequestId]);
       const o = (await q.query<{ status: string; organizationId: string; cashCollectedAt: Date }>(
         `SELECT status, "organizationId", "cashCollectedAt" FROM cash_return_obligation WHERE id = $1 FOR UPDATE`, [obligationId])).rows[0]!;
       if (o.status !== 'open') throw billingError(409, 'cash_return_not_open', BILLING_MESSAGES.cashReturnNotOpen);
-      const ordered = (await q.query<{ ok: boolean }>(`SELECT ($1::timestamptz >= $2::timestamptz AND $1::timestamptz <= now()) AS ok`, [input.returnedAt, o.cashCollectedAt])).rows[0]!;
+      // also no earlier than the collection time as the Owner corrected it, if corrected (Core V2 S5c, H-2: derived, never stored)
+      const ordered = (await q.query<{ ok: boolean }>(
+        `SELECT ($1::timestamptz >= $2::timestamptz AND $1::timestamptz >= billing_assistance_effective_time($3, 'cashCollectedAt') AND $1::timestamptz <= now()) AS ok`,
+        [input.returnedAt, o.cashCollectedAt, parties.assistanceRequestId])).rows[0]!;
       if (!ordered.ok) throw billingError(422, 'cash_return_time_invalid', BILLING_MESSAGES.cashReturnTimeInvalid);
       await q.query(`UPDATE cash_return_obligation SET status = 'return_reported', "returnedAt" = $2, "returnReportedBy" = $3 WHERE id = $1`, [obligationId, input.returnedAt, identity.id]);
       const updated = await this.loadObligation(q, obligationId);

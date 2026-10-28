@@ -123,6 +123,19 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     discharge: the beneficiary confirms in S5c.
   - The fee is re-validated against the cap when cash collection is recorded; settlement never re-checks or reprices it.
   - **Production refuses it:** not mounted, the services refuse, and Payment refuses the grant in production configuration.
+- **Cash-return confirmation, disputes and Owner timestamp corrections (Core V2 S5c; register BIL-18 F to BIL-22 F; the Owner's H-1 to
+  H-7 and J-1 to J-6; `db/migrations/0031`, `src/assistance/assistance-resolution.service.ts`) — DEVELOPMENT AND SIMULATION ONLY:**
+  - `POST /billing/cash-return-obligations/:id/confirm` (the beneficiary only): `return_reported → confirmed_returned`, and the request
+    `cash_collected → returned` in the same transaction, which resolves it and frees the one-request slot. Refused while a dispute is open.
+  - `POST /billing/assistance-requests/:id/disputes` `{reasonCode}` (the beneficiary only, no cutoff, one open at a time) and
+    `POST /billing/assistance-disputes/:id/responses` `{position: accepts | contests}` (the Organization actor, once; evidence only).
+  - `POST /billing/admin/assistance-requests/:id/corrections` `{field: cashCollectedAt | returnedAt, value, reasonCode}` and
+    `POST /billing/admin/assistance-disputes/:id/resolution` `{outcome: timestamp_corrected, correctionId}`: the Owner of the request's
+    Platform, live, each with its own factor step-up (`billing.assistance.correct`, `billing.assistance.dispute.resolve`, header
+    `X-Step-Up-Token`, consumed once through Auth). Corrections are append-only; the original evidence, `settleBy` and every financial
+    record stay unchanged. The only resolution closes a timestamp dispute on a matching later correction; a cash-not-returned or
+    collection-not-made dispute stays open.
+  - Nothing here creates, pays, refunds or reverses anything, and no Owner action discharges an obligation (`resolved_by_owner` is reserved).
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

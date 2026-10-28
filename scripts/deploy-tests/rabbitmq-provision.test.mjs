@@ -138,8 +138,8 @@ test('S1d-2: every identity, when selected, gets exactly its generated topic gra
   assert.deepEqual(Object.keys(b.users).sort(), GATED_FREE);
   for (const svc of GATED_FREE) assert.deepEqual(b.topic[svc], topicOf(svc), `${svc}: generated topic grants`);
   const counts = Object.fromEntries(ALL.map((s) => [s, [GENERATED[s].write.keys.length, GENERATED[s].read.keys.length]]));
-  // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13)
-  assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [18, 4], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+  // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c)
+  assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [23, 4], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
   // RabbitMQ evaluates a topic grant as a regex over the routing key (write) or binding key (read)
   const pub = (svc, key) => new RegExp(b.topic[svc].write).test(key);
   const bind = (svc, key) => new RegExp(b.topic[svc].read).test(key);

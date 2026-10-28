@@ -38,7 +38,17 @@ export interface OwnerAuthority {
    * holds an ACTIVE assignment to the Platform right now (an unknown operator, another Company's, or no assignment: `false`).
    */
   operatorAssigned(ownerBearer: string, operatorUserId: string, platformId: string, deadline: AbortSignal): Promise<boolean>;
+  /**
+   * Core V2 S5c (Owner decision H-1; register AUTH-04, AUTH-05): `POST /auth/step-up/verify` with the Owner's OWN bearer — verifies AND
+   * CONSUMES a fresh factor step-up bound to this owner, this session and exactly this purpose (single use). `true` when Auth consumed it;
+   * `false` when Auth refused it (missing, expired, reused, another purpose, owner or session); 401 refused bearer; 503 unanswerable (the
+   * outcome is unknown, so the caller needs a fresh proof).
+   */
+  consumeStepUp(userBearer: string, purpose: BillingStepUpPurpose, stepUpToken: string, deadline: AbortSignal): Promise<boolean>;
 }
+
+/** The step-up purposes Billing consumes (Core V2 S5c; Auth's allow-list declares them factor-only). */
+export type BillingStepUpPurpose = 'billing.assistance.correct' | 'billing.assistance.dispute.resolve';
 
 /** Core V2 S3f: the live facts of `/auth/grants` the fee commands need. */
 export interface VerifiedActor {
@@ -167,6 +177,26 @@ export class HttpOwnerAuthority implements OwnerAuthority {
       if (typeof o !== 'object' || o === null || typeof o.platformId !== 'string' || typeof o.active !== 'boolean') throw new AuthDependencyError('auth_unavailable');
       return o.active && o.platformId.toLowerCase() === platformId.toLowerCase();
     });
+  }
+
+  async consumeStepUp(userBearer: string, purpose: BillingStepUpPurpose, stepUpToken: string, deadline: AbortSignal): Promise<boolean> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.opts.baseUrl.replace(/\/+$/, '')}/auth/step-up/verify`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${userBearer}`, 'content-type': 'application/json', ...correlationHeaders() },
+        body: JSON.stringify({ purpose, stepUpToken }),
+        redirect: 'manual',
+        signal: deadline,
+      });
+    } catch {
+      throw this.failure(deadline); // the outcome is unknown: fail CLOSED (a fresh proof is needed to try again)
+    }
+    await this.release(res);
+    if (res.status === 204) return true;
+    if (res.status === 401) throw new UnauthorizedException();
+    if (res.status === 403 || res.status === 400) return false;
+    throw new AuthDependencyError('auth_unavailable');
   }
 
   async verifyPlatformOwner(userBearer: string, platformId: string, deadline: AbortSignal): Promise<VerifiedPlatformOwner> {

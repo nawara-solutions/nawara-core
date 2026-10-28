@@ -17,7 +17,9 @@ export type BillingAuditAction =
   | 'payment_request.created' | 'payment_request.cancelled'
   | 'product.created' | 'product.archived' | 'price.created' | 'price.retired'
   | 'assistance_request.created' | 'assistance_request.declined' | 'assistance_request.cash_collection_reported' // Core V2 S5a (D-9)
-  | 'assistance_request.settlement_requested' | 'cash_return_obligation.opened' | 'cash_return_obligation.return_reported'; // Core V2 S5b (E-13)
+  | 'assistance_request.settlement_requested' | 'cash_return_obligation.opened' | 'cash_return_obligation.return_reported' // Core V2 S5b (E-13)
+  | 'cash_return_obligation.confirmed' | 'assistance_dispute.opened' | 'assistance_dispute.responded' // Core V2 S5c (H-3 to H-5)
+  | 'assistance_dispute.resolved' | 'assistance_request.corrected'; // Core V2 S5c (H-2, H-6): the Owner, with a dedicated step-up
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in

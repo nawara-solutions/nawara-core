@@ -50,7 +50,17 @@ export type BillingErrorCode =
   | 'assistance_request_not_settleable' // Core V2 S5b assisted settlement and cash return (register BIL-16, BIL-17)
   | 'settlement_channel_open'
   | 'cash_return_not_open'
-  | 'cash_return_time_invalid';
+  | 'cash_return_time_invalid'
+  | 'cash_return_not_reported' // Core V2 S5c confirmation, disputes and corrections (register BIL-18 to BIL-22)
+  | 'cash_return_already_confirmed'
+  | 'assistance_dispute_open'
+  | 'assistance_dispute_not_open'
+  | 'dispute_not_permitted'
+  | 'dispute_response_exists'
+  | 'correction_not_permitted'
+  | 'correction_time_invalid'
+  | 'resolution_not_permitted'
+  | 'step_up_required';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

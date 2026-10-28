@@ -981,14 +981,91 @@ SELECT pg_temp.expect_error('S5b', 'an assisted routing record names its assista
   VALUES (%L, 'assisted_settlement', 'personal', 'user', 'u', 'u', %L, %L)$$, :'s5b_inv', :'a_org', :'f_prod'), '23514', 'invoice_entitlement_combination');
 SELECT pg_temp.expect_error('S5b', 'no other purpose may name an assistance request', format($$INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId", "assistanceRequestId")
   SELECT %L, 'non_entitlement', 'none', "payerType", "payerId", NULL, NULL, NULL, %L FROM invoice WHERE id = %L$$, :'s5b_inv', :'a_req', :'s5b_inv'), '23514', 'invoice_entitlement_combination');
-SELECT pg_temp.expect_error('S5b', 'a cash-return obligation has only the S5b states', $$INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", status)
+SELECT pg_temp.expect_error('S5b', 'a cash-return obligation is never created confirmed (nor in any later state)', $$INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", status)
   VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'TND', now(), 'confirmed_returned')$$, '23514');
 SELECT pg_temp.expect_error('S5b', 'a late settlement needs a verified settlement of its request', format($$INSERT INTO assistance_late_settlement ("assistanceRequestId", "invoiceId", "paymentRequestId", "receiptId", reason)
   VALUES (%L, %L, gen_random_uuid(), gen_random_uuid(), 'channel_closed')$$, :'a_req', :'s5b_inv'), '23514', 'assistance_late_settlement_verified');
 SELECT pg_temp.assert_eq('S5b', 'no settlement, late-settlement or obligation row ever references a subscription grant column (a cash report never settles)',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('cash_return_obligation', 'assistance_late_settlement') AND column_name ~* '(entitlement|subscription)'), '0');
-SELECT pg_temp.expect_error('S5b', 'an assistance idempotency record admits the S5b commands only', format($$
-  INSERT INTO assistance_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s5b-0001', 'cash_return_obligation.confirm', repeat('a', 64), 200, '{}')$$, :'a_ben'), '23514', 'assistance_command_idempotency_operation');
+SELECT pg_temp.expect_error('S5b', 'an assistance idempotency record admits the known commands only (no discharge command)', format($$
+  INSERT INTO assistance_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s5b-0001', 'cash_return_obligation.discharge', repeat('a', 64), 200, '{}')$$, :'a_ben'), '23514', 'assistance_command_idempotency_operation');
+
+-- ------------------------------------------------------------------------------------------------------------- S5c confirmation, disputes, corrections (0031)
+-- Disputes and corrections on the S5a request above (cash_collected at its consent instant, no obligation).
+SELECT pg_temp.expect_error('S5c', 'a dispute is opened open', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode", status) VALUES (%L, %L, %L, 'collection_not_made', 'resolved')$$,
+  :'a_req', :'a_ben', :'a_org'), '23514', 'assistance_dispute_created_open');
+SELECT pg_temp.expect_error('S5c', 'only the request''s beneficiary disputes it', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") VALUES (%L, %L, %L, 'collection_not_made')$$,
+  :'a_req', :'a_act', :'a_org'), '23503');
+SELECT pg_temp.expect_error('S5c', 'no cash-not-returned dispute without a cash-return obligation (J-3)', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") VALUES (%L, %L, %L, 'cash_not_returned')$$,
+  :'a_req', :'a_ben', :'a_org'), '23514', 'assistance_dispute_not_permitted');
+SELECT pg_temp.expect_error('S5c', 'no dispute of a request without cash evidence', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") SELECT id, "beneficiaryUserId", "organizationId", 'collection_not_made' FROM assistance_request WHERE id = %L$$,
+  :'s5b_pending'), '23514', 'assistance_dispute_not_permitted');
+SELECT pg_temp.expect_error('S5c', 'no free-form dispute reason', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") VALUES (%L, %L, %L, 'other')$$,
+  :'a_req', :'a_ben', :'a_org'), '23514', 'assistance_dispute_reason');
+INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode", "openedAt") VALUES (:'a_req', :'a_ben', :'a_org', 'collection_time_incorrect', '2000-01-01') RETURNING id AS c_dispute \gset
+SELECT pg_temp.assert_eq('S5c', 'openedAt is the database''s time', (SELECT ("openedAt" > '2020-01-01')::text FROM assistance_dispute WHERE id = :'c_dispute'), 'true');
+SELECT pg_temp.expect_error('S5c', 'one open dispute per request', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") VALUES (%L, %L, %L, 'collection_not_made')$$,
+  :'a_req', :'a_ben', :'a_org'), '23505', 'assistance_dispute_open_unique');
+SELECT pg_temp.expect_error('S5c', 'a dispute''s reason and parties never change', format($$UPDATE assistance_dispute SET "reasonCode" = 'collection_not_made' WHERE id = %L$$, :'c_dispute'), '23514');
+SELECT pg_temp.expect_error('S5c', 'no resolution outcome but the nonfinancial one (J-2)', format($$UPDATE assistance_dispute SET status = 'resolved', "resolvedBy" = %L, outcome = 'resolved_by_owner', "correctionId" = gen_random_uuid() WHERE id = %L$$, :'a_act', :'c_dispute'), '23514');
+SELECT pg_temp.expect_error('S5c', 'the beneficiary never answers their own dispute', format($$INSERT INTO assistance_dispute_response ("disputeId", position, "respondedBy") VALUES (%L, 'accepts', %L)$$, :'c_dispute', :'a_ben'), '23514', 'assistance_dispute_response_not_beneficiary');
+SELECT pg_temp.expect_ok('S5c', 'the Organization answers once', format($$INSERT INTO assistance_dispute_response ("disputeId", position, "respondedBy") VALUES (%L, 'contests', %L)$$, :'c_dispute', :'a_act'));
+SELECT pg_temp.expect_error('S5c', 'a second answer is refused', format($$INSERT INTO assistance_dispute_response ("disputeId", position, "respondedBy") VALUES (%L, 'accepts', %L)$$, :'c_dispute', :'a_act'), '23505');
+SELECT pg_temp.expect_error('S5c', 'an answer is append-only', format($$UPDATE assistance_dispute_response SET position = 'accepts' WHERE "disputeId" = %L$$, :'c_dispute'), '23514');
+SELECT pg_temp.expect_error('S5c', 'a correction needs the time it corrects to be reported', format($$INSERT INTO assistance_correction ("assistanceRequestId", field, "correctedValue", "reasonCode", "correctedBy") VALUES (%L, 'returnedAt', now(), 'actor_entry_error', gen_random_uuid())$$, :'a_req'),
+  '23514', 'assistance_correction_not_permitted');
+SELECT pg_temp.expect_error('S5c', 'a correction keeps consentAt <= cashCollectedAt <= reportedAt', format($$INSERT INTO assistance_correction ("assistanceRequestId", field, "correctedValue", "reasonCode", "correctedBy") VALUES (%L, 'cashCollectedAt', now() + interval '1 hour', 'actor_entry_error', gen_random_uuid())$$, :'a_req'),
+  '23514', 'assistance_correction_time_order');
+SELECT pg_temp.expect_error('S5c', 'a party to the request never corrects it', format($$INSERT INTO assistance_correction ("assistanceRequestId", field, "correctedValue", "reasonCode", "correctedBy") SELECT id, 'cashCollectedAt', "reportedAt", 'actor_entry_error', %L FROM assistance_request WHERE id = %L$$, :'a_act', :'a_req'),
+  '23514', 'assistance_correction_not_permitted');
+SELECT pg_temp.expect_error('S5c', 'an unchanged value is no correction', format($$INSERT INTO assistance_correction ("assistanceRequestId", field, "correctedValue", "reasonCode", "correctedBy") SELECT id, 'cashCollectedAt', "cashCollectedAt", 'actor_entry_error', gen_random_uuid() FROM assistance_request WHERE id = %L$$, :'a_req'),
+  '23514', 'assistance_correction_changes');
+SELECT pg_temp.expect_error('S5c', 'no free-form correction field or reason', format($$INSERT INTO assistance_correction ("assistanceRequestId", field, "correctedValue", "reasonCode", "correctedBy") SELECT id, 'totalAmount', "reportedAt", 'actor_entry_error', gen_random_uuid() FROM assistance_request WHERE id = %L$$, :'a_req'), '23514', 'assistance_correction_field');
+SELECT pg_temp.expect_error('S5c', 'a dispute closes only on a correction (J-1, J-2)', format($$UPDATE assistance_dispute SET status = 'resolved', "resolvedBy" = gen_random_uuid(), outcome = 'timestamp_corrected', "correctionId" = NULL WHERE id = %L$$, :'c_dispute'), '23514');
+INSERT INTO assistance_correction ("assistanceRequestId", sequence, field, "correctedValue", "supersededValue", "reasonCode", "correctedBy", "correctedAt")
+  SELECT id, 99, 'cashCollectedAt', "reportedAt", '2000-01-01', 'actor_entry_error', gen_random_uuid(), '2000-01-01' FROM assistance_request WHERE id = :'a_req' RETURNING id AS c_corr \gset
+SELECT pg_temp.assert_eq('S5c', 'the guard sets the sequence, the superseded value and the time (never supplied ones)',
+  (SELECT (c.sequence = 1 AND c."supersededValue" = a."cashCollectedAt" AND c."correctedAt" > '2020-01-01')::text FROM assistance_correction c JOIN assistance_request a ON a.id = c."assistanceRequestId" WHERE c.id = :'c_corr'), 'true');
+SELECT pg_temp.assert_eq('S5c', 'the original evidence is unchanged; the effective time is the correction''s',
+  (SELECT (a."cashCollectedAt" = a."consentAt" AND billing_assistance_effective_time(a.id, 'cashCollectedAt') = a."reportedAt" AND a."settleBy" = a."cashCollectedAt" + interval '72 hours')::text FROM assistance_request a WHERE a.id = :'a_req'), 'true');
+SELECT pg_temp.expect_error('S5c', 'a correction is never changed', format($$UPDATE assistance_correction SET "reasonCode" = 'evidence_contradicts_report' WHERE id = %L$$, :'c_corr'), '23514');
+SELECT pg_temp.expect_error('S5c', 'a correction is never deleted', format($$DELETE FROM assistance_correction WHERE id = %L$$, :'c_corr'), '23514');
+SELECT pg_temp.expect_ok('S5c', 'a timestamp dispute closes on a later correction of exactly that time', format($$UPDATE assistance_dispute SET status = 'resolved', "resolvedBy" = gen_random_uuid(), outcome = 'timestamp_corrected', "correctionId" = %L WHERE id = %L$$, :'c_corr', :'c_dispute'));
+SELECT pg_temp.expect_error('S5c', 'a resolved dispute is final', format($$UPDATE assistance_dispute SET status = 'open', "resolvedAt" = NULL, "resolvedBy" = NULL, outcome = NULL, "correctionId" = NULL WHERE id = %L$$, :'c_dispute'), '23514');
+SELECT pg_temp.expect_error('S5c', 'a dispute is never deleted', format($$DELETE FROM assistance_dispute WHERE id = %L$$, :'c_dispute'), '23514');
+INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") VALUES (:'a_req', :'a_ben', :'a_org', 'collection_time_incorrect') RETURNING id AS c_dispute2 \gset
+SELECT pg_temp.expect_error('S5c', 'a correction older than the dispute never closes it', format($$UPDATE assistance_dispute SET status = 'resolved', "resolvedBy" = gen_random_uuid(), outcome = 'timestamp_corrected', "correctionId" = %L WHERE id = %L$$, :'c_corr', :'c_dispute2'),
+  '23514', 'assistance_dispute_resolution_not_permitted');
+
+-- The cash-return side: a request past its deadline with a reported return (fixture written with the triggers off, as a superuser).
+\set c_ben '00000000-0000-4000-8000-00000000c5c1'
+INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (:'c_ben', :'a_org', :'f_p', :'f_prod', :'a_price', 'TND', 9000, 0, 9000, :'a_cap', true) RETURNING id AS c_req \gset
+SET session_replication_role = replica;
+UPDATE assistance_request SET "consentAt" = now() - interval '200 hours', status = 'cash_collected', "cashCollectedAt" = now() - interval '100 hours', "reportedAt" = now() - interval '100 hours',
+  "reportedBy" = :'a_act', "settleBy" = now() - interval '28 hours' WHERE id = :'c_req';
+INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", status, "returnedAt", "returnReportedAt", "returnReportedBy")
+  SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt", 'return_reported', now() - interval '1 hour', now(), :'a_act' FROM assistance_request WHERE id = :'c_req' RETURNING id AS c_ob \gset
+SET session_replication_role = origin;
+SELECT pg_temp.expect_error('S5c', 'only the beneficiary confirms (H-3)', format($$UPDATE cash_return_obligation SET status = 'confirmed_returned', "confirmedBy" = %L WHERE id = %L$$, :'a_act', :'c_ob'), '23514', 'cash_return_obligation_confirmed_by_beneficiary');
+SELECT pg_temp.expect_error('S5c', 'a confirmation commits only with the returned request (J-6)', format($$UPDATE cash_return_obligation SET status = 'confirmed_returned', "confirmedBy" = %L WHERE id = %L; SET CONSTRAINTS ALL IMMEDIATE$$, :'c_ben', :'c_ob'),
+  '23514', 'cash_return_confirmation_returns_request');
+SELECT pg_temp.expect_error('S5c', 'a request is returned only by the confirmation', format($$UPDATE assistance_request SET status = 'returned' WHERE id = %L$$, :'c_req'), '23514', 'assistance_request_returned_by_confirmation');
+SELECT pg_temp.expect_error('S5c', 'an open dispute blocks the confirmation (J-4)', format($$INSERT INTO assistance_dispute ("assistanceRequestId", "beneficiaryUserId", "organizationId", "reasonCode") VALUES (%L, %L, %L, 'cash_not_returned');
+  UPDATE cash_return_obligation SET status = 'confirmed_returned', "confirmedBy" = %L WHERE id = %L$$, :'c_req', :'c_ben', :'a_org', :'c_ben', :'c_ob'), '23514', 'assistance_dispute_open');
+SELECT pg_temp.expect_error('S5c', 'the report''s evidence never changes on confirmation', format($$UPDATE cash_return_obligation SET status = 'confirmed_returned', "confirmedBy" = %L, "returnedAt" = now() - interval '2 hours' WHERE id = %L$$, :'c_ben', :'c_ob'),
+  '23514', 'cash_return_obligation_report_immutable');
+SELECT pg_temp.expect_error('S5c', 'resolved_by_owner stays reserved and inactive (J-2)', format($$UPDATE cash_return_obligation SET status = 'resolved_by_owner' WHERE id = %L$$, :'c_ob'), '23514');
+SELECT pg_temp.expect_ok('S5c', 'the beneficiary''s confirmation and the returned request commit together', format($$UPDATE cash_return_obligation SET status = 'confirmed_returned', "confirmedBy" = %L, "confirmedAt" = '2000-01-01' WHERE id = %L;
+  UPDATE assistance_request SET status = 'returned' WHERE id = %L; SET CONSTRAINTS ALL IMMEDIATE$$, :'c_ben', :'c_ob', :'c_req'));
+SELECT pg_temp.assert_eq('S5c', 'confirmedAt is the database''s time', (SELECT ("confirmedAt" > '2020-01-01')::text FROM cash_return_obligation WHERE id = :'c_ob'), 'true');
+SELECT pg_temp.expect_error('S5c', 'a confirmed obligation is final', format($$UPDATE cash_return_obligation SET status = 'return_reported', "confirmedAt" = NULL, "confirmedBy" = NULL WHERE id = %L$$, :'c_ob'), '23514');
+SELECT pg_temp.expect_error('S5c', 'a returned request is final', format($$UPDATE assistance_request SET status = 'cash_collected' WHERE id = %L$$, :'c_req'), '23514');
+SELECT pg_temp.assert_eq('S5c', 'a returned request is resolved: never overdue', (SELECT (NOT billing_assistance_overdue(status, "settleBy"))::text FROM assistance_request WHERE id = :'c_req'), 'true');
+SELECT pg_temp.expect_ok('S5c', 'a returned request frees the one-unresolved-request slot (J-6)', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
+  VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, true)$$, :'c_ben', :'a_org', :'f_p', :'f_prod', :'a_price', :'a_cap'));
+SELECT pg_temp.assert_eq('S5c', 'no S5c table references a subscription, payment or purchase (no Owner or dispute action pays, grants or reverses)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('assistance_dispute', 'assistance_dispute_response', 'assistance_correction') AND column_name ~* '(entitlement|subscription|payment|purchase|invoice|amount)'), '0');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

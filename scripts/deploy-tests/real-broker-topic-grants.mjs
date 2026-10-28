@@ -225,8 +225,8 @@ test('provisioning: every identity selected gets EXACTLY its generated topic gra
   assertGrantsAre(GEN, ALL);
   assert.equal(GEN['auth-service'].domainEvents, 'inactive');
   assert.deepEqual(Object.fromEntries(ALL.map((s) => [s, [GEN[s].write.keys.length, GEN[s].read.keys.length]])), {
-    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13)
-    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [18, 4], 'file-service': [7, 0], 'notification-service': [0, 9],
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c)
+    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [23, 4], 'file-service': [7, 0], 'notification-service': [0, 9],
     'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0],
   });
 });
@@ -274,7 +274,7 @@ test('consumers: Audit binds `audit.#`, Billing its four Payment events and Noti
   assert.match(bindings, /^nawara\.events\.dlx\tbilling\.payment-events\.dead\t$/m);
 });
 
-test('producers: each of the six publishes EVERY key of its generated grant (63 keys), carried with its own user_id', async () => {
+test('producers: each of the six publishes EVERY key of its generated grant, carried with its own user_id', async () => {
   const sent = new Map();
   for (const svc of PRODUCERS) {
     const b = bus(svc);
@@ -284,7 +284,8 @@ test('producers: each of the six publishes EVERY key of its generated grant (63 
       sent.set(e.id, { svc, key });
     }
   }
-  assert.equal(sent.size, 63);
+  // every generated write key, exactly once (the literal 63 had gone stale as stages added actions; the per-service counts are pinned above)
+  assert.equal(sent.size, PRODUCERS.reduce((n, svc) => n + GEN[svc].write.keys.length, 0));
   assert.ok(await until(async () => [...sent.keys()].every((id) => tapped.has(id))), 'every authorized publish is routed');
   for (const [id, { svc, key }] of sent) assert.deepEqual(tapped.get(id), { key, userId: svc });
   // delivery: Audit receives every audit action; Billing exactly the four Payment events it binds (never payment.created)

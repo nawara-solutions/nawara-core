@@ -7,7 +7,9 @@ import { BILLING_MESSAGES } from '../messages.js';
 export type AssistanceOperation =
   | 'assistance_request.create' | 'assistance_request.decline' | 'assistance_request.cash_collection'
   // Core V2 S5b: the settlement is a money command (class M, E-1): its record is never deleted either (permanent, >= the approved 90 days)
-  | 'assistance_request.settlement' | 'cash_return_obligation.return';
+  | 'assistance_request.settlement' | 'cash_return_obligation.return'
+  // Core V2 S5c (H-7): class K, permanent
+  | 'cash_return_obligation.confirm' | 'assistance_request.dispute' | 'assistance_dispute.respond' | 'assistance_request.correct' | 'assistance_dispute.resolve';
 
 export interface AssistanceCommandResult {
   status: number;
@@ -24,6 +26,22 @@ export interface AssistanceCommandResult {
 @Injectable()
 export class AssistanceCommandIdempotency {
   constructor(private readonly db: DbService) {}
+
+  /**
+   * Core V2 S5c: the stored outcome of this actor's key for exactly this command, or null when the key is unused; 409
+   * `idempotency_key_conflict` for another command. Read BEFORE an Owner's step-up is spent, so a replay never consumes a fresh proof.
+   * `run` re-checks under the key lock, so a concurrent first use still yields one effect.
+   */
+  async stored(actorUserId: string, key: string, operation: AssistanceOperation, request: Record<string, unknown>): Promise<(AssistanceCommandResult & { replayed: true }) | null> {
+    const { rows } = await this.db.query<{ operation: string; requestHash: string; responseStatus: number; responseBody: Record<string, unknown> }>(
+      `SELECT operation, "requestHash", "responseStatus", "responseBody" FROM assistance_command_idempotency WHERE "actorUserId" = $1 AND "idempotencyKey" = $2`,
+      [actorUserId, key],
+    );
+    const stored = rows[0];
+    if (!stored) return null;
+    if (stored.operation !== operation || stored.requestHash !== requestHash({ operation, request })) throw billingError(409, 'idempotency_key_conflict', BILLING_MESSAGES.idempotencyKeyConflict);
+    return { status: stored.responseStatus, body: stored.responseBody, replayed: true };
+  }
 
   async run(
     actorUserId: string,

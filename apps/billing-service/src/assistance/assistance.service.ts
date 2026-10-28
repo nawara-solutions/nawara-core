@@ -24,7 +24,7 @@ interface AssistanceRow extends AssistanceParties {
   feeCapVersion: number | null;
   consent: boolean;
   consentAt: Date;
-  status: 'pending' | 'declined' | 'cash_collected' | 'settled';
+  status: 'pending' | 'declined' | 'cash_collected' | 'settled' | 'returned';
   declinedByRole: 'beneficiary' | 'organization_actor' | null;
   declinedAt: Date | null;
   cashCollectedAt: Date | null;
@@ -123,7 +123,7 @@ export class AssistanceService {
         `SELECT "unitAmount" FROM price WHERE id = $1 AND "productId" = $2 AND "retiredAt" IS NULL AND "effectiveFrom" <= now() AND "interval" = 'recurring' AND currency = $3`,
         [input.priceId, input.productId, platform.currency])).rows[0];
       if (!price) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
-      const open = (await q.query(`SELECT 1 FROM assistance_request WHERE "beneficiaryUserId" = $1 AND "organizationId" = $2 AND "productId" = $3 AND status NOT IN ('declined', 'settled')`,
+      const open = (await q.query(`SELECT 1 FROM assistance_request WHERE "beneficiaryUserId" = $1 AND "organizationId" = $2 AND "productId" = $3 AND status NOT IN ('declined', 'settled', 'returned')`,
         [beneficiary, input.organizationId, input.productId])).rows[0];
       if (open) throw billingError(409, 'assistance_request_open', BILLING_MESSAGES.assistanceRequestOpen);
 
@@ -198,7 +198,7 @@ export class AssistanceService {
     if (relation.beneficiary) throw operationNotPermitted(); // D-5: the beneficiary never reports their own collection, administrator or not
     return this.idempotency.run(identity.id, key, 'assistance_request.cash_collection', { id, ...input }, async (q): Promise<AssistanceCommandResult> => {
       const current = (await this.load(q, id, true))!;
-      if (current.status === 'cash_collected' || current.status === 'settled') throw billingError(409, 'cash_collection_already_reported', BILLING_MESSAGES.cashCollectionAlreadyReported);
+      if (current.status === 'cash_collected' || current.status === 'settled' || current.status === 'returned') throw billingError(409, 'cash_collection_already_reported', BILLING_MESSAGES.cashCollectionAlreadyReported);
       if (current.status !== 'pending') throw billingError(409, 'assistance_request_not_pending', BILLING_MESSAGES.assistanceRequestNotPending);
       const ordered = (await q.query<{ ok: boolean }>(`SELECT ($1::timestamptz >= $2::timestamptz AND $1::timestamptz <= now()) AS ok`, [input.cashCollectedAt, current.consentAt])).rows[0];
       if (!ordered.ok) throw billingError(422, 'cash_collection_time_invalid', BILLING_MESSAGES.cashCollectionTimeInvalid);
