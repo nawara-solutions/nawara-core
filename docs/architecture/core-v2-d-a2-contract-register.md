@@ -231,6 +231,7 @@ is preserved as evidence even when its commercial processing fails.
 | C. Errors, idempotency | IMPLEMENTED `step_up_unsupported`, `verification_failed`; class: existing step-up behaviour |
 | D. Existing | `STEP_UP_METHODS` (`apps/auth-service/src/owner/step-up.service.ts`) |
 | E. Open, gates | **Q11**: whether any other Owner action (fee caps, fee approval, Platform configuration, catalog changes, write-off, surplus resolution, dispute decision, fact association, legal hold, event re-emission) requires a step-up, and its purpose name. Stage S2-Auth. Confidence M |
+| F. S5c prerequisite (Owner decision H-1, option B, 2026-10-28) | **IMPLEMENTED in Auth only** (`apps/auth-service/src/owner/step-up.service.ts`): two distinct factor-only purposes (TOTP or passkey, never the secret key), `billing.assistance.correct` (BIL-19) and `billing.assistance.dispute.resolve` (BIL-22; resolves Q11 for the assistance dispute decision only). Issued through the existing `POST /auth/admin/step-up` with the existing lifetime; verified and consumed by billing-service through `POST /auth/step-up/verify` with the Owner's own bearer: bound to that owner, session and exact purpose, single use, so a correction proof never resolves a dispute and vice versa. No new method, route or verification path. Declaring the purposes activates no Billing operation: BIL-19 and BIL-22 stay unimplemented until S5c's own decisions. Q11 stays open for every other Owner action |
 
 #### AUTH-05 Step-up verification for services
 

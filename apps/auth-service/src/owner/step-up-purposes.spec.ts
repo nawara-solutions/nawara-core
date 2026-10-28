@@ -33,6 +33,8 @@ const PURPOSE = 'hierarchy.reference.repair';
 const REFUND = 'refund.authorize';
 /** S2-Audit.4: verified and consumed by audit-service through POST /auth/step-up/verify (not Auth-local). */
 const LEGAL_HOLD = ['audit.legal_hold.place', 'audit.legal_hold.release'] as const;
+/** S5c prerequisite (Owner decision H-1): verified and consumed by billing-service through POST /auth/step-up/verify (not Auth-local). */
+const ASSISTANCE = ['billing.assistance.correct', 'billing.assistance.dispute.resolve'] as const;
 
 describe('step-up purposes (A5.4-A1)', () => {
   it('the 19 earlier purposes keep exactly their methods', () => {
@@ -41,7 +43,7 @@ describe('step-up purposes (A5.4-A1)', () => {
   });
 
   it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key); S2-Auth.1 then adds refund.authorize', () => {
-    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD]);
+    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE]);
     expect([...STEP_UP_METHODS[PURPOSE]]).toEqual(['totp', 'webauthn']);
   });
 
@@ -51,6 +53,10 @@ describe('step-up purposes (A5.4-A1)', () => {
 
   it('S2-Audit.4 (Owner decision H3): the two legal-hold purposes are factor-only, never the secret key', () => {
     for (const p of LEGAL_HOLD) expect([...STEP_UP_METHODS[p]], p).toEqual(['totp', 'webauthn']);
+  });
+
+  it('S5c prerequisite (Owner decision H-1): the two assistance purposes are factor-only, never the secret key', () => {
+    for (const p of ASSISTANCE) expect([...STEP_UP_METHODS[p]], p).toEqual(['totp', 'webauthn']);
   });
 
   it('no application source outside the allow-list names either purpose literally (each has one Auth-local consumer)', () => {
