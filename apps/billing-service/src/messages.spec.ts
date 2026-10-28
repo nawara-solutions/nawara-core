@@ -116,6 +116,15 @@ describe('BILLING_MESSAGES', () => {
       [en('refundCaseExists'), 'This payment already has an open or completed refund case.'],
       [en('refundDisputeOpen'), 'A dispute on this payment is open: no refund case can be opened.'],
       [en('refundCaseNotOpen'), 'The refund case is not open.'],
+      [en('refundCaseCompleted'), 'The refund case is completed: it accepts no new refund attempt.'], // Core V2 S6b
+      [en('refundAuthorizationInProgress'), 'A refund authorization for this case is still unresolved or in effect.'],
+      [en('refundAuthorizationInvalid'), 'The refund authorization receipt is not valid for this refund case.'],
+      [en('refundAuthorizationExpired'), 'The refund authorization receipt expired before it was used: authorize the refund again.'],
+      [en('refundAuthorizationUnresolved'), 'The refund authorization is not confirmed yet; retry with the same Idempotency-Key and receipt.'],
+      [en('refundAuthorizationConflict'), 'This refund authorization is already bound to another receipt.'],
+      [en('refundRejectedByPayment', { reason: 'refund_dispute_open' }), 'The payment service refused this refund attempt (refund_dispute_open).'],
+      [en('refundPaymentUnavailable'), 'The payment service did not confirm the refund attempt; its outcome will be confirmed from Payment, or retry with the same Idempotency-Key and receipt.'],
+      [en('refundProcessingStarted'), 'Refund processing has begun for this case: it can no longer be cancelled.'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

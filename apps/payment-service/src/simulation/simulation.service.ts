@@ -7,10 +7,18 @@ import { notFound, paymentError } from '../errors.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 import type { PaymentRow } from '../payments/payment.types.js';
 import {
-  SIMULATION_PROVIDER_ID, SIMULATION_SIGNATURE_HEADER, SimulationPaymentProvider, simulationTransactionId, type SimulationCommandRow,
+  SIMULATION_PROVIDER_ID, SIMULATION_SIGNATURE_HEADER, SimulationPaymentProvider, simulationRefundId, simulationTransactionId, type SimulationCommandRow,
+  type SimulationRefundCommandRow,
 } from '../providers/simulation-provider.js';
+import type { RefundAttemptRow } from '../refunds/refund.types.js';
 import { WebhookService } from '../webhooks/webhook.service.js';
-import type { SimulationInitiationDto, SimulationOutcomeDto } from './dto/simulation-command.dto.js';
+import type { SimulationInitiationDto, SimulationOutcomeDto, SimulationRefundDispatchPlanDto, SimulationRefundOutcomeDto } from './dto/simulation-command.dto.js';
+
+export interface SimulationRefundCommandResult {
+  command: SimulationRefundCommandRow;
+  replayed: boolean;
+  delivered: { status: number } | null;
+}
 
 export interface SimulationCommandResult {
   command: SimulationCommandRow;
@@ -21,6 +29,7 @@ export interface SimulationCommandResult {
 
 /** The fields that make two commands under one `commandId` the same command (F-S6); everything else is derived from them. */
 const CONTENT = ['kind', 'paymentId', 'attemptId', 'instruction', 'failureCode', 'delivery'] as const;
+const REFUND_CONTENT = ['kind', 'paymentId', 'refundAttemptId', 'instruction', 'failureCode', 'delivery'] as const;
 
 /**
  * Core V2 S4f (register PAY-14; the Owner's F-S2 to F-S6): the non-production harness that tells the `simulation` provider what to answer.
@@ -112,6 +121,82 @@ export class SimulationService {
     if (CONTENT.some((k) => (stored[k] ?? null) !== (row[k] ?? null))) {
       throw paymentError(409, 'simulation_command_conflict', PAYMENT_MESSAGES.simulationCommandConflict);
     }
+    return { command: stored, replayed: true, delivered: null };
+  }
+
+  /**
+   * Core V2 S6b (R6B-6): how the simulated provider answers the refund dispatches of one payment (by default it accepts them). A rejection is
+   * the provider's definitive refusal for a key it has not answered yet; it never applies to a refund the provider already took.
+   */
+  async planRefundDispatch(paymentId: string, dto: SimulationRefundDispatchPlanDto): Promise<SimulationRefundCommandResult> {
+    this.assertEnabled();
+    if ((dto.failureCode !== undefined) !== (dto.mode === 'rejected')) throw paymentError(400, 'invalid_simulation_command', PAYMENT_MESSAGES.invalidSimulationCommand);
+    const { rows } = await this.db.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [paymentId]);
+    const payment = rows[0];
+    if (!payment || payment.liveMode === true) throw notFound();
+    return this.recordRefund({ commandId: dto.commandId, kind: 'dispatch_plan', paymentId, refundAttemptId: null, capturedAttemptId: null, instruction: dto.mode,
+      failureCode: dto.failureCode ?? null, amount: null, currency: null, providerRefundId: null, eventBody: null, delivery: null });
+  }
+
+  /**
+   * Core V2 S6b (R6B-6): what the simulated provider says happened to one refund it RECEIVED (a refund it was never sent has no outcome:
+   * `not_found`). Amount, currency and the provider refund reference are derived from Payment's attempt, never supplied; a notifying outcome
+   * is delivered (now or later) through the signed webhook pipeline, so the harness never writes Payment's evidence itself.
+   */
+  async recordRefundOutcome(refundAttemptId: string, dto: SimulationRefundOutcomeDto): Promise<SimulationRefundCommandResult> {
+    this.assertEnabled();
+    const notifies = dto.outcome === 'succeeded' || dto.outcome === 'amount_mismatch' || dto.outcome === 'failed';
+    if ((dto.failureCode !== undefined) !== (dto.outcome === 'failed') || (dto.delivery !== undefined && !notifies)) {
+      throw paymentError(400, 'invalid_simulation_command', PAYMENT_MESSAGES.invalidSimulationCommand);
+    }
+    const { rows } = await this.db.query<RefundAttemptRow>(
+      `SELECT a.* FROM refund_attempt a JOIN simulation_refund_dispatch d ON d."idempotencyKey" = a.id WHERE a.id = $1 AND a.provider = $2 AND a."liveMode" = false`,
+      [refundAttemptId, SIMULATION_PROVIDER_ID],
+    );
+    const attempt = rows[0];
+    if (!attempt) throw notFound();
+    const snapshot = Number(attempt.amount);
+    const amount = dto.outcome === 'succeeded' ? snapshot : dto.outcome === 'amount_mismatch' ? (snapshot > 1 ? snapshot - 1 : snapshot + 1) : null;
+    const currency = amount === null ? null : attempt.currency.trim();
+    const providerRefundId = simulationRefundId(refundAttemptId);
+    const eventBody = SimulationPaymentProvider.refundNotificationBody({
+      commandId: dto.commandId, refundAttemptId, instruction: dto.outcome, failureCode: dto.failureCode ?? null, amount: amount ?? undefined, currency: currency ?? undefined, providerRefundId,
+    });
+    const result = await this.recordRefund({ commandId: dto.commandId, kind: 'outcome', paymentId: attempt.paymentId, refundAttemptId, capturedAttemptId: attempt.capturedAttemptId,
+      instruction: dto.outcome, failureCode: dto.failureCode ?? null, amount, currency, providerRefundId, eventBody, delivery: eventBody ? (dto.delivery ?? 'immediate') : null });
+    if (!result.replayed && result.command.delivery === 'immediate') return { ...result, delivered: await this.deliverRefundBody(result.command) };
+    return result;
+  }
+
+  async deliverRefund(commandId: string): Promise<SimulationRefundCommandResult> {
+    this.assertEnabled();
+    const { rows } = await this.db.query<SimulationRefundCommandRow>('SELECT * FROM simulation_refund_command WHERE "commandId" = $1', [commandId]);
+    const command = rows[0];
+    if (!command) throw notFound();
+    if (!command.eventBody) throw paymentError(409, 'simulation_nothing_to_deliver', PAYMENT_MESSAGES.simulationNothingToDeliver);
+    return { command, replayed: false, delivered: await this.deliverRefundBody(command) };
+  }
+
+  private async deliverRefundBody(command: SimulationRefundCommandRow): Promise<{ status: number }> {
+    const body = command.eventBody!;
+    const result = await this.webhooks.receive(this.provider, body, { [SIMULATION_SIGNATURE_HEADER]: this.provider.sign(body) });
+    this.logger.log(`simulation_refund_notification_delivered command=${command.commandId} refundAttempt=${command.refundAttemptId} status=${result.status}`);
+    return result;
+  }
+
+  private async recordRefund(row: Omit<SimulationRefundCommandRow, 'createdAt' | 'seq' | 'provider' | 'amount'> & { amount: number | null }): Promise<SimulationRefundCommandResult> {
+    const { rows } = await this.db.query<SimulationRefundCommandRow>(
+      `INSERT INTO simulation_refund_command ("commandId", kind, "paymentId", "refundAttemptId", "capturedAttemptId", instruction, "failureCode", amount, currency, "providerRefundId", "eventBody", delivery)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT ("commandId") DO NOTHING RETURNING *`,
+      [row.commandId, row.kind, row.paymentId, row.refundAttemptId, row.capturedAttemptId, row.instruction, row.failureCode, row.amount, row.currency, row.providerRefundId, row.eventBody, row.delivery],
+    );
+    if (rows[0]) {
+      this.logger.log(`simulation_refund_command_recorded command=${row.commandId} kind=${row.kind} instruction=${row.instruction} payment=${row.paymentId}`);
+      return { command: rows[0], replayed: false, delivered: null };
+    }
+    const { rows: existing } = await this.db.query<SimulationRefundCommandRow>('SELECT * FROM simulation_refund_command WHERE "commandId" = $1', [row.commandId]);
+    const stored = existing[0]!;
+    if (REFUND_CONTENT.some((k) => (stored[k] ?? null) !== (row[k] ?? null))) throw paymentError(409, 'simulation_command_conflict', PAYMENT_MESSAGES.simulationCommandConflict);
     return { command: stored, replayed: true, delivered: null };
   }
 

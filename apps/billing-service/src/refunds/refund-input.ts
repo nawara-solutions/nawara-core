@@ -41,3 +41,18 @@ export function normaliseEmptyInput(raw: unknown): void {
 }
 
 export const isRefundId = (v: unknown): v is string => typeof v === 'string' && UUID.test(v);
+
+/** An Auth receipt secret: base64url of 32 random bytes (AUTH-01). */
+const RECEIPT_SECRET = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Core V2 S6b (BIL-24): `{receiptSecret}` and nothing else. The binding (amount, currency, reason, legal override, payment, Company) is the
+ * case's own; `expiresAt` is not accepted (Auth alone decides expiry, R6B-9). The secret is held in memory for this request only (F-12):
+ * never stored, logged, hashed for replay or echoed (no validation message names its value).
+ */
+export function normaliseRefundAuthorizationInput(raw: unknown): { receiptSecret: string } {
+  if (!isObject(raw)) throw bad(BILLING_MESSAGES.requestMustBeObject);
+  for (const k of Object.keys(raw)) if (k !== 'receiptSecret') throw bad(BILLING_MESSAGES.unknownField, { name: k });
+  if (typeof raw.receiptSecret !== 'string' || !RECEIPT_SECRET.test(raw.receiptSecret)) throw bad(BILLING_MESSAGES.valueOneOf, { field: 'receiptSecret', values: 'an authorization receipt secret' });
+  return { receiptSecret: raw.receiptSecret };
+}

@@ -311,6 +311,39 @@ describe('loadPaymentConfig', () => {
     });
   });
 
+  describe('Core V2 S6b (R6B-1): payment.refund.create is billing-service\'s alone, never in production, and needs Payment\'s own Auth credential', () => {
+    const producer = generateServiceToken();
+    const other = generateServiceToken();
+    const authToken = generateServiceToken().token;
+    const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${producer.digest},other-producer:${other.digest}` };
+    const policy = (billing: string[], others: string[] = ['payment.create']) =>
+      JSON.stringify({ callers: { 'billing-service': { operations: billing, allowedPlatforms: [P1] }, 'other-producer': { operations: others, allowedPlatforms: [P1] } } });
+    const prod = { ...env, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672' };
+
+    it('the grant enables refunds with Payment\'s own Auth token; without the grant there are no refunds at all', () => {
+      const cfg = loadPaymentConfig({ ...env, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.refund.create']) });
+      expect(cfg.refunds).toEqual({ authServiceToken: authToken });
+      expect(loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create']) }).refunds).toBeUndefined();
+    });
+
+    it('the grant without AUTH_SERVICE_TOKEN (or with a short one) is refused', () => {
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.refund.create']) })).toThrow(/AUTH_SERVICE_TOKEN/);
+      expect(() => loadPaymentConfig({ ...env, AUTH_SERVICE_TOKEN: 'short', PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.refund.create']) })).toThrow(/AUTH_SERVICE_TOKEN/);
+    });
+
+    it('no other service identity may hold it, and nothing implies it', () => {
+      expect(() => loadPaymentConfig({ ...env, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create'], ['payment.create', 'payment.refund.create']) })).toThrow(/may be held only by billing-service/);
+      for (const op of ['payment.refund', 'payment.refund.*', 'payment.*']) {
+        expect(() => loadPaymentConfig({ ...env, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create', op]) })).toThrow();
+      }
+    });
+
+    it('is refused in production configuration, and so is an Auth credential for it', () => {
+      expect(() => loadPaymentConfig({ ...prod, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.refund.create']) })).toThrow(/no production configuration may hold/);
+      expect(() => loadPaymentConfig({ ...prod, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create']) })).toThrow(/AUTH_SERVICE_TOKEN must not be configured/);
+    });
+  });
+
   describe('Core V2 S5b (E-2): payment.create.assisted_settlement is a narrow, purpose-bound grant for billing-service only', () => {
     const producer = generateServiceToken();
     const other = generateServiceToken();

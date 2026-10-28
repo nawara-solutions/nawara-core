@@ -56,3 +56,32 @@ row_count=$(psql -Atq -d "$db" -c "SELECT count(*) FROM payment WHERE \"paymentR
 rm -rf "$outdir"
 [ "$ok" -eq 1 ] && [ "$row_count" -eq 1 ] || fail "concurrent identical creates: ok=$ok row_count=$row_count (want ok=1 row_count=1)"
 echo "PASS: race — $racers concurrent identical creates give exactly one payment row"
+
+echo "== concurrency: Core V2 S6b — one potentially effective refund attempt per payment survives a race =="
+newdb refundrace; db="$DBNAME"; apply_all "$db"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "
+INSERT INTO payment(id, producer, \"paymentRequestId\", \"sourceType\", \"sourceId\", \"payerType\", \"payerId\", \"sellerType\", \"sellerId\", amount, currency, purpose, \"liveMode\")
+VALUES ('00000000-0000-0000-0000-0000000006b0', 'billing-service', gen_random_uuid(), 'invoice', 'inv-r', 'user', 'u1', 'company', '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'non_entitlement', false);
+INSERT INTO payment_attempt(id, \"paymentId\", \"attemptNumber\", provider, \"liveMode\") VALUES ('00000000-0000-0000-0000-0000000006a0', '00000000-0000-0000-0000-0000000006b0', 1, 'test', false);
+UPDATE payment SET status = 'pending' WHERE id = '00000000-0000-0000-0000-0000000006b0';
+UPDATE payment_attempt SET status = 'submitted', \"providerTransactionId\" = 'ptx-race', \"submittedAt\" = now() WHERE id = '00000000-0000-0000-0000-0000000006a0';
+UPDATE payment_attempt SET status = 'succeeded', \"completedAt\" = now() WHERE id = '00000000-0000-0000-0000-0000000006a0';
+INSERT INTO provider_transaction_fact (id, provider, \"providerTxnId\", kind, \"paymentId\", \"attemptId\", amount, currency, \"liveMode\", source)
+VALUES ('00000000-0000-0000-0000-0000000006f0', 'test', 'ptx-race', 'capture', '00000000-0000-0000-0000-0000000006b0', '00000000-0000-0000-0000-0000000006a0', 1000, 'TND', false, 'status_check');
+UPDATE payment SET status = 'succeeded', \"settledMethod\" = 'gateway', \"succeededAttemptId\" = '00000000-0000-0000-0000-0000000006a0', \"closedAt\" = now() WHERE id = '00000000-0000-0000-0000-0000000006b0';
+"
+racers=8
+outdir="$(mktemp -d)"
+for i in $(seq 1 "$racers"); do
+  ( psql -q -d "$db" >"$outdir/$i.out" 2>&1 -c "
+    INSERT INTO refund_attempt (id, \"paymentId\", producer, \"refundCaseId\", \"companyId\", amount, currency, reason, \"legalOverride\", \"captureFactId\", \"capturedAttemptId\", provider, \"liveMode\", \"receiptDigest\")
+    VALUES (gen_random_uuid(), '00000000-0000-0000-0000-0000000006b0', 'billing-service', gen_random_uuid(), '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'customer_request', false,
+      '00000000-0000-0000-0000-0000000006f0', '00000000-0000-0000-0000-0000000006a0', 'test', false, repeat('a', 64));
+  " ) &
+done
+wait
+ok=$(grep -L "refund_attempt_one_effective" "$outdir"/*.out | wc -l)
+live=$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_attempt WHERE \"paymentId\"='00000000-0000-0000-0000-0000000006b0'")
+rm -rf "$outdir"
+[ "$ok" -eq 1 ] && [ "$live" -eq 1 ] || fail "one effective refund attempt race: ok=$ok live=$live (want ok=1 live=1)"
+echo "PASS: race — one potentially effective refund attempt per payment survives $racers concurrent intents"

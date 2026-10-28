@@ -112,6 +112,14 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'TRUNCATE payment',
         'CREATE OR REPLACE FUNCTION forbid_column_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$',
         'DROP INDEX payment_attempt_one_succeeded',
+        // Core V2 S6b (migration 0017): refund evidence is never deleted, truncated or unguarded by the runtime role
+        'DELETE FROM refund_attempt',
+        'TRUNCATE refund_attempt',
+        'ALTER TABLE refund_attempt DISABLE TRIGGER refund_attempt_07_transition',
+        'UPDATE refund_attempt_refusal SET code = code',
+        'DELETE FROM refund_attempt_refusal',
+        'UPDATE simulation_refund_command SET instruction = instruction',
+        'DELETE FROM simulation_refund_dispatch',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }

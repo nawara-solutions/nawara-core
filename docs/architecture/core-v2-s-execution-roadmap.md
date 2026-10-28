@@ -383,7 +383,7 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
   | Id | Content |
   |---|---|
   | S6a | refund cases: full purchase only ([OD] D4); no new case while a dispute is open (D3) |
-  | S6b | Payment's durable refund intent (`consumeRef` = attempt id) → receipt consumption → `authorized`; asynchronous provider dispatch with a stable idempotency key; `authorization_expired` recovery |
+  | S6b | Payment's durable refund intent (`consumeRef` = attempt id) → receipt consumption → `authorized`; asynchronous provider dispatch with a stable idempotency key; `authorization_expired` recovery. **Status (2026-10-28): implemented for simulation under the Owner's R6B-1 to R6B-10 (register BIL-24 F, PAY-07 F, PAY-08 F); `authorization_expired` only from Auth's definitive answer (R6B-9, Q8: no margin); no `refund.*` event until S6c** |
   | S6c | allocation (FC-2: lock order, bounded counter, deferred sum check, DB-17) and completion (FC-3, V-3) |
   | S6d | reversal (FC-4, V-1): at most one per purchase, causes appended separately; an assisted purchase lost at final stage is never reversed |
   | S6e | disputes: Owner reads, evidence, decision; fraud holds (evidence-based, step-up, 14-day review, exact-duration compensation) |

@@ -2,7 +2,7 @@ import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertNoPublishedServiceTokens, assertRuntimeDatabaseRole, isPublishedDevelopmentSecret,
   loadBaseConfig, loadOrganizationReferenceConfig, parseServiceTokens, readDocsCredentials, registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
-import { assertOrganizationPayerGrant, assertSimulationGrant, parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
+import { assertOrganizationPayerGrant, assertSimulationGrant, parsePaymentServicePolicy, refundGranted, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
 
 
 /** payment-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16). */
@@ -34,6 +34,12 @@ export interface PaymentConfig extends BaseConfig {
    * `undefined` when disabled; the webhook signing secret is the operator's own (never a published development value).
    */
   simulation?: { webhookSecret: string };
+  /**
+   * Core V2 S6b (register PAY-07; ADR-0067 decisions 3 and 5; R6B-1): refund attempts, present only when `PAYMENT_SERVICE_POLICY` grants
+   * `payment.refund.create` (never in production). `authServiceToken` is Payment's own service credential for Auth's receipt consumption and
+   * recovery lookup (AUTH-02, AUTH-03), the only Payment -> Auth service call (ADR-0035 C4). Never echoed or logged.
+   */
+  refunds?: { authServiceToken: string };
   returnUrlAllowlist: string[];
   /** Baseline abuse limits (SDD section 16): requests per minute per authenticated caller. Technical values, no business meaning. */
   rateLimits: { createPerMinute: number; attemptPerMinute: number };
@@ -91,6 +97,15 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   const servicePolicy = parsePaymentServicePolicy(reader.get('PAYMENT_SERVICE_POLICY'), registeredCallers(serviceTokens));
   assertSimulationGrant(servicePolicy, simulation !== undefined);
   assertOrganizationPayerGrant(servicePolicy, base.isProduction);
+  // Core V2 S6b (R6B-1): refunds exist only where Billing holds the relay (never production) and Payment can authenticate to Auth
+  let refunds: PaymentConfig['refunds'];
+  if (refundGranted(servicePolicy, base.isProduction)) {
+    const token = reader.secret('AUTH_SERVICE_TOKEN', 32);
+    if (isPublishedDevelopmentSecret(token)) throw new ConfigError('AUTH_SERVICE_TOKEN must not be a development value published in this repository');
+    refunds = { authServiceToken: token };
+  } else if (base.isProduction && reader.optional('AUTH_SERVICE_TOKEN') !== undefined) {
+    throw new ConfigError('AUTH_SERVICE_TOKEN must not be configured when NODE_ENV=production (Core V2 S6b: refunds are simulation only)');
+  }
   return {
     ...base,
     databaseUrl,
@@ -106,6 +121,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
     testProviderEnabled,
     ...(simulation ? { simulation } : {}),
+    ...(refunds ? { refunds } : {}),
     returnUrlAllowlist: (reader.optional('PAYMENT_RETURN_URL_ALLOWLIST', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     rateLimits: {
       createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),

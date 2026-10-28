@@ -1129,6 +1129,24 @@ SELECT pg_temp.expect_error('S6a', 'a refund idempotency record is never changed
   INSERT INTO refund_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s6a-0002', 'refund_case.open', repeat('a', 64), 201, '{}');
   UPDATE refund_command_idempotency SET "responseStatus" = 200 WHERE "idempotencyKey" = 'k-s6a-0002'$$, :'a_ben'), '23514');
 
+-- ------------------------------------------------------------------------------------------------------------- S6b authorization relays (0034)
+-- The relay, mirror, reconciliation and cancellation paths run end to end in test/refund-authorizations.e2e-spec.ts and, with the real Auth and
+-- Payment, in test/e2e-real-broker/s6b-refund-processing.e2e-spec.ts; here, the guards that need no case fixture.
+SELECT pg_temp.expect_error('S6b', 'a relay starts unconfirmed (Payment alone decides its status)', $$INSERT INTO refund_authorization_relay (id, "refundCaseId", "paymentId", "requestedBy", "idempotencyKey", "requestHash", "attemptStatus", "statusAt")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'k-s6b-0001', repeat('a', 64), 'authorized', now())$$, '23514', 'refund_authorization_relay_created_unconfirmed');
+SELECT pg_temp.expect_error('S6b', 'a relay needs an open case', $$INSERT INTO refund_authorization_relay (id, "refundCaseId", "paymentId", "requestedBy", "idempotencyKey", "requestHash")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'k-s6b-0002', repeat('a', 64))$$, '23514', 'refund_authorization_relay_case_open');
+SELECT pg_temp.assert_eq('S6b', 'R6B-10: one relay per case while it may still refund (only the unconsumed endings and failed free it)',
+  (SELECT (indexdef LIKE '%UNIQUE%' AND indexdef LIKE '%("refundCaseId")%' AND indexdef LIKE '%authorization_expired%' AND indexdef LIKE '%authorization_refused%'
+      AND indexdef LIKE '%failed%' AND indexdef LIKE '%rejected%' AND indexdef NOT LIKE '%succeeded%')::text
+     FROM pg_indexes WHERE indexname = 'refund_authorization_relay_one_live'), 'true');
+SELECT pg_temp.assert_eq('S6b', 'R6B-10: the cancellation guard runs on every refund case update',
+  (SELECT count(*)::text FROM pg_trigger WHERE tgname = 'refund_case_15_cancel_guard' AND tgrelid = 'refund_case'::regclass AND NOT tgisinternal), '1');
+SELECT pg_temp.assert_eq('S6b', 'F-12: no Billing column stores a receipt secret',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND column_name ~* 'secret'), '0');
+SELECT pg_temp.assert_eq('S6b', 'a relay holds no money: the binding is the case''s own',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'refund_authorization_relay' AND column_name ~* '(amount|currency|total)'), '0');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

@@ -430,7 +430,7 @@ SELECT pg_temp.expect_error('S4d', 'a fact is bound to ITS attempt''s provider (
 SELECT pg_temp.expect_error('S4d', 'a webhook-sourced fact names a stored webhook of the same provider', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-5', 1000, 'webhook', :'wh_other'), '23514');
 SELECT pg_temp.expect_error('S4d', 'a webhook-sourced fact names its webhook', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-6', 1000, 'webhook', NULL), '23514');
 SELECT pg_temp.expect_error('S4d', 'a status-read fact names no webhook', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-7', 1000, 'status_check', :'wh_test'), '23514');
-SELECT pg_temp.expect_error('S4d', 'only the capture kind exists in S4d (refunds and chargebacks are S6)', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-8', 1000, 'status_check', NULL, 'refund'), '23514');
+SELECT pg_temp.expect_error('S4d', 'a refund fact is never free-standing: it names its refund attempt (S6b); chargebacks are S6e', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-8', 1000, 'status_check', NULL, 'refund'), '23514');
 SELECT pg_temp.expect_error('S4d', 'FC-10 under P-6: a live fact is refused (simulation only)', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-9', 1000, 'status_check', NULL, 'capture', 'true'), '23514');
 SELECT pg_temp.expect_error('S4d', 'a fact moves money: a zero amount is no fact', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-10', 0, 'status_check', NULL), '23514');
 SELECT pg_temp.expect_error('S4d', 'FC-1: a fact is never edited', $$UPDATE provider_transaction_fact SET amount = 1$$, '23514');
@@ -524,6 +524,69 @@ SELECT id AS s4e_p FROM payment WHERE "payerId" = '00000000-0000-4000-8000-00000
 SELECT pg_temp.expect_error('S4e', 'the payer Organization scope never changes (organizationId)', format($$UPDATE payment SET "organizationId" = '00000000-0000-4000-8000-0000000000e5' WHERE id = %L$$, :'s4e_p'), '23514');
 SELECT pg_temp.expect_error('S4e', 'the payer Organization scope never changes (payerId)', format($$UPDATE payment SET "payerId" = '00000000-0000-4000-8000-0000000000e5' WHERE id = %L$$, :'s4e_p'), '23514');
 SELECT pg_temp.expect_ok('S4e', 'a user payer is unaffected (no organizationId needed)', pg_temp.s4a('user', 'u-s4e', 'non_entitlement', NULL));
+\o
+
+-- ======================================================= Core V2 S6b: refund attempts (0017) ----
+\o /dev/null
+-- a captured, Company-sold, gateway-settled simulation payment with its verified capture fact
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-s6b', 'user', 'u-s6b', 'company', '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS r1 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'r1', 1, 'test', false) RETURNING id AS r1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'r1';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-s6b-1', "submittedAt" = now() WHERE id = :'r1a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'r1a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-s6b-1', 'capture', :'r1', :'r1a', 1000, 'TND', false, 'status_check') RETURNING id AS r1f \gset
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'r1a', "closedAt" = now() WHERE id = :'r1';
+CREATE FUNCTION pg_temp.s6b(id uuid, pid uuid, amt bigint DEFAULT 1000, status text DEFAULT 'authorization_pending', company text DEFAULT '00000000-0000-4000-8000-00000000c6b0') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId",
+      provider, "liveMode", "receiptDigest", status)
+    SELECT %L, p.id, 'billing-service', gen_random_uuid(), %L, %s, 'TND', 'customer_request', false, f.id, f."attemptId", 'test', false, repeat('a', 64), %L
+      FROM payment p JOIN provider_transaction_fact f ON f."paymentId" = p.id AND f.kind = 'capture' WHERE p.id = %L$$, id, company, amt, status, pid);
+$f$;
+SELECT pg_temp.expect_constraint('S6b', 'R6B-3: a new attempt starts as an authorization intent', pg_temp.s6b(gen_random_uuid(), :'r1', 1000, 'authorized'), 'refund_attempt_insert_state');
+SELECT pg_temp.expect_constraint('S6b', 'R6B-2 / D4: a partial amount is refused', pg_temp.s6b(gen_random_uuid(), :'r1', 999), 'refund_attempt_payment_refundable');
+SELECT pg_temp.expect_constraint('S6b', 'R6B-2: the attempt''s Company is the payment''s seller', pg_temp.s6b(gen_random_uuid(), :'r1', 1000, 'authorization_pending', '00000000-0000-4000-8000-00000000c6b1'), 'refund_attempt_payment_refundable');
+SELECT pg_temp.expect_ok('S6b', 'a full-amount intent on a verified capture', pg_temp.s6b('00000000-0000-4000-8000-0000000006b1', :'r1'));
+SELECT pg_temp.expect_error('S6b', 'R6B-3: at most one unresolved or potentially effective attempt per payment', pg_temp.s6b(gen_random_uuid(), :'r1'), '23505');
+SELECT pg_temp.expect_constraint('S6b', 'R6B-3: no skipping to success', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_transition');
+SELECT pg_temp.expect_constraint('S6b', 'authorized needs ALL of Auth''s consumption (receipt, approver, time)', $$UPDATE refund_attempt SET status = 'authorized', "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_authorization_shape');
+SELECT pg_temp.expect_constraint('S6b', 'authorized needs the receipt id too', $$UPDATE refund_attempt SET status = 'authorized', "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_authorization_shape');
+SELECT pg_temp.expect_ok('S6b', 'authorized with Auth''s consumption', $$UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$);
+SELECT pg_temp.expect_constraint('S6b', 'F-11: the consumed authorization never changes', $$UPDATE refund_attempt SET "approvedByUserId" = gen_random_uuid() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_outcome_with_status');
+SELECT pg_temp.expect_error('S6b', 'the binding is immutable', $$UPDATE refund_attempt SET amount = 1 WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, '23514');
+SELECT pg_temp.expect_ok('S6b', 'dispatching is durable before the provider call', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$);
+SELECT pg_temp.expect_constraint('S6b', 'R6B-5: success needs its own verified full-amount refund fact', $$UPDATE refund_attempt SET status = 'succeeded', "succeededFactId" = gen_random_uuid(), "completedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_success_evidence');
+SELECT pg_temp.expect_error('S6b', 'FC-1: a refund fact is bound to ITS attempt''s payment', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'rtx-s6b-x', 'refund', gen_random_uuid(), %L, '00000000-0000-4000-8000-0000000006b1', 1000, 'TND', false, 'status_check')$$, :'r1a'), '23503');
+SELECT pg_temp.expect_ok('S6b', 'FC-1: a partial refund fact is recorded, never refused (D4)', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'rtx-s6b-1', 'refund', %L, %L, '00000000-0000-4000-8000-0000000006b1', 999, 'TND', false, 'status_check')$$, :'r1', :'r1a'));
+SELECT id AS rf1 FROM provider_transaction_fact WHERE "providerTxnId" = 'rtx-s6b-1' \gset
+SELECT pg_temp.expect_constraint('S6b', 'R6B-5: a partial refund fact never succeeds the attempt', format($$UPDATE refund_attempt SET status = 'succeeded', "succeededFactId" = %L, "completedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, :'rf1'), 'refund_attempt_success_evidence');
+SELECT pg_temp.expect_ok('S6b', 'R6B-5: a mismatch is a discrepancy', $$UPDATE refund_attempt SET status = 'discrepancy', "completedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$);
+SELECT pg_temp.expect_constraint('S6b', 'a discrepancy is terminal', $$UPDATE refund_attempt SET "workAfter" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_terminal');
+SELECT pg_temp.expect_constraint('S6b', 'FC-5: refund evidence for the payment refuses every new attempt', pg_temp.s6b(gen_random_uuid(), :'r1'), 'refund_attempt_no_refund_fact');
+SELECT pg_temp.expect_error('S6b', 'refund attempts are never deleted', $$DELETE FROM refund_attempt$$, '23514');
+-- refusals: permanent, append-only, exclusive with attempts
+SELECT pg_temp.expect_ok('S6b', 'R6B-10: a pre-attempt refusal is recorded', format($$INSERT INTO refund_attempt_refusal (id, "paymentId", producer, "refundCaseId", code) VALUES ('00000000-0000-4000-8000-0000000006b2', %L, 'billing-service', gen_random_uuid(), 'refund_in_progress')$$, :'r1'));
+SELECT pg_temp.expect_constraint('S6b', 'an attempt id is never also a refusal', format($$INSERT INTO refund_attempt_refusal (id, "paymentId", producer, "refundCaseId", code) VALUES ('00000000-0000-4000-8000-0000000006b1', %L, 'billing-service', gen_random_uuid(), 'refund_in_progress')$$, :'r1'), 'refund_attempt_refusal_not_attempt');
+SELECT pg_temp.expect_error('S6b', 'a refusal is never changed', $$UPDATE refund_attempt_refusal SET code = 'refund_dispute_open'$$, '23514');
+SELECT pg_temp.expect_error('S6b', 'a refusal is never deleted', $$DELETE FROM refund_attempt_refusal$$, '23514');
+-- a second payment: the refused id never becomes an attempt; refund evidence blocks every new attempt
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-s6b-2', 'user', 'u-s6b', 'company', '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS r2 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'r2', 1, 'test', false) RETURNING id AS r2a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'r2';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-s6b-2', "submittedAt" = now() WHERE id = :'r2a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'r2a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source) VALUES ('test', 'ptx-s6b-2', 'capture', :'r2', :'r2a', 1000, 'TND', false, 'status_check');
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'r2a', "closedAt" = now() WHERE id = :'r2';
+SELECT pg_temp.expect_constraint('S6b', 'a refused id never becomes an attempt', pg_temp.s6b('00000000-0000-4000-8000-0000000006b2', :'r2'), 'refund_attempt_refused_id');
+SELECT pg_temp.expect_ok('S6b', 'another payment takes its own attempt', pg_temp.s6b('00000000-0000-4000-8000-0000000006b3', :'r2'));
+UPDATE refund_attempt SET status = 'authorization_refused', "authorizationRefusal" = 'receipt_invalid', "completedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b3';
+SELECT pg_temp.expect_constraint('S6b', 'a refused authorization is terminal', $$UPDATE refund_attempt SET "workAfter" = now() WHERE id = '00000000-0000-4000-8000-0000000006b3'$$, 'refund_attempt_terminal');
+SELECT pg_temp.expect_ok('S6b', 'a refused authorization frees the payment for a new attempt', pg_temp.s6b('00000000-0000-4000-8000-0000000006b4', :'r2'));
+SELECT pg_temp.assert_eq('S6b', 'no column of Payment stores a receipt secret', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND column_name ~* 'secret'), '0');
 \o
 
 -- ---------------------------------------------------------------------------- verdict ----

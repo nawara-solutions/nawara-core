@@ -40,6 +40,18 @@ describe('PAYMENT_MESSAGES', () => {
       amountCurrencyMismatch: 'Provider-reported amount/currency does not match the payment snapshot.',
       providerSuccessConflicts: 'Provider success conflicts with a payment that is already {status}.',
       lateSuccessConflicts: 'Late success conflicts with a provider-confirmed failure.',
+      invalidRefundRequest: 'The refund request is malformed.', // Core V2 S6b: new messages
+      paymentNotRefundable: 'This payment cannot be refunded.',
+      refundCaptureUnverified: 'This payment has no verified capture to refund.',
+      refundAmountNotFull: 'Only a full refund of the captured amount, in its currency, is supported.',
+      refundDisputeOpen: 'A dispute on this payment blocks a new refund attempt.',
+      refundDisputeUnavailable: 'The dispute status of this payment could not be verified; nothing was changed.',
+      refundInProgress: 'Another refund attempt for this payment is unresolved or may still take effect.',
+      refundAlreadyRecorded: 'Refund evidence already exists for this payment.',
+      refundAttemptConflict: 'This refund attempt already exists with different content or another authorization receipt.',
+      refundAuthorizationInvalid: 'The refund authorization receipt is not valid for this refund.',
+      refundAuthorizationExpired: 'The refund authorization receipt expired before it was used.',
+      refundAuthorizationUnresolved: 'The refund authorization could not be confirmed yet; retry with the same key and receipt.',
       cannotFailSucceeded: 'Cannot fail an attempt that already succeeded.',
     };
     expect(Object.keys(PAYMENT_MESSAGES).sort()).toEqual(Object.keys(before).sort());

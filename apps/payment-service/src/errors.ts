@@ -24,7 +24,20 @@ export type ErrorCode =
   | 'simulation_nothing_to_deliver'
   | 'provider_error'
   | 'provider_unavailable'
-  | 'auth_unavailable';
+  | 'auth_unavailable'
+  // Core V2 S6b (register PAY-07, PAY-08; R6B-1 to R6B-10)
+  | 'invalid_refund_request'
+  | 'payment_not_refundable'
+  | 'refund_capture_unverified'
+  | 'refund_amount_not_full'
+  | 'refund_dispute_open'
+  | 'refund_dispute_unavailable'
+  | 'refund_in_progress'
+  | 'refund_already_recorded'
+  | 'refund_attempt_conflict'
+  | 'refund_authorization_invalid'
+  | 'refund_authorization_expired'
+  | 'refund_authorization_unresolved';
 
 /** `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that echo a client value. */
 export function paymentError(status: number, code: ErrorCode, message: string | MessageTexts, params?: MessageParams): HttpException {

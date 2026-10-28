@@ -12,6 +12,9 @@ import { loadPaymentConfig, type PaymentConfig } from '../../src/config/payment-
 import { PaymentConfigModule } from '../../src/config/payment-config.module.js';
 import { PaymentsModule } from '../../src/payments/payments.module.js';
 import { ProvidersModule } from '../../src/providers/providers.module.js';
+import { RefundsModule } from '../../src/refunds/refunds.module.js';
+import type { ReceiptAuthority } from '../../src/refunds/receipt-authority.js';
+import type { RefundDisputeExposure } from '../../src/refunds/dispute-exposure.js';
 import { SimulationModule } from '../../src/simulation/simulation.module.js';
 import { WEBHOOK_PATH_PREFIX } from '../../src/webhooks/webhooks.controller.js';
 import { WebhooksModule } from '../../src/webhooks/webhooks.module.js';
@@ -73,6 +76,10 @@ export async function createTestApp(opts: {
   reference?: OrganizationReferenceResolver;
   /** The event bus (default: in memory). V2 A3M.3: a RabbitMQ bus, to prove readiness does not depend on the broker. */
   bus?: EventBus;
+  /** Core V2 S6b: Auth's receipt boundary and the dispute boundary for refunds (defaults: the HTTP client, the pre-S6e adapter); `refundWorker` false: no background passes. */
+  receiptAuthority?: ReceiptAuthority;
+  disputeExposure?: RefundDisputeExposure;
+  refundWorker?: boolean;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
   const config = loadPaymentConfig({
@@ -98,6 +105,7 @@ export async function createTestApp(opts: {
       ProvidersModule,
       PaymentsModule,
       AttemptsModule,
+      RefundsModule.register(config, { receiptAuthority: opts.receiptAuthority, disputeExposure: opts.disputeExposure, worker: opts.refundWorker }), // Core V2 S6b: as AppModule
       WebhooksModule,
       ...(config.simulation && !config.isProduction ? [SimulationModule] : []), // Core V2 S4f: as AppModule
     ],
