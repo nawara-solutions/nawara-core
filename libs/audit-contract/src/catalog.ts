@@ -108,6 +108,7 @@ const NONE = {} as const;
 /** Core V2 S2-Audit.2 (D3): the authorization receipts' scope: their Company, always. No Platform. */
 const RECEIPT_SCOPE = { company: 'required' } as const;
 
+
 const SPEC = {
   // ------------------------------------------------------------------------------------------------ auth-service (emits after its outbox, 18.7)
   'membership.approved': {
@@ -516,6 +517,34 @@ const SPEC = {
       reason_code: { type: 'code', shape: 'value', required: true, values: ['actor_entry_error', 'evidence_contradicts_report'] },
     },
     purpose: 'The Owner, with a factor step-up, appended a correction of an Organization-asserted time (the original evidence is kept; no financial term changes).',
+  },
+
+  // Core V2 S6a (register BIL-23; ADR-0067 decision 6; the Owner's R6A-1 to R6A-9): the Owner of the seller Company opens a refund case for
+  // one verified captured payment, in full, or cancels it while open. No money moves and no refund attempt exists: execution is S6b. Version
+  // 1: the seller Company and the Platform are recorded as changes; granting them as trusted scope stays a separate catalog decision (D3).
+  'refund_case.opened': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'optional',
+    resource: ['refund_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      company_id: { type: 'uuid', shape: 'value', required: true },
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+      amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+      eligibility: { type: 'code', shape: 'value', required: true, values: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement'] },
+      reason: { type: 'code', shape: 'value', required: true, values: ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement'] },
+      legal_override: { type: 'boolean', shape: 'value', required: true },
+    },
+    purpose: 'The Owner of the seller Company opened a refund case for one verified captured payment, in full (no refund attempt yet; nothing moved).',
+  },
+  'refund_case.cancelled': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'optional',
+    resource: ['refund_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      company_id: { type: 'uuid', shape: 'value', required: true },
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The Owner of the seller Company cancelled an open refund case before any refund processing (the payment may get a new case).',
   },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service

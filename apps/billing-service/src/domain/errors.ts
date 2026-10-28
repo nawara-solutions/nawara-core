@@ -61,7 +61,12 @@ export type BillingErrorCode =
   | 'correction_time_invalid'
   | 'resolution_not_permitted'
   | 'step_up_required'
-  | 'assistance_restricted'; // Core V2 S5d (register BIL-13 C; S5D-4)
+  | 'assistance_restricted' // Core V2 S5d (register BIL-13 C; S5D-4)
+  | 'invalid_refund_request' // Core V2 S6a refund cases (register BIL-23, BIL-25)
+  | 'refund_not_eligible'
+  | 'refund_case_exists'
+  | 'refund_dispute_open'
+  | 'refund_case_not_open';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

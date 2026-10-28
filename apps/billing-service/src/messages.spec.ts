@@ -112,6 +112,10 @@ describe('BILLING_MESSAGES', () => {
       [en('resolutionNotPermitted'), 'This dispute has no permitted nonfinancial resolution with this correction.'],
       [en('stepUpRequired'), 'A fresh step-up for this operation is required.'],
       [en('assistanceRestricted'), 'This Organization cannot accept new assistance requests while a financial restriction applies.'], // Core V2 S5d
+      [en('refundNotEligible'), 'This payment is not eligible for a refund case.'], // Core V2 S6a
+      [en('refundCaseExists'), 'This payment already has an open or completed refund case.'],
+      [en('refundDisputeOpen'), 'A dispute on this payment is open: no refund case can be opened.'],
+      [en('refundCaseNotOpen'), 'The refund case is not open.'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

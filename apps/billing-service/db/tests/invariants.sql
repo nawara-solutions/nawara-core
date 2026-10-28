@@ -69,7 +69,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND NOT (table_name = 'subscription_purchase' AND column_name = 'ledgerSeq') -- S3c: the ledger's ORDER, not money
     AND NOT (table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount') -- S3f: school-fee configuration, checked below
     AND NOT (table_name = 'assistance_request' AND column_name IN ('baseAmount', 'feeAmount', 'totalAmount')) -- S5a: frozen assistance terms, checked below
-    AND NOT (table_name = 'cash_return_obligation' AND column_name = 'amount')), '8'); -- S5b: the frozen total owed back, checked below
+    AND NOT (table_name = 'cash_return_obligation' AND column_name = 'amount') -- S5b: the frozen total owed back, checked below
+    AND NOT (table_name = 'refund_case' AND column_name = 'amount')), '8'); -- S6a: the full captured amount, equal to the payment request's (guard, e2e)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -1106,6 +1107,27 @@ SELECT pg_temp.expect_ok('S5d', 'an unrestricted Organization admits a new reque
 SELECT pg_temp.assert_eq('S5d', 'the reserved kinds (T3, inactive) have no source in the model', (SELECT (prosrc NOT LIKE '%''T3''%' AND prosrc NOT LIKE '%''inactive''%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
 SELECT pg_temp.assert_eq('S5d', 'no restriction or violation state is stored (FC-9)',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')), '0');
+
+-- ------------------------------------------------------------------------------------------------------------- S6a refund cases (0033)
+-- The eligible-capture paths are exercised end to end by test/refund-cases.e2e-spec.ts; here, the guards that need no capture fixture.
+SELECT pg_temp.expect_error('S6a', 'a refund case is opened open, never cancelled or completed', $$INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", "receiptId", eligibility, "companyId", "platformId", amount, currency, reason, "openedBy", status, "completedAt")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'non_entitlement', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'customer_request', gen_random_uuid(), 'completed', now())$$, '23514', 'refund_case_created_open');
+SELECT pg_temp.expect_error('S6a', 'no case without a verified capture of a paid payment request', $$INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", "receiptId", eligibility, "companyId", "platformId", amount, currency, reason, "openedBy")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'non_entitlement', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'customer_request', gen_random_uuid())$$, '23514', 'refund_case_capture_unverified');
+SELECT pg_temp.assert_eq('S6a', 'one live case per payment: open or completed (FC-3), a cancelled case frees it',
+  (SELECT (indexdef LIKE '%UNIQUE%' AND indexdef LIKE '%("paymentId")%' AND indexdef LIKE '%open%' AND indexdef LIKE '%completed%' AND indexdef NOT LIKE '%cancelled%')::text
+     FROM pg_indexes WHERE indexname = 'refund_case_payment_active_unique'), 'true');
+SELECT pg_temp.assert_eq('S6a', 'the case amount is bigint, positive and at most 2^53-1',
+  (SELECT (c.data_type = 'bigint' AND pg_get_constraintdef(k.oid) LIKE '%amount > 0%' AND pg_get_constraintdef(k.oid) LIKE '%9007199254740991%')::text
+     FROM information_schema.columns c, pg_constraint k WHERE c.table_name = 'refund_case' AND c.column_name = 'amount' AND k.conname = 'refund_case_amount'), 'true');
+SELECT pg_temp.assert_eq('S6a', 'a refund case holds no attempt, provider or allocation state (S6b, S6c)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'refund_case' AND column_name ~* '(attempt|provider|allocat|receiptSecret|consume)'), '0');
+SELECT pg_temp.expect_error('S6a', 'a refund idempotency record admits the two refund-case commands only', format($$
+  INSERT INTO refund_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s6a-0001', 'refund_case.complete', repeat('a', 64), 200, '{}')$$, :'a_ben'),
+  '23514', 'refund_command_idempotency_operation');
+SELECT pg_temp.expect_error('S6a', 'a refund idempotency record is never changed', format($$
+  INSERT INTO refund_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s6a-0002', 'refund_case.open', repeat('a', 64), 201, '{}');
+  UPDATE refund_command_idempotency SET "responseStatus" = 200 WHERE "idempotencyKey" = 'k-s6a-0002'$$, :'a_ben'), '23514');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

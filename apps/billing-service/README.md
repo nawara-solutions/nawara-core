@@ -147,6 +147,16 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   - `GET /billing/organizations/:organizationId/restrictions`: the Owner of the Platform, the Organization actor, or a service holding
     `restriction.read` for the Platform.
   - **Not provided:** T3 (S6f) and Organization inactivity (D6, needs V-4's lifecycle state) are reserved and never returned.
+- **Refund cases (Core V2 S6a; register BIL-23 F, BIL-25 F; the Owner's R6A-1 to R6A-9; `db/migrations/0033`, `src/refunds/`) —
+  DEVELOPMENT AND SIMULATION ONLY:**
+  - `POST /billing/admin/refund-cases` `{paymentId, reason, legalOverride?}`, `GET /billing/admin/refund-cases/:id`,
+    `POST /billing/admin/refund-cases/:id/cancel`: the Owner of the seller Company (live; no Operator, no Organization administrator).
+  - Eligible: a verified capture (a paid payment request with an applied `payment.succeeded` receipt) of a personal purchase (direct or
+    assisted, not reversed), a late assisted settlement held for reconciliation, or a `non_entitlement` invoice. Organization-subscription
+    payments are not. Billing computes the full amount; no partial refund.
+  - One `open` or `completed` case per payment; `cancelled` frees it; `completed` is reserved for S6c. An open dispute blocks a case; the
+    dispute boundary has no source before S6e.
+  - Nothing is refunded: no attempt, no call to Payment or Auth's receipts, no change to any purchase, entitlement or obligation.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription
