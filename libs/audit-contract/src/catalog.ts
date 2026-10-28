@@ -471,6 +471,52 @@ const SPEC = {
     changes: { returned_at: { type: 'timestamp', shape: 'value', required: true } },
     purpose: 'An Organization administrator declared the full cash returned to the beneficiary (awaiting the beneficiary\'s confirmation).',
   },
+  // Core V2 S5c (register BIL-18 to BIL-22; the Owner's H-1 to H-7, J-1 to J-6): the beneficiary confirms the reported cash return (the
+  // obligation's only discharge in S5c), opens a dispute (no cutoff), the Organization answers it (evidence only), and the Owner, with a
+  // dedicated factor step-up each, appends a correction of an Organization-asserted time or closes a timestamp dispute on such a
+  // correction (nonfinancial: no Owner action discharges, confirms, pays or reverses anything).
+  'cash_return_obligation.confirmed': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['cash_return_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { assistance_request_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'The beneficiary confirmed receiving the full cash back: the obligation is discharged and the assistance request is returned.',
+  },
+  'assistance_dispute.opened': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      assistance_request_id: { type: 'uuid', shape: 'value', required: true },
+      reason_code: { type: 'code', shape: 'value', required: true, values: ['cash_not_returned', 'collection_not_made', 'collection_time_incorrect', 'return_time_incorrect'] },
+    },
+    purpose: 'The beneficiary disputed the cash evidence of an assistance request (it blocks the confirmation of a cash return while open).',
+  },
+  'assistance_dispute.responded': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { position: { type: 'code', shape: 'value', required: true, values: ['accepts', 'contests'] } },
+    purpose: 'An Organization administrator answered a dispute (evidence only: no state changes).',
+  },
+  'assistance_dispute.resolved': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['assistance_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      outcome: { type: 'code', shape: 'value', required: true, values: ['timestamp_corrected'] },
+      correction_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The Owner, with a factor step-up, closed a timestamp dispute on a correction of exactly that time (no financial effect).',
+  },
+  'assistance_request.corrected': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['assistance_request'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      correction_id: { type: 'uuid', shape: 'value', required: true },
+      field: { type: 'code', shape: 'value', required: true, values: ['cash_collected_at', 'returned_at'] },
+      corrected_value: { type: 'timestamp', shape: 'value', required: true },
+      superseded_value: { type: 'timestamp', shape: 'value', required: true },
+      reason_code: { type: 'code', shape: 'value', required: true, values: ['actor_entry_error', 'evidence_contradicts_report'] },
+    },
+    purpose: 'The Owner, with a factor step-up, appended a correction of an Organization-asserted time (the original evidence is kept; no financial term changes).',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {

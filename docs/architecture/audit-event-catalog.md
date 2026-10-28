@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (17)
+## billing-service (22)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -82,6 +82,11 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `assistance_request.settlement_requested` | commercial | user (member) | required | assistance_request | — | succeeded | `invoice_id`: uuid<br>`payment_request_id`: uuid | An Organization administrator started the electronic settlement of an assistance request (an invoice and a payment request; not yet paid). |
 | `cash_return_obligation.opened` | commercial | system (`assistance_sweep`) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`amount`: integer 1–9007199254740991 | The settlement deadline passed with no electronic settlement: the Organization owes the beneficiary the full cash collected, fee included. |
 | `cash_return_obligation.return_reported` | commercial | user (member) | required | cash_return_obligation | — | succeeded | `returned_at`: timestamp | An Organization administrator declared the full cash returned to the beneficiary (awaiting the beneficiary's confirmation). |
+| `cash_return_obligation.confirmed` | commercial | user (member) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid | The beneficiary confirmed receiving the full cash back: the obligation is discharged and the assistance request is returned. |
+| `assistance_dispute.opened` | commercial | user (member) | required | assistance_dispute | — | succeeded | `assistance_request_id`: uuid<br>`reason_code`: cash_not_returned \| collection_not_made \| collection_time_incorrect \| return_time_incorrect | The beneficiary disputed the cash evidence of an assistance request (it blocks the confirmation of a cash return while open). |
+| `assistance_dispute.responded` | commercial | user (member) | required | assistance_dispute | — | succeeded | `position`: accepts \| contests | An Organization administrator answered a dispute (evidence only: no state changes). |
+| `assistance_dispute.resolved` | commercial | user (owner) | required | assistance_dispute | — | succeeded | `outcome`: timestamp_corrected<br>`correction_id`: uuid | The Owner, with a factor step-up, closed a timestamp dispute on a correction of exactly that time (no financial effect). |
+| `assistance_request.corrected` | commercial | user (owner) | required | assistance_request | — | succeeded | `correction_id`: uuid<br>`field`: cash_collected_at \| returned_at<br>`corrected_value`: timestamp<br>`superseded_value`: timestamp<br>`reason_code`: actor_entry_error \| evidence_contradicts_report | The Owner, with a factor step-up, appended a correction of an Organization-asserted time (the original evidence is kept; no financial term changes). |
 
 ## payment-service (5)
 
@@ -127,4 +132,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 74 actions.**
+**Total: 79 actions.**

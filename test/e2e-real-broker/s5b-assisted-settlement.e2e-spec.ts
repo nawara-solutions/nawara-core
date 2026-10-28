@@ -25,7 +25,9 @@ afterAll(() => refStub.close());
  *   the beneficiary's purchase → entitlement;
  *
  * and the unsuccessful path: a final failure → the deadline → Billing's sweep opens the cash-return obligation → the Organization reports
- * the return, with no purchase. Payment never calls Billing; the grant is held only by this isolated test policy.
+ * the return, with no purchase. Payment never calls Billing; the grant is held only by this isolated test policy. Core V2 S5c adds, on the same
+ * processes: an open dispute blocks the beneficiary's confirmation, the Organization answers it, and a confirmation resolves the request,
+ * with the audit evidence published over the real relay.
  *
  * Prerequisite: `npm run build -w @nawara/service-kit -w @nawara/audit-contract -w billing-service -w payment-service`.
  */
@@ -46,6 +48,8 @@ const BENEFICIARY_TOKEN = 'e2e-s5b-beneficiary-jwt';
 const BENEFICIARY = 'e2e0e2e0-0000-4000-8000-0000000055b3';
 const BENEFICIARY2_TOKEN = 'e2e-s5b-beneficiary-2-jwt';
 const BENEFICIARY2 = 'e2e0e2e0-0000-4000-8000-0000000055b4';
+const BENEFICIARY3_TOKEN = 'e2e-s5c-beneficiary-3-jwt'; // Core V2 S5c
+const BENEFICIARY3 = 'e2e0e2e0-0000-4000-8000-0000000055b5';
 
 describeWithEnv(
   'Core V2 S5b: assisted settlement -> Payment (simulation) -> real RabbitMQ -> Billing purchase; failure -> cash-return obligation',
@@ -100,6 +104,7 @@ describeWithEnv(
         [ADMIN_TOKEN]: { id: ADMIN_ID, isActive: true, memberships: member(true) },
         [BENEFICIARY_TOKEN]: { id: BENEFICIARY, isActive: true, memberships: member(false) },
         [BENEFICIARY2_TOKEN]: { id: BENEFICIARY2, isActive: true, memberships: member(false) },
+        [BENEFICIARY3_TOKEN]: { id: BENEFICIARY3, isActive: true, memberships: member(false) },
       });
 
       payment = spawnService('payment', PAYMENT_DIR, {
@@ -210,6 +215,51 @@ describeWithEnv(
       const admin = await billingCall('GET', producerToken.token, `/billing/users/${ADMIN_ID}/platforms/${TEST_PLATFORM}/products/${productId}/entitlement`);
       expect(admin.json).toEqual({ valid: false, expiresAt: null });
     }, 90_000);
+
+    /** A final failure at Payment, then the deadline (a test-only move of the collection into the past, as a superuser): the sweep's obligation. */
+    async function obligationAfterFailure(beneficiaryToken: string) {
+      const s = await settlementAtPayment(beneficiaryToken);
+      await capture(s.paymentId, 'failed');
+      await waitFor(async () => (await billingAdmin.query(`SELECT status FROM assistance_settlement_channel WHERE "invoiceId" = $1`, [s.invoiceId])).rows[0]?.status === 'closed',
+        20_000, 'the channel to close on Payment\'s final failure');
+      const cl = await billingAdmin.connect();
+      try {
+        await cl.query(`SET session_replication_role = replica`);
+        await cl.query(`UPDATE assistance_request SET "consentAt" = now() - interval '100 hours', "cashCollectedAt" = now() - interval '73 hours', "reportedAt" = now() - interval '73 hours', "settleBy" = now() - interval '1 hour' WHERE id = $1`, [s.requestId]);
+      } finally {
+        await cl.query(`SET session_replication_role = origin`);
+        cl.release();
+      }
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).rowCount! > 0,
+        20_000, 'Billing\'s sweep to open the cash-return obligation');
+      const obligationId = (await billingAdmin.query(`SELECT id FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).rows[0].id as string;
+      return { ...s, obligationId };
+    }
+
+    it('S5c: an open dispute blocks the confirmation; the beneficiary confirms the reported return; the audit evidence leaves over the real relay; never a purchase', async () => {
+      const s = await obligationAfterFailure(BENEFICIARY3_TOKEN);
+      const rr = await billingCall('POST', ADMIN_TOKEN, `/billing/cash-return-obligations/${s.obligationId}/return`, { returnedAt: new Date(Date.now() - 60_000).toISOString() });
+      expect(rr.json, JSON.stringify(rr.json)).toMatchObject({ status: 'return_reported' });
+      const d = await billingCall('POST', BENEFICIARY3_TOKEN, `/billing/assistance-requests/${s.requestId}/disputes`, { reasonCode: 'collection_time_incorrect' });
+      expect(d.status, JSON.stringify(d.json)).toBe(201);
+      const blocked = await billingCall('POST', BENEFICIARY3_TOKEN, `/billing/cash-return-obligations/${s.obligationId}/confirm`);
+      expect([blocked.status, blocked.json.code]).toEqual([409, 'assistance_dispute_open']);
+      const answer = await billingCall('POST', ADMIN_TOKEN, `/billing/assistance-disputes/${d.json.id}/responses`, { position: 'contests' });
+      expect(answer.json, JSON.stringify(answer.json)).toMatchObject({ status: 'open', response: { position: 'contests' } });
+      expect((await billingCall('POST', ADMIN_TOKEN, `/billing/cash-return-obligations/${s.obligationId}/confirm`)).status).toBe(403); // never the Organization
+
+      // another beneficiary's request, with no dispute: the confirmation resolves it
+      const s2 = await obligationAfterFailure(BENEFICIARY2_TOKEN);
+      await billingCall('POST', ADMIN_TOKEN, `/billing/cash-return-obligations/${s2.obligationId}/return`, { returnedAt: new Date(Date.now() - 60_000).toISOString() });
+      const ok = await billingCall('POST', BENEFICIARY2_TOKEN, `/billing/cash-return-obligations/${s2.obligationId}/confirm`);
+      expect(ok.json, JSON.stringify(ok.json)).toMatchObject({ status: 'confirmed_returned', confirmedAt: expect.any(String) });
+      expect((await billingCall('GET', BENEFICIARY2_TOKEN, `/billing/assistance-requests/${s2.requestId}`)).json).toMatchObject({ status: 'returned', overdue: false });
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = ANY($1::uuid[])`, [[s.requestId, s2.requestId]])).rows[0].n).toBe(0);
+      for (const [name, resource] of [['audit.assistance_dispute.opened', d.json.id], ['audit.assistance_dispute.responded', d.json.id], ['audit.cash_return_obligation.confirmed', s2.obligationId]]) {
+        await waitFor(async () => (await billingAdmin.query(`SELECT "publishedAt" FROM outbox WHERE name = $1 AND payload->'resource'->>'id' = $2`, [name, resource])).rows[0]?.publishedAt != null,
+          20_000, `the relay to publish ${name} to the broker`);
+      }
+    }, 120_000);
 
     it('UNSUCCESSFUL: a final failure, then the deadline: the sweep opens the cash-return obligation and the Organization reports the return; never a purchase', async () => {
       const s = await settlementAtPayment(BENEFICIARY2_TOKEN);

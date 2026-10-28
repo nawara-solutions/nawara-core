@@ -26,7 +26,7 @@ export interface TestApp {
 /** No network in tests: an Owner check that is not replaced fails closed, as an unreachable Auth would. */
 const unavailable = async (): Promise<never> => { throw new AuthDependencyError('auth_unavailable'); };
 const unreachableOwnerAuthority: OwnerAuthority = {
-  verifyPlatformOwner: unavailable, actor: unavailable, platformAllowed: unavailable, organizationPlatform: unavailable, operatorAssigned: unavailable,
+  verifyPlatformOwner: unavailable, actor: unavailable, platformAllowed: unavailable, organizationPlatform: unavailable, operatorAssigned: unavailable, consumeStepUp: unavailable,
 };
 
 const noopAuthClient: AuthClient = {

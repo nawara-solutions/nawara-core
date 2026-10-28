@@ -14,7 +14,7 @@ export type Mode = 'ok' | 'hang' | 'down' | 'reset' | 'redirect' | 'no_content' 
  */
 export class FakeAuth {
   mode: Mode = 'ok';
-  target: 'grants' | 'access' | 'me' | 'organization' | 'assignments' = 'grants';
+  target: 'grants' | 'access' | 'me' | 'organization' | 'assignments' | 'step_up' = 'grants';
   readonly identities = new Map<string, Identity>();
   /** platformId -> companyId, as Auth knows it now. */
   readonly platforms = new Map<string, string>();
@@ -23,6 +23,11 @@ export class FakeAuth {
   readonly operatorCompany = new Map<string, string>();
   /** Core V2 S3f: organizationId -> platformId. */
   readonly organizations = new Map<string, string>();
+  /**
+   * Core V2 S5c: the step-up proofs Auth issued (token -> the bearer it is bound to, i.e. that owner and session, and its purpose), with
+   * Auth's rules for `POST /auth/step-up/verify`: 204 and consumed once when the bearer, purpose and lifetime match; 403 otherwise.
+   */
+  readonly stepUps = new Map<string, { bearer: string; purpose: string; consumed: boolean; expired?: boolean }>();
   readonly received: Array<{ path: string; authorization: string | undefined }> = [];
   readonly sinkReceived: string[] = [];
   private server!: Server;
@@ -56,7 +61,8 @@ export class FakeAuth {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    for await (const _ of req) { /* drain */ }
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
     this.received.push({ path: req.url ?? '', authorization: req.headers.authorization });
     const send = (status: number, b?: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -64,6 +70,15 @@ export class FakeAuth {
     };
     const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '';
     const who = this.identities.get(bearer);
+    if (req.method === 'POST' && req.url === '/auth/step-up/verify') {
+      if (this.target === 'step_up' && this.mode === 'down') return send(500, { message: 'Internal Server Error' });
+      if (!who) return send(401, { message: 'Unauthorized' });
+      const { purpose, stepUpToken } = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { purpose?: string; stepUpToken?: string };
+      const proof = this.stepUps.get(stepUpToken ?? '');
+      if (!proof || proof.consumed || proof.expired || proof.bearer !== bearer || proof.purpose !== purpose) return send(403, { code: 'step_up_required' });
+      proof.consumed = true;
+      return send(204);
+    }
     const route = req.url === '/auth/grants' ? 'grants' : req.url === '/auth/me' ? 'me' : req.url?.startsWith('/auth/platform-access/') ? 'access'
       : req.url?.startsWith('/auth/admin/organizations/') ? 'organization' : /^\/auth\/admin\/operators\/[^/]+\/platform-assignments$/.test(req.url ?? '') ? 'assignments' : null;
     if (route === null) return send(404, { message: 'Not Found' });

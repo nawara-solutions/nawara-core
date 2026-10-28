@@ -128,6 +128,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         checkout_idempotency: ['INSERT', 'SELECT'], // S3f direct checkout (0026)
         assistance_request: ['INSERT', 'SELECT', 'UPDATE'], assistance_command_idempotency: ['INSERT', 'SELECT'], // S5a Organization assistance (0029)
         assistance_settlement_channel: ['INSERT', 'SELECT', 'UPDATE'], cash_return_obligation: ['INSERT', 'SELECT', 'UPDATE'], assistance_late_settlement: ['INSERT', 'SELECT'], // S5b (0030)
+        assistance_dispute: ['INSERT', 'SELECT', 'UPDATE'], assistance_dispute_response: ['INSERT', 'SELECT'], assistance_correction: ['INSERT', 'SELECT'], // S5c (0031)
       };
       for (const [table, privileges] of Object.entries(expected)) {
         const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);

@@ -66,4 +66,45 @@ export function normaliseDeclineInput(raw: unknown): Record<string, never> {
   return {};
 }
 
+/** Core V2 S5c BIL-20 (H-4): the closed dispute reasons; no free text (no evidence store exists in S5c). */
+export const DISPUTE_REASONS = ['cash_not_returned', 'collection_not_made', 'collection_time_incorrect', 'return_time_incorrect'] as const;
+export type DisputeReason = (typeof DISPUTE_REASONS)[number];
+/** Core V2 S5c BIL-21 (H-5): an Organization's answer to a dispute, evidence only. */
+export const DISPUTE_POSITIONS = ['accepts', 'contests'] as const;
+/** Core V2 S5c BIL-19 (H-2 option A): the two Organization-asserted times an Owner may correct, and the closed reasons. */
+export const CORRECTABLE_FIELDS = ['cashCollectedAt', 'returnedAt'] as const;
+export type CorrectableField = (typeof CORRECTABLE_FIELDS)[number];
+export const CORRECTION_REASONS = ['actor_entry_error', 'evidence_contradicts_report'] as const;
+/** Core V2 S5c BIL-22 (J-2, H-6): the only resolution S5c admits, nonfinancial. */
+export const RESOLUTION_OUTCOMES = ['timestamp_corrected'] as const;
+
+const oneOf = <T extends string>(v: unknown, values: readonly T[], field: string): T => {
+  if (typeof v !== 'string' || !(values as readonly string[]).includes(v)) throw bad(BILLING_MESSAGES.valueOneOf, { field, values: values.join(', ') });
+  return v as T;
+};
+
+/** BIL-20: `{reasonCode}` only. */
+export function normaliseDisputeInput(raw: unknown): { reasonCode: DisputeReason } {
+  return { reasonCode: oneOf(fields(raw, ['reasonCode']).reasonCode, DISPUTE_REASONS, 'reasonCode') };
+}
+
+/** BIL-21: `{position}` only. */
+export function normaliseDisputeResponseInput(raw: unknown): { position: (typeof DISPUTE_POSITIONS)[number] } {
+  return { position: oneOf(fields(raw, ['position']).position, DISPUTE_POSITIONS, 'position') };
+}
+
+/** BIL-19: `{field, value, reasonCode}`; the value is an RFC 3339 instant with a zone, at most milliseconds. Nothing monetary. */
+export function normaliseCorrectionInput(raw: unknown): { field: CorrectableField; value: string; reasonCode: (typeof CORRECTION_REASONS)[number] } {
+  const b = fields(raw, ['field', 'value', 'reasonCode']);
+  const field = oneOf(b.field, CORRECTABLE_FIELDS, 'field');
+  if (typeof b.value !== 'string' || !isRealTimestamp(b.value)) throw bad(BILLING_MESSAGES.mustBeTimestamp, { field: 'value' });
+  return { field, value: b.value, reasonCode: oneOf(b.reasonCode, CORRECTION_REASONS, 'reasonCode') };
+}
+
+/** BIL-22: `{outcome, correctionId}`: the nonfinancial outcome and the correction it rests on. */
+export function normaliseResolutionInput(raw: unknown): { outcome: (typeof RESOLUTION_OUTCOMES)[number]; correctionId: string } {
+  const b = fields(raw, ['outcome', 'correctionId']);
+  return { outcome: oneOf(b.outcome, RESOLUTION_OUTCOMES, 'outcome'), correctionId: uuid(b.correctionId, 'correctionId') };
+}
+
 export const isAssistanceId = (v: unknown): v is string => typeof v === 'string' && UUID.test(v);

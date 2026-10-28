@@ -8,7 +8,12 @@ import { requestTransitionContext } from '../domain/actors.js';
 import { notFound } from '../domain/errors.js';
 import { idempotencyKey } from '../fees/fee-input.js';
 import type { AssistanceCommandResult } from './assistance-idempotency.js';
-import { isAssistanceId, normaliseAssistanceCreateInput, normaliseCashCollectionInput, normaliseCashReturnInput, normaliseDeclineInput } from './assistance-input.js';
+import {
+  CORRECTABLE_FIELDS, CORRECTION_REASONS, DISPUTE_POSITIONS, DISPUTE_REASONS, RESOLUTION_OUTCOMES, isAssistanceId, normaliseAssistanceCreateInput, normaliseCashCollectionInput,
+  normaliseCashReturnInput, normaliseCorrectionInput, normaliseDeclineInput, normaliseDisputeInput, normaliseDisputeResponseInput, normaliseResolutionInput,
+} from './assistance-input.js';
+import { AssistanceOwner, AssistanceOwnerGuard } from './assistance-owner.guard.js';
+import { AssistanceResolutionService, type VerifiedAssistanceOwner } from './assistance-resolution.service.js';
 import { AssistanceSettlementService } from './assistance-settlement.service.js';
 import { AssistanceUser, AssistanceUserGuard } from './assistance-user.guard.js';
 import { AssistanceService } from './assistance.service.js';
@@ -26,7 +31,7 @@ class CashCollectionDto {
 
 class AssistanceRequestDto {
   @ApiProperty({ format: 'uuid' }) id!: string;
-  @ApiProperty({ enum: ['pending', 'declined', 'cash_collected'] }) status!: string;
+  @ApiProperty({ enum: ['pending', 'declined', 'cash_collected', 'settled', 'returned'], description: 'returned (Core V2 S5c): the beneficiary confirmed the full cash back; resolved.' }) status!: string;
   @ApiProperty({ format: 'uuid' }) beneficiaryUserId!: string;
   @ApiProperty({ format: 'uuid' }) organizationId!: string;
   @ApiProperty({ format: 'uuid' }) platformId!: string;
@@ -62,12 +67,55 @@ class CashReturnDto {
 class CashReturnObligationDto {
   @ApiProperty({ format: 'uuid' }) id!: string;
   @ApiProperty({ format: 'uuid' }) assistanceRequestId!: string;
-  @ApiProperty({ enum: ['open', 'return_reported'] }) status!: string;
+  @ApiProperty({ enum: ['open', 'return_reported', 'confirmed_returned'], description: 'confirmed_returned (Core V2 S5c): only the beneficiary confirms; a report alone never discharges.' }) status!: string;
   @ApiProperty({ description: 'The frozen total (base + Organization fee), minor units.' }) amount!: number;
   @ApiProperty() currency!: string;
   @ApiProperty({ format: 'date-time' }) openedAt!: string;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) returnedAt!: string | null;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) returnReportedAt!: string | null;
+  @ApiProperty({ type: String, nullable: true, format: 'date-time', description: "returnedAt after the Owner's corrections, if any (derived; the original stays)." }) effectiveReturnedAt!: string | null;
+  @ApiProperty({ type: String, nullable: true, format: 'date-time', description: "The beneficiary's confirmation (Billing's time)." }) confirmedAt!: string | null;
+}
+
+class DisputeCreateDto {
+  @ApiProperty({ enum: DISPUTE_REASONS, description: 'cash_not_returned needs a cash-return obligation; return_time_incorrect a reported return. No free text.' }) reasonCode!: string;
+}
+
+class DisputeResponseCreateDto {
+  @ApiProperty({ enum: DISPUTE_POSITIONS }) position!: string;
+}
+
+class DisputeDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty({ format: 'uuid' }) assistanceRequestId!: string;
+  @ApiProperty({ enum: DISPUTE_REASONS }) reasonCode!: string;
+  @ApiProperty({ enum: ['open', 'resolved'] }) status!: string;
+  @ApiProperty({ format: 'date-time' }) openedAt!: string;
+  @ApiProperty({ description: 'Derived: open for more than seven days. An escalation target only; it closes nothing.' }) escalationDue!: boolean;
+  @ApiProperty({ nullable: true, description: "The Organization's answer {position, respondedAt}, evidence only." }) response!: Record<string, unknown> | null;
+  @ApiProperty({ nullable: true, description: "The Owner's nonfinancial resolution {outcome: timestamp_corrected, correctionId, resolvedAt}." }) resolution!: Record<string, unknown> | null;
+}
+
+class CorrectionCreateDto {
+  @ApiProperty({ enum: CORRECTABLE_FIELDS, description: 'An Organization-asserted time that was reported. Nothing monetary is correctable.' }) field!: string;
+  @ApiProperty({ format: 'date-time', description: 'The corrected instant (RFC 3339 with a zone, at most milliseconds); it must keep the recorded time order.' }) value!: string;
+  @ApiProperty({ enum: CORRECTION_REASONS }) reasonCode!: string;
+}
+
+class CorrectionDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty({ format: 'uuid' }) assistanceRequestId!: string;
+  @ApiProperty({ description: 'The order corrections of this request apply in.' }) sequence!: number;
+  @ApiProperty({ enum: CORRECTABLE_FIELDS }) field!: string;
+  @ApiProperty({ format: 'date-time' }) correctedValue!: string;
+  @ApiProperty({ format: 'date-time', description: 'The effective value this correction supersedes (kept on record).' }) supersededValue!: string;
+  @ApiProperty({ enum: CORRECTION_REASONS }) reasonCode!: string;
+  @ApiProperty({ format: 'date-time' }) correctedAt!: string;
+}
+
+class ResolutionCreateDto {
+  @ApiProperty({ enum: RESOLUTION_OUTCOMES, description: 'The only outcome Core V2 S5c admits: nonfinancial.' }) outcome!: string;
+  @ApiProperty({ format: 'uuid', description: 'An Owner correction of exactly the disputed time, appended after the dispute opened.' }) correctionId!: string;
 }
 
 const KEY = { name: 'Idempotency-Key', required: true, description: 'Required: 8-128 of [A-Za-z0-9._:-], bound to you and this exact command. The same key and command replays the first success (Idempotent-Replayed: true); a different command with it is 409 idempotency_key_conflict.' };
@@ -95,6 +143,7 @@ export class AssistanceController {
   constructor(
     private readonly assistance: AssistanceService,
     private readonly settlement: AssistanceSettlementService,
+    private readonly resolution: AssistanceResolutionService,
     private readonly rateLimit: RateLimitService,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
   ) {}
@@ -204,6 +253,30 @@ export class AssistanceController {
     if (!isAssistanceId(id)) throw notFound();
     return answer(res, await this.settlement.settle(user, k, id.toLowerCase(), resolveLocale(acceptLanguage), requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
   }
+  @Post(':id/disputes')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: "Dispute the cash evidence of your assistance request (its beneficiary only; no filing cutoff).",
+    description: 'Core V2 S5c (H-4, J-1 to J-4). One open dispute per request. While open it blocks the confirmation of a cash return; it never ' +
+      'blocks a verified electronic settlement or the obligation sweep, and it changes no financial fact. Seven days open is an escalation ' +
+      'target only (escalationDue). Simulation and development only.',
+  })
+  @ApiParam(ID)
+  @ApiHeader(KEY)
+  @ApiBody({ type: DisputeCreateDto })
+  @ApiResponse({ status: 201, type: DisputeDto, description: 'Opened (or a replay of this key, Idempotent-Replayed: true).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: you administer the Organization but are not the beneficiary' })
+  @ApiResponse(R404)
+  @ApiResponse({ status: 409, description: 'dispute_not_permitted (no recorded evidence of that kind) | assistance_dispute_open | idempotency_key_conflict' })
+  @ApiResponse(R503)
+  async openDispute(@AssistanceUser() user: AuthIdentity, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    const input = normaliseDisputeInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.resolution.openDispute(user, k, id.toLowerCase(), input, requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
+  }
 }
 
 /** Core V2 S5b (register BIL-17; the Owner's E-8, E-9): an Organization's cash-return obligation to a beneficiary. Simulation only, as above. */
@@ -212,7 +285,33 @@ export class AssistanceController {
 @Controller('billing/cash-return-obligations')
 @UseGuards(AssistanceUserGuard)
 export class CashReturnObligationController {
-  constructor(private readonly settlement: AssistanceSettlementService) {}
+  constructor(
+    private readonly settlement: AssistanceSettlementService,
+    private readonly resolution: AssistanceResolutionService,
+  ) {}
+
+  @Post(':id/confirm')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Confirm that you received the full cash back (the beneficiary only).',
+    description: 'Core V2 S5c (H-3, J-4, J-6). Only after the Organization reported the return, and never while a dispute of the request is open. ' +
+      'The obligation becomes confirmed_returned and the request returned (resolved), together. Nothing is purchased, paid or granted.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiHeader(KEY)
+  @ApiResponse({ status: 200, type: CashReturnObligationDto, description: 'Confirmed (or a replay of this key).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request (no body is accepted) | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: you administer the Organization but are not the beneficiary' })
+  @ApiResponse({ status: 404, description: 'an unknown obligation, or you are neither its beneficiary nor an administrator of its Organization (one answer)' })
+  @ApiResponse({ status: 409, description: 'cash_return_not_reported | cash_return_already_confirmed | assistance_dispute_open | idempotency_key_conflict' })
+  @ApiResponse(R503)
+  async confirm(@AssistanceUser() user: AuthIdentity, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    normaliseDeclineInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.resolution.confirmReturn(user, k, id.toLowerCase(), requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
+  }
 
   @Post(':id/return')
   @Header('Cache-Control', 'no-store')
@@ -236,5 +335,108 @@ export class CashReturnObligationController {
     const input = normaliseCashReturnInput(body);
     if (!isAssistanceId(id)) throw notFound();
     return answer(res, await this.settlement.reportReturn(user, k, id.toLowerCase(), input, requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
+  }
+}
+
+/** Core V2 S5c (register BIL-21; the Owner's H-5): the Organization's answer to a beneficiary's dispute. Simulation only, as above. */
+@ApiTags('organization assistance')
+@ApiBearerAuth()
+@Controller('billing/assistance-disputes')
+@UseGuards(AssistanceUserGuard)
+export class AssistanceDisputeController {
+  constructor(private readonly resolution: AssistanceResolutionService) {}
+
+  @Post(':id/responses')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Answer a dispute: accepts or contests (an administrator of the Organization, never the beneficiary). Once per dispute.',
+    description: 'Evidence only: it closes nothing, discharges nothing and changes no financial state.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiHeader(KEY)
+  @ApiBody({ type: DisputeResponseCreateDto })
+  @ApiResponse({ status: 201, type: DisputeDto, description: 'Answered (or a replay of this key, Idempotent-Replayed: true).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: you are the beneficiary' })
+  @ApiResponse({ status: 404, description: 'an unknown dispute, or you are not an administrator of its Organization (one answer)' })
+  @ApiResponse({ status: 409, description: 'assistance_dispute_not_open | dispute_response_exists | idempotency_key_conflict' })
+  @ApiResponse(R503)
+  async respond(@AssistanceUser() user: AuthIdentity, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    const input = normaliseDisputeResponseInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.resolution.respond(user, k, id.toLowerCase(), input, requestTransitionContext({ type: 'user', id: user.id, userKind: 'member' })));
+  }
+}
+
+const STEP_UP = 'x-step-up-token';
+const R403_OWNER = { status: 403, description: 'operation_not_permitted: not an Owner (an operator or a member) | step_up_required: missing, expired, reused, or another purpose, owner or session' };
+const R503_OWNER = { status: 503, description: 'auth_timeout | auth_unavailable: Auth could not verify the Owner, the Platform or the step-up; nothing was changed' };
+
+/**
+ * Core V2 S5c (register BIL-19, BIL-22; the Owner's H-1, H-2, H-6, J-2): the Owner's append-only timestamp corrections and nonfinancial
+ * dispute resolutions. Human only: the caller's own Auth bearer, an Owner (live), of the request's Platform (live), with a fresh factor
+ * step-up of the operation's OWN purpose, consumed once through Auth. No Operator. No Owner action here discharges, confirms, pays, refunds
+ * or reverses anything. Simulation only, as above.
+ */
+@ApiTags('organization assistance')
+@ApiBearerAuth()
+@Controller('billing/admin')
+@UseGuards(AssistanceOwnerGuard)
+export class AssistanceAdminController {
+  constructor(private readonly resolution: AssistanceResolutionService) {}
+
+  @Post('assistance-requests/:id/corrections')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Append a correction of an Organization-asserted time: cashCollectedAt or returnedAt (the Owner, step-up billing.assistance.correct).',
+    description: 'The original evidence stays; the effective value is derived. A correction changes no amount, fee, deadline (settleBy), overdue ' +
+      'state, obligation, settlement, purchase or payment. A replay of the same key and command answers the stored correction without spending a proof.',
+  })
+  @ApiParam(ID)
+  @ApiHeader(KEY)
+  @ApiHeader({ name: STEP_UP, required: true, description: 'A fresh factor step-up for purpose "billing.assistance.correct" (POST /auth/admin/step-up). Consumed once.' })
+  @ApiBody({ type: CorrectionCreateDto })
+  @ApiResponse({ status: 201, type: CorrectionDto, description: 'Appended (or a replay of this key, Idempotent-Replayed: true; no proof is spent).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse(R403_OWNER)
+  @ApiResponse({ status: 404, description: "an unknown request, or one outside the Owner's Company (one answer)" })
+  @ApiResponse({ status: 409, description: 'correction_not_permitted (that time was not reported, or is unchanged) | idempotency_key_conflict' })
+  @ApiResponse({ status: 422, description: 'correction_time_invalid: the corrected time breaks the recorded time order' })
+  @ApiResponse(R503_OWNER)
+  async correct(@AssistanceOwner() owner: VerifiedAssistanceOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Headers(STEP_UP) stepUp: string | undefined,
+    @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    const input = normaliseCorrectionInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.resolution.correct(owner, k, id.toLowerCase(), input, stepUp, requestTransitionContext({ type: 'user', id: owner.userId, userKind: 'owner' })));
+  }
+
+  @Post('assistance-disputes/:id/resolution')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Close a timestamp dispute on a correction of exactly the disputed time (the Owner, step-up billing.assistance.dispute.resolve).',
+    description: 'The only resolution Core V2 S5c admits, nonfinancial (J-2). A cash_not_returned or collection_not_made dispute has none and stays open. ' +
+      'Never a discharge or a confirmation: the cash-return obligation is unchanged.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiHeader(KEY)
+  @ApiHeader({ name: STEP_UP, required: true, description: 'A fresh factor step-up for purpose "billing.assistance.dispute.resolve" (POST /auth/admin/step-up). Consumed once.' })
+  @ApiBody({ type: ResolutionCreateDto })
+  @ApiResponse({ status: 200, type: DisputeDto, description: 'Resolved (or a replay of this key).' })
+  @ApiResponse({ status: 400, description: 'invalid_assistance_request | idempotency_key_required' })
+  @ApiResponse(R401)
+  @ApiResponse(R403_OWNER)
+  @ApiResponse({ status: 404, description: "an unknown dispute, or one outside the Owner's Company (one answer)" })
+  @ApiResponse({ status: 409, description: 'assistance_dispute_not_open | resolution_not_permitted | idempotency_key_conflict' })
+  @ApiResponse(R503_OWNER)
+  async resolve(@AssistanceOwner() owner: VerifiedAssistanceOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Headers(STEP_UP) stepUp: string | undefined,
+    @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const k = idempotencyKey(key);
+    const input = normaliseResolutionInput(body);
+    if (!isAssistanceId(id)) throw notFound();
+    return answer(res, await this.resolution.resolve(owner, k, id.toLowerCase(), input, stepUp, requestTransitionContext({ type: 'user', id: owner.userId, userKind: 'owner' })));
   }
 }

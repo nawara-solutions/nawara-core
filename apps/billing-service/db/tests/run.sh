@@ -157,3 +157,51 @@ bad=$(q "SELECT count(*) FROM assistance_request a WHERE a.\"feeAmount\" > (SELE
 [ "$rows" -le 1 ] && [ "$other" -eq 0 ] && [ "$bad" -eq 0 ] && [ $((rows + dups + stale)) -eq "$racers" ] \
   || fail "assistance race: rows=$rows duplicates=$dups stale=$stale other=$other above-cap=$bad (want <=1 row, every other racer refused, no other error)"
 echo "PASS: race — $racers concurrent assistance requests gave rows=$rows (refused: $dups duplicate, $stale stale fee), none above its cap"
+
+echo "== concurrency (Core V2 S5c): a confirmation racing $racers disputes on one request: exactly one dispute opens, and the obligation is confirmed only if it committed first"
+# reuses the S5a race database: one request, written past its deadline with a reported return (triggers off, as a superuser fixture)
+b="00000000-0000-4000-8000-00000000c5f1"; a="00000000-0000-4000-8000-00000000c5f2"; org="00000000-0000-4000-8000-00000000c5f3" # an Organization with no approved fee
+req=$(q "INSERT INTO assistance_request (\"beneficiaryUserId\", \"organizationId\", \"platformId\", \"productId\", \"priceId\", currency, \"baseAmount\", \"feeAmount\", \"totalAmount\", \"feeCapVersion\", consent) VALUES ('$b', '$org', '$p', '$prod', '$price', 'TND', 9000, 0, 9000, (SELECT max(version) FROM fee_cap WHERE \"platformId\" = '$p'), true) RETURNING id")
+psql -Atq -v ON_ERROR_STOP=1 -d "$db" >/dev/null <<SQL
+SET session_replication_role = replica;
+UPDATE assistance_request SET "consentAt" = now() - interval '200 hours', status = 'cash_collected', "cashCollectedAt" = now() - interval '100 hours', "reportedAt" = now() - interval '100 hours', "reportedBy" = '$a', "settleBy" = now() - interval '28 hours' WHERE id = '$req';
+INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", status, "returnedAt", "returnReportedAt", "returnReportedBy")
+  SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt", 'return_reported', now() - interval '1 hour', now(), '$a' FROM assistance_request WHERE id = '$req';
+SQL
+# the service's lock order (H-7): the request row first, then the obligation
+confirm="BEGIN; SELECT 1 FROM assistance_request WHERE id = '$req' FOR UPDATE; SELECT 1 FROM cash_return_obligation WHERE \"assistanceRequestId\" = '$req' FOR UPDATE;
+  UPDATE cash_return_obligation SET status = 'confirmed_returned', \"confirmedBy\" = '$b' WHERE \"assistanceRequestId\" = '$req'; UPDATE assistance_request SET status = 'returned' WHERE id = '$req'; COMMIT;"
+dispute="INSERT INTO assistance_dispute (\"assistanceRequestId\", \"beneficiaryUserId\", \"organizationId\", \"reasonCode\") VALUES ('$req', '$b', '$org', 'cash_not_returned')"
+outdir="$(mktemp -d)"
+( psql -Atq -d "$db" >"$outdir/confirm.out" 2>&1 -c "$confirm" ) &
+for i in $(seq 1 "$racers"); do ( psql -Atq -d "$db" >"$outdir/$i.out" 2>&1 -c "$dispute" ) & done
+wait
+disputes=$(q "SELECT count(*) FROM assistance_dispute WHERE \"assistanceRequestId\" = '$req'")
+dups=$(cat "$outdir"/[0-9]*.out | grep -c 'assistance_dispute_open_unique' || true)
+deadlocks=$(cat "$outdir"/*.out | grep -ci deadlock || true); rm -rf "$outdir"
+state=$(q "SELECT o.status || '/' || a.status FROM cash_return_obligation o JOIN assistance_request a ON a.id = o.\"assistanceRequestId\" WHERE a.id = '$req'")
+# J-4: a confirmation never commits after a dispute opened; if it committed first, the dispute opened after it
+ordered=$(q "SELECT count(*) FROM cash_return_obligation o JOIN assistance_dispute d ON d.\"assistanceRequestId\" = o.\"assistanceRequestId\" WHERE o.\"assistanceRequestId\" = '$req' AND o.status = 'confirmed_returned' AND d.\"openedAt\" < o.\"confirmedAt\"")
+{ [ "$state" = "confirmed_returned/returned" ] || [ "$state" = "return_reported/cash_collected" ]; } && [ "$disputes" -eq 1 ] && [ "$dups" -eq $((racers - 1)) ] && [ "$deadlocks" -eq 0 ] && [ "$ordered" -eq 0 ] \
+  || fail "S5c race: state=$state disputes=$disputes duplicates=$dups deadlocks=$deadlocks dispute-before-confirmation=$ordered"
+echo "PASS: race — confirmation vs $racers disputes ended $state with exactly one dispute, no deadlock, never a confirmation after an open dispute"
+
+echo "== ordering (Core V2 S5c): a dispute whose transaction began before a confirmation committed, but serialized after it, is recorded after it"
+req2=$(q "INSERT INTO assistance_request (\"beneficiaryUserId\", \"organizationId\", \"platformId\", \"productId\", \"priceId\", currency, \"baseAmount\", \"feeAmount\", \"totalAmount\", \"feeCapVersion\", consent) VALUES ('00000000-0000-4000-8000-00000000c5f4', '$org', '$p', '$prod', '$price', 'TND', 9000, 0, 9000, (SELECT max(version) FROM fee_cap WHERE \"platformId\" = '$p'), true) RETURNING id")
+psql -Atq -v ON_ERROR_STOP=1 -d "$db" >/dev/null <<SQL
+SET session_replication_role = replica;
+UPDATE assistance_request SET "consentAt" = now() - interval '200 hours', status = 'cash_collected', "cashCollectedAt" = now() - interval '100 hours', "reportedAt" = now() - interval '100 hours', "reportedBy" = '$a', "settleBy" = now() - interval '28 hours' WHERE id = '$req2';
+INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", status, "returnedAt", "returnReportedAt", "returnReportedBy")
+  SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt", 'return_reported', now() - interval '1 hour', now(), '$a' FROM assistance_request WHERE id = '$req2';
+SQL
+outdir="$(mktemp -d)"
+# the dispute's transaction starts first and reaches its insert while the confirmation holds the request lock
+( psql -Atq -d "$db" >"$outdir/dispute.out" 2>&1 -c "BEGIN; SELECT pg_sleep(0.3); INSERT INTO assistance_dispute (\"assistanceRequestId\", \"beneficiaryUserId\", \"organizationId\", \"reasonCode\") VALUES ('$req2', '00000000-0000-4000-8000-00000000c5f4', '$org', 'cash_not_returned'); COMMIT;" ) &
+( sleep 0.1; psql -Atq -d "$db" >"$outdir/confirm.out" 2>&1 -c "BEGIN; SELECT 1 FROM assistance_request WHERE id = '$req2' FOR UPDATE; SELECT pg_sleep(0.6);
+  UPDATE cash_return_obligation SET status = 'confirmed_returned', \"confirmedBy\" = '00000000-0000-4000-8000-00000000c5f4' WHERE \"assistanceRequestId\" = '$req2'; UPDATE assistance_request SET status = 'returned' WHERE id = '$req2'; COMMIT;" ) &
+wait
+errors=$(cat "$outdir"/*.out | grep -ci error || true); rm -rf "$outdir"
+state=$(q "SELECT o.status FROM cash_return_obligation o WHERE o.\"assistanceRequestId\" = '$req2'")
+after=$(q "SELECT (d.\"openedAt\" > o.\"confirmedAt\")::text FROM assistance_dispute d JOIN cash_return_obligation o ON o.\"assistanceRequestId\" = d.\"assistanceRequestId\" WHERE d.\"assistanceRequestId\" = '$req2'")
+[ "$errors" -eq 0 ] && [ "$state" = "confirmed_returned" ] && [ "$after" = "true" ] || fail "S5c ordering: errors=$errors state=$state dispute-recorded-after-confirmation=$after"
+echo "PASS: ordering — the confirmation committed first and the dispute that waited for it is recorded after it"

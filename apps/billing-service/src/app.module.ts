@@ -90,7 +90,7 @@ export class AppModule {
         SubscriptionsModule,
         PlatformsModule.register(config, overrides.ownerAuthority), // Core V2 S3d (register BIL-01)
         CheckoutModule.register(config), // Core V2 S3f (BIL-10): development and simulation only; never mounted in production
-        AssistanceModule.register(config), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
+        AssistanceModule.register(config, overrides.ownerAuthority), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
       ],
     };
   }

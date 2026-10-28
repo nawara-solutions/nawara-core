@@ -2,9 +2,13 @@ import type { Queryable } from '@nawara/service-kit';
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
-/** A cash-return obligation as its Organization actor and its beneficiary see it (Core V2 S5b, E-8). */
+/**
+ * A cash-return obligation as its Organization actor and its beneficiary see it (Core V2 S5b, E-8). `returnedAt` is the Organization's
+ * original assertion; `effectiveReturnedAt` is it after the Owner's corrections, if any (Core V2 S5c, H-2: derived, never stored).
+ */
 export function representCashReturnObligation(o: {
   id: string; assistanceRequestId: string; status: string; amount: string; currency: string; openedAt: Date; returnedAt: Date | null; returnReportedAt: Date | null;
+  confirmedAt: Date | null; effectiveReturnedAt: Date | null;
 }) {
   return {
     id: o.id,
@@ -15,10 +19,56 @@ export function representCashReturnObligation(o: {
     openedAt: iso(o.openedAt),
     returnedAt: iso(o.returnedAt),
     returnReportedAt: iso(o.returnReportedAt),
+    effectiveReturnedAt: iso(o.effectiveReturnedAt), // Core V2 S5c
+    confirmedAt: iso(o.confirmedAt), // Core V2 S5c (H-3): the beneficiary's confirmation, the database's time
   };
 }
 
-export const OBLIGATION_COLUMNS = `id, "assistanceRequestId", status, amount, currency, "openedAt", "returnedAt", "returnReportedAt"`;
+export const OBLIGATION_COLUMNS = `id, "assistanceRequestId", status, amount, currency, "openedAt", "returnedAt", "returnReportedAt", "confirmedAt",
+  billing_assistance_effective_time("assistanceRequestId", 'returnedAt') AS "effectiveReturnedAt"`;
+
+/**
+ * Core V2 S5c (H-4, H-5, J-2): a dispute with the Organization's answer and the nonfinancial resolution, if any. `escalationDue` is derived
+ * from the database's time (open for more than seven days): an escalation TARGET only, it closes nothing and starts nothing. No actor
+ * identifier is exposed.
+ */
+export function representDispute(d: {
+  id: string; assistanceRequestId: string; reasonCode: string; status: string; openedAt: Date; escalationDue: boolean;
+  position: string | null; respondedAt: Date | null; outcome: string | null; correctionId: string | null; resolvedAt: Date | null;
+}) {
+  return {
+    id: d.id,
+    assistanceRequestId: d.assistanceRequestId,
+    reasonCode: d.reasonCode,
+    status: d.status,
+    openedAt: iso(d.openedAt),
+    escalationDue: d.escalationDue,
+    response: d.position ? { position: d.position, respondedAt: iso(d.respondedAt) } : null,
+    resolution: d.outcome ? { outcome: d.outcome, correctionId: d.correctionId, resolvedAt: iso(d.resolvedAt) } : null,
+  };
+}
+
+export const DISPUTE_COLUMNS = `d.id, d."assistanceRequestId", d."reasonCode", d.status, d."openedAt",
+  (d.status = 'open' AND now() > d."openedAt" + interval '7 days') AS "escalationDue",
+  p.position, p."respondedAt", d.outcome, d."correctionId", d."resolvedAt"`;
+
+/** Core V2 S5c (H-2): an appended Owner correction of an Organization-asserted time; the superseded value stays on record. */
+export function representCorrection(c: {
+  id: string; assistanceRequestId: string; sequence: number; field: string; correctedValue: Date; supersededValue: Date; reasonCode: string; correctedAt: Date;
+}) {
+  return {
+    id: c.id,
+    assistanceRequestId: c.assistanceRequestId,
+    sequence: c.sequence,
+    field: c.field,
+    correctedValue: iso(c.correctedValue)!,
+    supersededValue: iso(c.supersededValue)!,
+    reasonCode: c.reasonCode,
+    correctedAt: iso(c.correctedAt),
+  };
+}
+
+export const CORRECTION_COLUMNS = `id, "assistanceRequestId", sequence, field, "correctedValue", "supersededValue", "reasonCode", "correctedAt"`;
 
 /**
  * Core V2 S5b (E-1, E-5, E-8): the settlement side of an assistance request, for its read. Each channel is shown with its payment request's
@@ -32,8 +82,18 @@ export async function loadSettlementView(q: Queryable, assistanceRequestId: stri
       WHERE c."assistanceRequestId" = $1 ORDER BY c."createdAt", c.id`, [assistanceRequestId])).rows;
   const obligation = (await q.query<Parameters<typeof representCashReturnObligation>[0]>(
     `SELECT ${OBLIGATION_COLUMNS} FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [assistanceRequestId])).rows[0];
+  // Core V2 S5c: the disputes (oldest first) and the Owner's corrections (in the order they apply), and the effective collection time
+  const disputes = (await q.query<Parameters<typeof representDispute>[0]>(
+    `SELECT ${DISPUTE_COLUMNS} FROM assistance_dispute d LEFT JOIN assistance_dispute_response p ON p."disputeId" = d.id
+      WHERE d."assistanceRequestId" = $1 ORDER BY d."openedAt", d.id`, [assistanceRequestId])).rows;
+  const corrections = (await q.query<Parameters<typeof representCorrection>[0]>(
+    `SELECT ${CORRECTION_COLUMNS} FROM assistance_correction WHERE "assistanceRequestId" = $1 ORDER BY sequence`, [assistanceRequestId])).rows;
+  const collected = (await q.query<{ v: Date | null }>(`SELECT billing_assistance_effective_time($1, 'cashCollectedAt') AS v`, [assistanceRequestId])).rows[0]!.v;
   return {
     settlementChannels: channels.map((c) => ({ ...c, createdAt: iso(c.createdAt), closedAt: iso(c.closedAt) })),
     cashReturnObligation: obligation ? representCashReturnObligation(obligation) : null,
+    effectiveCashCollectedAt: iso(collected),
+    disputes: disputes.map(representDispute),
+    corrections: corrections.map(representCorrection),
   };
 }

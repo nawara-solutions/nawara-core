@@ -100,6 +100,17 @@ describe('BILLING_MESSAGES', () => {
       [en('settlementChannelOpen'), 'A settlement of this assistance request is already in progress.'],
       [en('cashReturnNotOpen'), 'The cash-return obligation is not open.'],
       [en('cashReturnTimeInvalid'), 'returnedAt must be no earlier than the cash collection and no later than now.'],
+      [en('valueOneOf', { field: 'reasonCode', values: 'a, b' }), 'reasonCode must be one of: a, b'], // Core V2 S5c
+      [en('cashReturnNotReported'), 'The Organization has not reported the cash return yet.'],
+      [en('cashReturnAlreadyConfirmed'), 'The cash return is already confirmed.'],
+      [en('assistanceDisputeOpen'), 'A dispute of this assistance request is open.'],
+      [en('assistanceDisputeNotOpen'), 'The dispute is not open.'],
+      [en('disputeNotPermitted'), 'This dispute concerns no recorded evidence of the assistance request.'],
+      [en('disputeResponseExists'), 'The dispute has already been answered.'],
+      [en('correctionNotPermitted'), 'This time cannot be corrected: it has not been reported, or the value is unchanged.'],
+      [en('correctionTimeInvalid'), 'The corrected time breaks the recorded time order.'],
+      [en('resolutionNotPermitted'), 'This dispute has no permitted nonfinancial resolution with this correction.'],
+      [en('stepUpRequired'), 'A fresh step-up for this operation is required.'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

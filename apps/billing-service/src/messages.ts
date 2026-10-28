@@ -407,4 +407,60 @@ export const BILLING_MESSAGES = defineMessages({
     fr: 'returnedAt ne doit être ni antérieur à la collecte des espèces ni postérieur à maintenant.',
     ar: 'يجب ألا يسبق returnedAt وقت تحصيل النقد وألا يتجاوز الوقت الحالي.',
   },
+  // Core V2 S5c: cash-return confirmation, disputes and Owner corrections (register BIL-18 to BIL-22)
+  valueOneOf: {
+    en: '{field} must be one of: {values}',
+    fr: "{field} doit être l'une des valeurs suivantes : {values}",
+    ar: 'يجب أن يكون {field} إحدى القيم التالية: {values}',
+  },
+  cashReturnNotReported: {
+    en: 'The Organization has not reported the cash return yet.',
+    fr: "L'organisation n'a pas encore déclaré la restitution des espèces.",
+    ar: 'لم تُبلغ المنظمة بعد عن إرجاع النقد.',
+  },
+  cashReturnAlreadyConfirmed: {
+    en: 'The cash return is already confirmed.',
+    fr: 'La restitution des espèces est déjà confirmée.',
+    ar: 'تم تأكيد إرجاع النقد بالفعل.',
+  },
+  assistanceDisputeOpen: {
+    en: 'A dispute of this assistance request is open.',
+    fr: "Une contestation de cette demande d'aide est ouverte.",
+    ar: 'يوجد اعتراض مفتوح على طلب المساعدة هذا.',
+  },
+  assistanceDisputeNotOpen: {
+    en: 'The dispute is not open.',
+    fr: "La contestation n'est pas ouverte.",
+    ar: 'الاعتراض غير مفتوح.',
+  },
+  disputeNotPermitted: {
+    en: 'This dispute concerns no recorded evidence of the assistance request.',
+    fr: "Cette contestation ne porte sur aucune preuve enregistrée de la demande d'aide.",
+    ar: 'لا يتعلق هذا الاعتراض بأي دليل مسجل لطلب المساعدة.',
+  },
+  disputeResponseExists: {
+    en: 'The dispute has already been answered.',
+    fr: 'La contestation a déjà reçu une réponse.',
+    ar: 'تم الرد على الاعتراض بالفعل.',
+  },
+  correctionNotPermitted: {
+    en: 'This time cannot be corrected: it has not been reported, or the value is unchanged.',
+    fr: "Cette heure ne peut pas être corrigée : elle n'a pas été déclarée, ou la valeur est inchangée.",
+    ar: 'لا يمكن تصحيح هذا الوقت: لم يُبلّغ عنه، أو أن القيمة لم تتغير.',
+  },
+  correctionTimeInvalid: {
+    en: 'The corrected time breaks the recorded time order.',
+    fr: "L'heure corrigée rompt l'ordre chronologique enregistré.",
+    ar: 'الوقت المصحح يخالف الترتيب الزمني المسجل.',
+  },
+  resolutionNotPermitted: {
+    en: 'This dispute has no permitted nonfinancial resolution with this correction.',
+    fr: "Cette contestation n'a pas de résolution non financière autorisée avec cette correction.",
+    ar: 'لا يوجد لهذا الاعتراض حل غير مالي مسموح به بهذا التصحيح.',
+  },
+  stepUpRequired: {
+    en: 'A fresh step-up for this operation is required.',
+    fr: 'Une nouvelle vérification renforcée pour cette opération est requise.',
+    ar: 'يلزم تحقق معزز جديد لهذه العملية.',
+  },
 });

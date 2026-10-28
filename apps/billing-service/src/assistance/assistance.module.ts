@@ -6,7 +6,10 @@ import { AssistanceAuthority } from './assistance-authority.js';
 import { AssistanceCommandIdempotency } from './assistance-idempotency.js';
 import { AssistanceSettlementService } from './assistance-settlement.service.js';
 import { AssistanceUserGuard } from './assistance-user.guard.js';
-import { AssistanceController, CashReturnObligationController } from './assistance.controller.js';
+import { HttpOwnerAuthority, OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
+import { AssistanceOwnerGuard } from './assistance-owner.guard.js';
+import { AssistanceResolutionService } from './assistance-resolution.service.js';
+import { AssistanceAdminController, AssistanceController, AssistanceDisputeController, CashReturnObligationController } from './assistance.controller.js';
 import { AssistanceService } from './assistance.service.js';
 import { CashReturnSweep, CashReturnSweepService } from './cash-return-sweep.js';
 
@@ -18,13 +21,18 @@ import { CashReturnSweep, CashReturnSweepService } from './cash-return-sweep.js'
  */
 @Module({})
 export class AssistanceModule {
-  static register(config: BillingConfig): DynamicModule {
+  static register(config: BillingConfig, ownerAuthority?: OwnerAuthority): DynamicModule {
     if (config.isProduction) return { module: AssistanceModule };
     return {
       module: AssistanceModule,
       imports: [RateLimitModule, InvoicesModule],
-      controllers: [AssistanceController, CashReturnObligationController],
-      providers: [AssistanceService, AssistanceSettlementService, AssistanceAuthority, AssistanceCommandIdempotency, AssistanceUserGuard, CashReturnSweep, CashReturnSweepService],
+      controllers: [AssistanceController, CashReturnObligationController, AssistanceDisputeController, AssistanceAdminController],
+      providers: [
+        AssistanceService, AssistanceSettlementService, AssistanceAuthority, AssistanceCommandIdempotency, AssistanceUserGuard, CashReturnSweep, CashReturnSweepService,
+        // Core V2 S5c (BIL-18 to BIL-22): the resolution commands; the Owner path uses Auth's live Owner, Platform and step-up checks
+        AssistanceResolutionService, AssistanceOwnerGuard,
+        { provide: OWNER_AUTHORITY, useValue: ownerAuthority ?? new HttpOwnerAuthority({ baseUrl: config.authServiceUrl }) },
+      ],
     };
   }
 }
