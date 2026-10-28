@@ -470,7 +470,7 @@ Separate from implementation; each item needs its own documentation authorizatio
 | DOC-1 | new record (location decided at authorization) | the R-6a specification (G-3) | S2-Auth R-6a |
 | DOC-2 | new record (location decided at authorization) | the AR-04.6 contract register: routes, DTOs, errors, idempotency classes (G-3) | route-changing packages of S2 to S6 |
 | DOC-3 | [`CORE-ROADMAP.md`](../CORE-ROADMAP.md), [`CORE-V3-ROADMAP.md`](../CORE-V3-ROADMAP.md) | an S-track entry in the current checkpoint; reconciliation of A10, A11 and Release / Payment dispositions with S3–S6 development (G-2), preserving the historical decisions | S3, S4 |
-| DOC-4 | [`financial-architecture.md`](./financial-architecture.md) | remove Nawara cash settlement; explicit routing (S0 §6.1) | S6 review (and S4 for cash) |
+| DOC-4 | [`financial-architecture.md`](./financial-architecture.md) | remove Nawara cash settlement; explicit routing (S0 §6.1). **Written 2026-10-28: its §0 (Core V2, with implementation status)** | S6 review (and S4 for cash) |
 | DOC-5 | [Billing SDD](../sdd/billing-service.md) | fixed Core V2 grace versus `SUBSCRIPTION_GRACE_DAYS` (S0 §6.1) | S3e |
 | DOC-6 | [Payment SDD](../sdd/payment-service.md), [Payment ADD](../add/payment-service.md) | no trust-based cash confirmation; payer and purpose (S0 §6.1) | S4 review |
 | DOC-7 | [`audit-event-catalog.md`](./audit-event-catalog.md), [`core-architecture.md`](./core-architecture.md) | new audit actions; Auth's service-callee route and payment-service as an Auth caller | S2 |
