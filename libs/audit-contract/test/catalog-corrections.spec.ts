@@ -104,7 +104,7 @@ describe('Core V2 S3g (D-CAT-9): the four catalog actions additionally accept th
     expect(billingWithUser.sort()).toEqual(['invoice.discarded', 'invoice.issued', 'payment_request.cancelled', 'payment_request.created', ...CATALOG, ...S5A, ...S5C_OWNER].sort());
     for (const a of S5C_OWNER) expect(AUDIT_CATALOG.get(a as never)!.actors).toEqual({ user: ['owner'] });
     for (const a of S5A) expect(AUDIT_CATALOG.get(a as never)!.actors).toEqual({ user: ['member'] });
-    expect(AUDIT_CATALOG.get('cash_return_obligation.opened' as never)!.actors).toEqual({ system: ['assistance_sweep'] }); // S5b: Billing's own sweep, never a user
+    expect(AUDIT_CATALOG.get('cash_return_obligation.opened' as never)!.actors).toEqual({ system: ['assistance_sweep', 'refund_effect_worker'] }); // S5b: Billing's own sweep, never a user // + Core V2 S6d (R6D-2): the refund effect worker opens refund-origin obligations
   });
 });
 
@@ -137,13 +137,13 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 
 describe('nothing else was broadened', () => {
   it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the four of A5.4-AC1 (batches 1 and 2), and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(87); // + Core V2 S6c (R6C-11): refund_authorization.completed, refund_case.completed; // + the three assistance-request actions of Core V2 S5a (D-9), the three settlement / cash-return actions of S5b (E-13), the five confirmation / dispute / correction actions of S5c, the two refund-case actions of S6a and the four refund actions of S6b (R6B-7); + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4, the two evidence-grant actions of S2-File.1, file.granted_read (S2-File.2) and the two hold actions of S2-File.3
+    expect(AUDIT_ACTIONS).toHaveLength(88); // + Core V2 S6c (R6C-11): refund_authorization.completed, refund_case.completed; + Core V2 S6d (R6D-5): subscription_purchase.reversed; // + the three assistance-request actions of Core V2 S5a (D-9), the three settlement / cash-return actions of S5b (E-13), the five confirmation / dispute / correction actions of S5c, the two refund-case actions of S6a and the four refund actions of S6b (R6B-7); + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4, the two evidence-grant actions of S2-File.1, file.granted_read (S2-File.2) and the two hold actions of S2-File.3
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
       'product.created', 'product.archived', 'price.created', 'price.retired']);
     const optional = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.organization === 'optional' && !corrected.has(a));
-    expect(optional.sort()).toEqual(['file.deleted', 'file.grant_issued', 'file.grant_revoked', 'file.granted_read', 'file.hold_placed', 'file.hold_released', 'file.integrity_incident', 'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded', 'refund_attempt.authorized', 'refund_attempt.failed', 'refund_attempt.succeeded', 'refund_authorization.completed', 'refund_case.authorization_relayed', 'refund_case.cancelled', 'refund_case.completed', 'refund_case.opened'].filter((a) => !corrected.has(a)).sort());
+    expect(optional.sort()).toEqual(['file.deleted', 'file.grant_issued', 'file.grant_revoked', 'file.granted_read', 'file.hold_placed', 'file.hold_released', 'file.integrity_incident', 'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded', 'refund_attempt.authorized', 'refund_attempt.failed', 'refund_attempt.succeeded', 'refund_authorization.completed', 'refund_case.authorization_relayed', 'refund_case.cancelled', 'refund_case.completed', 'refund_case.opened', 'subscription_purchase.reversed'].filter((a) => !corrected.has(a)).sort());
     const withUser = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'payment-service' && AUDIT_CATALOG.get(a)!.actors.user);
     expect(withUser.sort()).toEqual(['payment.failed', 'payment.succeeded']);
   });

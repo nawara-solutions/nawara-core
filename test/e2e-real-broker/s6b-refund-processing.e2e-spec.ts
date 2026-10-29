@@ -26,7 +26,8 @@ afterAll(() => refStub.close());
  *   at the REAL Auth (AUTH-02, Payment's own service token, `consumeRef` = the attempt id) → `authorized`, approver from Auth → the worker
  *   dispatches with the stable key → the simulated provider's signed refund notification → a `refund` fact and `succeeded` → Billing's
  *   reconciler mirrors it (PAY-08). Core V2 S6c: the verified refund is allocated, Payment completes the authorization once and publishes
- *   `refund.case_completed` over the real broker; Billing's verified consumer completes the case once. The purchase is never reversed (S6d).
+ *   `refund.case_completed` over the real broker; Billing's verified consumer completes the case once; Billing's refund effect worker then
+ *   reverses the purchase once (Core V2 S6d).
  *
  * And the refused path: a receipt bound to other content is refused by Auth (`receipt_invalid`) → the attempt is `authorization_refused`
  * and the case can be cancelled.
@@ -316,8 +317,14 @@ describeWithEnv(
       expect(completion).toEqual([expect.objectContaining({ refundAuthorizationId: z.id, refundAttemptId: attemptId })]);
       const read = await call(BILLING_URL, 'GET', ownerToken, `/billing/admin/refund-cases/${c.id}`);
       expect(read.json).toMatchObject({ status: 'completed', completedAt: new Date(z.completedAt).toISOString(), completion: { refundAuthorizationId: z.id } });
-      // S6d stays out: no reversal, the payment untouched, no other refund.* event, exactly one completion event
-      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows[0].n).toBe(0);
+      // Core V2 S6d: Billing's refund effect worker applies the completed case's commercial effect once: the direct purchase is reversed (one
+      // reversal, cause refund_completion), the purchase record kept; the payment untouched; no other refund.* event, exactly one completion event
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM refund_case_effect WHERE "refundCaseId" = $1`, [c.id])).rowCount === 1,
+        30_000, `Billing's refund effect worker to apply the completion\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT outcome FROM refund_case_effect WHERE "refundCaseId" = $1`, [c.id])).rows[0].outcome).toBe('reversed_purchase');
+      expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
+        .toEqual([{ cause: 'refund_completion' }]);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows[0].n).toBe(1);
       expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [paymentId])).rows[0].status).toBe('succeeded');
       expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'refund.%'`)).rows.map((x) => x.name)).toEqual(['refund.case_completed']);
       expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE (name LIKE 'audit.refund_attempt.%' AND payload->'resource'->>'id' = $1) OR (name = 'audit.refund_authorization.completed' AND payload->'resource'->>'id' = $2) ORDER BY "occurredAt", name`, [attemptId, z.id])).rows.map((x) => x.name))

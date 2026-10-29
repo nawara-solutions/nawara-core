@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (26)
+## billing-service (27)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -80,7 +80,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `assistance_request.declined` | commercial | user (member) | required | assistance_request | — | succeeded | `declined_by`: beneficiary \| organization_actor | A pending assistance request was finally declined, by its beneficiary or by an administrator of the Organization. |
 | `assistance_request.cash_collection_reported` | commercial | user (member) | required | assistance_request | — | succeeded | `cash_collected_at`: timestamp<br>`settle_by`: timestamp | An Organization administrator declared the physical cash collection, starting the 72-hour settlement deadline (not a settlement). |
 | `assistance_request.settlement_requested` | commercial | user (member) | required | assistance_request | — | succeeded | `invoice_id`: uuid<br>`payment_request_id`: uuid | An Organization administrator started the electronic settlement of an assistance request (an invoice and a payment request; not yet paid). |
-| `cash_return_obligation.opened` | commercial | system (`assistance_sweep`) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`amount`: integer 1–9007199254740991 | The settlement deadline passed with no electronic settlement: the Organization owes the beneficiary the full cash collected, fee included. |
+| `cash_return_obligation.opened` | commercial | system (`assistance_sweep`, `refund_effect_worker`) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`amount`: integer 1–9007199254740991<br>`origin`?: deadline \| refund_completion | The Organization owes the beneficiary the full cash collected, fee included: the settlement deadline passed with no electronic settlement, or a completed refund reversed the assisted purchase. |
 | `cash_return_obligation.return_reported` | commercial | user (member) | required | cash_return_obligation | — | succeeded | `returned_at`: timestamp | An Organization administrator declared the full cash returned to the beneficiary (awaiting the beneficiary's confirmation). |
 | `cash_return_obligation.confirmed` | commercial | user (member) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid | The beneficiary confirmed receiving the full cash back: the obligation is discharged and the assistance request is returned. |
 | `assistance_dispute.opened` | commercial | user (member) | required | assistance_dispute | — | succeeded | `assistance_request_id`: uuid<br>`reason_code`: cash_not_returned \| collection_not_made \| collection_time_incorrect \| return_time_incorrect | The beneficiary disputed the cash evidence of an assistance request (it blocks the confirmation of a cash return while open). |
@@ -91,6 +91,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `refund_case.cancelled` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company cancelled an open refund case before any refund processing (the payment may get a new case). |
 | `refund_case.authorization_relayed` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_attempt_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization). |
 | `refund_case.completed` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_approval_id`: uuid<br>`refund_attempt_id`: uuid | Payment's verified evidence shows the case's full refund was returned: the refund case is completed (no new attempt is ever accepted). |
+| `subscription_purchase.reversed` | commercial | system (`refund_effect_worker`) | as recorded (UUID or null) | subscription_purchase | — | succeeded | `refund_case_id`: uuid<br>`cause`: refund_completion | A completed refund reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept). |
 
 ## payment-service (9)
 
@@ -140,4 +141,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 87 actions.**
+**Total: 88 actions.**

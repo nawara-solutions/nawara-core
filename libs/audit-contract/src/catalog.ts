@@ -458,13 +458,16 @@ const SPEC = {
     purpose: 'An Organization administrator started the electronic settlement of an assistance request (an invoice and a payment request; not yet paid).',
   },
   'cash_return_obligation.opened': {
-    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['assistance_sweep'] }, organization: 'required',
+    // Core V2 S6d (R6D-2, R6D-5): also opened by the refund effect worker when a completed refund reverses an assisted purchase; `origin`
+    // (optional, absent on the deadline origin's existing evidence) says which
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['assistance_sweep', 'refund_effect_worker'] }, organization: 'required',
     resource: ['cash_return_obligation'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       assistance_request_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+      origin: { type: 'code', shape: 'value', required: false, values: ['deadline', 'refund_completion'] },
     },
-    purpose: 'The settlement deadline passed with no electronic settlement: the Organization owes the beneficiary the full cash collected, fee included.',
+    purpose: 'The Organization owes the beneficiary the full cash collected, fee included: the settlement deadline passed with no electronic settlement, or a completed refund reversed the assisted purchase.',
   },
   'cash_return_obligation.return_reported': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
@@ -572,6 +575,18 @@ const SPEC = {
       refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
     },
     purpose: 'Payment\'s verified evidence shows the case\'s full refund was returned: the refund case is completed (no new attempt is ever accepted).',
+  },
+
+  // Core V2 S6d (register BIL-24; ADR-0044 B5; S0 FC-4, V-1; the Owner's R6D-1, R6D-5): a completed refund reversed a Personal purchase (once,
+  // K-3 Option D re-lays the later periods). Version 1, no trusted scope; no billing.* domain event (EVT-05 is not approved).
+  'subscription_purchase.reversed': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['refund_effect_worker'] }, organization: 'optional',
+    resource: ['subscription_purchase'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      refund_case_id: { type: 'uuid', shape: 'value', required: true },
+      cause: { type: 'code', shape: 'value', required: true, values: ['refund_completion'] },
+    },
+    purpose: 'A completed refund reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept).',
   },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service

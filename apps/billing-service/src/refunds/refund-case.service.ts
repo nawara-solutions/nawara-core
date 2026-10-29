@@ -31,7 +31,10 @@ interface RelayView { id: string; attemptStatus: string | null; refusal: string 
  */
 interface CompletionView { refundAuthorizationId: string; refundAttemptId: string; completedAt: Date; source: string }
 
-function representCase(c: CaseRow, relays: RelayView[], completion: CompletionView | null = null) {
+interface EffectView { outcome: string; purchaseId: string | null; obligationId: string | null; reason: string | null; recordedAt: Date }
+interface ReviewView { state: string; reason: string; firstSeenAt: Date; lastSeenAt: Date }
+
+function representCase(c: CaseRow, relays: RelayView[], completion: CompletionView | null = null, effect: EffectView | null = null, review: ReviewView | null = null) {
   return {
     id: c.id, paymentId: c.paymentId, companyId: c.companyId, platformId: c.platformId, organizationId: c.organizationId,
     amount: Number(c.amount), currency: c.currency, status: c.status, eligibility: c.eligibility, reason: c.reason, legalOverride: c.legalOverride,
@@ -40,6 +43,9 @@ function representCase(c: CaseRow, relays: RelayView[], completion: CompletionVi
     // Core V2 S6c (R6C-12): Billing's own record of Payment's financial completion (null until the case is completed)
     completion: completion ? { refundAuthorizationId: completion.refundAuthorizationId, refundAttemptId: completion.refundAttemptId, completedAt: iso(completion.completedAt),
       source: completion.source } : null,
+    // Core V2 S6d (R6D-3, R6D-6): the commercial effect applied once, or, until then, the worker's non-terminal state (null when none)
+    commercialEffect: effect ? { outcome: effect.outcome, purchaseId: effect.purchaseId, obligationId: effect.obligationId, reason: effect.reason, recordedAt: iso(effect.recordedAt) } : null,
+    commercialEffectPending: !effect && review ? { state: review.state, reason: review.reason, firstSeenAt: iso(review.firstSeenAt), lastSeenAt: iso(review.lastSeenAt) } : null,
   };
 }
 
@@ -149,7 +155,9 @@ export class RefundCaseService {
     this.refuseInProduction();
     const completion = (await this.db.query<CompletionView>(
       `SELECT "refundAuthorizationId", "refundAttemptId", "completedAt", source FROM refund_case_completion WHERE "refundCaseId" = $1`, [id])).rows[0] ?? null;
-    return representCase(await this.authorizedCase(owner, id), await this.relays(this.db, id), completion);
+    const effect = (await this.db.query<EffectView>(`SELECT outcome, "purchaseId", "obligationId", reason, "recordedAt" FROM refund_case_effect WHERE "refundCaseId" = $1`, [id])).rows[0] ?? null;
+    const review = (await this.db.query<ReviewView>(`SELECT state, reason, "firstSeenAt", "lastSeenAt" FROM refund_case_effect_attempt WHERE "refundCaseId" = $1`, [id])).rows[0] ?? null;
+    return representCase(await this.authorizedCase(owner, id), await this.relays(this.db, id), completion, effect, review);
   }
 
   private async relays(q: Queryable, caseId: string): Promise<RelayView[]> {
