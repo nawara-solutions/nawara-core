@@ -35,7 +35,7 @@ class ScriptedPaymentRefunds implements PaymentRefundClient {
   }
   async refunds(paymentId: string): Promise<PaymentRefunds | null> {
     if (this.readDown) throw new Error('payment unavailable');
-    return this.records.get(paymentId) ?? { attempts: [], refusals: [] };
+    return this.records.get(paymentId) ?? { attempts: [], refusals: [], authorizations: [] };
   }
 }
 
@@ -231,17 +231,17 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       payment.next = [{ kind: 'unknown', reason: 'status_504' }];
       await authorize(caseId, { receiptSecret: secret() }).expect(503);
       const [relay] = await relays(caseId);
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
       expect(await reconcile()).toMatchObject({ changed: 1 });
       expect((await relays(caseId))[0]!.attemptStatus).toBe('authorized');
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
       await reconcile();
       const c = await readCase(caseId);
       expect(c.attempts[0].status).toBe('succeeded');
       expect(c).toMatchObject({ status: 'open', completedAt: null }); // S6c completes, not S6b
       expect(Number((await one(`SELECT count(*) AS n FROM subscription_purchase_reversal`)).n)).toBe(0);
       // a backwards report is refused by the database and the mirror stays
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
       await reconcile();
       expect((await relays(caseId))[0]!.attemptStatus).toBe('succeeded');
       payment.readDown = true;
@@ -269,7 +269,7 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       expect((await relays(caseId))[0]!.attemptStatus).toBe('authorization_pending');
       expect((await authorize(caseId, { receiptSecret: secret() }).expect(409)).body.code).toBe('refund_authorization_in_progress');
       const [relay] = await relays(caseId);
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'failed', approvedBy: { userId: OWNER } }], refusals: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'failed', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
       await reconcile();
       expect((await cancel(caseId).expect(409)).body.code).toBe('refund_processing_started'); // a consumed receipt and a dispatched refund
       await authorize(caseId, { receiptSecret: secret() }).expect(201); // a new receipt, a new attempt id
@@ -306,6 +306,102 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
           expect(rs).toHaveLength(1);
         }
       }
+    });
+  });
+
+  describe('Core V2 S6c: completion from Payment\'s verified evidence (R6C-9, R6C-10, R6C-12)', () => {
+    /** Payment's `refund.case_completed`, as a verified original delivery through the strict subscription. */
+    const completionEvent = (o: { caseId: string; paymentId: string; attemptId: string; amount: number; authorizationId?: string; over?: Row; eventId?: string }) => {
+      const id = o.eventId ?? randomUUID();
+      return { id, name: 'refund.case_completed', payload: {
+        refundCaseId: o.caseId, refundAuthorizationId: o.authorizationId ?? randomUUID(), refundAttemptId: o.attemptId, paymentId: o.paymentId, paymentRequestId: randomUUID(),
+        producer: 'billing-service', approvedAmount: o.amount, currency: 'TND', completedAt: '2026-10-29T10:00:00.000Z', liveMode: false, organizationId: null, purpose: 'non_entitlement', ...o.over,
+      } as Record<string, unknown>, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } };
+    };
+    const authorizedCase = async () => {
+      const { caseId, paymentId, amount } = await openCase();
+      await authorize(caseId, { receiptSecret: secret() }).expect(201);
+      const [relay] = await relays(caseId);
+      return { caseId, paymentId, amount, attemptId: relay!.id as string };
+    };
+    const completionRow = async (caseId: string) => (await admin.query(`SELECT * FROM refund_case_completion WHERE "refundCaseId" = $1`, [caseId])).rows[0];
+    const completionAudits = async (caseId: string) => (await admin.query(`SELECT payload FROM outbox WHERE name = 'audit.refund_case.completed' AND payload->'resource'->>'id' = $1`, [caseId])).rows;
+
+    it('the verified event completes the open case once, at Payment\'s completion time, with its receipt and audit; a redelivery changes nothing', async () => {
+      const c = await authorizedCase();
+      const ev = completionEvent(c);
+      await t.bus.deliver(ev);
+      await t.bus.deliver(ev); // a redelivery of the same event
+      const kase = await readCase(c.caseId);
+      expect(kase).toMatchObject({ status: 'completed', completedAt: '2026-10-29T10:00:00.000Z',
+        completion: { refundAuthorizationId: ev.payload.refundAuthorizationId, refundAttemptId: c.attemptId, completedAt: '2026-10-29T10:00:00.000Z', source: 'event' } });
+      expect(await completionRow(c.caseId)).toMatchObject({ eventId: ev.id, source: 'event', approvedAmount: String(c.amount) });
+      const audits = await completionAudits(c.caseId);
+      expect(audits).toHaveLength(1);
+      expect(audits[0].payload.actor).toEqual({ type: 'system', id: 'payment_event_consumer' });
+      expect(audits[0].payload.changes).toEqual({ payment_id: c.paymentId, refund_approval_id: ev.payload.refundAuthorizationId, refund_attempt_id: c.attemptId });
+      // FC-3 / V-3: no new relay, no cancellation; S6d stays out: no reversal, no obligation
+      expect((await authorize(c.caseId, { receiptSecret: secret() }).expect(409)).body.code).toBe('refund_case_completed');
+      expect((await cancel(c.caseId).expect(409)).body.code).toBe('refund_case_not_open');
+      expect(Number((await one(`SELECT count(*) AS n FROM subscription_purchase_reversal`)).n)).toBe(0);
+      expect(Number((await one(`SELECT count(*) AS n FROM cash_return_obligation`)).n)).toBe(0);
+      // another authorization claiming the same case is a conflict, never a second completion
+      const before = t.bus.deadLettered.length;
+      await t.bus.deliver(completionEvent({ ...c, authorizationId: randomUUID() }));
+      expect(t.bus.deadLettered.length).toBe(before + 1);
+      expect(await completionAudits(c.caseId)).toHaveLength(1);
+    });
+
+    it('a completion that does not bind exactly is never applied: another payment, amount, currency, an attempt Billing never relayed, a live event', async () => {
+      const c = await authorizedCase();
+      const before = t.bus.deadLettered.length;
+      for (const bad of [completionEvent({ ...c, paymentId: randomUUID() }), completionEvent({ ...c, amount: c.amount - 1 }), completionEvent({ ...c, over: { currency: 'EUR' } }),
+        completionEvent({ ...c, attemptId: randomUUID() }), completionEvent({ ...c, over: { liveMode: true } }), completionEvent({ ...c, caseId: randomUUID() })]) {
+        await t.bus.deliver(bad);
+      }
+      expect(t.bus.deadLettered.length).toBe(before + 6);
+      expect((await readCase(c.caseId)).status).toBe('open');
+      expect(await completionRow(c.caseId)).toBeUndefined();
+    });
+
+    it('a lost event: the reconciler completes the case from Payment\'s read; the late event is then a duplicate', async () => {
+      const c = await authorizedCase();
+      const authorizationId = randomUUID();
+      // Payment's read: the authorization is not complete yet -> nothing happens
+      payment.records.set(c.paymentId, { attempts: [{ refundAttemptId: c.attemptId, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [],
+        authorizations: [{ refundAuthorizationId: authorizationId, refundAttemptId: c.attemptId, refundCaseId: c.caseId, approvedAmount: c.amount, currency: 'TND', completedAt: null }] });
+      await reconcile();
+      expect((await readCase(c.caseId)).status).toBe('open');
+      // complete at Payment: the reconciler completes the case (source reconciliation)
+      payment.records.set(c.paymentId, { attempts: [{ refundAttemptId: c.attemptId, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [],
+        authorizations: [{ refundAuthorizationId: authorizationId, refundAttemptId: c.attemptId, refundCaseId: c.caseId, approvedAmount: c.amount, currency: 'TND', completedAt: '2026-10-29T11:00:00.000Z' }] });
+      await reconcile();
+      expect(await readCase(c.caseId)).toMatchObject({ status: 'completed', completion: { source: 'reconciliation', completedAt: '2026-10-29T11:00:00.000Z' } });
+      expect((await completionAudits(c.caseId))[0].payload.actor).toEqual({ type: 'system', id: 'payment_reconciler' });
+      const before = t.bus.deadLettered.length;
+      await t.bus.deliver(completionEvent({ ...c, authorizationId }));
+      expect(t.bus.deadLettered.length).toBe(before); // a duplicate: acknowledged, nothing changed
+      expect(await completionAudits(c.caseId)).toHaveLength(1);
+      // a Payment read whose amount differs is never applied
+      const d = await authorizedCase();
+      payment.records.set(d.paymentId, { attempts: [], refusals: [],
+        authorizations: [{ refundAuthorizationId: randomUUID(), refundAttemptId: d.attemptId, refundCaseId: d.caseId, approvedAmount: d.amount + 1, currency: 'TND', completedAt: '2026-10-29T11:00:00.000Z' }] });
+      await reconcile();
+      expect((await readCase(d.caseId)).status).toBe('open');
+    });
+
+    it('the database admits completion only with Payment\'s recorded completion; the evidence is append-only', async () => {
+      const c = await authorizedCase();
+      const fail = (sql: string, params: unknown[] = []) => expect(admin.query(sql, params)).rejects.toThrow();
+      await fail(`UPDATE refund_case SET status = 'completed', "completedAt" = now() WHERE id = $1`, [c.caseId]);
+      await fail(`INSERT INTO refund_case_completion ("refundCaseId", "paymentId", "refundAttemptId", "refundAuthorizationId", "approvedAmount", currency, "completedAt", source)
+        VALUES ($1, $2, $3, gen_random_uuid(), $4, 'TND', now(), 'reconciliation')`, [c.caseId, c.paymentId, c.attemptId, c.amount + 1]); // not the full amount
+      await fail(`INSERT INTO refund_case_completion ("refundCaseId", "paymentId", "refundAttemptId", "refundAuthorizationId", "approvedAmount", currency, "completedAt", source)
+        VALUES ($1, $2, gen_random_uuid(), gen_random_uuid(), $3, 'TND', now(), 'reconciliation')`, [c.caseId, c.paymentId, c.amount]); // an attempt never relayed
+      await t.bus.deliver(completionEvent(c));
+      await fail(`UPDATE refund_case_completion SET "completedAt" = now()`);
+      await fail(`DELETE FROM refund_case_completion`);
+      await fail(`UPDATE refund_case SET status = 'open' WHERE id = $1`, [c.caseId]);
     });
   });
 

@@ -74,4 +74,17 @@ export class PaymentAudit {
       { eventId: deterministicEventId(attempt.id, `audit.${action}`), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
+
+  /**
+   * Core V2 S6c (R6C-11): the central audit intent of a refund case's financial completion (FC-3), in the completion transaction. Version 1,
+   * no trusted scope, no `approvedBy`: identifiers only (the authorization is the resource; its payment, case and attempt as changes).
+   */
+  async recordRefundCompletion(q: Queryable, z: { id: string; paymentId: string; refundCaseId: string; refundAttemptId: string }, organizationId: string | null, ctx: EventContext): Promise<void> {
+    await this.writer.write(
+      q,
+      { action: 'refund_authorization.completed', actor: auditActor(ctx), organizationId, resource: { type: 'refund_authorization', id: z.id }, outcome: 'succeeded',
+        changes: { payment_id: z.paymentId, refund_case_id: z.refundCaseId, refund_attempt_id: z.refundAttemptId } } as never,
+      { eventId: deterministicEventId(z.id, 'audit.refund_authorization.completed'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
 }

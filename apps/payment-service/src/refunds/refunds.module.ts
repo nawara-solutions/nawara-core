@@ -5,6 +5,7 @@ import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { PaymentsModule } from '../payments/payments.module.js';
 import { NoDisputeSourceBeforeS6e, REFUND_DISPUTE_EXPOSURE, type RefundDisputeExposure } from './dispute-exposure.js';
 import { HttpReceiptAuthority, RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js';
+import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
 import { RefundWorker, RefundWorkerService } from './refund-worker.js';
@@ -27,7 +28,7 @@ export class RefundsModule {
       imports: [AuthModule, PaymentsModule],
       controllers: [RefundsController],
       providers: [
-        RefundAttemptService, RefundEvidenceService, RefundWorker, IdempotencyService,
+        RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundWorker, IdempotencyService,
         ...(opts.worker === false ? [] : [RefundWorkerService]),
         {
           provide: RECEIPT_AUTHORITY,
@@ -35,7 +36,7 @@ export class RefundsModule {
         },
         { provide: REFUND_DISPUTE_EXPOSURE, useValue: opts.disputeExposure ?? new NoDisputeSourceBeforeS6e() },
       ],
-      exports: [RefundEvidenceService, RefundWorker, RefundAttemptService],
+      exports: [RefundEvidenceService, RefundWorker, RefundAttemptService, RefundAllocationService],
     };
   }
 }

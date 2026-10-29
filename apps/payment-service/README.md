@@ -84,8 +84,11 @@ no production traffic can reach any of this (the test provider refuses to start 
   record", and applies provider evidence: a verified refund is first an immutable `provider_transaction_fact` of kind `refund`; only a fact of
   exactly the full amount succeeds the attempt, anything else is `discrepancy`; a provider-confirmed failure is `failed`. `GET
   /payment/payments/:paymentId/refunds` (PAY-08): the producer (with its refusals) or the payer. Audit `refund_attempt.authorized`,
-  `.failed`, `.succeeded` (version 1, no scope; the approver stays on Payment's row). No `refund.*` domain event, no allocation, completion
-  or reversal (S6c, S6d). The simulation provider gains refunds: `POST /payment/simulation/payments/:paymentId/refund-dispatch-plan`
+  `.failed`, `.succeeded` (version 1, no scope; the approver stays on Payment's row). **Core V2 S6c** (migration 0018,
+  `src/refunds/refund-allocation.service.ts`): each authorization's verified refund facts are allocated (FC-2: cumulative, excess kept,
+  contested or foreign-currency facts blocked, technical failures retried with backoff) and, at the approved amount, the authorization is
+  completed once with `refund.case_completed` in the outbox and audit `refund_authorization.completed`; a completed case refuses every new
+  attempt (`409 refund_case_completed`). No reversal (S6d). The simulation provider gains refunds: `POST /payment/simulation/payments/:paymentId/refund-dispatch-plan`
   (`accepted | ambiguous | rejected`), `POST /payment/simulation/refunds/:refundAttemptId/outcomes` (`succeeded | amount_mismatch | failed |
   no_record | pending`, `immediate | held`) and `POST /payment/simulation/refund-commands/:commandId/deliver`, under the same harness
   authority; refund outcomes reach Payment only through the signed notification or the status read.

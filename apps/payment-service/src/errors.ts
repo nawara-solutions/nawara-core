@@ -37,7 +37,8 @@ export type ErrorCode =
   | 'refund_attempt_conflict'
   | 'refund_authorization_invalid'
   | 'refund_authorization_expired'
-  | 'refund_authorization_unresolved';
+  | 'refund_authorization_unresolved'
+  | 'refund_case_completed'; // Core V2 S6c (FC-3, frozen)
 
 /** `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that echo a client value. */
 export function paymentError(status: number, code: ErrorCode, message: string | MessageTexts, params?: MessageParams): HttpException {

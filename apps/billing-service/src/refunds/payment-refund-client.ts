@@ -9,7 +9,7 @@ export const ATTEMPT_STATUSES = ['authorization_pending', 'authorized', 'authori
 export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number];
 /** Payment's permanent refusals of a refund attempt id before any attempt existed. */
 export const PAYMENT_REFUSALS = ['payment_not_refundable', 'refund_capture_unverified', 'refund_amount_not_full', 'refund_dispute_open', 'refund_in_progress',
-  'refund_already_recorded'] as const;
+  'refund_already_recorded', 'refund_case_completed'] as const; // Core V2 S6c: refund_case_completed (FC-3)
 export type PaymentRefusal = (typeof PAYMENT_REFUSALS)[number];
 
 export interface RefundAttemptSnapshot {
@@ -46,9 +46,20 @@ export type RefundRelayOutcome =
   | { kind: 'conflict' }
   | { kind: 'unknown'; reason: string };
 
+/** Core V2 S6c (R6C-12): one of Payment's refund authorizations, with its financial completion (null until complete). */
+export interface RefundAuthorizationSnapshot {
+  refundAuthorizationId: string;
+  refundAttemptId: string;
+  refundCaseId: string;
+  approvedAmount: number;
+  currency: string;
+  completedAt: string | null;
+}
+
 export interface PaymentRefunds {
   attempts: RefundAttemptSnapshot[];
   refusals: { refundAttemptId: string; code: PaymentRefusal }[];
+  authorizations: RefundAuthorizationSnapshot[];
 }
 
 export interface PaymentRefundClient {
@@ -116,6 +127,14 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
       if (typeof x.refundAttemptId !== 'string' || !(PAYMENT_REFUSALS as readonly unknown[]).includes(x.code)) throw new Error('payment-service GET refunds: malformed refusal');
       return { refundAttemptId: x.refundAttemptId, code: x.code as PaymentRefusal };
     });
-    return { attempts: attempts as RefundAttemptSnapshot[], refusals };
+    // Core V2 S6c: the authorizations (absent from a Payment older than S6c: none)
+    const raw = Array.isArray(r.body.authorizations) ? (r.body.authorizations as Record<string, unknown>[]) : [];
+    const authorizations = raw.map((z) => {
+      if (![z.refundAuthorizationId, z.refundAttemptId, z.refundCaseId].every((v) => typeof v === 'string' && UUID.test(v)) || typeof z.approvedAmount !== 'number'
+        || typeof z.currency !== 'string' || (z.completedAt !== null && typeof z.completedAt !== 'string')) throw new Error('payment-service GET refunds: malformed authorization');
+      return { refundAuthorizationId: z.refundAuthorizationId as string, refundAttemptId: z.refundAttemptId as string, refundCaseId: z.refundCaseId as string,
+        approvedAmount: z.approvedAmount, currency: z.currency, completedAt: (z.completedAt as string | null) ?? null };
+    });
+    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations };
   }
 }

@@ -5,6 +5,7 @@ import { jobContext, type EventContext } from '../events/payment-events.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import type { PaymentProvider, RefundDispatchResult } from '../providers/provider.port.js';
 import { RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js';
+import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
 import { bindingOf, type RefundAttemptRow } from './refund.types.js';
@@ -51,6 +52,7 @@ export class RefundWorker {
     @Inject(RefundAttemptService) private readonly attempts: RefundAttemptService,
     @Inject(RefundEvidenceService) private readonly evidence: RefundEvidenceService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
+    @Inject(RefundAllocationService) private readonly allocations: RefundAllocationService,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -84,6 +86,10 @@ export class RefundWorker {
           const code = (e as { response?: { code?: string } })?.response?.code;
           this.logger.warn(`refund_worker_failure refundAttempt=${a.id} status=${a.status} ${code ? `reason=${code}` : describeFailure(e)} — left as is; retried on a later pass`);
         }
+      }
+      // Core V2 S6c (R6C-6): every verified refund fact still pending allocation (a crash, a technical failure), each with its own backoff
+      for (const factId of await this.allocations.pendingFacts(BATCH_SIZE)) {
+        if (await this.allocations.allocateWithRetry(factId, ctx)) worked++;
       }
       return { worked };
     } finally {

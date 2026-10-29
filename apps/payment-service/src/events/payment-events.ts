@@ -57,7 +57,7 @@ export type { PaymentEventName };
  * transition can never enqueue a second event. `payment` must be the row AFTER the transition (`RETURNING *`) so `status`
  * and `revision` describe the state the event announces.
  */
-export function paymentEvent(name: PaymentEventName, payment: PaymentRow, ctx: EventContext, extra: Record<string, unknown> = {}): NewEvent {
+export function paymentEvent(name: Exclude<PaymentEventName, 'refund.case_completed'>, payment: PaymentRow, ctx: EventContext, extra: Record<string, unknown> = {}): NewEvent {
   return {
     id: deterministicEventId(payment.id, name),
     name,
@@ -86,6 +86,45 @@ export function paymentEvent(name: PaymentEventName, payment: PaymentRow, ctx: E
       // Placed AFTER `...extra` so nothing an event-specific caller passes can ever override Payment's own authoritative
       // producer (Billing SDD R-6): additional isolation evidence, never a replacement for full snapshot validation.
       producer: payment.producer,
+    },
+  };
+}
+
+/** The authorization fields `refund.case_completed` carries (a `refund_authorization` row after completion). */
+export interface CompletedRefundAuthorization {
+  id: string;
+  refundCaseId: string;
+  refundAttemptId: string;
+  paymentId: string;
+  approvedAmount: string | number;
+  currency: string;
+  completedAt: Date;
+}
+
+/**
+ * Core V2 S6c (register EVT-02; S0 FC-3; the Owner's R6C-8): the refund case's financial completion, version 1. The id is derived from the
+ * authorization (completed once, by FC-3), so a retried completion transaction can never enqueue a second event. Identifiers and the
+ * approved amount only; `liveMode` is false (simulation only); `producer`, `paymentRequestId`, `organizationId` and `purpose` are the
+ * payment row's own.
+ */
+export function refundCaseCompletedEvent(z: CompletedRefundAuthorization, payment: PaymentRow, ctx: EventContext): NewEvent {
+  return {
+    id: deterministicEventId(z.id, 'refund.case_completed'),
+    name: 'refund.case_completed',
+    correlationId: ctx.correlationId,
+    payload: {
+      refundCaseId: z.refundCaseId,
+      refundAuthorizationId: z.id,
+      refundAttemptId: z.refundAttemptId,
+      paymentId: z.paymentId,
+      paymentRequestId: payment.paymentRequestId,
+      producer: payment.producer,
+      approvedAmount: Number(z.approvedAmount),
+      currency: z.currency.trim(),
+      completedAt: new Date(z.completedAt).toISOString(),
+      liveMode: false,
+      organizationId: payment.organizationId,
+      purpose: payment.purpose,
     },
   };
 }

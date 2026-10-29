@@ -5,7 +5,7 @@
  * each field Billing requires must be declared there with a compatible type and nullability. The types are local on purpose (no shared
  * event-contract library, no domain contract in the kit).
  */
-export type EventFieldType = 'id' | 'uuid' | 'string' | 'datetime' | 'integer' | 'object' | 'array' | 'enum';
+export type EventFieldType = 'id' | 'uuid' | 'string' | 'datetime' | 'integer' | 'boolean' | 'object' | 'array' | 'enum';
 export interface EventField {
   readonly type: EventFieldType;
   /** `enum` only: the allowed values. */
@@ -78,6 +78,14 @@ export const CONSUMED_EVENTS = [
   { source: 'payment-service', name: 'payment.failed', version: 1, requires: PAYMENT_OUTCOME },
   { source: 'payment-service', name: 'payment.cancelled', version: 1, requires: PAYMENT_OUTCOME },
   { source: 'payment-service', name: 'payment.expired', version: 1, requires: PAYMENT_OUTCOME },
+  // Core V2 S6c (register EVT-02; the Owner's R6C-8, R6C-9): what `RefundCompletionService` requires of Payment's financial completion
+  {
+    source: 'payment-service', name: 'refund.case_completed', version: 1,
+    requires: {
+      refundCaseId: { type: 'uuid' }, refundAuthorizationId: { type: 'uuid' }, refundAttemptId: { type: 'uuid' }, paymentId: { type: 'uuid' },
+      producer: { type: 'string' }, approvedAmount: { type: 'integer' }, currency: { type: 'string' }, completedAt: { type: 'datetime' }, liveMode: { type: 'boolean' },
+    },
+  },
 ] as const satisfies readonly ConsumedEvent[];
 
 export type BillingEventName = keyof typeof PRODUCED_EVENTS;

@@ -127,7 +127,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     await until(async () => (await sql<{ n: number }>(d.adminUrl, `SELECT count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[])`, [events.map((e) => e.id)]))[0]!.n === events.length, 30_000);
     const bySource = await sql<{ s: string; n: number }>(d.adminUrl, `SELECT "sourceService" AS s, count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[]) GROUP BY 1 ORDER BY 1`, [events.map((e) => e.id)]);
     expect(bySource).toEqual([
-      { s: 'auth-service', n: 31 }, { s: 'billing-service', n: 25 }, { s: 'file-service', n: 7 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 8 },
+      { s: 'auth-service', n: 31 }, { s: 'billing-service', n: 26 }, { s: 'file-service', n: 7 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 9 },
       { s: 'release-service', n: 4 },
     ]);
     const dead = await deadLetters(1);

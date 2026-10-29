@@ -31,6 +31,7 @@ class RefundCaseDto {
   @ApiProperty({ format: 'date-time' }) openedAt!: string;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) cancelledAt!: string | null;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) completedAt!: string | null;
+  @ApiProperty({ type: Object, nullable: true, description: 'Core V2 S6c: Billing\'s record of Payment\'s financial completion {refundAuthorizationId, refundAttemptId, completedAt, source: event | reconciliation}; null while open.' }) completion!: unknown;
   @ApiProperty({ type: [Object], description: 'Core V2 S6b: the authorization relays, each {refundAttemptId, status (Payment\'s authoritative attempt status, or unconfirmed), refusal, requestedAt, statusAt}.' }) attempts!: unknown[];
 }
 

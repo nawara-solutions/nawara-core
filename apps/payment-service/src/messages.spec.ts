@@ -52,6 +52,7 @@ describe('PAYMENT_MESSAGES', () => {
       refundAuthorizationInvalid: 'The refund authorization receipt is not valid for this refund.',
       refundAuthorizationExpired: 'The refund authorization receipt expired before it was used.',
       refundAuthorizationUnresolved: 'The refund authorization could not be confirmed yet; retry with the same key and receipt.',
+      refundCaseCompleted: 'This refund case is completed: it accepts no new refund attempt.', // Core V2 S6c
       cannotFailSucceeded: 'Cannot fail an attempt that already succeeded.',
     };
     expect(Object.keys(PAYMENT_MESSAGES).sort()).toEqual(Object.keys(before).sort());

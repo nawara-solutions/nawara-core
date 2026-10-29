@@ -88,6 +88,13 @@ never a failure. A provider-reported refund is an immutable `refund` fact first;
 anything else is `discrepancy`. One potentially effective attempt per payment; full refunds only (D4). No `refund.*` event, allocation,
 completion or reversal (S6c, S6d). Implemented in `apps/payment-service/db/migrations/0017_refund_attempt.sql` and `src/refunds/`.
 
+**Core V2 S6c (refund allocation and completion; S0 FC-2, FC-3, DB-17; the Owner's R6C-1 to R6C-12; register PAY-07 G, PAY-08 G, EVT-02):**
+for Core V2 development and simulation only. Each authorized attempt has a `refund_authorization` (the consumed receipt's approved full amount);
+every verified `refund` fact is allocated once, in its own transaction (payment, then authorization), cumulatively and with excess recorded,
+never changing the provider's amount; a contested or foreign-currency fact is blocked for reconciliation; a technical failure is retried with
+backoff. When the allocation reaches the approved amount, `completedAt` is set once and `refund.case_completed` is written to the outbox; a
+completed case refuses every new attempt. Implemented in `db/migrations/0018_refund_allocation.sql` and `src/refunds/refund-allocation.service.ts`.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.

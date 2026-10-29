@@ -57,6 +57,28 @@ export const PRODUCED_EVENTS = {
   'payment.failed': { version: 1, payload: { ...COMMON, failureCode: { type: 'string', nullable: true } } },
   'payment.cancelled': { version: 1, payload: COMMON },
   'payment.expired': { version: 1, payload: { ...COMMON, expiresAt: { type: 'datetime' } } },
+  /**
+   * Core V2 S6c (register EVT-02; S0 FC-3; the Owner's R6C-8): the refund case's financial completion, once, when the cumulative verified
+   * allocation of its authorization reaches the approved full amount. Written to the outbox in the completion transaction; its id is
+   * derived from the authorization. Development and simulation only (`liveMode` false); Billing's verified consumer completes its case.
+   */
+  'refund.case_completed': {
+    version: 1,
+    payload: {
+      refundCaseId: { type: 'uuid' },
+      refundAuthorizationId: { type: 'uuid' },
+      refundAttemptId: { type: 'uuid' },
+      paymentId: { type: 'uuid' },
+      paymentRequestId: { type: 'string' },
+      producer: { type: 'string' },
+      approvedAmount: { type: 'integer' },
+      currency: { type: 'string' },
+      completedAt: { type: 'datetime' },
+      liveMode: { type: 'boolean' },
+      organizationId: { type: 'string', nullable: true },
+      purpose: { type: 'enum', values: ['direct_purchase', 'assisted_settlement', 'non_entitlement'] },
+    },
+  },
 } as const satisfies Readonly<Record<string, ProducedEvent>>;
 
 export const CONSUMED_EVENTS = [] as const satisfies readonly ConsumedEvent[];

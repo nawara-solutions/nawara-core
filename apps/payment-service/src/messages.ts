@@ -211,6 +211,11 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "L'autorisation de remboursement n'a pas encore pu être confirmée ; réessayez avec la même clé et le même reçu.",
     ar: 'تعذّر تأكيد تفويض الاسترداد بعد؛ أعد المحاولة بالمفتاح نفسه والإيصال نفسه.',
   },
+  refundCaseCompleted: { // Core V2 S6c (FC-3)
+    en: 'This refund case is completed: it accepts no new refund attempt.',
+    fr: "Ce dossier de remboursement est terminé : il n'accepte aucune nouvelle tentative de remboursement.",
+    ar: 'اكتمل ملف الاسترداد هذا: لا يقبل أي محاولة استرداد جديدة.',
+  },
   cannotFailSucceeded: {
     en: 'Cannot fail an attempt that already succeeded.',
     fr: "Impossible de faire échouer une tentative qui a déjà réussi.",
