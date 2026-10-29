@@ -30,7 +30,7 @@ const unavailable = () => billingError(503, 'fraud_hold_unavailable', BILLING_ME
 const refused = () => billingError(409, 'fraud_hold_authorization_refused', BILLING_MESSAGES.fraudHoldAuthorizationRefused);
 /** The release's receipt `consumeRef`: one per hold (a repeated release reuses it, so Auth answers the same consumption). */
 const releaseRef = (holdId: string) => {
-  const h = createHash('sha256').update(`billing.fraud_hold.release:${holdId}`).digest('hex');
+  const h = createHash('sha256').update(`billing-fraud-hold-release-reference:${holdId}`).digest('hex');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
 

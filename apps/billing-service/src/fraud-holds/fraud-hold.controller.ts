@@ -26,7 +26,7 @@ export class FraudHoldController {
   @ApiOperation({
     summary: "BIL-27: place a fraud hold on one beneficiary's Personal entitlement to one product of the Owner's Company, with File evidence and a fraud_hold_place receipt.",
     description: 'Body {holdId, beneficiaryUserId, productId, reason, evidence: [{grantId, fileId}] (1 to 5), receiptSecret}. Each evidence grant must be a live File '
-      + 'fraud_evidence grant to billing-service for exactly this hold (caseRef), Company and beneficiary. The receipt (factor-only billing.fraud_hold.place step-up) '
+      + 'fraud_evidence grant to billing-service for exactly this hold (caseRef), Company and beneficiary. The receipt (the dedicated factor-only placement step-up) '
       + 'is consumed once under the hold id. The hold restricts from placement until the earlier of its release and 14 days; the same holdId repeated answers the hold.',
   })
   @ApiResponse({ status: 201, description: 'The hold.' })
