@@ -203,10 +203,12 @@ describe('authorization receipt routes (S2-Auth.2)', () => {
       expect(await status(r.receiptId)).toBe('issued');
     });
 
-    it('only payment-service can ever be admitted: another caller or operation refuses to boot', () => {
+    it('only payment-service and (Core V2 S6e-H, H-2) billing-service can ever be admitted: another caller or operation refuses to boot', () => {
       const other = generateServiceToken();
-      const env = { ...t.env, SERVICE_TOKENS: `billing-service:${other.digest}`, AUTH_SERVICE_POLICY: JSON.stringify({ callers: { 'billing-service': { operations: ['authorization_receipt.consume'] } } }) };
-      expect(() => loadConfig(env as NodeJS.ProcessEnv)).toThrow(/billing-service/);
+      const env = { ...t.env, SERVICE_TOKENS: `audit-service:${other.digest}`, AUTH_SERVICE_POLICY: JSON.stringify({ callers: { 'audit-service': { operations: ['authorization_receipt.consume'] } } }) };
+      expect(() => loadConfig(env as NodeJS.ProcessEnv)).toThrow(/audit-service/);
+      const billing = { ...t.env, SERVICE_TOKENS: `billing-service:${other.digest}`, AUTH_SERVICE_POLICY: JSON.stringify({ callers: { 'billing-service': { operations: ['authorization_receipt.consume'] } } }) };
+      expect(() => loadConfig(billing as NodeJS.ProcessEnv)).not.toThrow();
       expect(() => loadConfig({ ...t.env, AUTH_SERVICE_POLICY: undefined } as NodeJS.ProcessEnv)).toThrow(/AUTH_SERVICE_POLICY is required/);
       const noPepper = { ...t.env, AUTHORIZATION_RECEIPT_PEPPER: undefined };
       expect(() => loadConfig(noPepper as NodeJS.ProcessEnv)).toThrow(/AUTHORIZATION_RECEIPT_PEPPER is required/);

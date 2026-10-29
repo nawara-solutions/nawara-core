@@ -387,6 +387,19 @@ consumption by `payment-service`, live authority at consumption, recovery lookup
 | Database | no migration: `authorization_receipt` stores digests only and is operation-agnostic |
 | Consumer | Payment's PAY-11 (S6e dispute slice) consumes it after this prerequisite is merged; until then nothing issues an Owner decision |
 
+## 17b. S6e-H amendment: fraud-hold receipts (the Owner's H-2, 2026-10-29; IMPLEMENTED)
+
+Two more receipt operations authorize an Owner's placement and release of one fraud hold (BIL-27). Every rule of §5 to §15 applies unchanged;
+only the binding, the step-up purpose and the audience differ.
+
+| Item | Contract |
+|---|---|
+| `Binding` | `fraud_hold_place`: `audience: 'billing-service'`, `companyId`, `holdId` (chosen before placement), `beneficiaryUserId`, `productId`, `reason` (bounded code). `fraud_hold_release`: the same without `reason`. Exactly these fields |
+| Step-up | `billing.fraud_hold.place` and `billing.fraud_hold.release`, factor-only, Auth-local, each consumed only by its own operation's issuance; refused without consumption by `POST /auth/step-up/verify` |
+| Audience (F-7, amended) | each binding names its one audience; `AUTH_SERVICE_POLICY` may now admit `billing-service`, and AUTH-02 / AUTH-03 serve a caller only for bindings naming it: billing-service can consume no refund or dispute receipt, payment-service no fraud-hold receipt |
+| Separation | the canonical binding includes the operation, Company, hold, beneficiary, product and reason: one receipt never authorizes another hold, beneficiary, product, reason, Company or the other action |
+| Database | no migration |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)

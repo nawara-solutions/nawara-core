@@ -28,13 +28,34 @@ export class DisputeDecisionBindingDto {
   @ApiProperty({ enum: ['contest', 'accept'] }) decision!: 'contest' | 'accept';
 }
 
-/** A refund binding or a dispute-decision binding, by `operation` (parsed strictly by `parseBinding`). */
-const BINDING_SCHEMA = { oneOf: [{ $ref: getSchemaPath(RefundBindingDto) }, { $ref: getSchemaPath(DisputeDecisionBindingDto) }] };
+/** Core V2 S6e-H Auth prerequisite (the Owner's H-2): an Owner's placement of one fraud hold (consumed by billing-service only). */
+export class FraudHoldPlaceBindingDto {
+  @ApiProperty({ enum: ['fraud_hold_place'] }) operation!: 'fraud_hold_place';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid', description: 'The hold to place (its id, chosen before placement).' }) holdId!: string;
+  @ApiProperty({ format: 'uuid' }) beneficiaryUserId!: string;
+  @ApiProperty({ format: 'uuid' }) productId!: string;
+  @ApiProperty({ pattern: '^[a-z][a-z0-9_]{0,63}$', description: 'A bounded fraud reason code, never free text.' }) reason!: string;
+}
 
-@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto)
+/** Core V2 S6e-H Auth prerequisite (the Owner's H-2): an Owner's release of one fraud hold (consumed by billing-service only). */
+export class FraudHoldReleaseBindingDto {
+  @ApiProperty({ enum: ['fraud_hold_release'] }) operation!: 'fraud_hold_release';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid' }) holdId!: string;
+  @ApiProperty({ format: 'uuid' }) beneficiaryUserId!: string;
+  @ApiProperty({ format: 'uuid' }) productId!: string;
+}
+
+/** A refund, dispute-decision or fraud-hold binding, by `operation` (parsed strictly by `parseBinding`). */
+const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+
+@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto)
 /** AUTH-01 body. The step-up proof is never stored with the receipt, logged, audited or part of the replay hash (D-A2 §12). */
 export class IssueReceiptDto {
-  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: the refund-authorization purpose (refund) or the dispute-decision purpose (dispute_decision)." })
+  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release)." })
   @IsString() @MaxLength(64) stepUpToken!: string;
 
   @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;
