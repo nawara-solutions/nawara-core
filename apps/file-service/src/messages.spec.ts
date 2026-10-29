@@ -53,6 +53,7 @@ describe('FILE_MESSAGES', () => {
       purposeNotAllowed: 'This caller cannot grant files for this purpose.',
       fileNotGrantable: 'Only an available, attached file can be granted.',
       grantIdempotencyKeyReused: 'This Idempotency-Key was used for a different grant.',
+      grantSubjectInvalid: 'companyId and subjectUserId are required for, and only for, fraud_evidence.', // Core V2 S6e-H
       noSuchGrant: 'No such grant.',
       grantExpiring: 'The grant expires too soon for a download ticket.',
       fileHeld: 'The file is under an evidence hold.',

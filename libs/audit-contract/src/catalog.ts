@@ -718,7 +718,7 @@ const SPEC = {
     resource: ['file_evidence_grant'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       file_id: { type: 'uuid', shape: 'value', required: true },
-      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
+      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence', 'fraud_evidence'] },
       case_ref: { type: 'uuid', shape: 'value', required: true },
       expires_at: { type: 'timestamp', shape: 'value', required: true },
     },
@@ -729,7 +729,7 @@ const SPEC = {
     resource: ['file_evidence_grant'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       file_id: { type: 'uuid', shape: 'value', required: true },
-      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
+      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence', 'fraud_evidence'] },
     },
     purpose: 'A file\'s owner service revoked an evidence grant: the grantee can no longer use the file for that case.',
   },
@@ -745,7 +745,7 @@ const SPEC = {
     organization: 'optional', resource: ['file_evidence_grant'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       file_id: { type: 'uuid', shape: 'value', required: true },
-      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
+      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence', 'fraud_evidence'] },
       access: {
         type: 'code', shape: 'value', required: true,
         values: ['metadata', 'content_authorized', 'ticket_issued', 'ticket_redemption_authorized',

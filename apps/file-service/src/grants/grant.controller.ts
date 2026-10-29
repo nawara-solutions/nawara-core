@@ -8,13 +8,23 @@ import { EVIDENCE_PURPOSES, type EvidencePurpose } from './evidence-purposes.js'
 import { GrantService } from './grant.service.js';
 
 export class IssueEvidenceGrantDto {
-  @ApiProperty({ enum: EVIDENCE_PURPOSES, description: 'The evidence purpose; it fixes the grantee (dispute_evidence: payment-service; surplus_evidence and settlement_evidence: billing-service).' })
+  @ApiProperty({ enum: EVIDENCE_PURPOSES, description: 'The evidence purpose; it fixes the grantee (dispute_evidence: payment-service; surplus_evidence, settlement_evidence and fraud_evidence: billing-service).' })
   @IsIn(EVIDENCE_PURPOSES)
   purpose!: EvidencePurpose;
 
   @ApiProperty({ format: 'uuid', description: "The grantor's opaque reference of the case the evidence belongs to." })
   @IsUUID()
   caseRef!: string;
+
+  @ApiPropertyOptional({ format: 'uuid', description: 'Core V2 S6e-H: required for, and only for, fraud_evidence: the Company the evidence is about.' })
+  @IsOptional()
+  @IsUUID()
+  companyId?: string;
+
+  @ApiPropertyOptional({ format: 'uuid', description: 'Core V2 S6e-H: required for, and only for, fraud_evidence: the user (the beneficiary) the evidence is about.' })
+  @IsOptional()
+  @IsUUID()
+  subjectUserId?: string;
 
   @ApiPropertyOptional({ minimum: GRANT_LIFETIME_MIN_SECONDS, maximum: GRANT_LIFETIME_MAX_SECONDS, default: GRANT_LIFETIME_DEFAULT_SECONDS, description: 'Lifetime in seconds; never extended (renewal = a new grant).' })
   @IsOptional()
@@ -25,7 +35,7 @@ export class IssueEvidenceGrantDto {
 }
 
 const ORG_HEADER = { name: 'X-Organization-Id', required: false, description: "The file's organization, when it has one" };
-const GRANT_VIEW = { description: '{ grantId, fileId, purpose, grantee, caseRef, organizationId, status (active | expired | revoked), expiresAt, revokedAt, createdAt }' };
+const GRANT_VIEW = { description: '{ grantId, fileId, purpose, grantee, caseRef, organizationId, status (active | expired | revoked), expiresAt, revokedAt, createdAt } (+ companyId, subjectUserId for fraud_evidence)' };
 
 /**
  * Core V2 S2-File.1 (register FIL-01): evidence-grant issuance and revocation, service tokens only (`grant`), on the caller's OWN files.

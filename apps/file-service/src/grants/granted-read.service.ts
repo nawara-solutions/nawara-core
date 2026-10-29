@@ -15,6 +15,7 @@ import { TicketRepository } from '../persistence/ticket.repository.js';
 import type { CallerPolicy } from '../policy/caller-policy.js';
 import { FILE_NOT_FOUND, fileError, fileView, type FileView } from '../upload/upload-http.js';
 import { grantorStillAllows } from './granted-access.js';
+import { subjectOf } from './grant.service.js';
 
 /**
  * Core V2 S2-File.2 (register FIL-02 / FIL-03; ADR-0048 Amendment 1): a grantee service's access to ONE file through ONE of its active
@@ -45,7 +46,7 @@ export class GrantedReadService {
    * Core V2 S6e-D (PAY-10; the Owner's R6E-3), additive: the grant the read went through (its id, purpose, case and expiry) beside the file, so
    * the grantee can bind the evidence to exactly the case it was granted for. Never the grantor's request, idempotency data or storage.
    */
-  async metadata(caller: string, grantId: string, fileId: string): Promise<FileView & { grant: { id: string; purpose: string; caseRef: string; expiresAt: string } }> {
+  async metadata(caller: string, grantId: string, fileId: string): Promise<FileView & { grant: { id: string; purpose: string; caseRef: string; expiresAt: string; companyId?: string; subjectUserId?: string } }> {
     const policy = this.policy(caller);
     const { file, grant } = await this.db.tx(async (q) => {
       const found = await this.authorize(q, caller, policy, grantId, fileId);
@@ -53,7 +54,8 @@ export class GrantedReadService {
       return found;
     });
     this.logger.log(`file_granted_read access=metadata grantee=${caller} grant=${grantId} file=${file.id}`);
-    return { ...fileView(file), grant: { id: grant.id, purpose: grant.purpose, caseRef: grant.caseRef, expiresAt: new Date(grant.expiresAt).toISOString() } };
+    // Core V2 S6e-H: a `fraud_evidence` grant also names its Company and subject, so the grantee binds the evidence to exactly them
+    return { ...fileView(file), grant: { id: grant.id, purpose: grant.purpose, caseRef: grant.caseRef, expiresAt: new Date(grant.expiresAt).toISOString(), ...subjectOf(grant) } };
   }
 
   async content(caller: string, req: Request, res: Response, grantId: string, fileId: string): Promise<void> {

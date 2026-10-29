@@ -610,6 +610,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | OPEN; class K |
 | D. Existing | none |
 | E. Open, gates | **OD-10**, Q11. Stage S6e. Confidence L |
+| F. S6e-H prerequisites (the Owner's H-1 to H-7, 2026-10-29) | Auth (#393, AUTH-04 H): `billing.fraud_hold.place` / `.release` receipts consumed by billing-service. File (this prerequisite, FIL-01): the `fraud_evidence` purpose, grantee `billing-service`, whose grant must name the hold (`caseRef`), the Company (`companyId`) and the subject (`subjectUserId`), immutable; the granted read returns them so Billing binds evidence to exactly that hold, Company and beneficiary. The Billing hold lifecycle and C-1 compensation follow (OD-10 resolved by H-1 to H-7 and C-1) |
 
 #### BIL-28 Recovery obligation read
 
