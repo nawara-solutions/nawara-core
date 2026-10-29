@@ -94,7 +94,7 @@ describe('authorization receipts (S2-Auth.1)', () => {
       expect(db.bindingDigest).toMatch(/^[0-9a-f]{64}$/);
       expect(await stepUpConsumed(r.stepUpToken)).toBe(true);
       const audit = (await t.db.query(`SELECT outcome, "actorId", metadata FROM auth_audit_event WHERE type='authorization_receipt.issued' AND "targetId"=$1`, [r.receiptId])).rows;
-      expect(audit).toEqual([{ outcome: 'success', actorId: o.id, metadata: { companyId: o.companyId } }]);
+      expect(audit).toEqual([{ outcome: 'success', actorId: o.id, metadata: { companyId: o.companyId, operation: 'refund' } }]);
     });
 
     it('the bare secret key cannot obtain a refund.authorize proof', async () => {
@@ -329,6 +329,125 @@ describe('authorization receipts (S2-Auth.1)', () => {
       const o = await ready();
       const su = await t.stepUpToken(o.tokens as Tokens, PURPOSE, o.totpSecret);
       expect(await httpStatusOf(t.app.get(StepUpService).verifyForService(t.dbs, { ownerId: o.id, sid: o.owner.sid, purpose: PURPOSE, token: su }))).toBe(403);
+      expect(await stepUpConsumed(su)).toBe(false);
+    });
+  });
+
+  /**
+   * Core V2 S6e Auth prerequisite (the Owner's R6E-3, 2026-10-29): an Owner's contest-or-accept decision on one Payment dispute is a
+   * receipt bound to the exact dispute, payment, decision, Company and audience, issued only after the dedicated factor-only
+   * `payment.dispute.decide` step-up. Every refund receipt rule above applies unchanged; these cases prove the separation.
+   */
+  describe('dispute decision receipts (S6e prerequisite, R6E-3)', () => {
+    const DECIDE = 'payment.dispute.decide';
+    const decision = (companyId: string, over: Record<string, unknown> = {}) => ({
+      operation: 'dispute_decision', audience: CALLER, companyId, disputeId: randomUUID(), paymentId: randomUUID(), decision: 'contest', ...over,
+    });
+    const issueDecision = async (o: Ready, b = decision(o.companyId), k = key()) => {
+      const stepUpToken = await t.stepUpToken(o.tokens as Tokens, DECIDE, o.totpSecret);
+      const r = await svc.issue(o.owner, { stepUpToken, idempotencyKey: k, binding: b });
+      return { ...r, binding: b, key: k, stepUpToken };
+    };
+    const receipts = async (userId: string) => (await t.db.query(`SELECT count(*)::int AS n FROM authorization_receipt WHERE "issuerUserId"=$1`, [userId])).rows[0].n;
+
+    it('a factor-only payment.dispute.decide step-up issues one decision receipt, consumed once by payment-service for exactly that binding', async () => {
+      const o = await ready();
+      const r = await issueDecision(o);
+      expect(r.secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(await stepUpConsumed(r.stepUpToken)).toBe(true);
+      const audit = (await t.db.query(`SELECT metadata FROM auth_audit_event WHERE type='authorization_receipt.issued' AND "targetId"=$1`, [r.receiptId])).rows;
+      expect(audit).toEqual([{ metadata: { companyId: o.companyId, operation: 'dispute_decision' } }]);
+      const ref = randomUUID();
+      const c = await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: ref });
+      expect(c).toMatchObject({ receiptId: r.receiptId, consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
+      expect(await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: ref })).toEqual(c);
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('consume_ref_conflict');
+      expect(await svc.lookupConsumption(CALLER, { consumeRef: ref, binding: r.binding })).toEqual(c);
+    });
+
+    it('the bare secret key cannot obtain a payment.dispute.decide proof', async () => {
+      const o = await ready();
+      const sk = await t.stepUp(o.tokens as Tokens, DECIDE, o.totpSecret, { method: 'secret_key', secretKey: 'x'.repeat(43), code: undefined });
+      expect([sk.status, sk.body.code]).toEqual([400, 'step_up_unsupported']);
+    });
+
+    it('purpose separation: a refund proof never issues a decision receipt, a decision proof never issues a refund receipt; neither is burned', async () => {
+      const o = await ready();
+      const refundProof = await t.stepUpToken(o.tokens as Tokens, PURPOSE, o.totpSecret);
+      expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: refundProof, idempotencyKey: key(), binding: decision(o.companyId) }))).toBe(403);
+      expect(await stepUpConsumed(refundProof)).toBe(false);
+      const decideProof = await t.stepUpToken(o.tokens as Tokens, DECIDE, o.totpSecret);
+      expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: decideProof, idempotencyKey: key(), binding: binding(o.companyId) }))).toBe(403);
+      expect(await stepUpConsumed(decideProof)).toBe(false);
+      for (const other of ['billing.assistance.dispute.resolve', 'audit.legal_hold.place', 'owner.factor.enroll']) {
+        const p = await t.stepUpToken(o.tokens as Tokens, other, o.totpSecret);
+        expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: p, idempotencyKey: key(), binding: decision(o.companyId) })), other).toBe(403);
+        expect(await stepUpConsumed(p), other).toBe(false);
+      }
+      expect(await receipts(o.id)).toBe(0);
+      // both proofs stay usable for their own operation
+      await svc.issue(o.owner, { stepUpToken: refundProof, idempotencyKey: key(), binding: binding(o.companyId) });
+      await svc.issue(o.owner, { stepUpToken: decideProof, idempotencyKey: key(), binding: decision(o.companyId) });
+      expect(await receipts(o.id)).toBe(2);
+    });
+
+    it("a receipt never authorizes another decision, dispute, payment, Company or a refund: one indistinguishable receipt_invalid; nothing changes", async () => {
+      const o = await ready();
+      const r = await issueDecision(o);
+      const ref = randomUUID();
+      for (const change of [{ decision: 'accept' }, { disputeId: randomUUID() }, { paymentId: randomUUID() }]) {
+        expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: { ...r.binding, ...change }, consumeRef: ref })), JSON.stringify(change)).toBe('receipt_invalid');
+      }
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: binding(o.companyId), consumeRef: ref }))).toBe('receipt_invalid');
+      // another Company: the issuer is not its Owner, so the binding digest differs (refused, never consumed)
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: { ...r.binding, companyId: await t.newCompany() }, consumeRef: ref }))).toBe('receipt_invalid');
+      expect(await codeOf(svc.consume('billing-service', { secret: r.secret, binding: r.binding, consumeRef: ref }))).toBe('receipt_binding_invalid');
+      expect((await row(r.receiptId)).status).toBe('issued');
+      // and an accept receipt is not a contest receipt
+      const accept = await issueDecision(o, decision(o.companyId, { disputeId: r.binding.disputeId, paymentId: r.binding.paymentId, decision: 'accept' }));
+      expect(await codeOf(svc.consume(CALLER, { secret: accept.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('receipt_invalid');
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: accept.binding, consumeRef: randomUUID() }))).toBe('receipt_invalid');
+    });
+
+    it("only the Owner's own Company; an inactive Owner neither issues nor has a decision consumed; proofs are not burned", async () => {
+      const o = await ready();
+      const su = await t.stepUpToken(o.tokens as Tokens, DECIDE, o.totpSecret);
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: decision(await t.newCompany()) }))).toBe('receipt_binding_invalid');
+      expect(await stepUpConsumed(su)).toBe(false);
+      await svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: decision(o.companyId) }); // still usable
+      const r2 = await issueDecision(o);
+      const su2 = await t.stepUpToken(o.tokens as Tokens, DECIDE, o.totpSecret);
+      await t.db.query(`UPDATE "user" SET "isActive"=false WHERE id=$1`, [o.id]);
+      try {
+        expect(await codeOf(svc.issue(o.owner, { stepUpToken: su2, idempotencyKey: key(), binding: decision(o.companyId) }))).toBe('authority_revoked');
+        expect(await codeOf(svc.consume(CALLER, { secret: r2.secret, binding: r2.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+        expect((await row(r2.receiptId)).status).toBe('issued');
+      } finally {
+        await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [o.id]);
+      }
+    });
+
+    it('replay of the issue key never returns a secret: it voids the decision receipt, and another decision under the key is idempotency_key_reused', async () => {
+      const o = await ready();
+      const r = await issueDecision(o);
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: r.key, binding: { ...r.binding, decision: 'accept' } }))).toBe('idempotency_key_reused');
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: r.key, binding: r.binding }))).toBe('receipt_issued_response_lost');
+      expect((await row(r.receiptId)).status).toBe('voided');
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('receipt_invalid');
+    });
+
+    it('two concurrent consumers of one decision receipt: exactly one succeeds', async () => {
+      const o = await ready();
+      const r = await issueDecision(o);
+      const out = await Promise.allSettled([0, 1, 2, 3].map(() => svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() })));
+      expect(out.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+      for (const x of out) if (x.status === 'rejected') expect((x.reason as ReceiptError).code).toBe('consume_ref_conflict');
+    });
+
+    it('POST /auth/step-up/verify (verifyForService) refuses a payment.dispute.decide proof without consuming it', async () => {
+      const o = await ready();
+      const su = await t.stepUpToken(o.tokens as Tokens, DECIDE, o.totpSecret);
+      expect(await httpStatusOf(t.app.get(StepUpService).verifyForService(t.dbs, { ownerId: o.id, sid: o.owner.sid, purpose: DECIDE, token: su }))).toBe(403);
       expect(await stepUpConsumed(su)).toBe(false);
     });
   });

@@ -35,6 +35,8 @@ const REFUND = 'refund.authorize';
 const LEGAL_HOLD = ['audit.legal_hold.place', 'audit.legal_hold.release'] as const;
 /** S5c prerequisite (Owner decision H-1): verified and consumed by billing-service through POST /auth/step-up/verify (not Auth-local). */
 const ASSISTANCE = ['billing.assistance.correct', 'billing.assistance.dispute.resolve'] as const;
+/** S6e prerequisite (the Owner's R6E-3): Auth-local; only the issuance of a dispute-decision receipt consumes it, through the exported constant. */
+const DISPUTE = 'payment.dispute.decide';
 
 describe('step-up purposes (A5.4-A1)', () => {
   it('the 19 earlier purposes keep exactly their methods', () => {
@@ -43,7 +45,7 @@ describe('step-up purposes (A5.4-A1)', () => {
   });
 
   it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key); S2-Auth.1 then adds refund.authorize', () => {
-    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE]);
+    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE, DISPUTE]);
     expect([...STEP_UP_METHODS[PURPOSE]]).toEqual(['totp', 'webauthn']);
   });
 
@@ -59,7 +61,11 @@ describe('step-up purposes (A5.4-A1)', () => {
     for (const p of ASSISTANCE) expect([...STEP_UP_METHODS[p]], p).toEqual(['totp', 'webauthn']);
   });
 
-  it('no application source outside the allow-list names either purpose literally (each has one Auth-local consumer)', () => {
+  it('S6e prerequisite (the Owner\'s R6E-3): payment.dispute.decide is factor-only, never the secret key', () => {
+    expect([...STEP_UP_METHODS[DISPUTE]]).toEqual(['totp', 'webauthn']);
+  });
+
+  it('no application source outside the allow-list names an Auth-local purpose literally (each has one Auth-local consumer)', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const apps = resolve(here, '../../..');
     const allowList = join(here, 'step-up.service.ts');
@@ -70,7 +76,7 @@ describe('step-up purposes (A5.4-A1)', () => {
         const path = join(dir, name);
         if (statSync(path).isDirectory()) walk(path);
         else if (/\.(ts|tsx|mts|cts|js|mjs|cjs)$/.test(name) && !/\.spec\.ts$/.test(name) && path !== allowList
-          && /hierarchy\.reference\.repair|refund\.authorize/.test(readFileSync(path, 'utf8'))) hits.push(path);
+          && /hierarchy\.reference\.repair|refund\.authorize|payment\.dispute\.decide/.test(readFileSync(path, 'utf8'))) hits.push(path);
       }
     };
     walk(apps);

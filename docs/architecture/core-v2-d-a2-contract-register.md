@@ -201,6 +201,7 @@ is preserved as evidence even when its commercial processing fails.
 | C. Errors, idempotency | FROZEN codes above; PROPOSED `receipt_binding_invalid`, `idempotency_key_required`, `idempotency_key_reused`; IMPLEMENTED step-up codes. Class X; guards `UNIQUE(issuerUserId, idempotencyKey)`, `UNIQUE(secretDigest)`, `UNIQUE(stepUpId)` (PROPOSED) |
 | D. Existing | Owner step-up only (`apps/auth-service/src/owner/step-up.service.ts`); no receipt code |
 | E. Open, gates | Q1, Q2, Q3, Q4, Q5, Q6, Q12; G-1 naming ADR-0067; G-7 for production. Stage S2-Auth. Confidence M |
+| F. S6e (the Owner's R6E-3, 2026-10-29) | **IMPLEMENTED**: a second binding operation, `dispute_decision`, issued after `payment.dispute.decide` (AUTH-04 G; receipt contract §17a) |
 
 #### AUTH-02 Consume a receipt
 
@@ -232,6 +233,7 @@ is preserved as evidence even when its commercial processing fails.
 | D. Existing | `STEP_UP_METHODS` (`apps/auth-service/src/owner/step-up.service.ts`) |
 | E. Open, gates | **Q11**: whether any other Owner action (fee caps, fee approval, Platform configuration, catalog changes, write-off, surplus resolution, dispute decision, fact association, legal hold, event re-emission) requires a step-up, and its purpose name. Stage S2-Auth. Confidence M |
 | F. S5c prerequisite (Owner decision H-1, option B, 2026-10-28) | **IMPLEMENTED in Auth only** (`apps/auth-service/src/owner/step-up.service.ts`): two distinct factor-only purposes (TOTP or passkey, never the secret key), `billing.assistance.correct` (BIL-19) and `billing.assistance.dispute.resolve` (BIL-22; resolves Q11 for the assistance dispute decision only). Issued through the existing `POST /auth/admin/step-up` with the existing lifetime; verified and consumed by billing-service through `POST /auth/step-up/verify` with the Owner's own bearer: bound to that owner, session and exact purpose, single use, so a correction proof never resolves a dispute and vice versa. No new method, route or verification path. Declaring the purposes activates no Billing operation: BIL-19 and BIL-22 stay unimplemented until S5c's own decisions. Q11 stays open for every other Owner action |
+| G. S6e prerequisite (the Owner's R6E-3, 2026-10-29) | **IMPLEMENTED in Auth only**: the dedicated factor-only purpose `payment.dispute.decide` (TOTP or passkey, never the secret key; resolves Q11 for the Payment dispute decision, PAY-11). Auth-local: consumed only by the issuance of an AUTH-01 receipt with the new `dispute_decision` binding `{operation, audience: payment-service, companyId, disputeId, paymentId, decision: contest \| accept}`, never by `POST /auth/step-up/verify`; each receipt operation consumes only its own purpose. The receipt is bound to the exact dispute, payment, decision, Company and audience (receipt contract §17a). No migration; activates no Payment operation |
 
 #### AUTH-05 Step-up verification for services
 
@@ -810,6 +812,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | PROPOSED `dispute_not_open` (409). Class K |
 | D. Existing | none |
 | E. Open, gates | Q11, **OD-11**. Stage S6e. Confidence M |
+| F. Auth prerequisite (the Owner's R6E-3, 2026-10-29) | Q11 resolved for this decision: a dedicated factor-only `payment.dispute.decide` step-up, consumed by an AUTH-01 `dispute_decision` receipt that Payment consumes (AUTH-02) for the exact dispute, payment, decision and Company. The route itself is the S6e dispute slice, after this prerequisite is merged |
 
 #### PAY-12 Reconciliation items
 
@@ -1011,7 +1014,7 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 | Q8 | Clock-skew margin before an unconsumed receipt is definitively expired for payment-service **Decided by the Owner (R6B-9 as amended, 2026-10-28): no margin.** Payment never derives expiry from its own clock or from a relayed `expiresAt`, and never reads an AUTH-03 `404` as expiry; only Auth's `receipt_expired` (or `receipt_invalid` / `receipt_binding_invalid`) to the SAME receipt ends an authorization. **Contract gap reported (S6b):** Auth offers no secret-free proof that a receipt was definitively NOT consumed under a `consumeRef` (AUTH-03 answers only a consumption or an indistinguishable `404`). An intent whose secret was lost before Auth gave a definitive answer therefore stays `authorization_pending` (holding its payment) until the Owner re-presents the same receipt or reconciliation (S6h) resolves it. Closing the gap needs an Auth contract change (for example a lookup that proves an expired, unconsumed receipt for the binding), which is NOT authorized | AUTH-03, PAY-07 recovery |
 | Q9 | Inbound `SERVICE_TOKENS` in Auth and payment-service's admission record | AUTH-02, AUTH-03, AUTH-06 |
 | Q10 | Approval of the idempotency taxonomy of §2, including the retention of the new administrative class K | every class K entry |
-| Q11 | Step-up purposes beyond `refund.authorize` and those frozen by S0: which Owner actions require a step-up, and the purpose names | AUTH-04 and every Owner command **Resolved for S5c (Owner H-1, H-6, 2026-10-28):** `billing.assistance.correct` (BIL-19) and `billing.assistance.dispute.resolve` (BIL-22), factor-only, distinct (AUTH-04 F) |
+| Q11 | Step-up purposes beyond `refund.authorize` and those frozen by S0: which Owner actions require a step-up, and the purpose names | AUTH-04 and every Owner command **Resolved for S5c (Owner H-1, H-6, 2026-10-28):** `billing.assistance.correct` (BIL-19) and `billing.assistance.dispute.resolve` (BIL-22), factor-only, distinct (AUTH-04 F). **Resolved for S6e (Owner R6E-3, 2026-10-29):** `payment.dispute.decide` (PAY-11), factor-only, Auth-local, through a `dispute_decision` receipt (AUTH-04 G) |
 | Q12 | Effect of Company lifecycle state (ADR-0060) on receipt issue and consumption | AUTH-01, AUTH-02 |
 | OD-01 | Meaning of "eligible member" for direct purchase (FC-12, [OD] D2). **Resolved (Owner B6, S3f, 2026-10-26):** an active, authenticated ordinary member verified live through `/auth/me`; checkout implemented for simulation only under D1 to D6 (BIL-10 G); B-001 / B-007 remain production blockers | BIL-10 |
 | OD-02 | Relation of `billing_platform` to the existing Platform currency configuration (`0009_platform_currency.sql`). **Resolved (Owner, S3d, 2026-10-26):** `billing_platform` is authoritative; `platform_currency` superseded for Core V2, kept untouched (BIL-01 F) | BIL-01 |

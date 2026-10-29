@@ -68,6 +68,11 @@ export const STEP_UP_METHODS = {
   // use, so a correction proof never resolves a dispute and vice versa. Declaring them activates no Billing operation.
   'billing.assistance.correct': ['totp', 'webauthn'],
   'billing.assistance.dispute.resolve': ['totp', 'webauthn'],
+  // Core V2 S6e prerequisite (the Owner's R6E-3, 2026-10-29): an Owner's contest-or-accept decision on one Payment dispute, with a fresh,
+  // factor-only proof, never the bare key. Like refund.authorize it is Auth-local: consumed only by the issuance of a `dispute_decision`
+  // authorization receipt bound to the exact dispute, payment, decision and Company (receipt-binding.ts); the generic
+  // POST /auth/step-up/verify refuses it without consuming it. Declaring it activates no Payment operation.
+  'payment.dispute.decide': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
@@ -79,8 +84,11 @@ const REFERENCE_REPAIR_PURPOSE = 'hierarchy.reference.repair' satisfies StepUpPu
 /** The purpose of an Owner's refund authorization (ADR-0067 decision 1). Only receipt issuance consumes it. */
 export const REFUND_AUTHORIZE_PURPOSE = 'refund.authorize' satisfies StepUpPurpose;
 
+/** The purpose of an Owner's Payment dispute decision (S6e, R6E-3). Only receipt issuance consumes it. */
+export const DISPUTE_DECIDE_PURPOSE = 'payment.dispute.decide' satisfies StepUpPurpose;
+
 /** Purposes no calling service may verify or consume through POST /auth/step-up/verify: each has its one Auth-local consumer. */
-const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE]);
+const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE, DISPUTE_DECIDE_PURPOSE]);
 
 /**
  * What `consumeForReferenceRepair` knows after its one statement (ADR-0065 §5; A5.4-A3 O8):
@@ -196,7 +204,7 @@ export class StepUpService {
 
   /**
    * The generic, service-facing verification (POST /auth/step-up/verify; ADR-0042 Amendment 1 A.1, as clarified by ADR-0065 §4, S1).
-   * A reference-repair proof and a refund-authorization proof (ADR-0067) are Auth-local: each is refused here BEFORE any consuming
+   * A reference-repair proof, a refund-authorization proof (ADR-0067) and a dispute-decision proof (S6e, R6E-3) are Auth-local: each is refused here BEFORE any consuming
    * statement, with the endpoint's existing answer (`403 step_up_required`) and the same local denial record `consume` writes for its own
    * refusals, so it stays usable by its one Auth-local consumer. Every other purpose goes through `consume`, unchanged.
    */

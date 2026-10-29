@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import {
-  RECEIPT_DOMAINS, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest,
+  RECEIPT_DOMAINS, RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type RefundBinding,
 } from './receipt-binding.js';
 import { ReceiptError } from './receipt-errors.js';
 
@@ -19,8 +19,8 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
   it('parses exactly the frozen F-2 fields; legalOverride is false unless given (Q1)', () => {
     expect(parseBinding(valid())).toEqual(valid());
     const { legalOverride: _omit, ...rest } = valid();
-    expect(parseBinding(rest).legalOverride).toBe(false);
-    expect(parseBinding({ ...valid(), legalOverride: true }).legalOverride).toBe(true);
+    expect((parseBinding(rest) as RefundBinding).legalOverride).toBe(false);
+    expect((parseBinding({ ...valid(), legalOverride: true }) as RefundBinding).legalOverride).toBe(true);
   });
 
   it('refuses anything unknown, missing or mistyped with receipt_binding_invalid', () => {
@@ -59,5 +59,46 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     expect(new Set(d).size).toBe(3);
     expect(bindingDigest(randomBytes(32), c)).not.toBe(d[0]);
     expect(Object.values(RECEIPT_DOMAINS).every((v) => v.endsWith('.v1'))).toBe(true);
+  });
+
+  describe('dispute decision (S6e Auth prerequisite, R6E-3)', () => {
+    const dispute = () => ({
+      operation: 'dispute_decision', audience: 'payment-service', companyId: '11111111-1111-4111-8111-111111111111',
+      disputeId: '44444444-4444-4444-8444-444444444444', paymentId: '33333333-3333-4333-8333-333333333333', decision: 'contest',
+    });
+
+    it('parses exactly its own fields, for contest and accept', () => {
+      expect(parseBinding(dispute())).toEqual(dispute());
+      expect(parseBinding({ ...dispute(), decision: 'accept' })).toEqual({ ...dispute(), decision: 'accept' });
+    });
+
+    it('refuses anything unknown, missing or mistyped, and never mixes the two field sets', () => {
+      const bad: Array<[string, unknown]> = [
+        ['an unknown field', { ...dispute(), extra: 1 }], ['a missing decision', (({ decision: _d, ...o }) => o)(dispute())],
+        ['a missing dispute', (({ disputeId: _d, ...o }) => o)(dispute())], ['another decision', { ...dispute(), decision: 'withdraw' }],
+        ['an upper-case decision', { ...dispute(), decision: 'Contest' }], ['another audience', { ...dispute(), audience: 'billing-service' }],
+        ['a non-uuid dispute', { ...dispute(), disputeId: 'd1' }], ['an upper-case uuid', { ...dispute(), paymentId: '33333333-3333-4333-8333-33333333333A' }],
+        ['a refund field', { ...dispute(), amount: 4900 }], ['a legal override', { ...dispute(), legalOverride: false }],
+        ['a refund with a dispute field', { ...valid(), disputeId: dispute().disputeId }],
+        ['a refund with a decision', { ...valid(), decision: 'accept' }],
+      ];
+      for (const [what, b] of bad) expect(code(() => parseBinding(b)), what).toBe('receipt_binding_invalid');
+    });
+
+    it('the canonical form (and so every digest) separates operations, disputes, payments, Companies and decisions', () => {
+      const c = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...dispute(), ...o }));
+      expect(c()).toBe(
+        '{"audience":"payment-service","companyId":"11111111-1111-4111-8111-111111111111","decision":"contest",'
+        + '"disputeId":"44444444-4444-4444-8444-444444444444","operation":"dispute_decision","paymentId":"33333333-3333-4333-8333-333333333333"}',
+      );
+      const all = [c(), c({ decision: 'accept' }), c({ disputeId: '55555555-5555-4555-8555-555555555555' }),
+        c({ paymentId: '66666666-6666-4666-8666-666666666666' }), c({ companyId: '77777777-7777-4777-8777-777777777777' }),
+        canonicalBinding(parseBinding(valid()))];
+      expect(new Set(all).size).toBe(all.length);
+    });
+
+    it('each operation consumes its own step-up purpose, never the other one', () => {
+      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide' });
+    });
   });
 });
