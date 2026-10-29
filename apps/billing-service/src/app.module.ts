@@ -23,6 +23,7 @@ import { RefundModule } from './refunds/refund.module.js';
 import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 import type { PaymentDisputeClient } from './refunds/payment-dispute-client.js';
+import type { FraudEvidenceFiles, FraudHoldReceipts } from './fraud-holds/fraud-hold-clients.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
 export const billingMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -51,6 +52,9 @@ export interface AppModuleOverrides {
   paymentRefundClient?: PaymentRefundClient;
   /** Core V2 S6e-D: Payment's dispute reads (tests only; default: the HTTP client). */
   paymentDisputeClient?: PaymentDisputeClient;
+  /** Core V2 S6e-H: fraud holds' Auth receipt and File evidence boundaries (tests only). */
+  fraudHoldReceipts?: FraudHoldReceipts;
+  fraudEvidenceFiles?: FraudEvidenceFiles;
   refundRelayReconciler?: boolean;
 }
 
@@ -103,7 +107,7 @@ export class AppModule {
         CheckoutModule.register(config), // Core V2 S3f (BIL-10): development and simulation only; never mounted in production
         AssistanceModule.register(config, overrides.ownerAuthority), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
         // Core V2 S6a (BIL-23, BIL-25) and S6b (BIL-24): development and simulation only
-        RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient }),
+        RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient, fraudHoldReceipts: overrides.fraudHoldReceipts, fraudEvidenceFiles: overrides.fraudEvidenceFiles }),
       ],
     };
   }

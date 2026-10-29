@@ -58,6 +58,12 @@ export interface BillingConfig extends BaseConfig {
   paymentServiceToken: string;
   paymentTimeoutMs: number;
   /**
+   * Core V2 S6e-H (BIL-27; H-2, H-3): fraud holds' outbound credentials, DEVELOPMENT AND SIMULATION ONLY: Billing's own service token for
+   * Auth's receipt consumption (AUTH-02, AUTH-03; fraud-hold receipts only) and File Service with Billing's token for the `fraud_evidence`
+   * granted read. Set together or not at all; refused in production. Absent: hold placement and release answer 503, nothing changes.
+   */
+  fraudHolds?: { authServiceToken: string; fileServiceUrl: string; fileServiceToken: string };
+  /**
    * Dispatcher polling (SDD section 21.5): technical tuning, no business meaning. `staleSendingMs` is also the
    * dispatcher's own retry threshold — a `sending` row older than this is re-claimed and re-sent (safe: the natural
    * key makes a repeated create idempotent), so a stuck dispatch never needs the reconciler at all.
@@ -153,6 +159,18 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
   // Stage 15.8: the dispatcher renews its unsent claims every quarter of the stale window, so a claim's age when its send ends is at most
   // stale / 4 + one send (bounded by PAYMENT_TIMEOUT_MS). Twice the timeout keeps another instance from ever re-claiming a request that is
   // being sent; a smaller stale window would make a slow send look abandoned and duplicate it.
+  // Core V2 S6e-H: fraud holds' credentials, together or not at all, never in production
+  const fraud = ['AUTH_SERVICE_TOKEN', 'FILE_SERVICE_URL', 'FILE_SERVICE_TOKEN'].map((k) => reader.optional(k));
+  if (fraud.some((v) => v !== undefined)) {
+    if (base.isProduction) throw new ConfigError('AUTH_SERVICE_TOKEN, FILE_SERVICE_URL and FILE_SERVICE_TOKEN must not be configured when NODE_ENV=production (Core V2 S6e-H: fraud holds are simulation only)');
+    if (fraud.some((v) => v === undefined)) throw new ConfigError('AUTH_SERVICE_TOKEN, FILE_SERVICE_URL and FILE_SERVICE_TOKEN are set together or not at all');
+    const authServiceToken = reader.secret('AUTH_SERVICE_TOKEN', 32);
+    const fileServiceToken = reader.secret('FILE_SERVICE_TOKEN', 32);
+    for (const [k, v] of [['AUTH_SERVICE_TOKEN', authServiceToken], ['FILE_SERVICE_TOKEN', fileServiceToken]] as const) {
+      if (isPublishedDevelopmentSecret(v)) throw new ConfigError(`${k} must not be a development value published in this repository`);
+    }
+    (config as BillingConfig).fraudHolds = { authServiceToken, fileServiceUrl: reader.url('FILE_SERVICE_URL', ['http:', 'https:']), fileServiceToken };
+  }
   if (config.dispatch.staleSendingMs < 2 * config.paymentTimeoutMs) {
     throw new ConfigError('BILLING_DISPATCH_STALE_SENDING_MS must be at least twice PAYMENT_TIMEOUT_MS');
   }

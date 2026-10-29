@@ -115,6 +115,15 @@ describe('BILLING_MESSAGES', () => {
       [en('refundNotEligible'), 'This payment is not eligible for a refund case.'], // Core V2 S6a
       [en('refundCaseExists'), 'This payment already has an open or completed refund case.'],
       [en('refundDisputeOpen'), 'A dispute on this payment is open: no refund case can be opened.'],
+      [en('invalidFraudHoldRequest'), 'The fraud hold request is invalid.'], // Core V2 S6e-H
+      [en('fraudHoldActive'), 'Another fraud hold still restricts this entitlement.'], // Core V2 S6e-H
+      [en('fraudHoldNotActive'), 'This fraud hold has already ended.'], // Core V2 S6e-H
+      [en('fraudHoldConflict'), 'This hold identifier or evidence already belongs to another fraud hold.'], // Core V2 S6e-H
+      [en('fraudEvidenceInvalid'), 'The evidence is not a fraud_evidence grant to Billing for exactly this hold, Company and beneficiary.'], // Core V2 S6e-H
+      [en('fraudEvidenceUnavailable'), 'The evidence could not be verified; nothing was changed.'], // Core V2 S6e-H
+      [en('fraudHoldAuthorizationRefused'), 'The authorization of this fraud hold operation was refused or has expired.'], // Core V2 S6e-H
+      [en('fraudHoldAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6e-H
+      [en('fraudHoldUnavailable'), 'Fraud holds are not available; nothing was changed.'], // Core V2 S6e-H
       [en('refundDisputeUnavailable'), 'The dispute status of this payment could not be verified; nothing was changed.'], // Core V2 S6e-D
       [en('refundCaseNotOpen'), 'The refund case is not open.'],
       [en('refundCaseCompleted'), 'The refund case is completed: it accepts no new refund attempt.'], // Core V2 S6b

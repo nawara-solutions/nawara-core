@@ -4,6 +4,12 @@ import { HttpOwnerAuthority, OWNER_AUTHORITY, type OwnerAuthority } from '../pla
 import { PAYMENT_DISPUTE_EXPOSURE, type DisputeExposure } from './dispute-exposure.js';
 import { DisputeLossService, DisputeLossWorkerService } from './dispute-loss.service.js';
 import { HttpPaymentDisputeClient, PAYMENT_DISPUTE_CLIENT, type PaymentDisputeClient } from './payment-dispute-client.js';
+import { FraudHoldController } from '../fraud-holds/fraud-hold.controller.js';
+import { FraudHoldService, FraudHoldSweepService } from '../fraud-holds/fraud-hold.service.js';
+import {
+  FRAUD_EVIDENCE_FILES, FRAUD_HOLD_RECEIPTS, FraudHoldsNotConfigured, HttpFraudEvidenceFiles, HttpFraudHoldReceipts, type FraudEvidenceFiles, type FraudHoldReceipts,
+} from '../fraud-holds/fraud-hold-clients.js';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 import { RefundCaseController } from './refund-case.controller.js';
 import { RefundCaseService } from './refund-case.service.js';
 import { RefundCommandIdempotency } from './refund-idempotency.js';
@@ -23,12 +29,16 @@ import { RefundEffectService, RefundEffectWorkerService } from './refund-effect.
 @Module({})
 export class RefundModule {
   static register(config: BillingConfig, ownerAuthority?: OwnerAuthority, disputeExposure?: DisputeExposure,
-    refunds: { paymentRefundClient?: PaymentRefundClient; reconciler?: boolean; paymentDisputeClient?: PaymentDisputeClient } = {}): DynamicModule {
+    refunds: { paymentRefundClient?: PaymentRefundClient; reconciler?: boolean; paymentDisputeClient?: PaymentDisputeClient; fraudHoldReceipts?: FraudHoldReceipts; fraudEvidenceFiles?: FraudEvidenceFiles } = {}): DynamicModule {
     if (config.isProduction) return { module: RefundModule };
+    // Core V2 S6e-H (BIL-27): fraud holds' Auth receipt and File evidence clients (Billing's own tokens); not configured, nothing is placed
+    const fh = config.fraudHolds;
+    const notConfigured = new FraudHoldsNotConfigured();
     const disputes = new HttpPaymentDisputeClient({ baseUrl: config.paymentServiceUrl, serviceToken: config.paymentServiceToken, timeoutMs: config.paymentTimeoutMs });
     return {
       module: RefundModule,
-      controllers: [RefundCaseController],
+      imports: [SubscriptionsModule],
+      controllers: [RefundCaseController, FraudHoldController],
       providers: [
         RefundCaseService, RefundCommandIdempotency, RefundOwnerGuard,
         // Core V2 S6b (BIL-24): the relay to Payment and its reconciler (Billing's own service token; never an Owner's bearer)
@@ -38,6 +48,16 @@ export class RefundModule {
         // Core V2 S6e-D (R6E-5, R6E-6): verified final losses (event or Payment's losses read) and their effects, asynchronously
         DisputeLossService, ...(refunds.reconciler === false ? [] : [DisputeLossWorkerService]),
         { provide: PAYMENT_DISPUTE_CLIENT, useValue: refunds.paymentDisputeClient ?? disputes },
+        // Core V2 S6e-H (H-1 to H-7, C-1): fraud holds and their sweep (expiry record, compensation evidence); tests drive `sweepOnce`
+        FraudHoldService, ...(refunds.reconciler === false ? [] : [FraudHoldSweepService]),
+        {
+          provide: FRAUD_HOLD_RECEIPTS,
+          useValue: refunds.fraudHoldReceipts ?? (fh ? new HttpFraudHoldReceipts({ baseUrl: config.authServiceUrl, serviceToken: fh.authServiceToken, timeoutMs: config.authTimeoutMs }) : notConfigured),
+        },
+        {
+          provide: FRAUD_EVIDENCE_FILES,
+          useValue: refunds.fraudEvidenceFiles ?? (fh ? new HttpFraudEvidenceFiles({ baseUrl: fh.fileServiceUrl, serviceToken: fh.fileServiceToken, timeoutMs: config.authTimeoutMs }) : notConfigured),
+        },
         {
           provide: PAYMENT_REFUND_CLIENT,
           useValue: refunds.paymentRefundClient ?? new HttpPaymentRefundClient({ baseUrl: config.paymentServiceUrl, serviceToken: config.paymentServiceToken, timeoutMs: config.paymentTimeoutMs }),
@@ -47,7 +67,7 @@ export class RefundModule {
       ],
       // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
       global: true,
-      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService],
+      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService],
     };
   }
 }

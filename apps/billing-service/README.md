@@ -177,6 +177,10 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     Payment's verified `payment.dispute.lost` (bound on `billing.payment-events`) or its losses read records a loss once, only with its verified
     chargeback; the dispute loss worker reverses a DIRECT purchase charged back in full once (cause `final_lost_chargeback`), keeps an assisted
     purchase's entitlement (no obligation, no T3: S6f), and holds a partial chargeback for review (no frozen threshold). No FinancialLoss (S6h).
+  - Core V2 S6e-H (`db/migrations/0038`, `src/fraud-holds/`; BIL-27): the Owner places a fraud hold on one beneficiary's personal subscription
+    to one product (File `fraud_evidence` grants for exactly that hold, Company and beneficiary; a `fraud_hold_place` receipt) and may release
+    it (`fraud_hold_release` receipt). It restricts that entitlement from placement to the earlier of release and 14 days, applied directly by
+    the entitlement read; the denied paid time is compensated after the interrupted run (C-1, exact ms, derived; paid spans never move).
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription
@@ -390,6 +394,7 @@ template. Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotatio
 | `RABBITMQ_HEARTBEAT_S` | no | the AMQP heartbeat this service requests, in seconds (default 10, range 5-60); a broker that goes silent is detected within about three times this value |
 | `BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE`, `BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE` | no | baseline abuse limits: invoice creations and payment-request creations per minute per authenticated caller (defaults 300 and 30, range 1-100000 each). Technical values, no business meaning |
 | `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_TOKEN` | yes | payment-service's base URL and Billing's own service token (bearer sent to Payment; a user's bearer is never forwarded). In production the token published in the root `.env.example` is refused |
+| `AUTH_SERVICE_TOKEN`, `FILE_SERVICE_URL`, `FILE_SERVICE_TOKEN` | no (simulation only) | Core V2 S6e-H fraud holds (BIL-27): Billing's own service tokens for Auth's receipt consumption (AUTH-02, AUTH-03; fraud-hold receipts only) and File's `fraud_evidence` granted read; set together, each token at least 32 characters, never a published value; refused in production. Absent: hold placement and release answer 503 |
 | `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |
 | `BILLING_DISPATCH_INTERVAL_MS`, `BILLING_DISPATCH_BATCH_SIZE`, `BILLING_DISPATCH_STALE_SENDING_MS` | no | `PaymentDispatcher`'s poll interval, batch size and stale-`sending` retry threshold, which is also the interval between two attempts at the same request (defaults: 2000ms, 50, 60s). A pass renews its claims not sent yet every quarter of the stale window, so a slow Payment never makes another instance re-send them; the stale window must be at least twice `PAYMENT_TIMEOUT_MS` (refused at startup otherwise; Stage 15.8) |
 | `BILLING_RECONCILE_INTERVAL_MS`, `BILLING_RECONCILE_STALE_REQUESTED_MS` | no | `PaymentReconciler`'s poll interval and stale-`requested` threshold (defaults: 30s, 5min) |

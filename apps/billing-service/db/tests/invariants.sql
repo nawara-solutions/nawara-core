@@ -72,7 +72,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND NOT (table_name = 'cash_return_obligation' AND column_name = 'amount') -- S5b: the frozen total owed back, checked below
     AND NOT (table_name = 'refund_case' AND column_name = 'amount') -- S6a: the full captured amount, equal to the payment request's (guard, e2e)
     AND NOT (table_name = 'refund_case_completion' AND column_name = 'approvedAmount') -- S6c: Payment's approved amount, equal to the case's (guard, e2e)
-    AND NOT (table_name = 'payment_dispute_loss' AND column_name IN ('disputeAmount', 'chargebackAmount'))), '8'); -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
+    AND NOT (table_name = 'payment_dispute_loss' AND column_name IN ('disputeAmount', 'chargebackAmount')) -- S6e-D
+    AND NOT (table_name = 'fraud_hold_compensation' AND column_name = 'deniedMs')), '8'); -- S6e-H: a duration (ms), not money -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -1207,6 +1208,27 @@ SELECT pg_temp.assert_eq('S6e-D', 'no S6h: no financial loss table exists',
   (SELECT count(*)::text FROM pg_tables WHERE schemaname = 'public' AND tablename ~ 'financial_loss'), '0');
 SELECT pg_temp.assert_eq('S6e-D', 'the verified-origin record admits payment.dispute.lost (and no other dispute event)',
   (SELECT (pg_get_constraintdef(oid) LIKE '%payment.dispute.lost%' AND pg_get_constraintdef(oid) NOT LIKE '%payment.dispute.opened%')::text FROM pg_constraint WHERE conname = 'payment_event_origin_name'), 'true');
+
+-- ------------------------------------------------------------------------------------------------------------- S6e-H fraud holds (0038)
+-- The lifecycle and C-1 compensation run end to end in test/refund-cases.e2e-spec.ts (Core V2 S6e-H block); here, the schema's own rules.
+SELECT pg_temp.assert_eq('S6e-H', 'H-4: the review window is exactly 14 days after placement (CHECK)',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%14 days%')::text FROM pg_constraint WHERE conname = 'fraud_hold_review_window'), 'true');
+SELECT pg_temp.assert_eq('S6e-H', 'H-1: a hold names one personal subscription of exactly its beneficiary and product (composite FK)',
+  (SELECT (contype = 'f' AND pg_get_constraintdef(oid) LIKE '%personal_subscription(id, "userId", "productId")%')::text FROM pg_constraint WHERE conname = 'fraud_hold_subscription'), 'true');
+SELECT pg_temp.expect_error('S6e-H', 'H-1: a hold of an unknown subscription is refused', $$INSERT INTO fraud_hold (id, "personalSubscriptionId", "companyId", "platformId", "productId", "beneficiaryUserId", reason, "placedByUserId", "receiptId", "placedAt", "expiresAt")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'u', 'account_takeover', gen_random_uuid(), gen_random_uuid(), now(), now() + interval '14 days')$$, '23514', 'fraud_hold_scope');
+SELECT pg_temp.assert_eq('S6e-H', 'H-3: a hold commits only with evidence (deferred constraint trigger)',
+  (SELECT (tgdeferrable AND tginitdeferred)::text FROM pg_trigger WHERE tgname = 'fraud_hold_06_evidence'), 'true');
+SELECT pg_temp.assert_eq('S6e-H', 'H-3: one hold per evidence grant; one placement per Auth receipt; one release per hold and per receipt',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('fraud_hold_evidence_grantId_key', 'fraud_hold_receiptId_key', 'fraud_hold_release_pkey', 'fraud_hold_release_receiptId_key')), '4');
+SELECT pg_temp.assert_eq('S6e-H', 'H-5 / C-1: compensation evidence never exceeds the 14-day window, one per hold',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%1209600000%')::text FROM pg_constraint WHERE conname = 'fraud_hold_compensation_denied'), 'true');
+SELECT pg_temp.assert_eq('S6e-H', 'C-1: no compensation becomes a purchase, a reversal or an obligation (no fraud-hold reference in the ledger tables)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('subscription_purchase', 'subscription_purchase_reversal', 'cash_return_obligation', 'payment_request') AND column_name ~* 'hold'), '0');
+SELECT pg_temp.assert_eq('S6e-H', 'H-6: the K-3 fold is unchanged: billing_personal_spans knows nothing of holds',
+  (SELECT (prosrc NOT LIKE '%fraud%')::text FROM pg_proc WHERE proname = 'billing_personal_spans'), 'true');
+SELECT pg_temp.assert_eq('S6e-H', 'every fraud-hold table is append-only (an update/delete guard on each)',
+  (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_10_append_only' AND tgrelid::regclass::text IN ('fraud_hold', 'fraud_hold_evidence', 'fraud_hold_release', 'fraud_hold_expiry', 'fraud_hold_compensation')), '5');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

@@ -592,6 +592,28 @@ const SPEC = {
     purpose: "A completed refund, or a direct purchase's verified final lost chargeback, reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept).",
   },
 
+  // Core V2 S6e-H (register BIL-27; the Owner's H-7): fraud holds. Version 1, no trusted scope, no organization (a Company-level control).
+  // The Owner places and releases (with dedicated factor-only receipts); the sweep records a hold that reached its 14-day deadline.
+  'fraud_hold.placed': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['fraud_hold'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      reason: { type: 'code', shape: 'value', required: true, values: ['account_takeover', 'stolen_payment_method', 'identity_fraud', 'chargeback_abuse', 'promotion_abuse'] },
+    },
+    purpose: "The Owner of the seller Company suspended one beneficiary's Personal entitlement to one product, with verified evidence, for at most 14 days.",
+  },
+  'fraud_hold.released': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['fraud_hold'], subject: NO_SUBJECT, outcomes: OK, changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'The Owner released a fraud hold before its 14-day review deadline; the denied paid time is compensated.',
+  },
+  'fraud_hold.expired': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['fraud_hold_sweep'] }, organization: 'none',
+    resource: ['fraud_hold'], subject: NO_SUBJECT, outcomes: OK, changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'A fraud hold reached its 14-day review deadline unreleased: its restriction ended there; the denied paid time is compensated.',
+  },
+
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true }, organization: 'optional',

@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (27)
+## billing-service (30)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -92,6 +92,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `refund_case.authorization_relayed` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_attempt_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization). |
 | `refund_case.completed` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_approval_id`: uuid<br>`refund_attempt_id`: uuid | Payment's verified evidence shows the case's full refund was returned: the refund case is completed (no new attempt is ever accepted). |
 | `subscription_purchase.reversed` | commercial | system (`refund_effect_worker`, `dispute_loss_worker`) | as recorded (UUID or null) | subscription_purchase | — | succeeded | `refund_case_id`?: uuid<br>`dispute_id`?: uuid<br>`cause`: refund_completion \| final_lost_chargeback | A completed refund, or a direct purchase's verified final lost chargeback, reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept). |
+| `fraud_hold.placed` | commercial | user (owner) | none (platform) | fraud_hold | — | succeeded | `product_id`: uuid<br>`reason`: account_takeover \| stolen_payment_method \| identity_fraud \| chargeback_abuse \| promotion_abuse | The Owner of the seller Company suspended one beneficiary's Personal entitlement to one product, with verified evidence, for at most 14 days. |
+| `fraud_hold.released` | commercial | user (owner) | none (platform) | fraud_hold | — | succeeded | `product_id`: uuid | The Owner released a fraud hold before its 14-day review deadline; the denied paid time is compensated. |
+| `fraud_hold.expired` | commercial | system (`fraud_hold_sweep`) | none (platform) | fraud_hold | — | succeeded | `product_id`: uuid | A fraud hold reached its 14-day review deadline unreleased: its restriction ended there; the denied paid time is compensated. |
 
 ## payment-service (13)
 
@@ -145,4 +148,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 92 actions.**
+**Total: 95 actions.**

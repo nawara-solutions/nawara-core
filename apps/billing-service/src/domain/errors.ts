@@ -77,7 +77,17 @@ export type BillingErrorCode =
   | 'refund_authorization_conflict'
   | 'refund_rejected_by_payment'
   | 'refund_payment_unavailable'
-  | 'refund_processing_started';
+  | 'refund_processing_started'
+  // Core V2 S6e-H fraud holds (register BIL-27)
+  | 'invalid_fraud_hold_request'
+  | 'fraud_hold_active'
+  | 'fraud_hold_not_active'
+  | 'fraud_hold_conflict'
+  | 'fraud_evidence_invalid'
+  | 'fraud_evidence_unavailable'
+  | 'fraud_hold_authorization_refused'
+  | 'fraud_hold_authorization_unresolved'
+  | 'fraud_hold_unavailable';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

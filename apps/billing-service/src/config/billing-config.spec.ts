@@ -225,6 +225,22 @@ describe('loadBillingConfig', () => {
     expect(cfg.docs.password).toContain('billing-service'); // the file's content, trimmed
   });
 
+  describe('Core V2 S6e-H fraud holds (BIL-27): credentials set together, never in production', () => {
+    const tok = () => 'f'.repeat(16) + Math.random().toString(36).slice(2).padEnd(24, 'x');
+    it('all three load together; none is the default; a partial set or a short token is refused', () => {
+      const env = { ...BASE, AUTH_SERVICE_TOKEN: tok(), FILE_SERVICE_URL: 'http://file:3000', FILE_SERVICE_TOKEN: tok() };
+      expect(loadBillingConfig(env).fraudHolds).toEqual({ authServiceToken: env.AUTH_SERVICE_TOKEN, fileServiceUrl: 'http://file:3000', fileServiceToken: env.FILE_SERVICE_TOKEN });
+      expect(loadBillingConfig(BASE).fraudHolds).toBeUndefined();
+      expect(() => loadBillingConfig({ ...BASE, AUTH_SERVICE_TOKEN: tok() })).toThrow(/set together/);
+      expect(() => loadBillingConfig({ ...env, FILE_SERVICE_TOKEN: 'short' })).toThrow(/FILE_SERVICE_TOKEN/);
+    });
+    it('production refuses any of them', () => {
+      for (const k of ['AUTH_SERVICE_TOKEN', 'FILE_SERVICE_URL', 'FILE_SERVICE_TOKEN']) {
+        expect(() => loadBillingConfig({ ...PROD, [k]: k === 'FILE_SERVICE_URL' ? 'http://file:3000' : tok() }), k).toThrow(/must not be configured when NODE_ENV=production/);
+      }
+    });
+  });
+
   describe('production', () => {
     it('loads with the runtime role and a broker', () => {
       const cfg = loadBillingConfig(PROD);

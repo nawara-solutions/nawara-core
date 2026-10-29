@@ -134,8 +134,10 @@ open disputes' stated amounts net of their chargebacks, plus chargebacks taken; 
 attempt; work in flight continues). Owner reads, File-granted evidence references and the contest-or-accept decision behind a
 `payment.dispute.decide` receipt. Billing reverses a DIRECT purchase charged back in full once (cause `final_lost_chargeback`; K-3 Option D);
 an assisted purchase keeps its entitlement (its verified loss recorded for S6f); a partial chargeback of a direct purchase is held for review
-(no frozen threshold). **Still FROZEN, not implemented**: fraud holds (evidence-based, Owner step-up, 14-day review; OD-10 **OPEN**, R6E-7 not
-authorized); recovery obligations after an assisted final-lost chargeback, recovery settlement for the base amount only,
+(no frozen threshold). **Fraud holds: IMPLEMENTED (S6e-H, simulation only; the Owner's H-1 to H-7 and C-1)**: evidence-based (File `fraud_evidence` grants), Owner
+receipts with dedicated factor-only step-ups, one beneficiary and product only, ended at the earlier of release and 14 days, the denied paid time
+compensated exactly after the interrupted run (derived, never a purchase; reversals remove it); holds block no financial command. **Still FROZEN,
+not implemented**: recovery obligations after an assisted final-lost chargeback, recovery settlement for the base amount only,
 `recovery_surplus` (R-1 to R-5) and T3 (S6f); late assisted settlement L-1 to L-6 including L-4's five conditions (S6g); reconciliation
 cases, fact association, balances that are never clamped (FC-5) and `FinancialLoss` only from evidence (FC-6) (S6h). Payment has no
 dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.

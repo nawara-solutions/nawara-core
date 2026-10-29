@@ -16,6 +16,7 @@ import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/ow
 import type { DisputeExposure } from '../../src/refunds/dispute-exposure.js';
 import type { PaymentRefundClient } from '../../src/refunds/payment-refund-client.js';
 import type { PaymentDisputeClient } from '../../src/refunds/payment-dispute-client.js';
+import type { FraudEvidenceFiles, FraudHoldReceipts } from '../../src/fraud-holds/fraud-hold-clients.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -76,6 +77,8 @@ export async function createTestApp(opts: {
   /** Core V2 S6b: the refund port to Payment (default: the HTTP client on the configured URL) and no relay-reconciler passes unless asked. */
   paymentRefundClient?: PaymentRefundClient;
   paymentDisputeClient?: PaymentDisputeClient;
+  fraudHoldReceipts?: FraudHoldReceipts;
+  fraudEvidenceFiles?: FraudEvidenceFiles;
   refundRelayReconciler?: boolean;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
@@ -110,6 +113,8 @@ export async function createTestApp(opts: {
         disputeExposure: opts.disputeExposure,
         paymentRefundClient: opts.paymentRefundClient,
         paymentDisputeClient: opts.paymentDisputeClient,
+        fraudHoldReceipts: opts.fraudHoldReceipts,
+        fraudEvidenceFiles: opts.fraudEvidenceFiles,
         refundRelayReconciler: opts.refundRelayReconciler ?? false,
       }),
       ProbeModule,
