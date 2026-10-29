@@ -372,6 +372,21 @@ Fault injection and acceptance:
 4. Acceptance: no path yields two consumptions of one receipt, two attempts for one consumption, an `authorized` intent without a
    consumption, a consumption applied to an attempt other than its `consumeRef`, or a persisted plaintext secret.
 
+## 17a. S6e amendment: dispute-decision receipts (the Owner's R6E-3, 2026-10-29; IMPLEMENTED)
+
+A second receipt operation authorizes an Owner's contest-or-accept decision on one Payment dispute (PAY-11). Every rule of §5 to §15 applies
+unchanged (one receipt per proof, 10 minutes by the database clock, digest-only storage, the secret once, the replay rules, single
+consumption by `payment-service`, live authority at consumption, recovery lookup); only the binding and the step-up purpose differ.
+
+| Item | Contract |
+|---|---|
+| `Binding` | `operation: 'dispute_decision'`; `audience: 'payment-service'`; `companyId: uuid` (the Owner's own Company); `disputeId: uuid`; `paymentId: uuid`; `decision: 'contest' \| 'accept'`. Exactly these fields; a refund field in it, or a dispute field in a refund binding, is `receipt_binding_invalid` |
+| Step-up | the dedicated factor-only purpose `payment.dispute.decide` (TOTP or passkey, never the secret key). Auth-local like `refund.authorize`: consumed only by issuance, refused without consumption by `POST /auth/step-up/verify`. Each operation consumes only its own purpose, so a refund proof never yields a decision receipt and the reverse |
+| Separation | the canonical binding (so every digest) includes the operation, Company, dispute, payment and decision: a receipt never authorizes another decision, dispute, payment, Company or a refund (one indistinguishable `receipt_invalid`) |
+| Audit | the Auth-local `authorization_receipt.issued` record adds `operation` (`refund` or `dispute_decision`); the central audit actions are unchanged and carry no binding |
+| Database | no migration: `authorization_receipt` stores digests only and is operation-agnostic |
+| Consumer | Payment's PAY-11 (S6e dispute slice) consumes it after this prerequisite is merged; until then nothing issues an Owner decision |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)

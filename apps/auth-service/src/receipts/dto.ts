@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiExtraModels, ApiProperty, ApiPropertyOptional, getSchemaPath } from '@nestjs/swagger';
 import { IsObject, IsString, IsUUID, MaxLength } from 'class-validator';
 
 /**
@@ -18,12 +18,26 @@ export class RefundBindingDto {
   @ApiPropertyOptional({ default: false, description: 'Part of what the Owner approved; confers no authority (Q1).' }) legalOverride?: boolean;
 }
 
+/** Core V2 S6e Auth prerequisite (the Owner's R6E-3): an Owner's decision on one Payment dispute of their own Company. */
+export class DisputeDecisionBindingDto {
+  @ApiProperty({ enum: ['dispute_decision'] }) operation!: 'dispute_decision';
+  @ApiProperty({ enum: ['payment-service'] }) audience!: 'payment-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid' }) disputeId!: string;
+  @ApiProperty({ format: 'uuid' }) paymentId!: string;
+  @ApiProperty({ enum: ['contest', 'accept'] }) decision!: 'contest' | 'accept';
+}
+
+/** A refund binding or a dispute-decision binding, by `operation` (parsed strictly by `parseBinding`). */
+const BINDING_SCHEMA = { oneOf: [{ $ref: getSchemaPath(RefundBindingDto) }, { $ref: getSchemaPath(DisputeDecisionBindingDto) }] };
+
+@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto)
 /** AUTH-01 body. The step-up proof is never stored with the receipt, logged, audited or part of the replay hash (D-A2 §12). */
 export class IssueReceiptDto {
-  @ApiProperty({ format: 'uuid', description: 'A fresh, factor-only refund-authorization step-up proof of this session.' })
+  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: the refund-authorization purpose (refund) or the dispute-decision purpose (dispute_decision)." })
   @IsString() @MaxLength(64) stepUpToken!: string;
 
-  @ApiProperty({ type: RefundBindingDto }) @IsObject() binding!: Record<string, unknown>;
+  @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;
 }
 
 export class IssuedReceiptDto {
@@ -35,7 +49,7 @@ export class IssuedReceiptDto {
 /** AUTH-02 body. */
 export class ConsumeReceiptDto {
   @ApiProperty({ description: 'The receipt secret from AUTH-01.' }) @IsString() @MaxLength(64) secret!: string;
-  @ApiProperty({ type: RefundBindingDto }) @IsObject() binding!: Record<string, unknown>;
+  @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;
   @ApiProperty({ format: 'uuid', description: "The consumer's durable reference for this consumption (its attempt id)." })
   @IsUUID() consumeRef!: string;
 }
@@ -43,7 +57,7 @@ export class ConsumeReceiptDto {
 /** AUTH-03 body: no secret (F-10). A POST so the binding never travels in a URL. */
 export class LookupConsumptionDto {
   @ApiProperty({ format: 'uuid' }) @IsUUID() consumeRef!: string;
-  @ApiProperty({ type: RefundBindingDto }) @IsObject() binding!: Record<string, unknown>;
+  @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;
 }
 
 export class ApprovedByDto {

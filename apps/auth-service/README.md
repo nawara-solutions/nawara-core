@@ -108,6 +108,10 @@ An Owner approves one exact refund with a fresh, factor-only `refund.authorize` 
 gets a single-use receipt, valid 10 minutes by the database clock; payment-service consumes it once. Contract:
 `docs/architecture/core-v2-d-a2-auth-authorization-receipts.md`.
 
+Core V2 S6e (the Owner's R6E-3): a second binding operation, `dispute_decision` (`companyId`, `disputeId`, `paymentId`,
+`decision: contest | accept`), authorizes an Owner's decision on one Payment dispute. It is issued only after the dedicated factor-only
+`payment.dispute.decide` step-up; each operation consumes only its own purpose, and both purposes are refused by `POST /auth/step-up/verify`.
+
 | Route | Caller | Purpose |
 |---|---|---|
 | `POST /auth/admin/authorization-receipts` (AUTH-01) | the Owner's own bearer; `Idempotency-Key` header required | issue; `201 {receiptId, secret, expiresAt}`, the secret once only, `Cache-Control: no-store` |

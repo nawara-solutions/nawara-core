@@ -5,9 +5,9 @@ import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import type { AuditActor } from '@nawara/audit-contract';
 import { DbService, isUniqueViolation, pgCode, pgConstraint, provesNothingCommitted, type Queryable } from '../db/db.service.js';
-import { REFUND_AUTHORIZE_PURPOSE, StepUpService } from '../owner/step-up.service.js';
+import { StepUpService } from '../owner/step-up.service.js';
 import {
-  bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type RefundBinding,
+  RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type ReceiptBinding,
 } from './receipt-binding.js';
 import { ReceiptError, receiptError, type ReceiptErrorCode } from './receipt-errors.js';
 
@@ -90,7 +90,8 @@ export class AuthorizationReceiptService {
   }
 
   /**
-   * Issues a receipt to the active Owner of `binding.companyId`, after a factor-only refund-authorization step-up (F-1 to F-5). Order
+   * Issues a receipt to the active Owner of `binding.companyId`, after the factor-only step-up of the binding's operation (F-1 to F-5):
+   * the refund-authorization purpose for a refund, the dispute-decision purpose for a dispute decision (S6e, R6E-3), never the other's. Order
    * (D-A2 §5.1): (1) a replay of the same key is answered first, so it never needs or burns a step-up; then ONE transaction (2) consumes
    * the step-up, (3) checks the Owner and the Company, (4) inserts the receipt and its audit record. A failure after (2) rolls the
    * consumption back: the proof is not burned. A concurrent duplicate with the same key loses on the (issuer, key) uniqueness and is
@@ -111,7 +112,7 @@ export class AuthorizationReceiptService {
     const secret = randomBytes(32).toString('base64url');
     try {
       return await this.db.tx(async (q) => {
-        await this.stepUps.consume(q, { ownerId: owner.userId, sid: owner.sid, purpose: REFUND_AUTHORIZE_PURPOSE, token: input.stepUpToken });
+        await this.stepUps.consume(q, { ownerId: owner.userId, sid: owner.sid, purpose: RECEIPT_PURPOSES[binding.operation], token: input.stepUpToken });
         const { rows: o } = await q.query(
           `SELECT o."companyId"::text AS "companyId", u."isActive" FROM owner o JOIN "user" u ON u.id = o."userId" AND u.kind = 'owner'
             WHERE o."userId" = $1`,
@@ -130,7 +131,7 @@ export class AuthorizationReceiptService {
         );
         await this.audit.record({
           type: 'authorization_receipt.issued', outcome: 'success', actorId: owner.userId, targetId: id, sessionFamilyId: owner.sid,
-          metadata: { companyId: binding.companyId },
+          metadata: { companyId: binding.companyId, operation: binding.operation },
         }, q);
         // the Company from Auth's own Owner row (`o[0]`, read in this transaction), equal to the binding's by the check above
         await this.recordCentrally(q, 'authorization_receipt.issued', { receiptId: id, companyId: o[0].companyId, actor: ownerActor(owner) });
@@ -283,7 +284,7 @@ export class AuthorizationReceiptService {
   }
 
   /** After an uncertain consumption: what actually committed, or `receipt_outcome_unknown`. Never a second consumption. */
-  private async recoverUncertain(caller: string, consumeRef: string, b: RefundBinding, bDigest: string): Promise<ReceiptConsumption> {
+  private async recoverUncertain(caller: string, consumeRef: string, b: ReceiptBinding, bDigest: string): Promise<ReceiptConsumption> {
     const found = await this.findConsumption(caller, consumeRef, bDigest).catch(() => undefined);
     if (found) return this.consumption(found, consumeRef, b);
     throw receiptError('receipt_outcome_unknown');
@@ -295,7 +296,7 @@ export class AuthorizationReceiptService {
     return receiptError(provesNothingCommitted(e) ? 'receipt_unavailable' : 'receipt_outcome_unknown');
   }
 
-  private consumption(row: { id: string; issuerUserId: string; consumedAt: Date }, consumeRef: string, b: RefundBinding): ReceiptConsumption {
+  private consumption(row: { id: string; issuerUserId: string; consumedAt: Date }, consumeRef: string, b: ReceiptBinding): ReceiptConsumption {
     return { receiptId: row.id, consumeRef, consumedAt: row.consumedAt, approvedBy: { userId: row.issuerUserId }, companyId: b.companyId };
   }
 
