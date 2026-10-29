@@ -25,7 +25,8 @@ afterAll(() => refStub.close());
  *   Billing records the relay, then PAY-07 → Payment verifies the payment and its capture fact, commits the intent and consumes the receipt
  *   at the REAL Auth (AUTH-02, Payment's own service token, `consumeRef` = the attempt id) → `authorized`, approver from Auth → the worker
  *   dispatches with the stable key → the simulated provider's signed refund notification → a `refund` fact and `succeeded` → Billing's
- *   reconciler mirrors it (PAY-08). The case is never completed, the purchase never reversed (S6c, S6d); cancellation is refused.
+ *   reconciler mirrors it (PAY-08). Core V2 S6c: the verified refund is allocated, Payment completes the authorization once and publishes
+ *   `refund.case_completed` over the real broker; Billing's verified consumer completes the case once. The purchase is never reversed (S6d).
  *
  * And the refused path: a receipt bound to other content is refused by Auth (`receipt_invalid`) → the attempt is `authorization_refused`
  * and the case can be cancelled.
@@ -301,20 +302,37 @@ describeWithEnv(
       expect((await attemptRow(attemptId)).status).toBe('succeeded');
       expect((await paymentAdmin.query(`SELECT kind, amount::int, "refundAttemptId" FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund'`, [paymentId])).rows)
         .toEqual([{ kind: 'refund', amount: c.amount, refundAttemptId: attemptId }]);
-      // Billing learns it from Payment's read (no refund.* event exists in S6b)
-      await waitFor(async () => (await billingAdmin.query(`SELECT "attemptStatus" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).rows[0]?.attemptStatus === 'succeeded',
-        30_000, 'Billing\'s relay reconciler to mirror the success');
+      // Core V2 S6c: the verified refund is allocated and completes the authorization, once, at Payment; refund.case_completed crosses the REAL
+      // broker as payment-service (its generated grant) and Billing's verified consumer completes the case, once
+      const z = (await paymentAdmin.query(`SELECT id, "allocatedIntended"::int AS allocated, "completedAt" FROM refund_authorization WHERE "refundAttemptId" = $1`, [attemptId])).rows[0];
+      expect(z).toMatchObject({ allocated: c.amount, completedAt: expect.any(Date) });
+      await waitFor(async () => (await billingAdmin.query(`SELECT status FROM refund_case WHERE id = $1`, [c.id])).rows[0]?.status === 'completed',
+        30_000, `Billing to complete the case from Payment's verified event over the broker\n${tails()}`);
+      // the event itself crossed the broker and was verified (Billing recorded its broker-verified origin), whichever path completed first
+      // (Billing's relay reconciler polls Payment too): exactly one completion, bound to Payment's authorization
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM payment_event_origin WHERE "eventName" = 'refund.case_completed' AND source = 'payment-service'`)).rowCount === 1,
+        30_000, 'the verified refund.case_completed delivery');
+      const completion = (await billingAdmin.query(`SELECT source, "refundAuthorizationId", "refundAttemptId" FROM refund_case_completion WHERE "refundCaseId" = $1`, [c.id])).rows;
+      expect(completion).toEqual([expect.objectContaining({ refundAuthorizationId: z.id, refundAttemptId: attemptId })]);
       const read = await call(BILLING_URL, 'GET', ownerToken, `/billing/admin/refund-cases/${c.id}`);
-      expect(read.json).toMatchObject({ status: 'open', completedAt: null, attempts: [expect.objectContaining({ status: 'succeeded' })] });
+      expect(read.json).toMatchObject({ status: 'completed', completedAt: new Date(z.completedAt).toISOString(), completion: { refundAuthorizationId: z.id } });
+      // S6d stays out: no reversal, the payment untouched, no other refund.* event, exactly one completion event
       expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows[0].n).toBe(0);
       expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [paymentId])).rows[0].status).toBe('succeeded');
-      expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'refund.%'`)).rows[0].n).toBe(0);
-      expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'audit.refund_attempt.%' AND payload->'resource'->>'id' = $1 ORDER BY "occurredAt", name`, [attemptId])).rows.map((x) => x.name))
-        .toEqual(['audit.refund_attempt.authorized', 'audit.refund_attempt.succeeded']);
-      // a new attempt for the refunded payment is refused by Payment itself, whatever Billing does
+      expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'refund.%'`)).rows.map((x) => x.name)).toEqual(['refund.case_completed']);
+      expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE (name LIKE 'audit.refund_attempt.%' AND payload->'resource'->>'id' = $1) OR (name = 'audit.refund_authorization.completed' AND payload->'resource'->>'id' = $2) ORDER BY "occurredAt", name`, [attemptId, z.id])).rows.map((x) => x.name))
+        .toEqual(['audit.refund_attempt.authorized', 'audit.refund_attempt.succeeded', 'audit.refund_authorization.completed']);
+      // a completed case refuses every new attempt, at Payment (FC-3) and at Billing
       expect((await call(PAYMENT_URL, 'POST', billingToPaymentToken.token, `/payment/payments/${paymentId}/refunds`, {
         refundAttemptId: randomUUID(), refundCaseId: c.id, amount: c.amount, currency: c.currency, reason: 'customer_request', legalOverride: false,
-        receiptSecret: randomBytes(32).toString('base64url') })).json.code).toBe('refund_already_recorded');
+        receiptSecret: randomBytes(32).toString('base64url') })).json.code).toBe('refund_case_completed');
+      expect((await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${c.id}/authorizations`, { receiptSecret: randomBytes(32).toString('base64url') })).json.code)
+        .toBe('refund_case_completed');
+      // nothing dead-lettered: the completion event was applied or acknowledged as a duplicate
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case_completion WHERE "refundCaseId" = $1`, [c.id])).rows[0].n).toBe(1);
+      const ch = await amqpConn.createChannel();
+      expect((await ch.checkQueue(BILLING_DEAD_QUEUE)).messageCount).toBe(0);
+      await ch.close();
     }, 180_000);
 
     it('REAL AUTH: a receipt bound to other content is refused by Auth; the attempt ends unconsumed and the case may be cancelled', async () => {

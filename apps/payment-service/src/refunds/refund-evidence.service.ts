@@ -4,6 +4,7 @@ import { PaymentAudit } from '../audit/payment-audit.js';
 import type { EventContext } from '../events/payment-events.js';
 import { notFound } from '../errors.js';
 import type { RefundStatusResult } from '../providers/provider.port.js';
+import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import type { RefundAttemptRow } from './refund.types.js';
 
@@ -33,6 +34,7 @@ export class RefundEvidenceService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
     @Inject(RefundAttemptService) private readonly attempts: RefundAttemptService,
+    @Inject(RefundAllocationService) private readonly allocations: RefundAllocationService,
   ) {}
 
   /** The refund attempt a provider message names (its idempotency key or its provider refund reference), of THAT provider only. */
@@ -45,6 +47,14 @@ export class RefundEvidenceService {
   async apply(refundAttemptId: string, status: RefundStatusResult, ctx: EventContext): Promise<RefundAttemptRow> {
     let fact: { id: string; matches: boolean } | null = null;
     if (status.kind === 'succeeded') fact = await this.recordRefundFact(refundAttemptId, status, ctx);
+    const row = await this.applyStatus(refundAttemptId, status, fact, ctx);
+    // Core V2 S6c (FC-2, R6C-6): allocation in its OWN transaction, after the fact and the attempt; a failure here never undoes either, the
+    // refund worker retries the still-pending fact with backoff
+    if (fact) await this.allocations.allocateWithRetry(fact.id, ctx);
+    return row;
+  }
+
+  private async applyStatus(refundAttemptId: string, status: RefundStatusResult, fact: { id: string; matches: boolean } | null, ctx: EventContext): Promise<RefundAttemptRow> {
     if (status.kind === 'pending' || status.kind === 'notFound') {
       const { rows } = await this.db.query<RefundAttemptRow>('SELECT * FROM refund_attempt WHERE id = $1', [refundAttemptId]);
       if (!rows[0]) throw notFound();

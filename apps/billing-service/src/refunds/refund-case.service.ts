@@ -29,12 +29,17 @@ interface RelayView { id: string; attemptStatus: string | null; refusal: string 
  * A refund case as its Owner reads it (BIL-23, BIL-25). Core V2 S6b: `attempts` are the authorization relays, each with Payment's
  * authoritative attempt status as last confirmed (`unconfirmed` until Payment's answer proved one); never a receipt or its secret.
  */
-function representCase(c: CaseRow, relays: RelayView[]) {
+interface CompletionView { refundAuthorizationId: string; refundAttemptId: string; completedAt: Date; source: string }
+
+function representCase(c: CaseRow, relays: RelayView[], completion: CompletionView | null = null) {
   return {
     id: c.id, paymentId: c.paymentId, companyId: c.companyId, platformId: c.platformId, organizationId: c.organizationId,
     amount: Number(c.amount), currency: c.currency, status: c.status, eligibility: c.eligibility, reason: c.reason, legalOverride: c.legalOverride,
     openedAt: iso(c.openedAt), cancelledAt: iso(c.cancelledAt), completedAt: iso(c.completedAt),
     attempts: relays.map((r) => ({ refundAttemptId: r.id, status: r.attemptStatus ?? 'unconfirmed', refusal: r.refusal, requestedAt: iso(r.requestedAt), statusAt: iso(r.statusAt) })),
+    // Core V2 S6c (R6C-12): Billing's own record of Payment's financial completion (null until the case is completed)
+    completion: completion ? { refundAuthorizationId: completion.refundAuthorizationId, refundAttemptId: completion.refundAttemptId, completedAt: iso(completion.completedAt),
+      source: completion.source } : null,
   };
 }
 
@@ -142,7 +147,9 @@ export class RefundCaseService {
   /** BIL-25: `GET /billing/admin/refund-cases/:id`, the Owner of its Company and Platform (live); everyone else the collapsed 404. */
   async read(owner: VerifiedRefundOwner, id: string) {
     this.refuseInProduction();
-    return representCase(await this.authorizedCase(owner, id), await this.relays(this.db, id));
+    const completion = (await this.db.query<CompletionView>(
+      `SELECT "refundAuthorizationId", "refundAttemptId", "completedAt", source FROM refund_case_completion WHERE "refundCaseId" = $1`, [id])).rows[0] ?? null;
+    return representCase(await this.authorizedCase(owner, id), await this.relays(this.db, id), completion);
   }
 
   private async relays(q: Queryable, caseId: string): Promise<RelayView[]> {

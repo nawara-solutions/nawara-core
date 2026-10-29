@@ -236,6 +236,40 @@
           "type": "string"
         }
       }
+    },
+    {
+      "source": "payment-service",
+      "name": "refund.case_completed",
+      "version": 1,
+      "requires": {
+        "approvedAmount": {
+          "type": "integer"
+        },
+        "completedAt": {
+          "type": "datetime"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "refundAttemptId": {
+          "type": "uuid"
+        },
+        "refundAuthorizationId": {
+          "type": "uuid"
+        },
+        "refundCaseId": {
+          "type": "uuid"
+        }
+      }
     }
   ]
 }

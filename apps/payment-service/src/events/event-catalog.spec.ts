@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PaymentRow } from '../payments/payment.types.js';
 import { PRODUCED_EVENTS, renderEventContract, type EventField, type PaymentEventName } from './event-catalog.js';
-import { jobContext, paymentEvent, requestContext, webhookContext } from './payment-events.js';
+import { jobContext, paymentEvent, refundCaseCompletedEvent, requestContext, webhookContext } from './payment-events.js';
 
 /** What a payload value must look like for its catalog field (V2 A3M.2). Returns the problems, empty when it conforms. */
 function conformance(payload: Record<string, unknown>, declared: Readonly<Record<string, EventField>>): string[] {
@@ -71,9 +71,23 @@ describe('payment-service event catalog (V2 A3M.2)', () => {
     await expect(renderEventContract()).toMatchFileSnapshot('../../contracts/events.json');
   });
 
+  it('Core V2 S6c: refund.case_completed matches its catalog entry, with a deterministic id per authorization and liveMode false', () => {
+    const z = { id: '44444444-4444-4444-8444-444444444444', refundCaseId: '55555555-5555-4555-8555-555555555555', refundAttemptId: '66666666-6666-4666-8666-666666666666',
+      paymentId: row.id, approvedAmount: '9000', currency: 'TND', completedAt: new Date('2026-10-29T10:00:00.000Z') };
+    for (const ctx of [jobContext('refund_worker'), webhookContext('simulation', 'evt-2')]) {
+      for (const base of [{ ...s4aRow, organizationId: '33333333-3333-4333-8333-333333333333' }, { ...s4aRow, purpose: 'non_entitlement' as const }]) {
+        const ev = refundCaseCompletedEvent(z, base, ctx);
+        expect(ev.name).toBe('refund.case_completed');
+        expect(conformance(JSON.parse(JSON.stringify(ev.payload)) as Record<string, unknown>, PRODUCED_EVENTS['refund.case_completed'].payload)).toEqual([]);
+        expect(ev.payload).toMatchObject({ refundAuthorizationId: z.id, approvedAmount: 9000, completedAt: '2026-10-29T10:00:00.000Z', liveMode: false });
+        expect(ev.id).toBe(refundCaseCompletedEvent(z, base, jobContext('refund_worker')).id); // one id per authorization, whatever the run
+      }
+    }
+  });
+
   it('every event the builder produces matches its catalog entry, with the extras each call site passes', () => {
     // The extras exactly as the call sites pass them: attempt.service (succeeded, failed), expiry-sweeper (expired).
-    const extras: Record<PaymentEventName, Array<Record<string, unknown>>> = {
+    const extras: Record<Exclude<PaymentEventName, 'refund.case_completed'>, Array<Record<string, unknown>>> = {
       'payment.created': [{}],
       'payment.succeeded': [{ settledMethod: 'gateway', succeededAt: row.closedAt?.toISOString() }, { settledMethod: 'gateway', succeededAt: undefined }],
       'payment.failed': [{ failureCode: 'card_declined' }, { failureCode: null }],
@@ -81,7 +95,7 @@ describe('payment-service event catalog (V2 A3M.2)', () => {
       'payment.expired': [{ expiresAt: row.expiresAt?.toISOString() }],
     };
     const contexts = [requestContext({ type: 'user', id: 'u-1' }), jobContext('expiry_sweep'), webhookContext('test', 'evt-1')];
-    for (const name of Object.keys(PRODUCED_EVENTS) as PaymentEventName[]) {
+    for (const name of Object.keys(extras) as Array<keyof typeof extras>) {
       for (const extra of extras[name]) {
         for (const ctx of contexts) {
           for (const base of [row, s4aRow]) {

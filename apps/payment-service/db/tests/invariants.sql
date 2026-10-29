@@ -589,6 +589,71 @@ SELECT pg_temp.expect_ok('S6b', 'a refused authorization frees the payment for a
 SELECT pg_temp.assert_eq('S6b', 'no column of Payment stores a receipt secret', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND column_name ~* 'secret'), '0');
 \o
 
+-- ======================================================= Core V2 S6c: refund allocation and completion (0018) ----
+\o /dev/null
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-s6c', 'user', 'u-s6c', 'company', '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS c1 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'c1', 1, 'test', false) RETURNING id AS c1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'c1';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-s6c-1', "submittedAt" = now() WHERE id = :'c1a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'c1a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-s6c-1', 'capture', :'c1', :'c1a', 1000, 'TND', false, 'status_check') RETURNING id AS c1f \gset
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'c1a', "closedAt" = now() WHERE id = :'c1';
+SELECT pg_temp.s6b('00000000-0000-4000-8000-0000000006c1', :'c1');
+\gexec
+SELECT "refundCaseId" AS c1case FROM refund_attempt WHERE id = '00000000-0000-4000-8000-0000000006c1' \gset
+SELECT pg_temp.expect_constraint('S6c', 'R6C-1: an authorization only from an attempt Auth authorized', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', gen_random_uuid(), gen_random_uuid(), 1000, 'TND')$$, :'c1', :'c1case'), 'refund_authorization_from_attempt');
+UPDATE refund_attempt SET status = 'authorized', "receiptId" = '00000000-0000-4000-8000-0000000006d1', "approvedByUserId" = '00000000-0000-4000-8000-0000000000a6', "consumedAt" = now(), "authorizedAt" = now()
+  WHERE id = '00000000-0000-4000-8000-0000000006c1';
+SELECT pg_temp.expect_constraint('S6c', 'R6C-1: an authorization is the attempt''s own (amount)', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', '00000000-0000-4000-8000-0000000006d1', '00000000-0000-4000-8000-0000000000a6', 999, 'TND')$$, :'c1', :'c1case'), 'refund_authorization_from_attempt');
+SELECT pg_temp.expect_ok('S6c', 'R6C-1: the authorization of the authorized attempt', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', '00000000-0000-4000-8000-0000000006d1', '00000000-0000-4000-8000-0000000000a6', 1000, 'TND')$$, :'c1', :'c1case'));
+SELECT id AS z1 FROM refund_authorization WHERE "refundAttemptId" = '00000000-0000-4000-8000-0000000006c1' \gset
+SELECT pg_temp.expect_error('S6c', 'one authorization per attempt', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', '00000000-0000-4000-8000-0000000006d1', '00000000-0000-4000-8000-0000000000a6', 1000, 'TND')$$, :'c1', :'c1case'), '23505');
+UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-0000000006c1';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'rtx-s6c-1', 'refund', :'c1', :'c1a', '00000000-0000-4000-8000-0000000006c1', 400, 'TND', false, 'status_check') RETURNING id AS rf6c1 \gset
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'rtx-s6c-2', 'refund', :'c1', :'c1a', '00000000-0000-4000-8000-0000000006c1', 600, 'TND', false, 'status_check') RETURNING id AS rf6c2 \gset
+CREATE FUNCTION pg_temp.alloc(f uuid, amt bigint, intended bigint, excess bigint, cur text DEFAULT 'TND') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$SET CONSTRAINTS ALL IMMEDIATE; INSERT INTO refund_allocation ("factId", "refundAuthorizationId", "paymentId", "refundAttemptId", amount, currency, intended, excess)
+    SELECT %L, z.id, z."paymentId", z."refundAttemptId", %s, %L, %s, %s FROM refund_authorization z WHERE z."refundAttemptId" = '00000000-0000-4000-8000-0000000006c1'$$, f, amt, cur, intended, excess);
+$f$;
+SELECT pg_temp.expect_constraint('S6c', 'FC-2: the allocation records the fact''s observed amount unchanged', pg_temp.alloc(:'rf6c1', 500, 400, 100), 'refund_allocation_binding');
+SELECT pg_temp.expect_constraint('S6c', 'FC-2: intended + excess = amount', pg_temp.alloc(:'rf6c1', 400, 400, 100), 'refund_allocation_amounts');
+SELECT pg_temp.expect_constraint('S6c', 'FC-2: a capture fact is never a refund allocation', pg_temp.alloc(:'c1f', 1000, 1000, 0), 'refund_allocation_binding');
+SELECT pg_temp.expect_constraint('S6c', 'FC-2 / DB-17: the counter equals the sum of allocations (deferred check)', pg_temp.alloc(:'rf6c1', 400, 400, 0), 'refund_authorization_sum');
+SELECT pg_temp.expect_ok('S6c', 'FC-2: an allocation with its counter, in one transaction', format($$SET CONSTRAINTS ALL IMMEDIATE; SET CONSTRAINTS ALL DEFERRED;
+  INSERT INTO refund_allocation ("factId", "refundAuthorizationId", "paymentId", "refundAttemptId", amount, currency, intended, excess)
+    VALUES (%L, %L, %L, '00000000-0000-4000-8000-0000000006c1', 400, 'TND', 400, 0);
+  UPDATE refund_authorization SET "allocatedIntended" = 400 WHERE id = %L; SET CONSTRAINTS ALL IMMEDIATE$$, :'rf6c1', :'z1', :'c1', :'z1'));
+SELECT pg_temp.expect_error('S6c', 'one allocation per fact, forever', pg_temp.alloc(:'rf6c1', 400, 0, 400), '23505');
+SELECT pg_temp.expect_constraint('S6c', 'FC-2: allocatedIntended never exceeds the approved amount', format($$UPDATE refund_authorization SET "allocatedIntended" = 1001 WHERE id = %L$$, :'z1'), 'refund_authorization_bounded');
+SELECT pg_temp.expect_constraint('S6c', 'FC-3: completedAt only with the full approved amount', format($$UPDATE refund_authorization SET "completedAt" = now() WHERE id = %L$$, :'z1'), 'refund_authorization_completion');
+SELECT pg_temp.expect_constraint('S6c', 'FC-2: the counter never decreases', format($$UPDATE refund_authorization SET "allocatedIntended" = 0 WHERE id = %L$$, :'z1'), 'refund_authorization_monotonic');
+SELECT pg_temp.expect_error('S6c', 'the approved amount is immutable', format($$UPDATE refund_authorization SET "approvedAmount" = 400 WHERE id = %L$$, :'z1'), '23514');
+SELECT pg_temp.expect_ok('S6c', 'FC-3: the completing allocation sets completedAt with the full amount', format($$SET CONSTRAINTS ALL DEFERRED;
+  INSERT INTO refund_allocation ("factId", "refundAuthorizationId", "paymentId", "refundAttemptId", amount, currency, intended, excess)
+    VALUES (%L, %L, %L, '00000000-0000-4000-8000-0000000006c1', 600, 'TND', 600, 0);
+  UPDATE refund_authorization SET "allocatedIntended" = 1000, "completedAt" = now() WHERE id = %L; SET CONSTRAINTS ALL IMMEDIATE$$, :'rf6c2', :'z1', :'c1', :'z1'));
+SELECT pg_temp.expect_constraint('S6c', 'FC-3: completedAt is set once', format($$UPDATE refund_authorization SET "completedAt" = now() - interval '1 day' WHERE id = %L$$, :'z1'), 'refund_authorization_completed_once');
+SELECT pg_temp.expect_error('S6c', 'allocations are never edited', $$UPDATE refund_allocation SET intended = 0$$, '23514');
+SELECT pg_temp.expect_error('S6c', 'allocations are never deleted', $$DELETE FROM refund_allocation$$, '23514');
+SELECT pg_temp.expect_error('S6c', 'authorizations are never deleted', $$DELETE FROM refund_authorization$$, '23514');
+SELECT pg_temp.expect_constraint('S6c', 'FC-3 / V-3: a completed case refuses every new attempt (database boundary)', pg_temp.s6b(gen_random_uuid(), :'c1'), 'refund_attempt_case_completed');
+SELECT pg_temp.assert_eq('S6c', 'V-3: at most one completed authorization per case and per payment (partial unique indexes)',
+  (SELECT count(*)::text FROM pg_indexes WHERE indexname IN ('refund_authorization_case_completed', 'refund_authorization_payment_completed') AND indexdef LIKE '%UNIQUE%' AND indexdef LIKE '%"completedAt" IS NOT NULL%'), '2');
+SELECT pg_temp.expect_ok('S6c', 'R6C-6: a blocked fact is recorded with its reason', format($$INSERT INTO refund_fact_allocation_block ("factId", reason) VALUES (%L, 'contested')$$, :'c1f'));
+SELECT pg_temp.expect_error('S6c', 'a block is never edited', $$UPDATE refund_fact_allocation_block SET reason = 'currency_mismatch'$$, '23514');
+SELECT pg_temp.expect_error('S6c', 'a block is never deleted', $$DELETE FROM refund_fact_allocation_block$$, '23514');
+SELECT pg_temp.expect_error('S6c', 'a block has a closed reason', format($$INSERT INTO refund_fact_allocation_block ("factId", reason) VALUES (%L, 'whatever')$$, :'rf6c1'), '23514');
+SELECT pg_temp.assert_eq('S6c', 'FC-1: allocation never changed the facts', (SELECT string_agg(amount::text, ',' ORDER BY amount) FROM provider_transaction_fact WHERE "refundAttemptId" = '00000000-0000-4000-8000-0000000006c1'), '400,600');
+\o
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

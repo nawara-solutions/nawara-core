@@ -228,7 +228,8 @@ describe('PaymentEventConsumer provenance wiring (Core V2 S1b, observe-only)', (
     const bus = { subscribe: vi.fn(async (s: typeof sub) => { sub = s; return { close: async () => undefined }; }) };
     await new PaymentEventConsumer({} as never, bus as never, { tx: vi.fn() } as never, {} as never).onApplicationBootstrap();
     expect(sub.queue).toBe('billing.payment-events');
-    expect(sub.bindings).toEqual(['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired']); // payment.created still not bound
+    // payment.created still not bound; Core V2 S6c binds Payment's refund completion (and no other refund.* name)
+    expect(sub.bindings).toEqual(['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired', 'refund.case_completed']);
     expect(sub.provenance?.store).toBeDefined();
     for (const name of sub.bindings) expect(sub.provenance?.ownerOf(name)).toBe('payment-service');
     for (const name of ['payment.created', 'refund.succeeded', 'invoice.created', 'audit.payment_succeeded']) expect(sub.provenance?.ownerOf(name)).toBeUndefined();

@@ -347,11 +347,12 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
       expect((await audits(b.refundAttemptId)).map((x) => x.action)).toEqual(['refund_attempt.authorized', 'refund_attempt.succeeded']);
       expect((await audits(b.refundAttemptId))[1].changes).toEqual({ payment_id: payment.id, refund_case_id: b.refundCaseId, fact_id: row.succeededFactId });
       expect((await admin.query(`SELECT received FROM simulation_refund_dispatch WHERE "idempotencyKey" = $1`, [b.refundAttemptId])).rows[0].received).toBe(1);
-      // S6c/S6d stay out: the payment is untouched, no refund.* or payment.* event follows, no new attempt is admissible
+      // S6d stays out: the payment is untouched, no payment.* event follows; Core V2 S6c: the full verified refund completes the case, once
       expect((await admin.query(`SELECT status FROM payment WHERE id = $1`, [payment.id])).rows[0].status).toBe('succeeded');
-      expect(Number((await admin.query(`SELECT count(*) FROM outbox WHERE name NOT LIKE 'audit.%' AND payload->>'paymentId' = $1 AND name <> 'payment.created' AND name <> 'payment.succeeded'`, [payment.id])).rows[0].count)).toBe(0);
+      expect((await admin.query(`SELECT name FROM outbox WHERE name NOT LIKE 'audit.%' AND payload->>'paymentId' = $1 AND name <> 'payment.created' AND name <> 'payment.succeeded'`, [payment.id])).rows.map((r) => r.name))
+        .toEqual(['refund.case_completed']);
       const c = randomUUID();
-      expect((await refund(payment.id, body(c, receiptFor(payment.id, c).secret)).expect(409)).body.code).toBe('refund_already_recorded');
+      expect((await refund(payment.id, body(c, receiptFor(payment.id, c).secret)).expect(409)).body.code).toBe('refund_case_completed');
     });
 
     it('ambiguous dispatch and no record: only ever resent with the SAME key, never failed by inference, never a second refund', async () => {
@@ -418,7 +419,8 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
       await sim(`refunds/${b3.refundAttemptId}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201);
       expect((await attemptRow(b3.refundAttemptId)).status).toBe('discrepancy');
       const c = randomUUID();
-      expect((await refund(p3.id, body(c, receiptFor(p3.id, c).secret)).expect(409)).body.code).toBe('refund_already_recorded');
+      // Core V2 S6c (R6C-4): the verified full refund is allocated even on a discrepancy attempt, so the case is complete (FC-3)
+      expect((await refund(p3.id, body(c, receiptFor(p3.id, c).secret)).expect(409)).body.code).toBe('refund_case_completed');
     });
 
     it('the status read is an authenticated channel too: a submitted refund resolves through it, and the late notification is the same fact', async () => {

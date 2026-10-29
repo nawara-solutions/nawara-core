@@ -70,7 +70,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND NOT (table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount') -- S3f: school-fee configuration, checked below
     AND NOT (table_name = 'assistance_request' AND column_name IN ('baseAmount', 'feeAmount', 'totalAmount')) -- S5a: frozen assistance terms, checked below
     AND NOT (table_name = 'cash_return_obligation' AND column_name = 'amount') -- S5b: the frozen total owed back, checked below
-    AND NOT (table_name = 'refund_case' AND column_name = 'amount')), '8'); -- S6a: the full captured amount, equal to the payment request's (guard, e2e)
+    AND NOT (table_name = 'refund_case' AND column_name = 'amount') -- S6a: the full captured amount, equal to the payment request's (guard, e2e)
+    AND NOT (table_name = 'refund_case_completion' AND column_name = 'approvedAmount')), '8'); -- S6c: Payment's approved amount, equal to the case's (guard, e2e)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -1146,6 +1147,22 @@ SELECT pg_temp.assert_eq('S6b', 'F-12: no Billing column stores a receipt secret
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND column_name ~* 'secret'), '0');
 SELECT pg_temp.assert_eq('S6b', 'a relay holds no money: the binding is the case''s own',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'refund_authorization_relay' AND column_name ~* '(amount|currency|total)'), '0');
+
+-- ------------------------------------------------------------------------------------------------------------- S6c refund case completion (0035)
+-- Completion from Payment's verified event or read runs end to end in test/refund-authorizations.e2e-spec.ts and over a real broker in
+-- test/e2e-real-broker/s6b-refund-processing.e2e-spec.ts; here, the guards that need no case fixture.
+SELECT pg_temp.expect_error('S6c', 'completion evidence names a real case of the same payment', $$INSERT INTO refund_case_completion ("refundCaseId", "paymentId", "refundAttemptId", "refundAuthorizationId", "approvedAmount", currency, "completedAt", source)
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'TND', now(), 'reconciliation')$$, '23514', 'refund_case_completion_case_open');
+SELECT pg_temp.assert_eq('S6c', 'an event-sourced completion records its verified event id, a reconciled one none',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%eventId%')::text FROM pg_constraint WHERE conname = 'refund_case_completion_source'), 'true');
+SELECT pg_temp.assert_eq('S6c', 'V-3: one completion per case (primary key) and per Payment authorization (unique)',
+  (SELECT count(*)::text FROM pg_constraint WHERE conrelid = 'refund_case_completion'::regclass AND contype IN ('p', 'u')), '3');
+SELECT pg_temp.assert_eq('S6c', 'the completion is bound to a relay of the same case (composite key)',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname = 'refund_case_completion_relay' AND contype = 'f'), '1');
+SELECT pg_temp.assert_eq('S6c', 'the refund_case.completed transition requires the recorded completion',
+  (SELECT (prosrc LIKE '%refund_case_completion_evidence%')::text FROM pg_proc WHERE proname = 'billing_refund_case_transition_guard'), 'true');
+SELECT pg_temp.assert_eq('S6c', 'R6C-10: completion adds no reversal, entitlement or obligation column',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'refund_case_completion' AND column_name ~* '(reversal|entitlement|obligation|purchase)'), '0');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

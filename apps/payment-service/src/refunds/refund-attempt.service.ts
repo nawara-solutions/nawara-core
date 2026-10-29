@@ -27,12 +27,15 @@ export interface RefundRequestInput {
 /** A refusal made before any attempt existed (R6B-10): permanent for this refund attempt id. */
 export const REFUSAL_STATUS: Record<RefusalCode, number> = {
   payment_not_refundable: 409, refund_capture_unverified: 409, refund_amount_not_full: 422, refund_dispute_open: 409, refund_in_progress: 409,
-  refund_already_recorded: 409,
+  refund_already_recorded: 409, refund_case_completed: 409,
 };
-export type RefusalCode = 'payment_not_refundable' | 'refund_capture_unverified' | 'refund_amount_not_full' | 'refund_dispute_open' | 'refund_in_progress' | 'refund_already_recorded';
+/** Core V2 S6c (R6C-7; FC-3, V-3): `refund_case_completed` is the frozen refusal of every new attempt once the case's refund is complete. */
+export type RefusalCode = 'payment_not_refundable' | 'refund_capture_unverified' | 'refund_amount_not_full' | 'refund_dispute_open' | 'refund_in_progress'
+  | 'refund_already_recorded' | 'refund_case_completed';
 const REFUSAL_MESSAGE: Record<RefusalCode, keyof typeof PAYMENT_MESSAGES> = {
   payment_not_refundable: 'paymentNotRefundable', refund_capture_unverified: 'refundCaptureUnverified', refund_amount_not_full: 'refundAmountNotFull',
   refund_dispute_open: 'refundDisputeOpen', refund_in_progress: 'refundInProgress', refund_already_recorded: 'refundAlreadyRecorded',
+  refund_case_completed: 'refundCaseCompleted',
 };
 export const refusalError = (code: RefusalCode) => paymentError(REFUSAL_STATUS[code], code, PAYMENT_MESSAGES[REFUSAL_MESSAGE[code]]);
 
@@ -174,6 +177,10 @@ export class RefundAttemptService {
       || !p.purpose || !REFUNDABLE_PURPOSES.has(p.purpose) || !p.succeededAttemptId) {
       return { refusal: 'payment_not_refundable' };
     }
+    // Core V2 S6c (R6C-7; FC-3, V-3): a completed refund case (or a payment already refunded in full) refuses every new attempt, forever
+    const { rows: completed } = await q.query(
+      `SELECT 1 FROM refund_authorization WHERE "completedAt" IS NOT NULL AND ("refundCaseId" = $1 OR "paymentId" = $2) LIMIT 1`, [input.refundCaseId, p.id]);
+    if (completed.length > 0) return { refusal: 'refund_case_completed' };
     // the verified original capture (S4d): exactly one fact of the succeeded attempt, for the full amount, never contradicted. A capture
     // recorded before S4d has no fact and is never reconstructed: it stays on its reconciliation path (S6h).
     const { rows: facts } = await q.query<{ id: string; provider: string; amount: string; currency: string; contested: boolean }>(
@@ -245,6 +252,12 @@ export class RefundAttemptService {
             WHERE id = $1 RETURNING *`,
           [id, c.receiptId, c.approvedByUserId, c.consumedAt],
         );
+        // Core V2 S6c (R6C-1): the authorization allocations are counted against, created with the consumption it records
+        await q.query(
+          `INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [id, a.paymentId, a.refundCaseId, a.producer, c.receiptId, c.approvedByUserId, a.amount, a.currency],
+        );
         await this.audit.recordRefund(q, 'refund_attempt.authorized', rows[0]!, await this.organizationOf(q, a.paymentId), ctx);
         this.log.log(`refund_attempt_authorized refundAttempt=${id} payment=${a.paymentId}`);
         return rows[0]!;
@@ -290,7 +303,21 @@ export class RefundAttemptService {
       ? (await this.db.query<{ id: string; refundCaseId: string; code: string; refusedAt: Date }>(
           `SELECT id, "refundCaseId", code, "refusedAt" FROM refund_attempt_refusal WHERE "paymentId" = $1 ORDER BY "refusedAt", id`, [paymentId])).rows
       : null;
-    return { attempts, refusals };
+    // Core V2 S6c (R6C-12): the authorizations with their verified allocations; for the producer, the refund facts not (yet) allocated
+    const { rows: authorizations } = await this.db.query<{ id: string; refundAttemptId: string; refundCaseId: string; approvedAmount: string; currency: string;
+      allocatedIntended: string; completedAt: Date | null }>(
+      `SELECT id, "refundAttemptId", "refundCaseId", "approvedAmount", currency, "allocatedIntended", "completedAt" FROM refund_authorization WHERE "paymentId" = $1 ORDER BY "createdAt", id`,
+      [paymentId]);
+    const { rows: allocations } = await this.db.query<{ refundAuthorizationId: string; factId: string; amount: string; currency: string; intended: string; excess: string; allocatedAt: Date }>(
+      `SELECT "refundAuthorizationId", "factId", amount, currency, intended, excess, "allocatedAt" FROM refund_allocation WHERE "paymentId" = $1 ORDER BY "allocatedAt", id`, [paymentId]);
+    const unallocated = includeRefusals
+      ? (await this.db.query<{ factId: string; refundAttemptId: string; amount: string; currency: string; observedAt: Date; blockedReason: string | null }>(
+          `SELECT f.id AS "factId", f."refundAttemptId", f.amount, f.currency, f."observedAt", b.reason AS "blockedReason"
+             FROM provider_transaction_fact f LEFT JOIN refund_fact_allocation_block b ON b."factId" = f.id
+            WHERE f."paymentId" = $1 AND f.kind = 'refund' AND NOT EXISTS (SELECT 1 FROM refund_allocation a WHERE a."factId" = f.id)
+            ORDER BY f."observedAt", f.id`, [paymentId])).rows
+      : null;
+    return { attempts, refusals, authorizations, allocations, unallocated };
   }
 }
 
@@ -300,5 +327,5 @@ const attemptConflict = (): HttpException => paymentError(409, 'refund_attempt_c
 export const REFUND_REQUEST_CODES: readonly ErrorCode[] = [
   'invalid_refund_request', 'payment_not_refundable', 'refund_capture_unverified', 'refund_amount_not_full', 'refund_dispute_open', 'refund_dispute_unavailable',
   'refund_in_progress', 'refund_already_recorded', 'refund_attempt_conflict', 'refund_authorization_invalid', 'refund_authorization_expired',
-  'refund_authorization_unresolved',
+  'refund_authorization_unresolved', 'refund_case_completed',
 ];

@@ -472,10 +472,10 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect((await audit(first.body.id)).map((e) => e.name)).toEqual(['audit.refund_case.opened', 'audit.refund_case.cancelled']);
     });
 
-    it('a completed case is terminal: it keeps the payment forever, cannot be cancelled, and completion is refused until S6c', async () => {
+    it('a completed case is terminal: it keeps the payment forever, cannot be cancelled, and completion needs Payment\'s recorded completion (S6c)', async () => {
       const p = await directPurchase();
       const c = (await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).body;
-      await expect(admin.query(`UPDATE refund_case SET status = 'completed', "completedAt" = now() WHERE id = $1`, [c.id])).rejects.toMatchObject({ constraint: 'refund_case_completion_reserved' });
+      await expect(admin.query(`UPDATE refund_case SET status = 'completed', "completedAt" = now() WHERE id = $1`, [c.id])).rejects.toMatchObject({ constraint: 'refund_case_completion_evidence' }); // Core V2 S6c: only with Payment's recorded completion
       await backdate(c.id, `UPDATE refund_case SET status = 'completed', "completedAt" = now() WHERE id = $1`); // a test-only stand-in for S6c's completion
       expect((await cancelCase(c.id)).body.code).toBe('refund_case_not_open');
       expect((await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).body.code).toBe('refund_case_exists');

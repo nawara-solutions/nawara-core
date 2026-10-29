@@ -354,6 +354,54 @@
           "optional": true
         }
       }
+    },
+    {
+      "name": "refund.case_completed",
+      "version": 1,
+      "payload": {
+        "approvedAmount": {
+          "type": "integer"
+        },
+        "completedAt": {
+          "type": "datetime"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "direct_purchase",
+            "assisted_settlement",
+            "non_entitlement"
+          ]
+        },
+        "refundAttemptId": {
+          "type": "uuid"
+        },
+        "refundAuthorizationId": {
+          "type": "uuid"
+        },
+        "refundCaseId": {
+          "type": "uuid"
+        }
+      }
     }
   ],
   "consumes": []

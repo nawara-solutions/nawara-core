@@ -120,6 +120,12 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'DELETE FROM refund_attempt_refusal',
         'UPDATE simulation_refund_command SET instruction = instruction',
         'DELETE FROM simulation_refund_dispatch',
+        // Core V2 S6c (migration 0018): allocation evidence is never edited, deleted or truncated by the runtime role
+        'UPDATE refund_allocation SET intended = intended',
+        'DELETE FROM refund_allocation',
+        'DELETE FROM refund_authorization',
+        'TRUNCATE refund_authorization',
+        'UPDATE refund_fact_allocation_block SET reason = reason',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }

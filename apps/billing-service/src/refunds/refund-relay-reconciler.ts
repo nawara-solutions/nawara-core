@@ -2,6 +2,8 @@ import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnAppl
 import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { PAYMENT_REFUND_CLIENT, type PaymentRefundClient } from './payment-refund-client.js';
 import { RefundAuthorizationService, type RelayRow } from './refund-authorization.service.js';
+import { RefundCompletionService } from './refund-completion.service.js';
+import { randomUUID } from 'node:crypto';
 
 const BATCH_SIZE = 50;
 const LEASE_SECONDS = 30;
@@ -25,6 +27,7 @@ export class RefundRelayReconciler {
     private readonly db: DbService,
     private readonly relays: RefundAuthorizationService,
     @Inject(PAYMENT_REFUND_CLIENT) private readonly payment: PaymentRefundClient,
+    private readonly completions: RefundCompletionService,
   ) {}
 
   start(intervalMs = 10_000): void {
@@ -33,6 +36,33 @@ export class RefundRelayReconciler {
 
   async stop(drainTimeoutMs?: number): Promise<DrainOutcome> {
     return this.loop.stop(drainTimeoutMs);
+  }
+
+  /** Core V2 S6c (R6C-9): open cases whose relay may have been consumed, completed from Payment's authoritative completion. */
+  private async completeFromPayment(): Promise<number> {
+    const { rows } = await this.db.query<{ id: string; paymentId: string }>(
+      `SELECT c.id, c."paymentId" FROM refund_case c
+        WHERE c.status = 'open' AND EXISTS (SELECT 1 FROM refund_authorization_relay r WHERE r."refundCaseId" = c.id
+          AND (r."attemptStatus" IS NULL OR r."attemptStatus" NOT IN ('authorization_expired', 'authorization_refused', 'rejected')))
+        ORDER BY c."openedAt", c.id LIMIT $1`, [BATCH_SIZE]);
+    let completed = 0;
+    for (const c of rows) {
+      try {
+        const z = (await this.payment.refunds(c.paymentId))?.authorizations.find((a) => a.refundCaseId === c.id && a.completedAt);
+        if (!z) continue;
+        const runId = randomUUID();
+        const outcome = await this.completions.complete(
+          { refundCaseId: c.id, refundAuthorizationId: z.refundAuthorizationId, refundAttemptId: z.refundAttemptId, paymentId: c.paymentId, approvedAmount: z.approvedAmount,
+            currency: z.currency, completedAt: z.completedAt! },
+          { kind: 'reconciliation' },
+          { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: runId }, correlationId: `reconcile:${runId}` },
+        );
+        if (outcome === 'completed') completed++;
+      } catch (e) {
+        this.logger.warn(`refund_case_completion_reconcile_failure refundCase=${c.id} ${describeFailure(e)} — retried on a later pass`);
+      }
+    }
+    return completed;
   }
 
   /** One pass. Exposed directly for tests. */
@@ -67,6 +97,7 @@ export class RefundRelayReconciler {
           this.logger.warn(`refund_relay_reconcile_failure relay=${relay.id} ${describeFailure(e)} — retried on a later pass`);
         }
       }
+      changed += await this.completeFromPayment();
       return { checked: rows.length, changed };
     } finally {
       this.running = false;

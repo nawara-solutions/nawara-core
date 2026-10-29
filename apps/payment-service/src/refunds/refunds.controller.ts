@@ -82,7 +82,7 @@ export class RefundsController {
   @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
   @RequireServiceOperation('payment.read')
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'PAY-08: the refund attempts of a payment and their authoritative state; for its producer, also the refund attempt ids Payment refused before any attempt existed.' })
+  @ApiOperation({ summary: 'PAY-08: the refund attempts of a payment and their authoritative state, the refund authorizations with their verified allocations and completion; for its producer, also the refused refund attempt ids and the refund facts not allocated (pending or blocked).' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted' })
@@ -92,10 +92,19 @@ export class RefundsController {
     const payment = await this.payments.findById(paymentId.toLowerCase());
     if (!payment || !req.caller) throw notFound();
     const relation = await this.authorization.assertCanRead(payment, req.caller);
-    const { attempts, refusals } = await this.refunds.listForPayment(payment.id, relation === 'producer');
+    const { attempts, refusals, authorizations, allocations, unallocated } = await this.refunds.listForPayment(payment.id, relation === 'producer');
     return {
       paymentId: payment.id,
       attempts: attempts.map(representRefundAttempt),
+      // Core V2 S6c (R6C-12): each authorization's approved amount, cumulative intended allocation, completion and verified allocations
+      authorizations: authorizations.map((z) => ({
+        refundAuthorizationId: z.id, refundAttemptId: z.refundAttemptId, refundCaseId: z.refundCaseId, approvedAmount: Number(z.approvedAmount), currency: z.currency.trim(),
+        allocatedIntended: Number(z.allocatedIntended), completedAt: iso(z.completedAt),
+        allocations: allocations.filter((a) => a.refundAuthorizationId === z.id).map((a) => ({
+          factId: a.factId, amount: Number(a.amount), currency: a.currency.trim(), intended: Number(a.intended), excess: Number(a.excess), allocatedAt: iso(a.allocatedAt) })),
+      })),
+      ...(unallocated ? { unallocatedFacts: unallocated.map((f) => ({ factId: f.factId, refundAttemptId: f.refundAttemptId, amount: Number(f.amount), currency: f.currency,
+        observedAt: iso(f.observedAt), state: f.blockedReason ? 'blocked' : 'pending', blockedReason: f.blockedReason })) } : {}),
       ...(refusals ? { refusals: refusals.map((r) => ({ refundAttemptId: r.id, refundCaseId: r.refundCaseId, code: r.code, refusedAt: iso(r.refusedAt) })) } : {}),
     };
   }

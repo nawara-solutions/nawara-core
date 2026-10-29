@@ -561,6 +561,19 @@ const SPEC = {
     purpose: 'The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization).',
   },
 
+  // Core V2 S6c (register EVT-02; S0 FC-3; the Owner's R6C-9, R6C-11): Billing completes a refund case once, from Payment's verified
+  // `refund.case_completed` (or Payment's status read when that event is lost). Version 1, no trusted scope; nothing is reversed (S6d).
+  'refund_case.completed': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['payment_event_consumer', 'payment_reconciler'] }, organization: 'optional',
+    resource: ['refund_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      refund_approval_id: { type: 'uuid', shape: 'value', required: true }, // Payment's refund authorization id (a key naming 'authorization' is screened as sensitive)
+      refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'Payment\'s verified evidence shows the case\'s full refund was returned: the refund case is completed (no new attempt is ever accepted).',
+  },
+
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true }, organization: 'optional',
@@ -605,6 +618,18 @@ const SPEC = {
     resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
     changes: { payment_id: { type: 'uuid', shape: 'value', required: true }, refund_case_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'The provider definitively refused or failed an authorized refund (a further attempt needs a new authorization).',
+  },
+  // Core V2 S6c (register EVT-02; S0 FC-2, FC-3; the Owner's R6C-7, R6C-11): the cumulative verified allocation of a refund authorization reached
+  // its approved full amount; `refund.case_completed` is published with it. Version 1, no trusted scope, no `approvedBy`.
+  'refund_authorization.completed': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
+    resource: ['refund_authorization'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      refund_case_id: { type: 'uuid', shape: 'value', required: true },
+      refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'Verified provider refund evidence reached the full approved refund: the refund is financially complete, once.',
   },
   'refund_attempt.succeeded': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',

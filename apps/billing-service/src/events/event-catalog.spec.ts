@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import { invoiceCreatedEvent } from '../invoices/billing-events.js';
 import type { InvoiceRecord } from '../invoices/invoice.types.js';
 import { CONSUMED_EVENTS, PRODUCED_EVENTS, renderEventContract, type EventField } from './event-catalog.js';
@@ -24,6 +23,7 @@ function conformance(payload: Record<string, unknown>, declared: Readonly<Record
       string: () => typeof v === 'string',
       datetime: () => typeof v === 'string' && !Number.isNaN(Date.parse(v)) && v.endsWith('Z'),
       integer: () => Number.isSafeInteger(v),
+      boolean: () => typeof v === 'boolean',
       object: () => typeof v === 'object' && !Array.isArray(v),
       array: () => Array.isArray(v),
       enum: () => typeof v === 'string' && (f.values ?? []).includes(v),
@@ -63,9 +63,9 @@ describe('billing-service event catalog (V2 A3M.2)', () => {
     }
   });
 
-  it('the consumed payment outcomes are exactly the names the consumer binds, each at version 1', () => {
-    const names: readonly PaymentEventName[] = CONSUMED_EVENTS.map((c) => c.name);
-    expect([...names].sort()).toEqual(['payment.cancelled', 'payment.expired', 'payment.failed', 'payment.succeeded']);
+  it('the consumed payment outcomes (and, Core V2 S6c, Payment\'s refund completion) are exactly the names the consumer binds, each at version 1', () => {
+    const names: readonly string[] = CONSUMED_EVENTS.map((c) => c.name);
+    expect([...names].sort()).toEqual(['payment.cancelled', 'payment.expired', 'payment.failed', 'payment.succeeded', 'refund.case_completed']);
     for (const c of CONSUMED_EVENTS) {
       expect(c.source).toBe('payment-service');
       expect(c.version).toBe(1);

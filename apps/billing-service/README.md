@@ -165,7 +165,9 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     request only. Payment's answer is mirrored only when it proves something; a lost answer leaves the relay `unconfirmed`.
   - A `RefundRelayReconciler` mirrors Payment's authoritative attempt status (PAY-08); the case's `attempts` show it.
   - Cancellation is refused (`409 refund_processing_started`) unless Payment proved every relay ended unconsumed and undispatched.
-  - No case is completed and nothing is reversed (S6c, S6d); no `refund.*` event exists yet.
+  - Core V2 S6c (`db/migrations/0035`, `src/refunds/refund-completion.service.ts`): the case is completed once from Payment's verified
+    `refund.case_completed` (bound on `billing.payment-events`), or from Payment's PAY-08 read by the relay reconciler when the event is lost,
+    with strict binding to the case, payment, full amount, currency and a relay Billing recorded. Nothing is reversed (S6d).
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

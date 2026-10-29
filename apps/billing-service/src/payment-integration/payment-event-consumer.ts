@@ -1,13 +1,16 @@
-import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, EVENT_BUS, EVENT_NAME, PermanentEventFailure, PgProvenanceStore, pgCode, runWithEventContext, SAFE_ID, safeToken, strictEnforcement, type EventBus, type EventEnvelope, type HandlerTrust } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
 import { CONSUMED_EVENTS as CATALOG } from '../events/event-catalog.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
 import { PaymentEventOriginRepository, trustedEnvelope, type TrustedPaymentEnvelope } from './payment-event-origin.js';
+import { RefundCompletionService } from '../refunds/refund-completion.service.js';
 
 /** V2 A3M.2: the consumed names and their supported versions come from the event catalog (`events/event-catalog.ts`). */
-const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.map((c) => c.name);
+const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.filter((c) => c.name.startsWith('payment.')).map((c) => c.name as PaymentEventName);
+/** Core V2 S6c: every name the queue binds (the payment outcomes and Payment's refund completion). */
+const BOUND_EVENTS: readonly string[] = CATALOG.map((c) => c.name);
 const SUPPORTED_VERSION: ReadonlyMap<string, number> = new Map(CATALOG.map((c) => [c.name, c.version]));
 /** V2 A3M.3 (G11): the only source each consumed event may come from. A sanity filter on an ASSERTED header, never authentication. */
 const EXPECTED_SOURCE: ReadonlyMap<string, string> = new Map(CATALOG.map((c) => [c.name, c.source]));
@@ -88,12 +91,14 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     @Inject(EVENT_BUS) private readonly bus: EventBus,
     private readonly db: DbService,
     private readonly origins: PaymentEventOriginRepository,
+    /** Core V2 S6c: present only where refund cases are mounted (never production); without it a refund completion is never applied. */
+    @Optional() @Inject(RefundCompletionService) private readonly refundCompletions?: RefundCompletionService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
     this.subscription = await this.bus.subscribe({
       queue: 'billing.payment-events',
-      bindings: [...CONSUMED_EVENTS],
+      bindings: [...BOUND_EVENTS],
       handler: (event, trust) => this.handle(event, trust),
       // Core V2 S1b: each delivery's provenance is committed in Billing's database before anything else; the owner of each consumed name
       // is the catalog's (payment-service for payment.*).
@@ -188,6 +193,7 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
       this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=wrong_source`, who);
       throw new PermanentEventFailure('wrong_source');
     }
+    if (t.name === 'refund.case_completed') return this.processRefundCompletion(event, t, correlationId, who, tag);
     let facts: PaymentEventFacts;
     let settledAt: Date;
     try {
@@ -237,5 +243,35 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     // Core V2 S3a (B9): a paid invoice without a matching routing record changes no Subscription; it needs review, never a guess.
     if (result.subscription === 'late') this.logger.error(`payment_event_assisted_settlement_late — settlement recorded, no purchase and no obligation change (assistance_late_settlement); held for reconciliation (S6h)`, at);
     if (result.subscription === 'unrouted') this.logger.error(`payment_event_subscription_unrouted — settlement applied; the invoice has no organization_subscription routing for that Organization, so no Subscription changed; needs manual review`, at);
+  }
+
+  /**
+   * Core V2 S6c (register EVT-02; the Owner's R6C-9): Payment's verified financial completion of a refund case. The payload is parsed trusting
+   * nothing; `liveMode` must be false (simulation only). `RefundCompletionService` binds it strictly to Billing's own case and relay and
+   * completes the case once, with the verified event id as its receipt. A binding mismatch or a conflict is never applied and never retried:
+   * it is dead-lettered for review (permanent). Without the refund module (production) nothing is applied.
+   */
+  private async processRefundCompletion(event: EventEnvelope, t: TrustedPaymentEnvelope, correlationId: string, who: Record<string, string>, tag: (b: string, r: string) => string): Promise<void> {
+    const p = event.payload;
+    const str = (v: unknown) => (typeof v === 'string' ? v : '');
+    if (typeof p.approvedAmount !== 'number' || p.liveMode !== false || typeof p.refundCaseId !== 'string' || typeof p.completedAt !== 'string') {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`, who);
+      throw new MalformedPaymentEventError();
+    }
+    if (!this.refundCompletions) {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=refunds_not_enabled`, who);
+      throw new PermanentEventFailure('refunds_not_enabled');
+    }
+    const outcome = await this.refundCompletions.complete(
+      { refundCaseId: str(p.refundCaseId), refundAuthorizationId: str(p.refundAuthorizationId), refundAttemptId: str(p.refundAttemptId), paymentId: str(p.paymentId),
+        approvedAmount: p.approvedAmount, currency: str(p.currency), completedAt: str(p.completedAt) },
+      { kind: 'event', eventId: t.eventId },
+      { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: t.eventId }, correlationId },
+    );
+    if (outcome === 'binding_mismatch' || outcome === 'conflict') {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=refund_completion_${outcome}`, who);
+      throw new PermanentEventFailure(`refund_completion_${outcome}`);
+    }
+    this.logger.log(`${tag('refund_completion_applied', 'refund_completion_replay')} outcome=${outcome}`, who);
   }
 }

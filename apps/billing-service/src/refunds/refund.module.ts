@@ -9,6 +9,7 @@ import { RefundOwnerGuard } from './refund-owner.guard.js';
 import { HttpPaymentRefundClient, PAYMENT_REFUND_CLIENT, type PaymentRefundClient } from './payment-refund-client.js';
 import { RefundAuthorizationService } from './refund-authorization.service.js';
 import { RefundRelayReconciler, RefundRelayReconcilerService } from './refund-relay-reconciler.js';
+import { RefundCompletionService } from './refund-completion.service.js';
 
 /**
  * Core V2 S6a refund cases (register BIL-23, BIL-25; the Owner's R6A-1 to R6A-9). PRODUCTION REFUSAL, first line: in production the module
@@ -27,7 +28,7 @@ export class RefundModule {
       providers: [
         RefundCaseService, RefundCommandIdempotency, RefundOwnerGuard,
         // Core V2 S6b (BIL-24): the relay to Payment and its reconciler (Billing's own service token; never an Owner's bearer)
-        RefundAuthorizationService, RefundRelayReconciler, ...(refunds.reconciler === false ? [] : [RefundRelayReconcilerService]),
+        RefundAuthorizationService, RefundRelayReconciler, RefundCompletionService, ...(refunds.reconciler === false ? [] : [RefundRelayReconcilerService]),
         {
           provide: PAYMENT_REFUND_CLIENT,
           useValue: refunds.paymentRefundClient ?? new HttpPaymentRefundClient({ baseUrl: config.paymentServiceUrl, serviceToken: config.paymentServiceToken, timeoutMs: config.paymentTimeoutMs }),
@@ -35,7 +36,9 @@ export class RefundModule {
         { provide: OWNER_AUTHORITY, useValue: ownerAuthority ?? new HttpOwnerAuthority({ baseUrl: config.authServiceUrl }) },
         { provide: PAYMENT_DISPUTE_EXPOSURE, useValue: disputeExposure ?? new NoDisputeSourceBeforeS6e() },
       ],
-      exports: [RefundRelayReconciler],
+      // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
+      global: true,
+      exports: [RefundRelayReconciler, RefundCompletionService],
     };
   }
 }
