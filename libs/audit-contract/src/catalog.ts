@@ -533,8 +533,9 @@ const SPEC = {
       company_id: { type: 'uuid', shape: 'value', required: true },
       platform_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
-      eligibility: { type: 'code', shape: 'value', required: true, values: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement'] },
-      reason: { type: 'code', shape: 'value', required: true, values: ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement'] },
+      // + Core V2 S6f (R6F-5 Path A): the recovery-surplus basis and its reason
+      eligibility: { type: 'code', shape: 'value', required: true, values: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement', 'recovery_surplus'] },
+      reason: { type: 'code', shape: 'value', required: true, values: ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement', 'recovery_surplus'] },
       legal_override: { type: 'boolean', shape: 'value', required: true },
     },
     purpose: 'The Owner of the seller Company opened a refund case for one verified captured payment, in full (no refund attempt yet; nothing moved).',
@@ -612,6 +613,56 @@ const SPEC = {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['fraud_hold_sweep'] }, organization: 'none',
     resource: ['fraud_hold'], subject: NO_SUBJECT, outcomes: OK, changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A fraud hold reached its 14-day review deadline unreleased: its restriction ended there; the denied paid time is compensated.',
+  },
+
+  // Core V2 S6f (register BIL-28 to BIL-31; ADR-0044 B8, B10; S0 §3.5 R-1 to R-5; the Owner's R6F-6): Organization recovery. Version 1, no
+  // trusted scope. The worker opens; a verified payment (Payment's event, applied by Billing) records and recovers; the Owner and the receiving
+  // Organization's administrator resolve a surplus. Amounts are Billing's own computed values, never a client claim.
+  'recovery_obligation.opened': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['recovery_worker'] }, organization: 'required',
+    resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      dispute_id: { type: 'uuid', shape: 'value', required: true },
+      assistance_request_id: { type: 'uuid', shape: 'value', required: true },
+      base_amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+    },
+    purpose: "A verified full final lost chargeback of an assisted purchase: the Organization owes the base amount only; the beneficiary keeps the entitlement; new assistance is restricted (T3).",
+  },
+  'recovery_payment.recorded': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['payment_event_consumer', 'payment_reconciler'] }, organization: 'required',
+    resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_request_id: { type: 'uuid', shape: 'value', required: true },
+      recovered_amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
+      surplus_amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
+    },
+    purpose: 'A verified recovery-settlement payment, recorded once: the part recovering the base and the surplus beyond it.',
+  },
+  'recovery_obligation.recovered': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['payment_event_consumer', 'payment_reconciler'] }, organization: 'required',
+    resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
+    purpose: 'Verified recoveries reached the base amount: the obligation is recovered once and its T3 restriction ends.',
+  },
+  'recovery_surplus.recorded': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['payment_event_consumer', 'payment_reconciler'] }, organization: 'required',
+    resource: ['recovery_surplus'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 } },
+    purpose: 'A verified recovery payment beyond the base: a surplus owed to the Organization (not revenue, not a loss, no expiry, never offset).',
+  },
+  'recovery_surplus.resolved': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'], system: ['refund_effect_worker'] }, organization: 'required',
+    resource: ['recovery_surplus'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      method: { type: 'code', shape: 'value', required: true, values: ['full_refund', 'external_execution_evidenced'] },
+      refund_case_id: { type: 'uuid', shape: 'value', required: false },
+      file_id: { type: 'uuid', shape: 'value', required: false },
+    },
+    purpose: 'A surplus resolution: the completed full refund of an entirely surplus payment, or the Owner\'s evidenced record of an external repayment (which the Organization then confirms).',
+  },
+  'recovery_surplus.recipient_confirmed': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['recovery_surplus'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
+    purpose: "The receiving Organization's administrator confirmed an external surplus repayment: the surplus is resolved.",
   },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service

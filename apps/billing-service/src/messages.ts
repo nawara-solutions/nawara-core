@@ -535,6 +535,51 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Les blocages pour fraude ne sont pas disponibles ; rien n'a été modifié.",
     ar: 'الحجز بسبب الاحتيال غير متاح؛ لم يتغيّر شيء.',
   },
+  invalidRecoveryRequest: { // Core V2 S6f
+    en: 'The recovery request is invalid.',
+    fr: "La demande de recouvrement n'est pas valide.",
+    ar: 'طلب الاسترداد غير صالح.',
+  },
+  recoveryObligationClosed: { // Core V2 S6f
+    en: 'This recovery obligation is already recovered.',
+    fr: 'Cette obligation de recouvrement est déjà recouvrée.',
+    ar: 'تمّ استرداد التزام الاسترداد هذا بالفعل.',
+  },
+  surplusNotOwed: { // Core V2 S6f
+    en: 'This surplus is already resolved or being refunded.',
+    fr: 'Cet excédent est déjà résolu ou en cours de remboursement.',
+    ar: 'تمت تسوية هذا الفائض بالفعل أو يجري استرداده.',
+  },
+  surplusNotEvidenced: { // Core V2 S6f
+    en: 'The Owner has not recorded an external repayment of this surplus.',
+    fr: "Le propriétaire n'a enregistré aucun remboursement externe de cet excédent.",
+    ar: 'لم يسجّل المالك أي سداد خارجي لهذا الفائض.',
+  },
+  surplusEvidenceInvalid: { // Core V2 S6f
+    en: 'The evidence is not a surplus_evidence grant to Billing for exactly this surplus.',
+    fr: "La preuve n'est pas une autorisation surplus_evidence accordée à la facturation pour exactement cet excédent.",
+    ar: 'الدليل ليس منحًا من نوع surplus_evidence للفوترة يخص هذا الفائض تحديدًا.',
+  },
+  surplusEvidenceUnavailable: { // Core V2 S6f
+    en: 'The surplus evidence could not be verified; nothing was changed.',
+    fr: "La preuve de l'excédent n'a pas pu être vérifiée ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من دليل الفائض؛ لم يتغيّر شيء.',
+  },
+  recoveryAuthorizationRefused: { // Core V2 S6f
+    en: 'The authorization of this external repayment record was refused or has expired.',
+    fr: "L'autorisation de cet enregistrement de remboursement externe a été refusée ou a expiré.",
+    ar: 'رُفض تفويض تسجيل هذا السداد الخارجي أو انتهت صلاحيته.',
+  },
+  recoveryAuthorizationUnresolved: { // Core V2 S6f
+    en: 'The authorization could not be confirmed; repeat the same request.',
+    fr: "L'autorisation n'a pas pu être confirmée ; répétez la même requête.",
+    ar: 'تعذّر تأكيد التفويض؛ أعد إرسال الطلب نفسه.',
+  },
+  recoveryAuthorizationUnavailable: { // Core V2 S6f
+    en: 'The external repayment record is not available; nothing was changed.',
+    fr: "L'enregistrement du remboursement externe n'est pas disponible ; rien n'a été modifié.",
+    ar: 'تسجيل السداد الخارجي غير متاح؛ لم يتغيّر شيء.',
+  },
   refundCaseNotOpen: {
     en: 'The refund case is not open.',
     fr: "Le dossier de remboursement n'est pas ouvert.",

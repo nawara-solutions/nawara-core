@@ -124,6 +124,15 @@ describe('BILLING_MESSAGES', () => {
       [en('fraudHoldAuthorizationRefused'), 'The authorization of this fraud hold operation was refused or has expired.'], // Core V2 S6e-H
       [en('fraudHoldAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6e-H
       [en('fraudHoldUnavailable'), 'Fraud holds are not available; nothing was changed.'], // Core V2 S6e-H
+      [en('invalidRecoveryRequest'), 'The recovery request is invalid.'], // Core V2 S6f
+      [en('recoveryObligationClosed'), 'This recovery obligation is already recovered.'], // Core V2 S6f
+      [en('surplusNotOwed'), 'This surplus is already resolved or being refunded.'], // Core V2 S6f
+      [en('surplusNotEvidenced'), 'The Owner has not recorded an external repayment of this surplus.'], // Core V2 S6f
+      [en('surplusEvidenceInvalid'), 'The evidence is not a surplus_evidence grant to Billing for exactly this surplus.'], // Core V2 S6f
+      [en('surplusEvidenceUnavailable'), 'The surplus evidence could not be verified; nothing was changed.'], // Core V2 S6f
+      [en('recoveryAuthorizationRefused'), 'The authorization of this external repayment record was refused or has expired.'], // Core V2 S6f
+      [en('recoveryAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6f
+      [en('recoveryAuthorizationUnavailable'), 'The external repayment record is not available; nothing was changed.'], // Core V2 S6f
       [en('refundDisputeUnavailable'), 'The dispute status of this payment could not be verified; nothing was changed.'], // Core V2 S6e-D
       [en('refundCaseNotOpen'), 'The refund case is not open.'],
       [en('refundCaseCompleted'), 'The refund case is completed: it accepts no new refund attempt.'], // Core V2 S6b

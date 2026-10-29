@@ -112,6 +112,18 @@ export class RefundEffectService {
           `SELECT "paymentId", "approvedAmount", trim(currency) AS currency FROM refund_case_completion WHERE "refundCaseId" = $1`, [refundCaseId])).rows[0];
         if (!c || !k || c.status !== 'completed') throw new Contradiction('case_not_completed');
         if (k.paymentId !== c.paymentId || Number(k.approvedAmount) !== Number(c.amount) || k.currency !== c.currency) throw new Contradiction('completion_mismatch');
+        // Core V2 S6f (R6F-5 Path A, R-3a): the completed full refund of an entirely surplus recovery payment resolves that surplus; no purchase,
+        // no entitlement, no obligation
+        if (c.eligibility === 'recovery_surplus') {
+          const s = (await q.query<{ surplusId: string; organizationId: string }>(
+            `SELECT rc."surplusId", su."organizationId" FROM refund_case rc JOIN recovery_surplus su ON su.id = rc."surplusId" WHERE rc.id = $1`, [c.id])).rows[0];
+          if (!s || c.purchaseId || c.lateSettlementId) throw new Contradiction('basis_mismatch');
+          await q.query(`INSERT INTO recovery_surplus_refund ("surplusId", "refundCaseId") VALUES ($1, $2)`, [s.surplusId, c.id]);
+          await this.audit.record(q, 'recovery_surplus.resolved', {
+            organizationId: s.organizationId, resource: { type: 'recovery_surplus', id: s.surplusId }, changes: { method: 'full_refund', refund_case_id: c.id },
+          }, ctx);
+          return this.record(q, c.id, 'none', null, null, 'recovery_surplus_refunded');
+        }
         if (c.eligibility === 'non_entitlement') {
           if (c.purchaseId || c.lateSettlementId) throw new Contradiction('basis_mismatch');
           return this.record(q, c.id, 'none', null, null, 'no_entitlement_basis');

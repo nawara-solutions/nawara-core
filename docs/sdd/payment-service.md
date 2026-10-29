@@ -60,7 +60,10 @@ pays exactly `assisted_settlement` or `recovery_settlement`, created only by a c
 `payment.create.organization_payer` (refused in production configuration; no ordinary producer holds it, so the capability stays inactive
 until S5b / S6f and a separate Owner decision). *Core V2 S5b (Owner E-2):* the grant is purpose-bound: `assisted_settlement` is admitted only
 under `payment.create.assisted_settlement` (only `billing-service`, never in production configuration), and the broad operation no longer
-admits it (it stays default-denied, for `recovery_settlement`). The payer Organization is the payment's `organizationId` (database insert guard, immutable),
+admits it. *Core V2 S6f (Owner R6F-2):* `recovery_settlement` is admitted only under `payment.create.recovery_settlement` (only
+`billing-service`, never in production configuration); the broad operation now admits neither purpose and stays default-denied. A captured
+`recovery_settlement` payment is refundable in full with reason `recovery_surplus` (migration `0020`; Billing decides it is entirely surplus),
+and `refund.case_completed` may carry purpose `recovery_settlement`. The payer Organization is the payment's `organizationId` (database insert guard, immutable),
 inside the producer's Platforms (Organization reference read). Its **Organization actor**, an ordinary member whom Auth's live `/auth/me`
 shows active with an active administrator membership in that Organization on the Organization's authoritative Platform, starts and syncs
 its attempts and reads its payments; anyone else gets the collapsed `404`. This is the active-Organization actor set only: V-5 (inactive

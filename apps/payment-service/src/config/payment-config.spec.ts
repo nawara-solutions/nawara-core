@@ -382,13 +382,27 @@ describe('loadPaymentConfig', () => {
       }
     });
 
-    it('the required grant is purpose-bound: assisted needs the narrow grant only; recovery and any other Organization payer need the broad one', () => {
+    it('the required grant is purpose-bound: assisted and (Core V2 S6f, R6F-2) recovery need their narrow grants only; any other Organization payer needs the broad one', () => {
       expect(organizationPayerGrant('assisted_settlement', 'organization')).toBe('payment.create.assisted_settlement');
       expect(organizationPayerGrant('assisted_settlement', 'user')).toBe('payment.create.assisted_settlement'); // the pairing then refuses it
-      expect(organizationPayerGrant('recovery_settlement', 'organization')).toBe('payment.create.organization_payer');
+      expect(organizationPayerGrant('recovery_settlement', 'organization')).toBe('payment.create.recovery_settlement');
       expect(organizationPayerGrant('non_entitlement', 'organization')).toBe('payment.create.organization_payer');
       expect(organizationPayerGrant('direct_purchase', 'user')).toBeNull();
       expect(organizationPayerGrant('organization_subscription', 'user')).toBeNull();
+    });
+  });
+
+  describe('Core V2 S6f (R6F-2): payment.create.recovery_settlement is billing-service\'s alone, never in production', () => {
+    const producer = generateServiceToken();
+    const other = generateServiceToken();
+    const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${producer.digest},other-producer:${other.digest}` };
+    const policy = (billing: string[], others: string[] = ['payment.create']) =>
+      JSON.stringify({ callers: { 'billing-service': { operations: billing, allowedPlatforms: [P1] }, 'other-producer': { operations: others, allowedPlatforms: [P1] } } });
+    it('billing-service may hold it; no other caller; production refuses it', () => {
+      expect(loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.create.recovery_settlement']) }).servicePolicy.of('billing-service')!.operations.has('payment.create.recovery_settlement')).toBe(true);
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create'], ['payment.create', 'payment.create.recovery_settlement']) })).toThrow(/may be held only by billing-service/);
+      expect(() => loadPaymentConfig({ ...env, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672', PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.create.recovery_settlement']) }))
+        .toThrow(/no production configuration may hold/);
     });
   });
 });

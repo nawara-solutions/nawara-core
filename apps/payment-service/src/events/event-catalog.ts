@@ -76,7 +76,7 @@ export const PRODUCED_EVENTS = {
       completedAt: { type: 'datetime' },
       liveMode: { type: 'boolean' },
       organizationId: { type: 'string', nullable: true },
-      purpose: { type: 'enum', values: ['direct_purchase', 'assisted_settlement', 'non_entitlement'] },
+      purpose: { type: 'enum', values: ['direct_purchase', 'assisted_settlement', 'non_entitlement', 'recovery_settlement'] }, // S6f: Path A
     },
   },
   /**

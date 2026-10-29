@@ -9,7 +9,9 @@ export type AssistanceOperation =
   // Core V2 S5b: the settlement is a money command (class M, E-1): its record is never deleted either (permanent, >= the approved 90 days)
   | 'assistance_request.settlement' | 'cash_return_obligation.return'
   // Core V2 S5c (H-7): class K, permanent
-  | 'cash_return_obligation.confirm' | 'assistance_request.dispute' | 'assistance_dispute.respond' | 'assistance_request.correct' | 'assistance_dispute.resolve';
+  | 'cash_return_obligation.confirm' | 'assistance_request.dispute' | 'assistance_dispute.respond' | 'assistance_request.correct' | 'assistance_dispute.resolve'
+  // Core V2 S6f (BIL-29 class M; BIL-31 class K): permanent
+  | 'recovery_obligation.settlement' | 'recovery_surplus.confirm';
 
 export interface AssistanceCommandResult {
   status: number;

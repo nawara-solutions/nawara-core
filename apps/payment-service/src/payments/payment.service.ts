@@ -10,7 +10,7 @@ import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-m
 import { isPaymentUncertain } from './payment-closing.js';
 import { ACCEPTED_PURPOSES, CORE_V2_LIVE_MODE, ORGANIZATION_PAYER_PURPOSES, type PaymentPurpose, type PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
-import { ASSISTED_SETTLEMENT_CREATE_OPERATION, ORGANIZATION_PAYER_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
+import { ASSISTED_SETTLEMENT_CREATE_OPERATION, ORGANIZATION_PAYER_CREATE_OPERATION, RECOVERY_SETTLEMENT_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 
@@ -203,12 +203,15 @@ export class PaymentService {
 /**
  * Core V2 S4e (A-5) and S5b (E-2): the creation grant an Organization payer or an Organization-payer purpose needs, or null when none is
  * needed. Purpose-bound: `assisted_settlement` needs exactly the narrow assisted grant; every other Organization-payer case (a recovery
- * settlement, or an Organization payer with any other purpose, which the pairing then refuses) needs the broad, default-denied grant.
+ * settlement needs, since Core V2 S6f, exactly `payment.create.recovery_settlement`; an Organization payer with any other purpose, which the pairing
+ * then refuses) needs the broad, default-denied grant.
  */
 export function organizationPayerGrant(purpose: string, payerType: string): string | null {
   const organizationPayer = payerType === 'organization' || (ORGANIZATION_PAYER_PURPOSES as readonly string[]).includes(purpose);
   if (!organizationPayer) return null;
-  return purpose === 'assisted_settlement' ? ASSISTED_SETTLEMENT_CREATE_OPERATION : ORGANIZATION_PAYER_CREATE_OPERATION;
+  if (purpose === 'assisted_settlement') return ASSISTED_SETTLEMENT_CREATE_OPERATION;
+  if (purpose === 'recovery_settlement') return RECOVERY_SETTLEMENT_CREATE_OPERATION; // Core V2 S6f (R6F-2): purpose-bound, like the assisted grant
+  return ORGANIZATION_PAYER_CREATE_OPERATION;
 }
 
 function assertPurposePairing(purpose: PaymentPurpose, payer: { type: string; id: string }, beneficiaryUserId: string | undefined): void {

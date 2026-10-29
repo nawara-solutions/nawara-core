@@ -4,10 +4,12 @@ import { correlationHeaders } from '@nawara/service-kit';
 export const FRAUD_HOLD_RECEIPTS = Symbol('BILLING_FRAUD_HOLD_RECEIPTS');
 export const FRAUD_EVIDENCE_FILES = Symbol('BILLING_FRAUD_EVIDENCE_FILES');
 
-/** A fraud-hold receipt binding, exactly as Auth issued it (AUTH-01, S6e-H prerequisite #393). */
+/** A Billing-consumed receipt binding, exactly as Auth issued it (AUTH-01; S6e-H prerequisite #393; S6f prerequisite #396). */
 export type FraudHoldBinding =
   | { operation: 'fraud_hold_place'; audience: 'billing-service'; companyId: string; holdId: string; beneficiaryUserId: string; productId: string; reason: string }
-  | { operation: 'fraud_hold_release'; audience: 'billing-service'; companyId: string; holdId: string; beneficiaryUserId: string; productId: string };
+  | { operation: 'fraud_hold_release'; audience: 'billing-service'; companyId: string; holdId: string; beneficiaryUserId: string; productId: string }
+  // Core V2 S6f (R6F-5 Path B; Auth #396): an Owner's record that one recovery surplus was repaid outside Core
+  | { operation: 'recovery_surplus_external'; audience: 'billing-service'; companyId: string; surplusId: string; organizationId: string; amount: number; currency: string };
 
 export interface ReceiptConsumption { receiptId: string; approvedByUserId: string }
 

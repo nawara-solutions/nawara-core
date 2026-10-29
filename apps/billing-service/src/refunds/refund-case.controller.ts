@@ -25,7 +25,7 @@ class RefundCaseDto {
   @ApiProperty({ description: 'The full captured amount, minor units, computed by Billing (no partial refund).' }) amount!: number;
   @ApiProperty() currency!: string;
   @ApiProperty({ enum: ['open', 'cancelled', 'completed'], description: 'completed is reserved for verified refund completion (a later stage).' }) status!: string;
-  @ApiProperty({ enum: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement'] }) eligibility!: string;
+  @ApiProperty({ enum: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement', 'recovery_surplus'] }) eligibility!: string;
   @ApiProperty({ enum: REFUND_REASONS }) reason!: string;
   @ApiProperty() legalOverride!: boolean;
   @ApiProperty({ format: 'date-time' }) openedAt!: string;

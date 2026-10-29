@@ -246,6 +246,8 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     if (result.subscription === 'conflict') this.logger.error(`payment_event_subscription_conflict — settlement applied but its offering conflicts with the organization's existing Subscription; needs manual review`, at);
     // Core V2 S3a (B9): a paid invoice without a matching routing record changes no Subscription; it needs review, never a guess.
     if (result.subscription === 'late') this.logger.error(`payment_event_assisted_settlement_late — settlement recorded, no purchase and no obligation change (assistance_late_settlement); held for reconciliation (S6h)`, at);
+    // Core V2 S6f (B8): a verified recovery-settlement success, accounted for as a recovery payment (no subscription, no entitlement)
+    if (result.subscription === 'recovery' || result.subscription === 'recovered') this.logger.log(`payment_event_recovery_payment outcome=${result.subscription}`, at);
     if (result.subscription === 'unrouted') this.logger.error(`payment_event_subscription_unrouted — settlement applied; the invoice has no organization_subscription routing for that Organization, so no Subscription changed; needs manual review`, at);
   }
 

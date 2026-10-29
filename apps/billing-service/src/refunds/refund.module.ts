@@ -67,7 +67,7 @@ export class RefundModule {
       ],
       // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
       global: true,
-      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService],
+      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService, FRAUD_HOLD_RECEIPTS, FRAUD_EVIDENCE_FILES], // S6f: the recovery Path B reuses both clients
     };
   }
 }

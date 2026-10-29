@@ -11,7 +11,7 @@ export type RefundAttemptStatus = (typeof REFUND_ATTEMPT_STATUSES)[number];
 export const NOT_EFFECTIVE: readonly RefundAttemptStatus[] = ['authorization_expired', 'authorization_refused', 'failed'];
 
 /** Core V2 S6a (R6A-4): the closed reason codes, carried unchanged from the refund case into the receipt binding. */
-export const REFUND_REASONS = ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement'] as const;
+export const REFUND_REASONS = ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement', 'recovery_surplus'] as const;
 export type RefundReason = (typeof REFUND_REASONS)[number];
 
 /** Shape of the `refund_attempt` row (migration 0017). Column names match the database exactly. */

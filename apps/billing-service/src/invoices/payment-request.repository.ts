@@ -16,8 +16,9 @@ import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscr
 import { SubscriptionRepository } from '../subscriptions/subscription.repository.js';
 import { BILLING_MESSAGES } from '../messages.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
-import { ASSISTANCE_PRODUCER, type BillingConfig } from '../config/billing-config.js';
+import { ASSISTANCE_PRODUCER, RECOVERY_PRODUCER, type BillingConfig } from '../config/billing-config.js';
 import { lockOrganization } from '../assistance/assistance-restrictions.js';
+import { applyRecoveryPayment } from '../recovery/recovery-ledger.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;
@@ -34,7 +35,8 @@ export interface PaymentRequestResult {
  */
 /** `purchased` (Core V2 S3c): a routed `direct_purchase` recorded in its beneficiary's Personal Subscription ledger. */
 /** Core V2 S5b (E-7): `late` = a verified assisted success that could not apply, held in `assistance_late_settlement` for S6h. */
-export type SubscriptionSettlementOutcome = 'settled' | 'purchased' | 'late' | 'conflict' | 'unrouted' | null;
+/** Core V2 S6f: `recovery` / `recovered` = a verified recovery-settlement payment accounted for (no subscription is touched). */
+export type SubscriptionSettlementOutcome = 'settled' | 'purchased' | 'late' | 'conflict' | 'unrouted' | 'recovery' | 'recovered' | null;
 
 export interface EventApplication {
   outcome: Decision['outcome'];
@@ -98,9 +100,10 @@ export class PaymentRequestRepository {
     const invoice = rows[0];
     if (!invoice || relationTo(invoice, caller) === null) throw notFound();
     if (invoice.status !== 'open') throw billingError(409, 'invoice_not_payable', BILLING_MESSAGES.onlyOpenInvoicePayable);
-    // B-026 (v1): user payers only. Core V2 S5b (E-3): the single exception is the Organization payer of the reserved assisted-settlement
-    // producer's invoice (its routing is assisted_settlement; the database refuses any other Organization-payer request too).
-    if (invoice.payerType !== 'user' && !(invoice.payerType === 'organization' && invoice.producer === ASSISTANCE_PRODUCER)) {
+    // B-026 (v1): user payers only. Core V2 S5b (E-3) and S6f (R6F-2): the exceptions are the Organization payer of the reserved
+    // assisted-settlement and recovery producers' invoices (routed assisted_settlement / recovery_settlement; the database refuses any other
+    // Organization-payer request too).
+    if (invoice.payerType !== 'user' && !(invoice.payerType === 'organization' && (invoice.producer === ASSISTANCE_PRODUCER || invoice.producer === RECOVERY_PRODUCER))) {
       throw billingError(409, 'payment_request_not_supported', BILLING_MESSAGES.onlyUserPayer);
     }
 
@@ -424,6 +427,13 @@ export class PaymentRequestRepository {
     const assisted = (await q.query<{ beneficiaryUserId: string; productId: string; assistanceRequestId: string }>(
       `SELECT "beneficiaryUserId", "productId", "assistanceRequestId" FROM invoice_entitlement WHERE "invoiceId" = $1 AND purpose = 'assisted_settlement'`, [invoice.id])).rows[0];
     if (assisted) return this.applyAssistedSettlement(q, invoice.id, assisted, paymentRequestId, receiptId, settledAt);
+    // Core V2 S6f (B8, DB-9): a recovery-settlement invoice's verified success is a recovery payment of its obligation; never a subscription
+    const recovery = (await q.query<{ recoveryObligationId: string }>(
+      `SELECT "recoveryObligationId" FROM invoice_entitlement WHERE "invoiceId" = $1 AND purpose = 'recovery_settlement'`, [invoice.id])).rows[0];
+    if (recovery) {
+      const pr = (await q.query<{ amount: string; currency: string }>(`SELECT amount, currency FROM payment_request WHERE id = $1`, [paymentRequestId])).rows[0]!;
+      return applyRecoveryPayment(q, this.audit, { obligationId: recovery.recoveryObligationId, invoiceId: invoice.id, paymentRequestId, receiptId, amount: pr.amount, currency: pr.currency }, ctx);
+    }
     if (personalRouting) {
       const line = (await q.query<{ priceId: string }>(
         `SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1 AND "productId" = $2 AND "interval" = 'recurring'`, [invoice.id, personalRouting.productId])).rows;

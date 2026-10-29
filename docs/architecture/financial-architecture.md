@@ -136,9 +136,15 @@ attempt; work in flight continues). Owner reads, File-granted evidence reference
 an assisted purchase keeps its entitlement (its verified loss recorded for S6f); a partial chargeback of a direct purchase is held for review
 (no frozen threshold). **Fraud holds: IMPLEMENTED (S6e-H, simulation only; the Owner's H-1 to H-7 and C-1)**: evidence-based (File `fraud_evidence` grants), Owner
 receipts with dedicated factor-only step-ups, one beneficiary and product only, ended at the earlier of release and 14 days, the denied paid time
-compensated exactly after the interrupted run (derived, never a purchase; reversals remove it); holds block no financial command. **Still FROZEN,
-not implemented**: recovery obligations after an assisted final-lost chargeback, recovery settlement for the base amount only,
-`recovery_surplus` (R-1 to R-5) and T3 (S6f); late assisted settlement L-1 to L-6 including L-4's five conditions (S6g); reconciliation
+compensated exactly after the interrupted run (derived, never a purchase; reversals remove it); holds block no financial command.
+**Organization recovery: IMPLEMENTED (S6f, simulation only; the Owner's R6F-1 to R6F-8)**: a verified FULL final lost chargeback of an
+assisted purchase (never refunded) opens the Organization's base-only recovery obligation and T3 (a partial chargeback or a refunded payment
+is kept for review: no debt, no T3); the Organization's administrator settles the outstanding amount through one `recovery_settlement`
+invoice at a time (Payment's narrow `payment.create.recovery_settlement`); only Payment's verified success is a recovery payment, split by
+the database into principal and `recovery_surplus` owed to the Organization (never revenue, never offset, no expiry); T3 clears once when
+principal reaches the base. A surplus is resolved by the full refund of an entirely surplus payment (refund cases) or by the Owner's
+evidenced external repayment confirmed by the Organization. No `billing.recovery` event (EVT-06), no FinancialLoss. **Still FROZEN, not
+implemented**: late assisted settlement L-1 to L-6 including L-4's five conditions (S6g); reconciliation
 cases, fact association, balances that are never clamped (FC-5) and `FinancialLoss` only from evidence (FC-6) (S6h). Payment has no
 dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.
 

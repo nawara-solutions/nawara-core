@@ -4,7 +4,8 @@ import { BILLING_MESSAGES } from '../messages.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Core V2 S6a (R6A-4): the closed reason codes. Classification and audit context only: a reason bypasses no constraint. */
-export const REFUND_REASONS = ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement'] as const;
+/** Core V2 S6f (R6F-5 Path A): `recovery_surplus`, only for a case refunding an entirely surplus recovery payment (and required for it). */
+export const REFUND_REASONS = ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement', 'recovery_surplus'] as const;
 export type RefundReason = (typeof REFUND_REASONS)[number];
 
 export interface RefundCaseInput {

@@ -1,5 +1,5 @@
 import { BillingAudit } from '../audit/billing-audit.js';
-import { ASSISTANCE_PRODUCER } from '../config/billing-config.js';
+import { ASSISTANCE_PRODUCER, RECOVERY_PRODUCER } from '../config/billing-config.js';
 import { Injectable } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
 import { type Caller, type TransitionContext } from '../domain/actors.js';
@@ -146,9 +146,10 @@ export class InvoiceRepository {
     if (routing.platformId !== null && !verified.callerPlatforms.has(routing.platformId)) throw routingInvalid('platform_out_of_scope');
     if (routing.purpose === 'organization_subscription' && verified.organizationPlatformId !== routing.platformId) throw routingInvalid('organization_platform_mismatch');
     await q.query(
-      `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId", "assistanceRequestId")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId, routing.assistanceRequestId ?? null],
+      `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId", "assistanceRequestId", "recoveryObligationId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId, routing.assistanceRequestId ?? null,
+        routing.recoveryObligationId ?? null],
     );
     let snapshot;
     try {
@@ -269,7 +270,13 @@ export class InvoiceRepository {
         `SELECT a.id, a."beneficiaryRef" AS "beneficiaryUserId", a."organizationId", a."productId"
            FROM assistance_settlement_channel c JOIN assistance_request a ON a.id = c."assistanceRequestId" WHERE c."invoiceId" = $1`, [row.id])).rows[0] ?? null
       : null;
-    return { payerType: row.payerType, payerId: row.payerId, organizationId: row.organizationId, lines: rows, assistance };
+    // Core V2 S6f: the recovery obligation whose settlement channel this invoice is (only the reserved producer has one)
+    const recovery = row.producer === RECOVERY_PRODUCER
+      ? (await q.query<{ obligationId: string; organizationId: string }>(
+        `SELECT o.id AS "obligationId", o."organizationId" FROM recovery_settlement_channel c JOIN recovery_obligation o ON o.id = c."obligationId" WHERE c."invoiceId" = $1`,
+        [row.id])).rows[0] ?? null
+      : null;
+    return { payerType: row.payerType, payerId: row.payerId, organizationId: row.organizationId, lines: rows, assistance, recovery };
   }
 
   private async lockForCaller(q: Queryable, invoiceId: string, caller: Caller): Promise<InvoiceRow> {

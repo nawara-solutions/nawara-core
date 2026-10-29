@@ -181,6 +181,19 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     to one product (File `fraud_evidence` grants for exactly that hold, Company and beneficiary; a `fraud_hold_place` receipt) and may release
     it (`fraud_hold_release` receipt). It restricts that entitlement from placement to the earlier of release and 14 days, applied directly by
     the entitlement read; the denied paid time is compensated after the interrupted run (C-1, exact ms, derived; paid spans never move).
+  - Core V2 S6f (`db/migrations/0039`, `src/recovery/`; BIL-26 T3, BIL-28 to BIL-31; the Owner's R6F-1 to R6F-8): the recovery worker
+    visits every verified assisted loss of S6e-D once (including earlier ones): a FULL chargeback of a never-refunded payment opens the
+    Organization's `recovery_obligation` for the frozen BASE only and T3 (new assistance requests refused; every discharge stays available);
+    a partial chargeback or a refunded payment is kept in `recovery_review` (no debt, no T3). The Organization's administrator (never the
+    beneficiary) reads it (`GET /billing/recovery-obligations/:id`) and settles it (`POST .../:id/settlement`, class M): one invoice of the
+    reserved producer `billing-recovery` for exactly the outstanding amount, routed `recovery_settlement` (no entitlement), one open or
+    uncertain channel at a time; Payment needs `payment.create.recovery_settlement`. Only Payment's verified success is a
+    `recovery_payment` (principal and surplus split by the database); the obligation is recovered once when principal reaches the base (T3
+    clears). A `recovery_surplus` is owed to the Organization: resolved by a refund case (eligibility and reason `recovery_surplus`, only for
+    an entirely surplus payment) or by the Owner's evidenced external repayment (`POST /billing/admin/recovery-surpluses/:id/resolution`, File
+    `surplus_evidence` and an Auth `recovery_surplus_external` receipt) confirmed by the Organization's administrator
+    (`POST /billing/recovery-surpluses/:id/recipient-confirmation`). The Owner reads (`GET /billing/admin/recovery-obligations/:id`) but
+    never settles or confirms. Six audit actions; no `billing.*` event (EVT-06); no FinancialLoss.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription
@@ -394,7 +407,7 @@ template. Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotatio
 | `RABBITMQ_HEARTBEAT_S` | no | the AMQP heartbeat this service requests, in seconds (default 10, range 5-60); a broker that goes silent is detected within about three times this value |
 | `BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE`, `BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE` | no | baseline abuse limits: invoice creations and payment-request creations per minute per authenticated caller (defaults 300 and 30, range 1-100000 each). Technical values, no business meaning |
 | `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_TOKEN` | yes | payment-service's base URL and Billing's own service token (bearer sent to Payment; a user's bearer is never forwarded). In production the token published in the root `.env.example` is refused |
-| `AUTH_SERVICE_TOKEN`, `FILE_SERVICE_URL`, `FILE_SERVICE_TOKEN` | no (simulation only) | Core V2 S6e-H fraud holds (BIL-27): Billing's own service tokens for Auth's receipt consumption (AUTH-02, AUTH-03; fraud-hold receipts only) and File's `fraud_evidence` granted read; set together, each token at least 32 characters, never a published value; refused in production. Absent: hold placement and release answer 503 |
+| `AUTH_SERVICE_TOKEN`, `FILE_SERVICE_URL`, `FILE_SERVICE_TOKEN` | no (simulation only) | Core V2 S6e-H fraud holds (BIL-27) and S6f recovery surplus Path B (BIL-30): Billing's own service tokens for Auth's receipt consumption (AUTH-02, AUTH-03; fraud-hold and `recovery_surplus_external` receipts only) and File's `fraud_evidence` / `surplus_evidence` granted read; set together, each token at least 32 characters, never a published value; refused in production. Absent: hold placement and release, and the external-repayment record, answer 503 |
 | `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |
 | `BILLING_DISPATCH_INTERVAL_MS`, `BILLING_DISPATCH_BATCH_SIZE`, `BILLING_DISPATCH_STALE_SENDING_MS` | no | `PaymentDispatcher`'s poll interval, batch size and stale-`sending` retry threshold, which is also the interval between two attempts at the same request (defaults: 2000ms, 50, 60s). A pass renews its claims not sent yet every quarter of the stale window, so a slow Payment never makes another instance re-send them; the stale window must be at least twice `PAYMENT_TIMEOUT_MS` (refused at startup otherwise; Stage 15.8) |
 | `BILLING_RECONCILE_INTERVAL_MS`, `BILLING_RECONCILE_STALE_REQUESTED_MS` | no | `PaymentReconciler`'s poll interval and stale-`requested` threshold (defaults: 30s, 5min) |
