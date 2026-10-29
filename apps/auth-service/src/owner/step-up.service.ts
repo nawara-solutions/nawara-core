@@ -73,6 +73,12 @@ export const STEP_UP_METHODS = {
   // authorization receipt bound to the exact dispute, payment, decision and Company (receipt-binding.ts); the generic
   // POST /auth/step-up/verify refuses it without consuming it. Declaring it activates no Payment operation.
   'payment.dispute.decide': ['totp', 'webauthn'],
+  // Core V2 S6e-H prerequisite (the Owner's H-2, 2026-10-29): an Owner's placement and release of one fraud hold, each with its own fresh,
+  // factor-only proof, never the bare key. Auth-local: consumed only by the issuance of a `fraud_hold_place` / `fraud_hold_release`
+  // receipt bound to the exact Company, hold, beneficiary and product (receipt-binding.ts); POST /auth/step-up/verify refuses both without
+  // consuming them. Declaring them activates no Billing operation.
+  'billing.fraud_hold.place': ['totp', 'webauthn'],
+  'billing.fraud_hold.release': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
@@ -87,8 +93,12 @@ export const REFUND_AUTHORIZE_PURPOSE = 'refund.authorize' satisfies StepUpPurpo
 /** The purpose of an Owner's Payment dispute decision (S6e, R6E-3). Only receipt issuance consumes it. */
 export const DISPUTE_DECIDE_PURPOSE = 'payment.dispute.decide' satisfies StepUpPurpose;
 
+/** The purposes of an Owner's fraud-hold placement and release (S6e-H, H-2). Only receipt issuance consumes them. */
+export const FRAUD_HOLD_PLACE_PURPOSE = 'billing.fraud_hold.place' satisfies StepUpPurpose;
+export const FRAUD_HOLD_RELEASE_PURPOSE = 'billing.fraud_hold.release' satisfies StepUpPurpose;
+
 /** Purposes no calling service may verify or consume through POST /auth/step-up/verify: each has its one Auth-local consumer. */
-const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE, DISPUTE_DECIDE_PURPOSE]);
+const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE, DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE]);
 
 /**
  * What `consumeForReferenceRepair` knows after its one statement (ADR-0065 §5; A5.4-A3 O8):
@@ -204,7 +214,7 @@ export class StepUpService {
 
   /**
    * The generic, service-facing verification (POST /auth/step-up/verify; ADR-0042 Amendment 1 A.1, as clarified by ADR-0065 §4, S1).
-   * A reference-repair proof, a refund-authorization proof (ADR-0067) and a dispute-decision proof (S6e, R6E-3) are Auth-local: each is refused here BEFORE any consuming
+   * A reference-repair proof, a refund-authorization proof (ADR-0067), a dispute-decision proof (S6e, R6E-3) and a fraud-hold proof (S6e-H, H-2) are Auth-local: each is refused here BEFORE any consuming
    * statement, with the endpoint's existing answer (`403 step_up_required`) and the same local denial record `consume` writes for its own
    * refusals, so it stays usable by its one Auth-local consumer. Every other purpose goes through `consume`, unchanged.
    */

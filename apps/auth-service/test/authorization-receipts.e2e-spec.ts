@@ -452,6 +452,104 @@ describe('authorization receipts (S2-Auth.1)', () => {
     });
   });
 
+  /**
+   * Core V2 S6e-H Auth prerequisite (the Owner's H-2, 2026-10-29): an Owner's placement and release of one fraud hold are receipts bound to the
+   * exact Company, hold, beneficiary, product (and placement reason), issued only after their own dedicated factor-only step-up and
+   * consumed only by billing-service. Every receipt rule above applies unchanged.
+   */
+  describe('fraud-hold receipts (S6e-H prerequisite, H-2)', () => {
+    const PLACE = 'billing.fraud_hold.place';
+    const RELEASE = 'billing.fraud_hold.release';
+    const BILLING = 'billing-service';
+    const hold = (companyId: string, over: Record<string, unknown> = {}) => ({
+      operation: 'fraud_hold_place', audience: BILLING, companyId, holdId: randomUUID(), beneficiaryUserId: randomUUID(), productId: randomUUID(), reason: 'account_takeover', ...over,
+    });
+    const releaseOf = (b: Record<string, unknown>) => (({ reason: _r, ...o }) => ({ ...o, operation: 'fraud_hold_release' }))(b as { reason: unknown });
+    const issueWith = async (o: Ready, purpose: string, b: Record<string, unknown>, k = key()) => {
+      const stepUpToken = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+      const r = await svc.issue(o.owner, { stepUpToken, idempotencyKey: k, binding: b });
+      return { ...r, binding: b, key: k, stepUpToken };
+    };
+
+    it('a placement and a release, each after its own factor-only step-up, consumed once by billing-service for exactly their binding', async () => {
+      const o = await ready();
+      const p = await issueWith(o, PLACE, hold(o.companyId));
+      expect(await stepUpConsumed(p.stepUpToken)).toBe(true);
+      const audit = (await t.db.query(`SELECT metadata FROM auth_audit_event WHERE type='authorization_receipt.issued' AND "targetId"=$1`, [p.receiptId])).rows;
+      expect(audit).toEqual([{ metadata: { companyId: o.companyId, operation: 'fraud_hold_place' } }]);
+      const ref = randomUUID();
+      const c = await svc.consume(BILLING, { secret: p.secret, binding: p.binding, consumeRef: ref });
+      expect(c).toMatchObject({ receiptId: p.receiptId, consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
+      expect(await svc.consume(BILLING, { secret: p.secret, binding: p.binding, consumeRef: ref })).toEqual(c);
+      expect(await svc.lookupConsumption(BILLING, { consumeRef: ref, binding: p.binding })).toEqual(c);
+      const r = await issueWith(o, RELEASE, releaseOf(p.binding));
+      expect((await svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() })).receiptId).toBe(r.receiptId);
+    });
+
+    it('only billing-service consumes them, and billing-service consumes nothing else', async () => {
+      const o = await ready();
+      const p = await issueWith(o, PLACE, hold(o.companyId));
+      expect(await codeOf(svc.consume(CALLER, { secret: p.secret, binding: p.binding, consumeRef: randomUUID() }))).toBe('receipt_binding_invalid');
+      const refund = await issue(o);
+      expect(await codeOf(svc.consume(BILLING, { secret: refund.secret, binding: refund.binding, consumeRef: randomUUID() }))).toBe('receipt_binding_invalid');
+      expect((await row(p.receiptId)).status).toBe('issued');
+      expect((await row(refund.receiptId)).status).toBe('issued');
+    });
+
+    it('purpose separation: placement, release, refund and dispute proofs each issue only their own operation; a refused proof is not burned', async () => {
+      const o = await ready();
+      const b = hold(o.companyId);
+      const pairs: Array<[string, Record<string, unknown>]> = [[RELEASE, b], [PURPOSE, b], ['payment.dispute.decide', b], [PLACE, releaseOf(b)], [PLACE, binding(o.companyId)]];
+      for (const [purpose, bnd] of pairs) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: bnd })), `${purpose} ${String(bnd.operation)}`).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+      const sk = await t.stepUp(o.tokens as Tokens, PLACE, o.totpSecret, { method: 'secret_key', secretKey: 'x'.repeat(43), code: undefined });
+      expect([sk.status, sk.body.code]).toEqual([400, 'step_up_unsupported']);
+    });
+
+    it('a receipt never authorizes another hold, beneficiary, product, reason, Company or the other action: one indistinguishable receipt_invalid', async () => {
+      const o = await ready();
+      const p = await issueWith(o, PLACE, hold(o.companyId));
+      for (const change of [{ holdId: randomUUID() }, { beneficiaryUserId: randomUUID() }, { productId: randomUUID() }, { reason: 'chargeback_abuse' }, { companyId: await t.newCompany() }]) {
+        expect(await codeOf(svc.consume(BILLING, { secret: p.secret, binding: { ...p.binding, ...change }, consumeRef: randomUUID() })), JSON.stringify(change)).toBe('receipt_invalid');
+      }
+      expect(await codeOf(svc.consume(BILLING, { secret: p.secret, binding: releaseOf(p.binding), consumeRef: randomUUID() }))).toBe('receipt_invalid');
+      expect((await row(p.receiptId)).status).toBe('issued');
+      // another Company's hold cannot even be issued; a revoked Owner's receipt is not consumed
+      const su = await t.stepUpToken(o.tokens as Tokens, PLACE, o.totpSecret);
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: hold(await t.newCompany()) }))).toBe('receipt_binding_invalid');
+      expect(await stepUpConsumed(su)).toBe(false);
+      await t.db.query(`UPDATE "user" SET "isActive"=false WHERE id=$1`, [o.id]);
+      try {
+        expect(await codeOf(svc.consume(BILLING, { secret: p.secret, binding: p.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+        expect((await row(p.receiptId)).status).toBe('issued');
+      } finally {
+        await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [o.id]);
+      }
+    });
+
+    it('replay never returns a secret; concurrent consumers record exactly one consumption', async () => {
+      const o = await ready();
+      const p = await issueWith(o, PLACE, hold(o.companyId));
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: p.key, binding: { ...p.binding, reason: 'chargeback_abuse' } }))).toBe('idempotency_key_reused');
+      const q = await issueWith(o, PLACE, hold(o.companyId));
+      const out = await Promise.allSettled([0, 1, 2, 3].map(() => svc.consume(BILLING, { secret: q.secret, binding: q.binding, consumeRef: randomUUID() })));
+      expect(out.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: p.key, binding: p.binding }))).toBe('receipt_issued_response_lost');
+    });
+
+    it('POST /auth/step-up/verify (verifyForService) refuses both fraud-hold proofs without consuming them', async () => {
+      const o = await ready();
+      for (const purpose of [PLACE, RELEASE]) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await httpStatusOf(t.app.get(StepUpService).verifyForService(t.dbs, { ownerId: o.id, sid: o.owner.sid, purpose, token: su }))).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+    });
+  });
+
   describe('secret handling', () => {
     it('no plaintext secret, canonical binding or pepper in the database, the audit records or the logs', async () => {
       const o = await ready();

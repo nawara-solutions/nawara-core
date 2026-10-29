@@ -7,8 +7,9 @@ import { ConfigError, parseCallerPolicy, policyList, type CallerPolicyMap } from
 export const AUTH_SERVICE_OPERATIONS = ['authorization_receipt.consume', 'authorization_receipt.lookup'] as const;
 export type AuthServiceOperation = (typeof AUTH_SERVICE_OPERATIONS)[number];
 
-/** F-7: the receipts' only audience. A receipt operation can be granted to no other service. */
-const RECEIPT_CALLERS: readonly string[] = ['payment-service'];
+/** F-7: the receipts' audiences. A receipt operation can be granted to no other service. Core V2 S6e-H (H-2): billing-service, for fraud holds only
+ * (each binding names its one audience, and consumption requires the caller to be it). */
+const RECEIPT_CALLERS: readonly string[] = ['payment-service', 'billing-service'];
 
 export interface AuthCallerPolicy {
   operations: ReadonlySet<string>;
@@ -21,7 +22,7 @@ export interface AuthCallerPolicy {
  *
  * Deny by default (the kit's rules): no document and no `SERVICE_TOKENS` means no service may call Auth; every caller registered in
  * `SERVICE_TOKENS` needs an entry and every entry a registered token; unknown and repeated keys, an empty or unknown operation and any
- * wildcard refuse to boot. On top of the kit: an entry for any caller other than `payment-service` refuses to boot (F-7: the policy
+ * wildcard refuse to boot. On top of the kit: an entry for any caller other than `payment-service` or (S6e-H) `billing-service` refuses to boot (F-7: the policy
  * admits exactly the receipts' audience). The caller's identity always comes from its authenticated service token, never a request value.
  */
 export function parseAuthServicePolicy(raw: string | undefined, registered: readonly string[]): CallerPolicyMap<AuthCallerPolicy> {

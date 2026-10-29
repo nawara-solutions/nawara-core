@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import {
-  RECEIPT_DOMAINS, RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type RefundBinding,
+  RECEIPT_AUDIENCES, RECEIPT_DOMAINS, RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type RefundBinding,
 } from './receipt-binding.js';
 import { ReceiptError } from './receipt-errors.js';
 
@@ -98,7 +98,39 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     });
 
     it('each operation consumes its own step-up purpose, never the other one', () => {
-      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide' });
+      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release' });
+    });
+  });
+
+  describe('fraud holds (S6e-H Auth prerequisite, H-2)', () => {
+    const place = () => ({
+      operation: 'fraud_hold_place', audience: 'billing-service', companyId: '11111111-1111-4111-8111-111111111111', holdId: '66666666-6666-4666-8666-666666666666',
+      beneficiaryUserId: '77777777-7777-4777-8777-777777777777', productId: '88888888-8888-4888-8888-888888888888', reason: 'account_takeover',
+    });
+    const release = () => (({ reason: _r, ...o }) => ({ ...o, operation: 'fraud_hold_release' }))(place());
+
+    it('parses exactly their own fields, for billing-service only', () => {
+      expect(parseBinding(place())).toEqual(place());
+      expect(parseBinding(release())).toEqual(release());
+      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service' });
+    });
+
+    it('refuses anything unknown, missing, mistyped or for another audience', () => {
+      const bad: Array<[string, unknown]> = [
+        ['payment-service audience', { ...place(), audience: 'payment-service' }], ['a release with a reason', { ...release(), reason: 'x' }],
+        ['a placement without reason', (({ reason: _r, ...o }) => o)(place())], ['a free-text reason', { ...place(), reason: 'He stole it' }],
+        ['a missing hold', (({ holdId: _h, ...o }) => o)(place())], ['a non-uuid product', { ...place(), productId: 'p1' }],
+        ['an extra field', { ...place(), evidence: 'x' }], ['a refund binding for billing', { ...valid(), audience: 'billing-service' }],
+        ['a dispute binding for billing', { operation: 'dispute_decision', audience: 'billing-service', companyId: place().companyId, disputeId: place().holdId, paymentId: place().productId, decision: 'accept' }],
+      ];
+      for (const [what, b] of bad) expect(code(() => parseBinding(b)), what).toBe('receipt_binding_invalid');
+    });
+
+    it('the canonical form separates placement and release, holds, beneficiaries, products, Companies and reasons', () => {
+      const c = (b: Record<string, unknown>) => canonicalBinding(parseBinding(b));
+      const all = [c(place()), c(release()), c({ ...place(), holdId: '99999999-9999-4999-8999-999999999999' }), c({ ...place(), beneficiaryUserId: '99999999-9999-4999-8999-999999999999' }),
+        c({ ...place(), productId: '99999999-9999-4999-8999-999999999999' }), c({ ...place(), companyId: '99999999-9999-4999-8999-999999999999' }), c({ ...place(), reason: 'chargeback_abuse' })];
+      expect(new Set(all).size).toBe(all.length);
     });
   });
 });

@@ -111,6 +111,9 @@ gets a single-use receipt, valid 10 minutes by the database clock; payment-servi
 Core V2 S6e (the Owner's R6E-3): a second binding operation, `dispute_decision` (`companyId`, `disputeId`, `paymentId`,
 `decision: contest | accept`), authorizes an Owner's decision on one Payment dispute. It is issued only after the dedicated factor-only
 `payment.dispute.decide` step-up; each operation consumes only its own purpose, and both purposes are refused by `POST /auth/step-up/verify`.
+Core V2 S6e-H (the Owner's H-2): `fraud_hold_place` (`companyId`, `holdId`, `beneficiaryUserId`, `productId`, `reason`) and
+`fraud_hold_release` (the same without `reason`), audience `billing-service`, after the dedicated `billing.fraud_hold.place` /
+`billing.fraud_hold.release` step-ups; `AUTH_SERVICE_POLICY` may admit `billing-service`, which consumes only bindings naming it.
 
 | Route | Caller | Purpose |
 |---|---|---|

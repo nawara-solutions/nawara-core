@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto/hmac.js';
 import { canonicalJson } from '../hierarchy/snapshot.js';
-import { DISPUTE_DECIDE_PURPOSE, REFUND_AUTHORIZE_PURPOSE } from '../owner/step-up.service.js';
+import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, REFUND_AUTHORIZE_PURPOSE } from '../owner/step-up.service.js';
 import { receiptError } from './receipt-errors.js';
 
 /**
@@ -38,19 +38,53 @@ export interface DisputeDecisionBinding {
   decision: 'contest' | 'accept';
 }
 
+/**
+ * Core V2 S6e-H Auth prerequisite (the Owner's H-2, 2026-10-29): an Owner's placement or release of ONE fraud hold on one beneficiary's
+ * Personal entitlement to one product of their Company. Exactly what the Owner approved: the Company, the hold (its id chosen before
+ * placement), the beneficiary, the product and, for a placement, its bounded reason code. Only `billing-service` consumes them; each is
+ * issued only after its own dedicated factor-only step-up (`RECEIPT_PURPOSES`), so a placement proof never releases and the reverse.
+ */
+export interface FraudHoldPlaceBinding {
+  operation: 'fraud_hold_place';
+  audience: 'billing-service';
+  companyId: string;
+  holdId: string;
+  beneficiaryUserId: string;
+  productId: string;
+  reason: string;
+}
+
+export interface FraudHoldReleaseBinding {
+  operation: 'fraud_hold_release';
+  audience: 'billing-service';
+  companyId: string;
+  holdId: string;
+  beneficiaryUserId: string;
+  productId: string;
+}
+
 /** Every receipt binding. `operation` selects the exact field set; the canonical form (and so every digest) includes it. */
-export type ReceiptBinding = RefundBinding | DisputeDecisionBinding;
+export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding;
 export type ReceiptOperation = ReceiptBinding['operation'];
 
 export const RECEIPT_AUDIENCE = 'payment-service';
 
+/** The one audience each operation names (and so the only service that may consume it, F-7). */
+export const RECEIPT_AUDIENCES = {
+  refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service',
+} as const satisfies Record<ReceiptOperation, string>;
+
 /** The one step-up purpose each operation's issuance consumes (Auth-local purposes, `step-up.service.ts`). */
-export const RECEIPT_PURPOSES = { refund: REFUND_AUTHORIZE_PURPOSE, dispute_decision: DISPUTE_DECIDE_PURPOSE } as const satisfies Record<ReceiptOperation, string>;
+export const RECEIPT_PURPOSES = {
+  refund: REFUND_AUTHORIZE_PURPOSE, dispute_decision: DISPUTE_DECIDE_PURPOSE, fraud_hold_place: FRAUD_HOLD_PLACE_PURPOSE, fraud_hold_release: FRAUD_HOLD_RELEASE_PURPOSE,
+} as const satisfies Record<ReceiptOperation, string>;
 
 const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride'] as const;
 const OPTIONAL = new Set(['legalOverride']);
 const DISPUTE_FIELDS = ['operation', 'audience', 'companyId', 'disputeId', 'paymentId', 'decision'] as const;
 const DECISIONS: readonly string[] = ['contest', 'accept'];
+const HOLD_PLACE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId', 'reason'] as const;
+const HOLD_RELEASE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId'] as const;
 /** Canonical lower-case UUIDs only: two spellings of one id must never yield two digests. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURRENCY = /^[A-Z]{3}$/;
@@ -72,6 +106,7 @@ export function parseBinding(value: unknown): ReceiptBinding {
   if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw invalid();
   const v = value as Record<string, unknown>;
   if (v.operation === 'dispute_decision') return parseDisputeDecision(v);
+  if (v.operation === 'fraud_hold_place' || v.operation === 'fraud_hold_release') return parseFraudHold(v);
   for (const k of Object.keys(v)) if (!(FIELDS as readonly string[]).includes(k)) throw invalid();
   for (const k of FIELDS) if (!OPTIONAL.has(k) && !(k in v)) throw invalid();
   const legalOverride = v.legalOverride === undefined ? false : v.legalOverride;
@@ -98,6 +133,20 @@ function parseDisputeDecision(v: Record<string, unknown>): DisputeDecisionBindin
     operation: 'dispute_decision', audience: RECEIPT_AUDIENCE, companyId: v.companyId as string, disputeId: v.disputeId as string,
     paymentId: v.paymentId as string, decision: v.decision as 'contest' | 'accept',
   };
+}
+
+function parseFraudHold(v: Record<string, unknown>): FraudHoldPlaceBinding | FraudHoldReleaseBinding {
+  const invalid = () => receiptError('receipt_binding_invalid');
+  const place = v.operation === 'fraud_hold_place';
+  const fields: readonly string[] = place ? HOLD_PLACE_FIELDS : HOLD_RELEASE_FIELDS;
+  for (const k of Object.keys(v)) if (!fields.includes(k)) throw invalid();
+  for (const k of fields) if (!(k in v)) throw invalid();
+  if (v.audience !== 'billing-service') throw invalid();
+  for (const k of ['companyId', 'holdId', 'beneficiaryUserId', 'productId'] as const) if (typeof v[k] !== 'string' || !UUID.test(v[k] as string)) throw invalid();
+  const ids = { audience: 'billing-service' as const, companyId: v.companyId as string, holdId: v.holdId as string, beneficiaryUserId: v.beneficiaryUserId as string, productId: v.productId as string };
+  if (!place) return { operation: 'fraud_hold_release', ...ids };
+  if (typeof v.reason !== 'string' || !REASON.test(v.reason)) throw invalid();
+  return { operation: 'fraud_hold_place', ...ids, reason: v.reason };
 }
 
 /** `canonicalJson` (sorted keys) over exactly the fields of a parsed binding. Never logged, never stored. */
