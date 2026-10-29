@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
+import { entitlementAt, type HoldWindow } from '../fraud-holds/fraud-hold-intervals.js';
 
 export interface PersonalSubscriptionRow {
   id: string;
@@ -98,7 +99,21 @@ export class PersonalSubscriptionRepository {
   async entitlement(userId: string, platformId: string, productId: string, now: Date): Promise<PersonalEntitlement> {
     const subscription = await this.find(this.db, userId, productId);
     if (!subscription || subscription.platformId !== platformId) return { valid: false, expiresAt: null };
-    return personalEntitlementAt(await this.spans(subscription.id), now);
+    const spans = await this.spans(subscription.id);
+    // Core V2 S6e-H (H-1, H-4, C-1): this subscription's fraud holds restrict it from placement to the earlier of release and 14 days
+    // (applied here directly, whatever the sweep's delay), and the paid time they denied is compensated after its run
+    const holds = await this.holds(this.db, subscription.id);
+    if (holds.length === 0) return personalEntitlementAt(spans, now);
+    const e = entitlementAt(spans.map((s) => ({ start: s.effectiveStart.getTime(), end: s.effectiveEnd.getTime() })), holds, now.getTime());
+    return { valid: e.valid, expiresAt: e.expiresAt === null ? null : new Date(e.expiresAt) };
+  }
+
+  /** Core V2 S6e-H: the subscription's holds, each with its effective end (the earlier of its release and its 14-day deadline). */
+  async holds(q: Queryable, personalSubscriptionId: string): Promise<HoldWindow[]> {
+    const { rows } = await q.query<{ id: string; placedAt: Date; endsAt: Date }>(
+      `SELECT h.id, h."placedAt", LEAST(h."expiresAt", COALESCE(r."releasedAt", h."expiresAt")) AS "endsAt"
+         FROM fraud_hold h LEFT JOIN fraud_hold_release r ON r."holdId" = h.id WHERE h."personalSubscriptionId" = $1`, [personalSubscriptionId]);
+    return rows.map((h) => ({ id: h.id, start: h.placedAt.getTime(), end: h.endsAt.getTime() }));
   }
 
   /** Whether the product is a personal subscription product of that Platform (the B6 read's 404 otherwise). */

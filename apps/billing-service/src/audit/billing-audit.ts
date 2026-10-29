@@ -23,7 +23,8 @@ export type BillingAuditAction =
   | 'refund_case.opened' | 'refund_case.cancelled' // Core V2 S6a (R6A-2): the Owner of the seller Company
   | 'refund_case.authorization_relayed' // Core V2 S6b (R6B-7)
   | 'refund_case.completed' // Core V2 S6c (R6C-9, R6C-11): from Payment's verified completion
-  | 'subscription_purchase.reversed'; // Core V2 S6d (R6D-5): the refund effect worker
+  | 'subscription_purchase.reversed' // Core V2 S6d (R6D-5): the refund effect worker
+  | 'fraud_hold.placed' | 'fraud_hold.released' | 'fraud_hold.expired'; // Core V2 S6e-H (H-7): the Owner; the expiry by the sweep
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in
@@ -41,6 +42,7 @@ export function auditActor(ctx: TransitionContext): AuditActor {
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'assistance_sweep') return { type: 'system', id: 'assistance_sweep' }; // Core V2 S5b (E-6)
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'refund_effect_worker') return { type: 'system', id: 'refund_effect_worker' }; // Core V2 S6d
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'dispute_loss_worker') return { type: 'system', id: 'dispute_loss_worker' }; // Core V2 S6e-D
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'fraud_hold_sweep') return { type: 'system', id: 'fraud_hold_sweep' }; // Core V2 S6e-H
   throw new Error(`billing_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 

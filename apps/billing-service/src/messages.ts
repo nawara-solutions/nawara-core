@@ -490,6 +490,51 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "L'état des litiges de ce paiement n'a pas pu être vérifié ; rien n'a été modifié.",
     ar: 'تعذّر التحقق من حالة النزاعات على هذه الدفعة؛ لم يتغيّر شيء.',
   },
+  invalidFraudHoldRequest: { // Core V2 S6e-H
+    en: 'The fraud hold request is invalid.',
+    fr: 'La demande de blocage pour fraude est invalide.',
+    ar: 'طلب الحجز بسبب الاحتيال غير صالح.',
+  },
+  fraudHoldActive: { // Core V2 S6e-H
+    en: 'Another fraud hold still restricts this entitlement.',
+    fr: "Un autre blocage pour fraude restreint encore ce droit d'accès.",
+    ar: 'لا يزال حجز آخر بسبب الاحتيال يقيّد هذا الاستحقاق.',
+  },
+  fraudHoldNotActive: { // Core V2 S6e-H
+    en: 'This fraud hold has already ended.',
+    fr: 'Ce blocage pour fraude est déjà terminé.',
+    ar: 'انتهى هذا الحجز بسبب الاحتيال بالفعل.',
+  },
+  fraudHoldConflict: { // Core V2 S6e-H
+    en: 'This hold identifier or evidence already belongs to another fraud hold.',
+    fr: 'Cet identifiant ou cette preuve appartient déjà à un autre blocage pour fraude.',
+    ar: 'ينتمي هذا المعرّف أو هذا الدليل بالفعل إلى حجز آخر بسبب الاحتيال.',
+  },
+  fraudEvidenceInvalid: { // Core V2 S6e-H
+    en: 'The evidence is not a fraud_evidence grant to Billing for exactly this hold, Company and beneficiary.',
+    fr: "La preuve n'est pas une autorisation fraud_evidence accordée à la facturation pour exactement ce blocage, cette entreprise et ce bénéficiaire.",
+    ar: 'الدليل ليس منحًا من نوع fraud_evidence للفوترة يخص هذا الحجز وهذه الشركة وهذا المستفيد تحديدًا.',
+  },
+  fraudEvidenceUnavailable: { // Core V2 S6e-H
+    en: 'The evidence could not be verified; nothing was changed.',
+    fr: "La preuve n'a pas pu être vérifiée ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من الدليل؛ لم يتغيّر شيء.',
+  },
+  fraudHoldAuthorizationRefused: { // Core V2 S6e-H
+    en: 'The authorization of this fraud hold operation was refused or has expired.',
+    fr: "L'autorisation de cette opération de blocage pour fraude a été refusée ou a expiré.",
+    ar: 'رُفض تفويض عملية الحجز هذه أو انتهت صلاحيته.',
+  },
+  fraudHoldAuthorizationUnresolved: { // Core V2 S6e-H
+    en: 'The authorization could not be confirmed; repeat the same request.',
+    fr: "L'autorisation n'a pas pu être confirmée ; répétez la même requête.",
+    ar: 'تعذّر تأكيد التفويض؛ أعد إرسال الطلب نفسه.',
+  },
+  fraudHoldUnavailable: { // Core V2 S6e-H
+    en: 'Fraud holds are not available; nothing was changed.',
+    fr: "Les blocages pour fraude ne sont pas disponibles ; rien n'a été modifié.",
+    ar: 'الحجز بسبب الاحتيال غير متاح؛ لم يتغيّر شيء.',
+  },
   refundCaseNotOpen: {
     en: 'The refund case is not open.',
     fr: "Le dossier de remboursement n'est pas ouvert.",

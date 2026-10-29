@@ -25,6 +25,9 @@ import { RefundModule } from '../src/refunds/refund.module.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import { DisputeLossService } from '../src/refunds/dispute-loss.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
+import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
+import { FraudHoldService } from '../src/fraud-holds/fraud-hold.service.js';
+import { PersonalSubscriptionRepository } from '../src/subscriptions/personal-subscription.repository.js';
 import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -61,6 +64,33 @@ const paymentDisputes: PaymentDisputeClient = {
   losses: async (after, limit) => {
     if (lossesAtPayment.down) throw new Error('payment-service unavailable');
     return lossesAtPayment.items.filter((l) => !after || l.disputeId > after).sort((a, b) => (a.disputeId < b.disputeId ? -1 : 1)).slice(0, limit);
+  },
+};
+
+/** Core V2 S6e-H: Auth's fraud-hold receipts (AUTH-02 / AUTH-03 semantics) and File's fraud_evidence grants, under test control. */
+type IssuedReceipt = { id: string; binding: Record<string, unknown>; issuer: string; consumeRef?: string };
+const canon = (b: Record<string, unknown>) => JSON.stringify(Object.keys(b).sort().map((k) => [k, b[k]]));
+const fraudAuth = { issued: new Map<string, IssuedReceipt>(), down: false };
+const fraudHoldReceipts: FraudHoldReceipts = {
+  consume: async ({ secret, binding, consumeRef }) => {
+    if (fraudAuth.down) return { kind: 'unresolved', reason: 'receipt_unavailable' };
+    const r = fraudAuth.issued.get(secret);
+    if (!r || canon(r.binding) !== canon(binding as never)) return { kind: 'refused', code: 'receipt_invalid' };
+    if (r.consumeRef && r.consumeRef !== consumeRef) return { kind: 'unresolved', reason: 'consume_ref_conflict' };
+    r.consumeRef = consumeRef;
+    return { kind: 'consumed', consumption: { receiptId: r.id, approvedByUserId: r.issuer } };
+  },
+  lookup: async ({ binding, consumeRef }) => {
+    for (const r of fraudAuth.issued.values()) if (r.consumeRef === consumeRef && canon(r.binding) === canon(binding as never)) return { receiptId: r.id, approvedByUserId: r.issuer };
+    return null;
+  },
+};
+const fraudFiles = { grants: new Map<string, GrantedFraudEvidence>(), down: false };
+const fraudEvidenceFiles: FraudEvidenceFiles = {
+  granted: async (grantId, fileId) => {
+    if (fraudFiles.down) throw new Error('file-service unavailable');
+    const g = fraudFiles.grants.get(grantId);
+    return g && g.fileId === fileId ? g : null;
   },
 };
 
@@ -239,6 +269,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       databaseUrl: db.url, authClient, organizationReference: reference, paymentClient: payment, disputeExposure, ownerAuthority: new HttpOwnerAuthority({ baseUrl: auth.url }),
       paymentRefundClient: refundsAtPayment, // Core V2 S6d: Payment authorizes every relay (S6b's own behaviour is certified elsewhere)
       paymentDisputeClient: paymentDisputes, // Core V2 S6e-D: Payment's losses read
+      fraudHoldReceipts, fraudEvidenceFiles, // Core V2 S6e-H
       tokens: [{ caller: 'test-producer', digest: producer.digest }],
       env: { BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'test-producer': { operations: [...BILLING_OPERATIONS], allowedPlatforms: [PLATFORM] } } }) },
     });
@@ -922,6 +953,249 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
         .rejects.toMatchObject({ constraint: 'dispute_loss_effect_reversal' });
       await expect(admin.query(`INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount", "chargebackCurrency", "lostAt", source)
         VALUES ($1, $2, $3, 1, 'TND', $4, 1, 'TND', now(), 'reconciliation')`, [randomUUID(), randomUUID(), p.paymentRequestId, randomUUID()])).rejects.toMatchObject({ constraint: 'payment_dispute_loss_payment' });
+    });
+  });
+
+  describe('Core V2 S6e-H: fraud holds and C-1 compensation (H-1 to H-7)', () => {
+    const holds = () => t.app.get(FraudHoldService);
+    const purchaseOf = (paymentId: string) => one(`SELECT s.* FROM subscription_purchase s JOIN payment_request pr ON pr.id = s."paymentRequestId" WHERE pr."paymentId" = $1`, [paymentId]);
+    const issue = (binding: Record<string, unknown>, issuer = U.owner) => {
+      const secret = randomBytes(32).toString('base64url');
+      fraudAuth.issued.set(secret, { id: randomUUID(), binding, issuer });
+      return secret;
+    };
+    const evidenceFor = (holdId: string, beneficiaryUserId: string, over: Partial<GrantedFraudEvidence> = {}) => {
+      const g: GrantedFraudEvidence = { grantId: randomUUID(), fileId: randomUUID(), purpose: 'fraud_evidence', caseRef: holdId, companyId: COMPANY, subjectUserId: beneficiaryUserId, ...over };
+      fraudFiles.grants.set(g.grantId, g);
+      return { grantId: g.grantId, fileId: g.fileId };
+    };
+    type HoldIn = { holdId: string; beneficiaryUserId: string; productId: string; reason: string };
+    const placeBinding = (h: HoldIn) => ({ operation: 'fraud_hold_place', audience: 'billing-service', companyId: COMPANY, ...h });
+    const place = (h: HoldIn, o: { secret?: string; evidence?: unknown[]; bearer?: string } = {}) =>
+      send(request(server()).post('/billing/admin/fraud-holds'), o.bearer ?? 'owner-tok', null)
+        .send({ ...h, evidence: o.evidence ?? [evidenceFor(h.holdId, h.beneficiaryUserId)], receiptSecret: o.secret ?? issue(placeBinding(h)) });
+    const release = (h: HoldIn, secret?: string, bearer = 'owner-tok') =>
+      send(request(server()).post(`/billing/admin/fraud-holds/${h.holdId}/release`), bearer, null)
+        .send({ receiptSecret: secret ?? issue({ operation: 'fraud_hold_release', audience: 'billing-service', companyId: COMPANY, holdId: h.holdId, beneficiaryUserId: h.beneficiaryUserId, productId: h.productId }) });
+    const holdFor = (p: { productId: string }, user = U.b1): HoldIn => ({ holdId: randomUUID(), beneficiaryUserId: user, productId: p.productId, reason: 'account_takeover' });
+    const holdRows = async (holdId: string) => one(`SELECT h."placedAt", h."expiresAt", r."releasedAt", x."expiredAt", c."deniedMs"::bigint AS "deniedMs"
+      FROM fraud_hold h LEFT JOIN fraud_hold_release r ON r."holdId" = h.id LEFT JOIN fraud_hold_expiry x ON x."holdId" = h.id LEFT JOIN fraud_hold_compensation c ON c."holdId" = h.id WHERE h.id = $1`, [holdId]);
+    const runEnd = async (paymentId: string) => {
+      const p = await purchaseOf(paymentId);
+      const spans = (await admin.query(`SELECT "effectiveEnd" FROM billing_personal_spans($1) ORDER BY "effectiveEnd" DESC LIMIT 1`, [p.personalSubscriptionId])).rows;
+      return new Date(spans[0].effectiveEnd).getTime();
+    };
+    /** Moves a hold's placement (and so its deadline) into the past, as a superuser (the immutability triggers bypassed for the fixture only). */
+    const backdateHold = (holdId: string, ms: number) => backdate(holdId, `UPDATE fraud_hold SET "placedAt" = "placedAt" - make_interval(secs => $2::double precision / 1000),
+      "expiresAt" = "expiresAt" - make_interval(secs => $2::double precision / 1000) WHERE id = $1`, [ms]);
+    beforeEach(() => {
+      fraudAuth.down = false;
+      fraudFiles.down = false;
+    });
+
+    it('the Owner places a hold with File evidence and a place receipt: only that beneficiary and product lose entitlement; audited; replay answers the hold', async () => {
+      const productId = await productOf();
+      const priceId = await priceOf(productId, 4900);
+      const p = await directPurchase('b1', { productId, priceId });
+      const otherUser = await directPurchase('b2', { productId, priceId });
+      const otherProduct = await directPurchase('b1');
+      const h = holdFor(p);
+      const secret = issue(placeBinding(h));
+      const ev = evidenceFor(h.holdId, h.beneficiaryUserId);
+      const r = await place(h, { secret, evidence: [ev] });
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(r.body).toMatchObject({ holdId: h.holdId, companyId: COMPANY, platformId: PLATFORM, productId, beneficiaryUserId: U.b1, reason: 'account_takeover', placedBy: { userId: U.owner } });
+      expect(Date.parse(r.body.reviewDeadline) - Date.parse(r.body.placedAt)).toBe(14 * 24 * 3600 * 1000);
+      expect((await entitlement(U.b1, productId).expect(200)).body).toEqual({ valid: false, expiresAt: null });
+      expect((await entitlement(U.b2, productId).expect(200)).body.valid).toBe(true);
+      expect((await entitlement(U.b1, otherProduct.productId).expect(200)).body.valid).toBe(true);
+      expect(otherUser.paymentId).toBeDefined();
+      const a = (await audit(h.holdId)).filter((x) => x.name === 'audit.fraud_hold.placed');
+      expect(a.map((x) => [x.payload.actor, x.payload.changes])).toEqual([[{ type: 'user', id: U.owner, userKind: 'owner' }, { product_id: productId, reason: 'account_takeover' }]]);
+      expect(await place(h, { secret, evidence: [ev] }).then((x) => x.status)).toBe(200); // the same holdId: the hold
+      expect((await send(request(server()).get(`/billing/admin/fraud-holds/${h.holdId}`), 'owner-tok', null).expect(200)).body).toMatchObject({ state: 'active', evidence: [{ grantId: ev.grantId, fileId: ev.fileId }], release: null });
+      // a second hold of the same entitlement while one restricts it: refused (no stacking, no silent extension)
+      expect((await place(holdFor(p)).expect(409)).body.code).toBe('fraud_hold_active');
+      // the purchase, its payment request and the ledger are untouched; nothing financial happened
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [(await purchaseOf(p.paymentId)).id])).toBe(0);
+      expect(await count(`SELECT count(*) AS n FROM outbox WHERE name LIKE 'billing.%'`)).toBe(0);
+    });
+
+    it('authority: another Company\'s Owner, a member, an operator and a service are refused; an unknown subscription is 404; nothing is written', async () => {
+      const p = await directPurchase('b2');
+      const h = holdFor(p, U.b2);
+      expect((await place(h, { bearer: 'foreign-owner-tok' })).status).toBe(404);
+      expect((await place(h, { bearer: 'member-tok' })).status).toBe(403);
+      expect((await place(h, { bearer: 'operator-tok' })).status).toBe(403);
+      expect((await place(h, { bearer: producer.token })).status).toBe(401);
+      expect((await place({ ...h, beneficiaryUserId: randomUUID() })).status).toBe(404); // no subscription of that beneficiary
+      expect((await place({ ...h, productId: randomUUID() })).status).toBe(404);
+      expect((await place({ ...h, reason: 'he looked suspicious' })).status).toBe(400);
+      expect(await count(`SELECT count(*) AS n FROM fraud_hold WHERE id = $1`, [h.holdId])).toBe(0);
+    });
+
+    it('receipts: a release receipt, another reason, another hold or beneficiary, or another Owner\'s receipt places nothing; an unconfirmable one is retried with the same request', async () => {
+      const p = await directPurchase('b2');
+      const h = holdFor(p, U.b2);
+      const rel = { operation: 'fraud_hold_release', audience: 'billing-service', companyId: COMPANY, holdId: h.holdId, beneficiaryUserId: h.beneficiaryUserId, productId: h.productId };
+      for (const secret of [issue(rel), issue(placeBinding({ ...h, reason: 'identity_fraud' })), issue(placeBinding({ ...h, holdId: randomUUID() })),
+        issue(placeBinding({ ...h, beneficiaryUserId: U.b1 })), randomBytes(32).toString('base64url')]) {
+        expect((await place(h, { secret }).expect(409)).body.code).toBe('fraud_hold_authorization_refused');
+      }
+      expect(await count(`SELECT count(*) AS n FROM fraud_hold WHERE id = $1`, [h.holdId])).toBe(0);
+      const secret = issue(placeBinding(h));
+      const ev = [evidenceFor(h.holdId, h.beneficiaryUserId)];
+      fraudAuth.down = true;
+      expect((await place(h, { secret, evidence: ev }).expect(503)).body.code).toBe('fraud_hold_authorization_unresolved');
+      expect(await count(`SELECT count(*) AS n FROM fraud_hold WHERE id = $1`, [h.holdId])).toBe(0);
+      fraudAuth.down = false;
+      expect((await place(h, { secret, evidence: ev })).status).toBe(201);
+      // a receipt another user issued (Auth consumes it, but its approver is not the Owner who asks): refused, nothing placed
+      const p2 = await directPurchase('b1');
+      const h2 = holdFor(p2);
+      expect((await place(h2, { secret: issue(placeBinding(h2), randomUUID()) }).expect(409)).body.code).toBe('fraud_hold_authorization_refused');
+      expect(await count(`SELECT count(*) AS n FROM fraud_hold WHERE id = $1`, [h2.holdId])).toBe(0);
+    });
+
+    it('evidence: only a live fraud_evidence grant for exactly this hold, Company and beneficiary; File unavailable writes nothing', async () => {
+      const p = await directPurchase('b2');
+      const h = holdFor(p, U.b2);
+      const bad = [
+        evidenceFor(randomUUID(), U.b2), // another hold's case
+        evidenceFor(h.holdId, U.b2, { companyId: OTHER_COMPANY }),
+        evidenceFor(h.holdId, U.b1), // another beneficiary
+        evidenceFor(h.holdId, U.b2, { purpose: 'dispute_evidence' }),
+        evidenceFor(h.holdId, U.b2, { companyId: null, subjectUserId: null }),
+        { grantId: randomUUID(), fileId: randomUUID() }, // no such grant (revoked, expired or never issued: File's one 404)
+      ];
+      for (const e of bad) expect((await place(h, { evidence: [e] }).expect(422)).body.code, JSON.stringify(e)).toBe('fraud_evidence_invalid');
+      expect((await place(h, { evidence: [] }).expect(400)).body.code).toBe('invalid_fraud_hold_request');
+      fraudFiles.down = true;
+      expect((await place(h).expect(503)).body.code).toBe('fraud_evidence_unavailable');
+      fraudFiles.down = false;
+      expect([...fraudAuth.issued.values()].some((r) => r.consumeRef === h.holdId)).toBe(false); // no receipt was consumed by a refused placement
+      expect(await count(`SELECT count(*) AS n FROM fraud_hold WHERE id = $1`, [h.holdId])).toBe(0);
+    });
+
+    it('early release restores access; C-1: exactly the denied milliseconds are compensated after the run (paid dates kept); evidence once', async () => {
+      const productId = await productOf();
+      const priceId = await priceOf(productId, 4900);
+      const first = await directPurchase('b1', { productId, priceId });
+      const renewal = await directPurchase('b1', { productId, priceId }); // the next paid month: one uninterrupted run
+      const endBefore = await runEnd(first.paymentId);
+      const spansBefore = (await admin.query(`SELECT "purchaseId", "effectiveStart", "effectiveEnd" FROM billing_personal_spans($1)`, [(await purchaseOf(first.paymentId)).personalSubscriptionId])).rows;
+      const h = holdFor({ productId });
+      await place(h).expect(201);
+      await new Promise((r) => setTimeout(r, 25)); // a sub-second hold
+      await release(h).expect(201);
+      expect((await release(h)).status).toBe(200); // once
+      const rows = await holdRows(h.holdId);
+      const denied = new Date(rows.releasedAt).getTime() - new Date(rows.placedAt).getTime();
+      expect(denied).toBeGreaterThan(0);
+      const e = (await entitlement(U.b1, productId).expect(200)).body;
+      expect(e.valid).toBe(true);
+      expect(Date.parse(e.expiresAt)).toBe(endBefore + denied); // exact, not rounded
+      // the paid spans themselves never moved
+      expect((await admin.query(`SELECT "purchaseId", "effectiveStart", "effectiveEnd" FROM billing_personal_spans($1)`, [(await purchaseOf(first.paymentId)).personalSubscriptionId])).rows).toEqual(spansBefore);
+      expect(renewal.paymentId).toBeDefined();
+      expect(await holds().sweepOnce()).toMatchObject({ expired: 0, compensated: 1 });
+      expect(await holds().sweepOnce()).toMatchObject({ compensated: 0 });
+      expect(Number((await holdRows(h.holdId)).deniedMs)).toBe(denied);
+      expect((await audit(h.holdId)).map((x) => x.name).sort()).toEqual(['audit.fraud_hold.placed', 'audit.fraud_hold.released']);
+    });
+
+    it('the 14-day deadline ends the restriction by itself (a delayed sweep changes nothing); the sweep records the expiry once, by the system actor', async () => {
+      const p = await directPurchase('b1');
+      const purchase = await purchaseOf(p.paymentId);
+      // the purchase settled 15 days ago (fixture only), so the hold's whole 14-day window lies inside paid time
+      await backdate(purchase.id, `UPDATE subscription_purchase SET "settledAt" = "settledAt" - interval '15 days', "originalStart" = "originalStart" - interval '15 days',
+        "originalEnd" = "originalEnd" - interval '15 days' WHERE id = $1`);
+      const end = await runEnd(p.paymentId);
+      const h = holdFor(p);
+      await place(h).expect(201);
+      expect((await entitlement(U.b1, p.productId).expect(200)).body.valid).toBe(false);
+      await backdateHold(h.holdId, 14 * 24 * 3600 * 1000 + 1000); // its deadline passed one second ago; no sweep has run
+      const rows = await holdRows(h.holdId);
+      expect(rows.expiredAt).toBeNull();
+      const denied = 14 * 24 * 3600 * 1000; // the whole window was paid time
+      const e = (await entitlement(U.b1, p.productId).expect(200)).body;
+      expect(e).toEqual({ valid: true, expiresAt: new Date(end + denied).toISOString() });
+      expect((await release(h).expect(409)).body.code).toBe('fraud_hold_not_active');
+      const passes = await Promise.all([holds().sweepOnce(), holds().sweepOnce(), holds().sweepOnce()]);
+      expect(passes.reduce((n, x) => n + x.expired, 0) + (await holds().sweepOnce()).expired).toBe(1);
+      await holds().sweepOnce();
+      const after = await holdRows(h.holdId);
+      expect(new Date(after.expiredAt).getTime()).toBe(new Date(rows.expiresAt).getTime());
+      expect(Number(after.deniedMs)).toBe(denied);
+      const ex = (await audit(h.holdId)).filter((x) => x.name === 'audit.fraud_hold.expired');
+      expect(ex.map((x) => x.payload.actor)).toEqual([{ type: 'system', id: 'fraud_hold_sweep' }]);
+      // a new hold after the old one ended needs its own evidence and receipt (the old ones are spent)
+      expect((await place(holdFor(p))).status).toBe(201);
+    });
+
+    it('a refund completed during a hold reverses the purchase normally; the reversed span earns no compensation and nothing is resurrected', async () => {
+      const p = await directPurchase('b2');
+      const h = holdFor(p, U.b2);
+      await place(h).expect(201);
+      // H-6: the hold blocks no financial command: the refund case opens, is authorized and completes
+      const caseId = (await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).body.id as string;
+      expect(caseId).toBeDefined();
+      await send(request(server()).post(`/billing/admin/refund-cases/${caseId}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      const c = await one(`SELECT r.id AS "attemptId" FROM refund_authorization_relay r WHERE r."refundCaseId" = $1`, [caseId]);
+      const id = randomUUID();
+      await t.bus.deliver({ id, name: 'refund.case_completed', payload: { refundCaseId: caseId, refundAuthorizationId: randomUUID(), refundAttemptId: c.attemptId, paymentId: p.paymentId,
+        paymentRequestId: p.paymentRequestId, producer: 'billing-service', approvedAmount: p.amount, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false, organizationId: null,
+        purpose: 'direct_purchase' }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      await t.app.get(RefundEffectService).drainOnce();
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [(await purchaseOf(p.paymentId)).id])).toBe(1);
+      await release(h).expect(201);
+      await holds().sweepOnce();
+      expect(Number((await holdRows(h.holdId)).deniedMs)).toBe(0); // the reversed span no longer counts
+      expect((await entitlement(U.b2, p.productId).expect(200)).body).toEqual({ valid: false, expiresAt: null });
+    });
+
+    it('a final lost chargeback during a hold reverses the direct purchase normally; no compensation survives it', async () => {
+      const p = await directPurchase('b1');
+      const h = holdFor(p);
+      await place(h).expect(201);
+      const id = randomUUID();
+      const disputeId = randomUUID();
+      await t.bus.deliver({ id, name: 'payment.dispute.lost', payload: { disputeId, paymentId: p.paymentId, paymentRequestId: p.paymentRequestId, producer: 'billing-service', organizationId: null,
+        purpose: 'direct_purchase', amount: p.amount, currency: 'TND', lostAt: new Date().toISOString(), chargeback: { factId: randomUUID(), amount: p.amount, currency: 'TND' }, liveMode: false },
+      headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as never);
+      await t.app.get(DisputeLossService).drainOnce();
+      expect((await one(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId])).outcome).toBe('reversed_purchase');
+      await release(h).expect(201);
+      const e = await t.app.get(PersonalSubscriptionRepository).entitlement(U.b1, PLATFORM, p.productId, new Date(Date.now() + 40 * 24 * 3600 * 1000));
+      expect(e).toEqual({ valid: false, expiresAt: null });
+      expect((await entitlement(U.b1, p.productId).expect(200)).body.valid).toBe(false);
+    });
+
+    it('the database: a hold needs evidence, never stacks, ends once; history and compensation evidence are append-only', async () => {
+      const p = await directPurchase('b2');
+      const h = holdFor(p, U.b2);
+      await place(h).expect(201);
+      const sub = (await purchaseOf(p.paymentId)).personalSubscriptionId;
+      const insertHold = (id: string) => admin.query(`INSERT INTO fraud_hold (id, "personalSubscriptionId", "companyId", "platformId", "productId", "beneficiaryUserId", reason, "placedByUserId", "receiptId", "placedAt", "expiresAt")
+        VALUES ($1, $2, $3, $4, $5, $6, 'account_takeover', $7, gen_random_uuid(), now(), now() + interval '14 days')`, [id, sub, COMPANY, PLATFORM, p.productId, U.b2, U.owner]);
+      await expect(insertHold(randomUUID())).rejects.toMatchObject({ constraint: 'fraud_hold_active' });
+      await expect(admin.query(`INSERT INTO fraud_hold_expiry ("holdId", "expiredAt") VALUES ($1, now())`, [h.holdId])).rejects.toMatchObject({ constraint: 'fraud_hold_not_expired' });
+      await expect(admin.query(`INSERT INTO fraud_hold_compensation ("holdId", "personalSubscriptionId", "deniedMs", "holdEndedAt") VALUES ($1, $2, 0, now())`, [h.holdId, sub]))
+        .rejects.toMatchObject({ constraint: 'fraud_hold_compensation_ended' });
+      for (const sql of [`UPDATE fraud_hold SET reason = 'identity_fraud' WHERE id = $1`, `DELETE FROM fraud_hold WHERE id = $1`, `DELETE FROM fraud_hold_evidence WHERE "holdId" = $1`]) {
+        await expect(admin.query(sql, [h.holdId]), sql).rejects.toThrow();
+      }
+      await release(h).expect(201);
+      await expect(admin.query(`INSERT INTO fraud_hold_release ("holdId", "releasedAt", "releasedByUserId", "receiptId") VALUES ($1, now(), $2, gen_random_uuid())`, [h.holdId, U.owner])).rejects.toThrow();
+      await expect(admin.query(`UPDATE fraud_hold_release SET "releasedAt" = now() WHERE "holdId" = $1`, [h.holdId])).rejects.toThrow();
+      // a hold without evidence is refused when its transaction commits
+      const other = await directPurchase('b1');
+      const sub2 = (await purchaseOf(other.paymentId)).personalSubscriptionId;
+      await expect(admin.query(`INSERT INTO fraud_hold (id, "personalSubscriptionId", "companyId", "platformId", "productId", "beneficiaryUserId", reason, "placedByUserId", "receiptId", "placedAt", "expiresAt")
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'account_takeover', $6, gen_random_uuid(), now(), now() + interval '14 days')`, [sub2, COMPANY, PLATFORM, other.productId, U.b1, U.owner]))
+        .rejects.toMatchObject({ constraint: 'fraud_hold_evidence_required' });
+      await holds().sweepOnce();
+      await expect(admin.query(`UPDATE fraud_hold_compensation SET "deniedMs" = 1 WHERE "holdId" = $1`, [h.holdId])).rejects.toThrow();
     });
   });
 
