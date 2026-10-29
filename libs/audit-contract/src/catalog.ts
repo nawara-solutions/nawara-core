@@ -580,13 +580,16 @@ const SPEC = {
   // Core V2 S6d (register BIL-24; ADR-0044 B5; S0 FC-4, V-1; the Owner's R6D-1, R6D-5): a completed refund reversed a Personal purchase (once,
   // K-3 Option D re-lays the later periods). Version 1, no trusted scope; no billing.* domain event (EVT-05 is not approved).
   'subscription_purchase.reversed': {
-    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['refund_effect_worker'] }, organization: 'optional',
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['refund_effect_worker', 'dispute_loss_worker'] }, organization: 'optional',
     resource: ['subscription_purchase'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
-      refund_case_id: { type: 'uuid', shape: 'value', required: true },
-      cause: { type: 'code', shape: 'value', required: true, values: ['refund_completion'] },
+      // Core V2 S6e-D (R6E-5, R6E-8): also written by the dispute loss worker for a direct purchase's final lost chargeback; exactly one of
+      // refund_case_id (cause refund_completion) or dispute_id (cause final_lost_chargeback) is present
+      refund_case_id: { type: 'uuid', shape: 'value', required: false },
+      dispute_id: { type: 'uuid', shape: 'value', required: false },
+      cause: { type: 'code', shape: 'value', required: true, values: ['refund_completion', 'final_lost_chargeback'] },
     },
-    purpose: 'A completed refund reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept).',
+    purpose: "A completed refund, or a direct purchase's verified final lost chargeback, reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept).",
   },
 
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
@@ -636,6 +639,43 @@ const SPEC = {
   },
   // Core V2 S6c (register EVT-02; S0 FC-2, FC-3; the Owner's R6C-7, R6C-11): the cumulative verified allocation of a refund authorization reached
   // its approved full amount; `refund.case_completed` is published with it. Version 1, no trusted scope, no `approvedBy`.
+  // Core V2 S6e-D (register PAY-09 to PAY-11, EVT-03; the Owner's R6E-8): Payment disputes. Version 1, no trusted scope. A provider observation is
+  // the verified webhook's (`payment_webhook`); evidence and decisions are the Owner's own. Identifiers and codes only: never an amount,
+  // evidence content, a receipt or its secret.
+  'payment_dispute.opened': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook'] }, organization: 'optional',
+    resource: ['payment_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { payment_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: "A verified provider dispute of a captured payment was recorded, in the exposure the provider states (it changes no entitlement).",
+  },
+  'payment_dispute.closed': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook'] }, organization: 'optional',
+    resource: ['payment_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      outcome: { type: 'code', shape: 'value', required: true, values: ['won', 'lost'] },
+    },
+    purpose: "The provider's final outcome of a dispute, once (a later contradictory notification never replaces it).",
+  },
+  'payment_dispute.evidence_added': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'optional',
+    resource: ['payment_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      file_id: { type: 'uuid', shape: 'value', required: true },
+      grant_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The Owner of the seller Company added a reference to a file File granted Payment as evidence of this open dispute.',
+  },
+  'payment_dispute.decided': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'optional',
+    resource: ['payment_dispute'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      decision: { type: 'code', shape: 'value', required: true, values: ['contest', 'accept'] },
+    },
+    purpose: "The Owner's contest-or-accept decision on a dispute, authorized by a consumed Auth dispute-decision receipt (the provider still decides the outcome).",
+  },
   'refund_authorization.completed': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_authorization'], subject: NO_SUBJECT, outcomes: OK,

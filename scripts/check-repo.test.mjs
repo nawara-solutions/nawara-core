@@ -2264,12 +2264,13 @@ test('V2 A3M.2: event contracts agree across services; every app with event traf
   assert.equal(usesEventTraffic(['const sub = await this.bus.subscribe({ queue: Q, bindings, handler });']), true);
   assert.equal(usesEventTraffic(['await this.writer.write(q, input);']), false);
 
-  // The real contracts agree, and they hold the inventory: 19 produced events, 14 consumed entries (+ Core V2 S6c: refund.case_completed, produced by Payment, consumed by Billing).
+  // The real contracts agree, and they hold the inventory: 21 produced events, 15 consumed entries (+ Core V2 S6c: refund.case_completed, produced by Payment, consumed by Billing;
+  // + Core V2 S6e-D: payment.dispute.opened and payment.dispute.lost, produced by Payment, payment.dispute.lost consumed by Billing).
   const real = Object.fromEntries(['auth-service', 'payment-service', 'billing-service', 'notification-service'].map((a) => [a, repoFile(`apps/${a}/contracts/events.json`)]));
   assert.deepEqual(checkEventContracts(real, ['auth-service', 'payment-service', 'billing-service', 'notification-service', 'audit-service']), []);
   const all = Object.values(real).map((t) => JSON.parse(t));
-  assert.equal(all.flatMap((c) => c.produces).length, 19);
-  assert.equal(all.flatMap((c) => c.consumes).length, 14);
+  assert.equal(all.flatMap((c) => c.produces).length, 21);
+  assert.equal(all.flatMap((c) => c.consumes).length, 15);
   const runner = repoFile('scripts/check-repo.mjs');
   assert.equal(runner.split('checkEventContracts(').length - 1, 1);
   assert.match(runner, /if \(usesEventTraffic\(texts\)\) required\.push\(app\);/);
@@ -3473,16 +3474,17 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     }
     // the investigation's counts
     const counts = Object.fromEntries(Object.entries(out.identities).map(([s, id]) => [s, [id.write.keys.length, id.read.keys.length]]));
-    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c) + the two refund-case actions (S6a) + refund_case.authorization_relayed (S6b) + refund_case.completed (S6c) + subscription_purchase.reversed (S6d), reading + refund.case_completed (S6c); payment-service: 10 + the three refund-attempt actions (S6b, R6B-7) + refund_authorization.completed and refund.case_completed (S6c)
-    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [28, 5], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [15, 0], 'release-service': [4, 0] });
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c) + the two refund-case actions (S6a) + refund_case.authorization_relayed (S6b) + refund_case.completed (S6c) + subscription_purchase.reversed (S6d), reading + refund.case_completed (S6c); payment-service: 10 + the three refund-attempt actions (S6b, R6B-7) + refund_authorization.completed and refund.case_completed (S6c) + the four payment_dispute actions and payment.dispute.opened / payment.dispute.lost (S6e-D, R6E-6, R6E-8); billing-service reading + payment.dispute.lost (S6e-D)
+    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [28, 6], 'file-service': [7, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [21, 0], 'release-service': [4, 0] });
   });
 
   test('S1d-1 Payment: its five ordinary events and five audit actions (+ the refund actions of S6b and S6c, and refund.case_completed); not the re-emission allow-list; no unregistered action', () => {
     const p = gen().identities['payment-service'];
     assert.deepEqual(p.write.keys, ['audit.payment.cancelled', 'audit.payment.created', 'audit.payment.expired', 'audit.payment.failed', 'audit.payment.succeeded',
+      'audit.payment_dispute.closed', 'audit.payment_dispute.decided', 'audit.payment_dispute.evidence_added', 'audit.payment_dispute.opened', // Core V2 S6e-D (R6E-8)
       'audit.refund_attempt.authorized', 'audit.refund_attempt.failed', 'audit.refund_attempt.succeeded', // Core V2 S6b (R6B-7)
       'audit.refund_authorization.completed', // Core V2 S6c (R6C-11)
-      'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded',
+      'payment.cancelled', 'payment.created', 'payment.dispute.lost', 'payment.dispute.opened', 'payment.expired', 'payment.failed', 'payment.succeeded', // + S6e-D (R6E-6)
       'refund.case_completed']); // Core V2 S6c (R6C-8): the one refund.* event, owned by payment-service (ADR-0057 §13.1)
     assert.deepEqual(p.write.keys.filter((k) => k.startsWith('refund.')), ['refund.case_completed']); // no refund.authorized / succeeded / failed
     assert.ok(p.write.keys.includes('payment.created')); // the producer catalog, not the S0-C4 re-emission allow-list
@@ -3493,7 +3495,7 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
 
   test('S1d-1 Billing: one identity, its own writes and exactly the four Payment events it binds (+ refund.case_completed, Core V2 S6c)', () => {
     const b = gen().identities['billing-service'];
-    assert.deepEqual(b.read.keys, ['payment.cancelled', 'payment.expired', 'payment.failed', 'payment.succeeded', 'refund.case_completed']);
+    assert.deepEqual(b.read.keys, ['payment.cancelled', 'payment.dispute.lost', 'payment.expired', 'payment.failed', 'payment.succeeded', 'refund.case_completed']); // + S6e-D: the verified loss only (never payment.dispute.opened)
     assert.ok(b.write.keys.includes('invoice.created') && !b.write.keys.some((k) => k.startsWith('payment.') || k.startsWith('billing.') || k.startsWith('refund.')));
     assert.ok(!b.read.keys.includes('payment.created'));
     for (const other of ['payment-service', 'notification-service', 'auth-service']) assert.ok(!gen().identities[other].read.keys.some((k) => b.read.keys.includes(k)));

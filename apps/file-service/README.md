@@ -75,7 +75,7 @@ takes the file's organization; the file must be `AVAILABLE` and attached; 24 hou
 deleted. `file.grant_issued` / `file.grant_revoked` are written in the same transaction. A grant is a record, not a credential, and it
 opens no existing route to the grantee.
 
-**Granted reads (Core V2 S2-File.2; `src/grants/granted-read.*`):** `GET /file/evidence-grants/{grantId}/files/{fileId}`, `GET …/content`
+**Granted reads (Core V2 S2-File.2; `src/grants/granted-read.*`):** `GET /file/evidence-grants/{grantId}/files/{fileId}` (Core V2 S6e-D, additive: the metadata answer also names the grant it was read through, `grant: { id, purpose, caseRef, expiresAt }`, so the grantee binds evidence to exactly its case), `GET …/content`
 and `POST …/tickets` (`{ operation: 'download', disposition?, singleUse? }`), for the grantee only (`read_granted`, the grant's purpose in
 its `readPurposes`). Each request re-checks, in one transaction holding the grant and the file `FOR SHARE`: the caller is the grant's
 grantee, the grant names that file, it is neither revoked nor expired, the file is still `AVAILABLE` and the grantor's in the grant's

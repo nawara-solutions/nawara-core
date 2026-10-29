@@ -92,6 +92,19 @@ no production traffic can reach any of this (the test provider refuses to start 
   (`accepted | ambiguous | rejected`), `POST /payment/simulation/refunds/:refundAttemptId/outcomes` (`succeeded | amount_mismatch | failed |
   no_record | pending`, `immediate | held`) and `POST /payment/simulation/refund-commands/:commandId/deliver`, under the same harness
   authority; refund outcomes reach Payment only through the signed notification or the status read.
+- **Payment disputes (Core V2 S6e-D; register PAY-09 to PAY-11, EVT-03; the Owner's R6E-1 to R6E-6, R6E-8, R6E-9) — DEVELOPMENT AND SIMULATION
+  ONLY** (`src/disputes/`, migration 0019; mounted exactly where refunds are). Signed `payment.dispute.opened | won | lost` notifications,
+  through the same webhook pipeline, record a `payment_dispute` (unique `(provider, providerDisputeId)`, bound to the verified capture, in the
+  provider's stated exposure, `open → won | lost` once) and keep every observation (`applied`, `duplicate`, or a `conflict` preserved for
+  S6h: a contradictory terminal outcome, another exposure or chargeback for the same dispute, an unverified capture). A loss moves money only
+  as a verified `chargeback` fact the provider reports with it (or later), linked once. Refund admission reads this exposure under the payment
+  lock (an open dispute or a chargeback: `409 refund_dispute_open`; a conflict or a loss without its chargeback: `503`, nothing written;
+  attempts in flight continue). Owner routes (live `/auth/grants`): `GET /payment/admin/disputes[/:id]`, `POST …/:id/evidence`
+  `{grantId, fileId}` (File's `dispute_evidence` grant for exactly this dispute; `FILE_SERVICE_URL`/`FILE_SERVICE_TOKEN`) and `POST
+  …/:id/decision` `{decision, receiptSecret}` (an Auth `dispute_decision` receipt, consumed once; the provider still decides the outcome).
+  Producer reads (`payment.read`): `GET /payment/payments/:id/dispute-exposure` and `GET /payment/disputes/losses`. Events
+  `payment.dispute.opened` / `payment.dispute.lost` (v1, outbox); audit `payment_dispute.opened`, `.closed`, `.evidence_added`, `.decided`.
+  Harness: `POST /payment/simulation/payments/:paymentId/disputes` and `POST /payment/simulation/dispute-commands/:commandId/deliver`.
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
@@ -169,6 +182,7 @@ Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
 | `PAYMENT_TEST_PROVIDER` | no | `false` | no | the development test gateway (payer-chosen `scenario`s); **refused in production** |
 | `PAYMENT_SIMULATION_PROVIDER` | no | `false` | no | Core V2 S4f: the `simulation` provider and its harness routes (certification only); **refused in production** and together with `PAYMENT_TEST_PROVIDER` |
 | `AUTH_SERVICE_TOKEN` | when `PAYMENT_SERVICE_POLICY` grants `payment.refund.create` | none | **yes** | Payment's own service token for Auth's receipt consumption and lookup (AUTH-02, AUTH-03; Core V2 S6b); at least 32 characters, never a published value; refused in production |
+| `FILE_SERVICE_URL`, `FILE_SERVICE_TOKEN` | no (only beside refunds) | none | token: **yes** | File Service and Payment's own service token for verifying an Owner's `dispute_evidence` grant (`read_granted`; Core V2 S6e-D, PAY-10); set together; the token at least 32 characters, never a published value; refused in production. Absent: dispute evidence is refused (503) and nothing recorded |
 | `PAYMENT_SIMULATION_WEBHOOK_SECRET` | when the simulation provider is on | none | **yes** | the simulation provider's notification signing secret (at least 32 characters; a value published in this repository is refused); refused in production |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes** | API docs; mounted only with a password of at least 16 characters |
 

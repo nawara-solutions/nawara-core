@@ -172,6 +172,11 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     commercial effect once: the refunded Personal purchase is reversed (K-3 Option D re-lays later periods) and, for an assisted purchase,
     the Organization owes the beneficiary the full frozen cash total (a `refund_completion` cash-return obligation, T2 while unresolved).
     Contradictions are kept for review, never applied; no `billing.*` event.
+  - Core V2 S6e-D (`db/migrations/0037`, `src/refunds/dispute-loss.service.ts`, `payment-dispute-client.ts`): refund cases and relays read
+    Payment's authoritative dispute exposure (`unresolved`, `404` or a timeout is `503 refund_dispute_unavailable`, never "no dispute").
+    Payment's verified `payment.dispute.lost` (bound on `billing.payment-events`) or its losses read records a loss once, only with its verified
+    chargeback; the dispute loss worker reverses a DIRECT purchase charged back in full once (cause `final_lost_chargeback`), keeps an assisted
+    purchase's entitlement (no obligation, no T3: S6f), and holds a partial chargeback for review (no frozen threshold). No FinancialLoss (S6h).
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

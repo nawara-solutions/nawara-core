@@ -61,6 +61,22 @@ export interface RefundBinding {
   legalOverride: boolean;
 }
 
+/**
+ * Core V2 S6e-D (the Owner's R6E-3; Auth's `dispute_decision` receipt binding, receipt contract §17a): an Owner's contest-or-accept decision on
+ * one Payment dispute of their Company. Auth issues it only after the dedicated factor-only dispute-decision step-up.
+ */
+export interface DisputeDecisionBinding {
+  operation: 'dispute_decision';
+  audience: 'payment-service';
+  companyId: string;
+  disputeId: string;
+  paymentId: string;
+  decision: 'contest' | 'accept';
+}
+
+/** Every receipt binding Payment consumes. */
+export type ReceiptBinding = RefundBinding | DisputeDecisionBinding;
+
 export function bindingOf(a: Pick<RefundAttemptRow, 'companyId' | 'refundCaseId' | 'paymentId' | 'amount' | 'currency' | 'reason' | 'legalOverride'>): RefundBinding {
   return {
     operation: 'refund', audience: 'payment-service', companyId: a.companyId, refundCaseId: a.refundCaseId, paymentId: a.paymentId,

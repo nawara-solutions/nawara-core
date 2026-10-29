@@ -15,6 +15,7 @@ import { BillingExceptionFilter } from '../../src/errors/billing-exception.filte
 import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/owner-authority.client.js';
 import type { DisputeExposure } from '../../src/refunds/dispute-exposure.js';
 import type { PaymentRefundClient } from '../../src/refunds/payment-refund-client.js';
+import type { PaymentDisputeClient } from '../../src/refunds/payment-dispute-client.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -74,6 +75,7 @@ export async function createTestApp(opts: {
   disputeExposure?: DisputeExposure;
   /** Core V2 S6b: the refund port to Payment (default: the HTTP client on the configured URL) and no relay-reconciler passes unless asked. */
   paymentRefundClient?: PaymentRefundClient;
+  paymentDisputeClient?: PaymentDisputeClient;
   refundRelayReconciler?: boolean;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
@@ -107,6 +109,7 @@ export async function createTestApp(opts: {
         ownerAuthority: opts.ownerAuthority ?? unreachableOwnerAuthority,
         disputeExposure: opts.disputeExposure,
         paymentRefundClient: opts.paymentRefundClient,
+        paymentDisputeClient: opts.paymentDisputeClient,
         refundRelayReconciler: opts.refundRelayReconciler ?? false,
       }),
       ProbeModule,

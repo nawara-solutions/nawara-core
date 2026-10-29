@@ -71,7 +71,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND NOT (table_name = 'assistance_request' AND column_name IN ('baseAmount', 'feeAmount', 'totalAmount')) -- S5a: frozen assistance terms, checked below
     AND NOT (table_name = 'cash_return_obligation' AND column_name = 'amount') -- S5b: the frozen total owed back, checked below
     AND NOT (table_name = 'refund_case' AND column_name = 'amount') -- S6a: the full captured amount, equal to the payment request's (guard, e2e)
-    AND NOT (table_name = 'refund_case_completion' AND column_name = 'approvedAmount')), '8'); -- S6c: Payment's approved amount, equal to the case's (guard, e2e)
+    AND NOT (table_name = 'refund_case_completion' AND column_name = 'approvedAmount') -- S6c: Payment's approved amount, equal to the case's (guard, e2e)
+    AND NOT (table_name = 'payment_dispute_loss' AND column_name IN ('disputeAmount', 'chargebackAmount'))), '8'); -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -1180,6 +1181,32 @@ SELECT pg_temp.assert_eq('S6d', 'no artificial deadline: a refund-origin obligat
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'cash_return_obligation' AND column_name ~* '(settleby|deadline|overdue|due)'), '0');
 SELECT pg_temp.assert_eq('S6d', 'T2 is the S5d model, unchanged: it counts every unresolved obligation, whatever its origin',
   (SELECT (prosrc NOT LIKE '%origin%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+
+-- ------------------------------------------------------------------------------------------------------------- S6e-D dispute losses (0037)
+-- The effects run end to end in test/refund-cases.e2e-spec.ts (Core V2 S6e-D block); here, the guards that need no purchase fixture.
+SELECT pg_temp.expect_error('S6e-D', 'R6E-5: a loss names a payment request Billing issued for that payment', $$INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency,
+  "chargebackFactId", "chargebackAmount", "chargebackCurrency", "lostAt", source) VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'TND', gen_random_uuid(), 1, 'TND', now(), 'reconciliation')$$, '23514', 'payment_dispute_loss_payment');
+SELECT pg_temp.assert_eq('S6e-D', 'R6E-5: loss amounts are safe positive integers',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%9007199254740991%')::text FROM pg_constraint WHERE conname = 'payment_dispute_loss_amounts'), 'true');
+SELECT pg_temp.assert_eq('S6e-D', 'R6E-5: a loss is recorded only with its verified chargeback fact (NOT NULL, unique)',
+  (SELECT (a.attnotnull AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid = a.attrelid AND c.contype = 'u' AND a.attnum = ANY (c.conkey)))::text
+     FROM pg_attribute a WHERE a.attrelid = 'payment_dispute_loss'::regclass AND a.attname = 'chargebackFactId'), 'true');
+SELECT pg_temp.assert_eq('S6e-D', 'R6E-6: an event-sourced loss names its verified event; a reconciled one does not',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%eventId%')::text FROM pg_constraint WHERE conname = 'payment_dispute_loss_source'), 'true');
+SELECT pg_temp.expect_error('S6e-D', 'an effect needs a recorded loss', $$INSERT INTO dispute_loss_effect ("disputeId", outcome, reason) VALUES (gen_random_uuid(), 'none', 'not_a_personal_purchase')$$, '23503');
+SELECT pg_temp.assert_eq('S6e-D', 'R6E-5: the effect outcomes are exactly reversed_purchase and none (assisted preserved, already reversed, no Personal purchase)',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%assisted_purchase_preserved%' AND pg_get_constraintdef(oid) LIKE '%already_reversed%' AND pg_get_constraintdef(oid) LIKE '%not_a_personal_purchase%')::text
+     FROM pg_constraint WHERE conname = 'dispute_loss_effect_shape'), 'true');
+SELECT pg_temp.expect_error('S6e-D', 'FC-4: a chargeback cause names its verified loss (never a refund case)', $$INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "refundCaseId") VALUES (gen_random_uuid(), 'final_lost_chargeback', NULL)$$, '23514');
+SELECT pg_temp.expect_error('S6e-D', 'FC-4: a refund cause never names a dispute', $$INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "disputeId") VALUES (gen_random_uuid(), 'refund_completion', gen_random_uuid())$$, '23514');
+SELECT pg_temp.assert_eq('S6e-D', 'V-1: every cause (refund case or dispute) recorded once per purchase',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%disputeId%' AND pg_get_constraintdef(oid) LIKE '%refundCaseId%')::text FROM pg_constraint WHERE conname = 'subscription_purchase_reversal_cause_once'), 'true');
+SELECT pg_temp.assert_eq('S6e-D', 'no S6f: a dispute loss opens no obligation and no restriction (T2/T3 unchanged)',
+  (SELECT (prosrc NOT LIKE '%dispute%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+SELECT pg_temp.assert_eq('S6e-D', 'no S6h: no financial loss table exists',
+  (SELECT count(*)::text FROM pg_tables WHERE schemaname = 'public' AND tablename ~ 'financial_loss'), '0');
+SELECT pg_temp.assert_eq('S6e-D', 'the verified-origin record admits payment.dispute.lost (and no other dispute event)',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%payment.dispute.lost%' AND pg_get_constraintdef(oid) NOT LIKE '%payment.dispute.opened%')::text FROM pg_constraint WHERE conname = 'payment_event_origin_name'), 'true');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

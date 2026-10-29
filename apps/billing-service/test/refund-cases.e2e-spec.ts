@@ -23,6 +23,8 @@ import { HttpOwnerAuthority } from '../src/platforms/owner-authority.client.js';
 import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundModule } from '../src/refunds/refund.module.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
+import { DisputeLossService } from '../src/refunds/dispute-loss.service.js';
+import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -51,6 +53,15 @@ class FakePaymentClient implements PaymentClient {
 const refundsAtPayment: PaymentRefundClient = {
   relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+};
+
+/** Core V2 S6e-D: Payment's losses read under test control (a page of verified losses, or Payment unavailable). */
+const lossesAtPayment = { items: [] as PaymentDisputeLoss[], down: false };
+const paymentDisputes: PaymentDisputeClient = {
+  losses: async (after, limit) => {
+    if (lossesAtPayment.down) throw new Error('payment-service unavailable');
+    return lossesAtPayment.items.filter((l) => !after || l.disputeId > after).sort((a, b) => (a.disputeId < b.disputeId ? -1 : 1)).slice(0, limit);
+  },
 };
 
 const COMPANY = randomUUID();
@@ -227,6 +238,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     t = await createTestApp({
       databaseUrl: db.url, authClient, organizationReference: reference, paymentClient: payment, disputeExposure, ownerAuthority: new HttpOwnerAuthority({ baseUrl: auth.url }),
       paymentRefundClient: refundsAtPayment, // Core V2 S6d: Payment authorizes every relay (S6b's own behaviour is certified elsewhere)
+      paymentDisputeClient: paymentDisputes, // Core V2 S6e-D: Payment's losses read
       tokens: [{ caller: 'test-producer', digest: producer.digest }],
       env: { BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'test-producer': { operations: [...BILLING_OPERATIONS], allowedPlatforms: [PLATFORM] } } }) },
     });
@@ -747,6 +759,169 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       await expect(admin.query(`INSERT INTO refund_case_effect ("refundCaseId", outcome, reason) VALUES ($1, 'none', 'no_entitlement_basis')`, [caseId])).rejects.toThrow(); // one per case
       await expect(ins()).rejects.toThrow(); // one obligation per request
       await expect(admin.query(`UPDATE cash_return_obligation SET origin = 'deadline' WHERE "refundCaseId" = $1`, [caseId])).rejects.toThrow(); // the origin is immutable
+    });
+  });
+
+  describe('Core V2 S6e-D: verified final lost chargebacks (R6E-5, R6E-6)', () => {
+    const losses = () => t.app.get(DisputeLossService);
+    const purchaseOf = (paymentId: string) => one(`SELECT s.* FROM subscription_purchase s JOIN payment_request pr ON pr.id = s."paymentRequestId" WHERE pr."paymentId" = $1`, [paymentId]);
+    const reversals = (purchaseId: string) => admin.query(`SELECT cause FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [purchaseId]).then((r) => r.rows as Row[]);
+    const causes = (purchaseId: string) => admin.query(`SELECT cause, "refundCaseId", "disputeId" FROM subscription_purchase_reversal_cause WHERE "purchaseId" = $1 ORDER BY "recordedAt"`, [purchaseId]).then((r) => r.rows as Row[]);
+    const effect = (disputeId: string) => one(`SELECT outcome, "purchaseId", reason FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId]);
+    const attempt = (disputeId: string) => one(`SELECT state, reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [disputeId]);
+    const lossRow = (disputeId: string) => one(`SELECT source, "eventId", "chargebackAmount"::int AS cb FROM payment_dispute_loss WHERE "disputeId" = $1`, [disputeId]);
+    const lostEvent = (o: { paymentId: string; amount: number; chargeback?: number | null; disputeId?: string; factId?: string; currency?: string }) => {
+      const id = randomUUID();
+      const disputeId = o.disputeId ?? randomUUID();
+      const chargeback = o.chargeback === null ? null : { factId: o.factId ?? randomUUID(), amount: o.chargeback ?? o.amount, currency: o.currency ?? 'TND' };
+      return { disputeId, chargeback, envelope: { id, name: 'payment.dispute.lost', payload: {
+        disputeId, paymentId: o.paymentId, paymentRequestId: randomUUID(), producer: 'billing-service', organizationId: null, purpose: 'direct_purchase', amount: o.amount,
+        currency: o.currency ?? 'TND', lostAt: new Date().toISOString(), chargeback, liveMode: false,
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } };
+    };
+    beforeEach(() => {
+      lossesAtPayment.items = [];
+      lossesAtPayment.down = false;
+    });
+
+    it('a direct purchase charged back in full is reversed once (K-3 Option D re-lays the later period); the loss is recorded once; audited by the worker', async () => {
+      const productId = await productOf();
+      const priceId = await priceOf(productId, 4900);
+      const first = await directPurchase('b2', { productId, priceId });
+      const second = await directPurchase('b2', { productId, priceId });
+      const purchase = await purchaseOf(first.paymentId);
+      const before = (await admin.query(`SELECT "purchaseId" FROM billing_personal_spans($1)`, [purchase.personalSubscriptionId])).rows;
+      expect(before).toHaveLength(2);
+      const e = lostEvent({ paymentId: first.paymentId, amount: first.amount });
+      await t.bus.deliver(e.envelope as never);
+      expect(await lossRow(e.disputeId)).toEqual({ source: 'event', eventId: e.envelope.id, cb: first.amount });
+      expect(await reversals(purchase.id)).toEqual([]); // nothing before the worker
+      expect(await losses().drainOnce()).toMatchObject({ applied: 1, review: 0 });
+      expect(await effect(e.disputeId)).toEqual({ outcome: 'reversed_purchase', purchaseId: purchase.id, reason: null });
+      expect(await reversals(purchase.id)).toEqual([{ cause: 'final_lost_chargeback' }]);
+      expect(await causes(purchase.id)).toEqual([{ cause: 'final_lost_chargeback', refundCaseId: null, disputeId: e.disputeId }]);
+      expect(await purchaseOf(first.paymentId)).toEqual(purchase); // the purchase record is kept
+      const after = (await admin.query(`SELECT "purchaseId", "effectiveStart" FROM billing_personal_spans($1)`, [purchase.personalSubscriptionId])).rows;
+      expect(after.map((s) => s.purchaseId)).toEqual([(await purchaseOf(second.paymentId)).id]);
+      expect(after[0].effectiveStart).toEqual((await purchaseOf(second.paymentId)).settledAt);
+      expect((await entitlement(U.b2, productId).expect(200)).body.valid).toBe(true); // the second, paid period remains
+      const a = (await audit(purchase.id)).filter((x) => x.name === 'audit.subscription_purchase.reversed');
+      expect(a.map((x) => [x.payload.actor, x.payload.changes])).toEqual([[{ type: 'system', id: 'dispute_loss_worker' }, { dispute_id: e.disputeId, cause: 'final_lost_chargeback' }]]);
+      // the same loss again (redelivery) and again from Payment's read: nothing more
+      await t.bus.deliver(e.envelope as never);
+      lossesAtPayment.items = [{ disputeId: e.disputeId, paymentId: first.paymentId, paymentRequestId: first.paymentRequestId, amount: first.amount, currency: 'TND', lostAt: new Date().toISOString(), chargeback: e.chargeback! }];
+      expect(await losses().drainOnce()).toMatchObject({ recorded: 0, applied: 0 });
+      expect(await reversals(purchase.id)).toHaveLength(1);
+    });
+
+    it('a loss without its chargeback changes nothing; Payment\'s losses read records it once the chargeback is reported, and it is applied once', async () => {
+      const p = await directPurchase('b1');
+      const purchase = await purchaseOf(p.paymentId);
+      const e = lostEvent({ paymentId: p.paymentId, amount: p.amount, chargeback: null });
+      await t.bus.deliver(e.envelope as never);
+      expect(t.bus.deadLettered.some((x) => x.id === e.envelope.id)).toBe(false); // acknowledged, not an error
+      expect(await count(`SELECT count(*) AS n FROM payment_dispute_loss WHERE "disputeId" = $1`, [e.disputeId])).toBe(0);
+      lossesAtPayment.down = true;
+      expect(await losses().drainOnce()).toMatchObject({ recorded: 0, applied: 0 }); // Payment unavailable: nothing inferred
+      lossesAtPayment.down = false;
+      lossesAtPayment.items = [{ disputeId: e.disputeId, paymentId: p.paymentId, paymentRequestId: p.paymentRequestId, amount: p.amount, currency: 'TND', lostAt: new Date().toISOString(),
+        chargeback: { factId: randomUUID(), amount: p.amount, currency: 'TND' } }];
+      expect(await losses().drainOnce()).toMatchObject({ recorded: 1, applied: 1 });
+      expect(await lossRow(e.disputeId)).toMatchObject({ source: 'reconciliation', eventId: null });
+      expect(await reversals(purchase.id)).toEqual([{ cause: 'final_lost_chargeback' }]);
+      expect((await entitlement(U.b1, p.productId).expect(200)).body.valid).toBe(false);
+    });
+
+    it('an assisted purchase keeps its entitlement: no reversal, no obligation, no restriction; the verified loss is kept for S6f', async () => {
+      const a = await assistedPurchase();
+      const purchase = await purchaseOf(a.paymentId);
+      const e = lostEvent({ paymentId: a.paymentId, amount: a.amount });
+      await t.bus.deliver(e.envelope as never);
+      await losses().drainOnce();
+      expect(await effect(e.disputeId)).toEqual({ outcome: 'none', purchaseId: purchase.id, reason: 'assisted_purchase_preserved' });
+      expect(await reversals(purchase.id)).toEqual([]);
+      expect(await causes(purchase.id)).toEqual([]);
+      expect(await count(`SELECT count(*) AS n FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [a.requestId])).toBe(0);
+      expect((await admin.query(`SELECT kind FROM billing_assistance_restrictions($1, now())`, [ORG])).rows).toEqual([]); // no T3 before S6f
+      expect((await entitlement(U.b1, purchase.productId).expect(200)).body.valid).toBe(true);
+      expect(await lossRow(e.disputeId)).toMatchObject({ cb: a.amount });
+    });
+
+    it('a partial chargeback of a direct purchase is never applied: it stays a non-terminal review (the frozen rules define no threshold)', async () => {
+      const p = await directPurchase('b2');
+      const purchase = await purchaseOf(p.paymentId);
+      const e = lostEvent({ paymentId: p.paymentId, amount: p.amount, chargeback: p.amount - 100 });
+      await t.bus.deliver(e.envelope as never);
+      expect(await losses().drainOnce()).toMatchObject({ applied: 0, review: 1 });
+      expect(await attempt(e.disputeId)).toEqual({ state: 'review', reason: 'partial_chargeback_threshold_open' });
+      expect(await count(`SELECT count(*) AS n FROM dispute_loss_effect WHERE "disputeId" = $1`, [e.disputeId])).toBe(0);
+      expect(await reversals(purchase.id)).toEqual([]);
+      expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(true);
+    });
+
+    it('FC-4: a purchase already reversed by a completed refund gets no second reversal; the chargeback cause is appended for S6h', async () => {
+      const p = await directPurchase('b2');
+      const purchase = await purchaseOf(p.paymentId);
+      const caseId = (await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).body.id as string;
+      await send(request(server()).post(`/billing/admin/refund-cases/${caseId}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      const c = await one(`SELECT r.id AS "attemptId" FROM refund_authorization_relay r WHERE r."refundCaseId" = $1`, [caseId]);
+      const id = randomUUID();
+      await t.bus.deliver({ id, name: 'refund.case_completed', payload: { refundCaseId: caseId, refundAuthorizationId: randomUUID(), refundAttemptId: c.attemptId, paymentId: p.paymentId,
+        paymentRequestId: p.paymentRequestId, producer: 'billing-service', approvedAmount: p.amount, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false, organizationId: null,
+        purpose: 'direct_purchase' }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      await t.app.get(RefundEffectService).drainOnce();
+      expect(await reversals(purchase.id)).toEqual([{ cause: 'refund_completion' }]);
+      const e = lostEvent({ paymentId: p.paymentId, amount: p.amount });
+      await t.bus.deliver(e.envelope as never);
+      await losses().drainOnce();
+      expect(await effect(e.disputeId)).toEqual({ outcome: 'none', purchaseId: purchase.id, reason: 'already_reversed' });
+      expect(await reversals(purchase.id)).toEqual([{ cause: 'refund_completion' }]);
+      expect((await causes(purchase.id)).map((x) => x.cause)).toEqual(['refund_completion', 'final_lost_chargeback']);
+      expect((await audit(purchase.id)).filter((x) => x.name === 'audit.subscription_purchase.reversed')).toHaveLength(1);
+    });
+
+    it('no Personal purchase (a non-entitlement payment): no commercial effect; an unknown payment or a different statement of a loss is refused and dead-lettered', async () => {
+      const ne = await producerPayment({ target: 'none' });
+      const e = lostEvent({ paymentId: ne.paymentId, amount: ne.amount });
+      await t.bus.deliver(e.envelope as never);
+      await losses().drainOnce();
+      expect(await effect(e.disputeId)).toEqual({ outcome: 'none', purchaseId: null, reason: 'not_a_personal_purchase' });
+      const unknown = lostEvent({ paymentId: randomUUID(), amount: 100 });
+      await t.bus.deliver(unknown.envelope as never);
+      expect(t.bus.deadLettered.some((x) => x.id === unknown.envelope.id)).toBe(true);
+      expect(await count(`SELECT count(*) AS n FROM payment_dispute_loss WHERE "disputeId" = $1`, [unknown.disputeId])).toBe(0);
+      const other = lostEvent({ paymentId: ne.paymentId, amount: ne.amount, disputeId: e.disputeId, chargeback: ne.amount }); // another chargeback fact for the same loss
+      await t.bus.deliver(other.envelope as never);
+      expect(t.bus.deadLettered.some((x) => x.id === other.envelope.id)).toBe(true);
+      const live = lostEvent({ paymentId: ne.paymentId, amount: ne.amount });
+      (live.envelope.payload as Row).liveMode = true;
+      await t.bus.deliver(live.envelope as never);
+      expect(t.bus.deadLettered.some((x) => x.id === live.envelope.id)).toBe(true);
+    });
+
+    it('concurrent workers apply one effect; the database binds every row to its verified loss and keeps them append-only', async () => {
+      const p = await directPurchase('b1');
+      const purchase = await purchaseOf(p.paymentId);
+      const e = lostEvent({ paymentId: p.paymentId, amount: p.amount });
+      await t.bus.deliver(e.envelope as never);
+      const outs = await Promise.all(Array.from({ length: 8 }, () => losses().apply(e.disputeId)));
+      expect(outs.filter((o) => o.kind === 'applied')).toHaveLength(1);
+      expect(outs.filter((o) => o.kind === 'already_applied')).toHaveLength(7);
+      expect(await reversals(purchase.id)).toHaveLength(1);
+      await expect(admin.query(`UPDATE payment_dispute_loss SET "chargebackAmount" = 1 WHERE "disputeId" = $1`, [e.disputeId])).rejects.toThrow();
+      await expect(admin.query(`DELETE FROM dispute_loss_effect WHERE "disputeId" = $1`, [e.disputeId])).rejects.toThrow();
+      // an assisted purchase can never get a chargeback cause, and a loss names its own payment request
+      const a = await assistedPurchase();
+      const ae = lostEvent({ paymentId: a.paymentId, amount: a.amount });
+      await t.bus.deliver(ae.envelope as never);
+      await expect(admin.query(`INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "disputeId") VALUES ($1, 'final_lost_chargeback', $2)`,
+        [(await purchaseOf(a.paymentId)).id, ae.disputeId])).rejects.toMatchObject({ constraint: 'subscription_purchase_reversal_cause_dispute' });
+      await expect(admin.query(`INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "disputeId") VALUES ($1, 'final_lost_chargeback', $2)`,
+        [purchase.id, ae.disputeId])).rejects.toMatchObject({ constraint: 'subscription_purchase_reversal_cause_dispute' });
+      await expect(admin.query(`INSERT INTO dispute_loss_effect ("disputeId", outcome, "purchaseId") VALUES ($1, 'reversed_purchase', $2)`, [ae.disputeId, (await purchaseOf(a.paymentId)).id]))
+        .rejects.toMatchObject({ constraint: 'dispute_loss_effect_reversal' });
+      await expect(admin.query(`INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount", "chargebackCurrency", "lostAt", source)
+        VALUES ($1, $2, $3, 1, 'TND', $4, 1, 'TND', now(), 'reconciliation')`, [randomUUID(), randomUUID(), p.paymentRequestId, randomUUID()])).rejects.toMatchObject({ constraint: 'payment_dispute_loss_payment' });
     });
   });
 

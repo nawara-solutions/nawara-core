@@ -21,6 +21,26 @@ export function simulationRefundId(refundAttemptId: string): string {
   return `simr_${refundAttemptId}`;
 }
 
+/** Core V2 S6e-D: one row of `simulation_dispute_command` (migration 0019). */
+export interface SimulationDisputeCommandRow {
+  commandId: string;
+  paymentId: string;
+  attemptId: string;
+  provider: string;
+  providerDisputeId: string;
+  instruction: 'opened' | 'won' | 'lost';
+  amount: string;
+  currency: string;
+  reason: string | null;
+  chargebackTxnId: string | null;
+  chargebackAmount: string | null;
+  chargebackCurrency: string | null;
+  eventBody: Buffer;
+  delivery: 'immediate' | 'held';
+  createdAt: Date;
+  seq: string;
+}
+
 /** Core V2 S6b: one row of `simulation_refund_command` (migration 0017). */
 export interface SimulationRefundCommandRow {
   commandId: string;
@@ -197,6 +217,14 @@ export class SimulationPaymentProvider implements PaymentProvider {
       default:
         return null;
     }
+  }
+
+  /** Core V2 S6e-D (R6E-2): the signed dispute notification a dispute command produces; `simd_<commandId>` is its event id. */
+  static disputeNotificationBody(c: { commandId: string; attemptId: string; instruction: string; providerDisputeId: string; amount: number; currency: string;
+    reason: string | null; chargeback: { txnId: string; amount: number; currency: string } | null }): Buffer {
+    const data: Record<string, unknown> = { disputeId: c.providerDisputeId, ...(c.reason ? { reason: c.reason } : {}) };
+    if (c.chargeback) data.chargeback = { id: c.chargeback.txnId, amount: c.chargeback.amount, currency: c.chargeback.currency };
+    return Buffer.from(JSON.stringify({ eventId: `simd_${c.commandId}`, type: `payment.dispute.${c.instruction}`, reference: c.attemptId, amount: c.amount, currency: c.currency, data }), 'utf8');
   }
 
   /** The signature this provider puts on a notification, with the operator's secret (F-S5). */

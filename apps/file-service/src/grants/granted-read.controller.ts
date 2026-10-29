@@ -25,7 +25,7 @@ export class GrantedReadController {
   @ApiOperation({ summary: 'Metadata of a file granted to the caller (read_granted)', description: 'Through an active evidence grant naming the caller and this file; recorded as access=metadata.' })
   @ApiParam(PARAMS[0])
   @ApiParam(PARAMS[1])
-  @ApiResponse({ status: 200, description: 'The file' })
+  @ApiResponse({ status: 200, description: 'The file, and (Core V2 S6e-D) `grant: { id, purpose, caseRef, expiresAt }`: the grant this read went through' })
   @ApiResponse({ status: 401, description: 'no or unknown service token' })
   @ApiResponse({ status: 403, description: 'operation_not_allowed (no read_granted)' })
   @ApiResponse({ status: 404, description: REFUSED })

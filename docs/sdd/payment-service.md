@@ -95,6 +95,15 @@ never changing the provider's amount; a contested or foreign-currency fact is bl
 backoff. When the allocation reaches the approved amount, `completedAt` is set once and `refund.case_completed` is written to the outbox; a
 completed case refuses every new attempt. Implemented in `db/migrations/0018_refund_allocation.sql` and `src/refunds/refund-allocation.service.ts`.
 
+**Core V2 S6e-D (payment disputes; ADR-0044 B10; S0 FC-1, FC-4, FC-5, D3; the Owner's R6E-1 to R6E-6, R6E-8, R6E-9; register PAY-09 F,
+PAY-10 F, PAY-11 G, EVT-03):** for Core V2 development and simulation only. A verified provider dispute notification is applied in one
+transaction under the payment lock (`src/disputes/dispute-ingestion.service.ts`): the dispute (provider identity, verified capture, the
+provider's stated exposure, `open → won | lost` once), its observation (append-only, with a `conflict` preserved for S6h and never applied),
+a loss's verified `chargeback` fact (linked once), `payment.dispute.opened` / `payment.dispute.lost` in the outbox and the audit intent. FC-5
+exposure feeds refund admission (fail closed when unresolved) and Billing (`GET /payment/payments/:id/dispute-exposure`). The Owner reads,
+adds File-granted evidence and records a contest-or-accept decision authorized by a consumed Auth `dispute_decision` receipt. Implemented in
+`db/migrations/0019_payment_dispute.sql` and `src/disputes/`. Fraud holds stay out of scope (OD-10).
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.

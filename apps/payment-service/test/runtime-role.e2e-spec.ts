@@ -126,6 +126,15 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'DELETE FROM refund_authorization',
         'TRUNCATE refund_authorization',
         'UPDATE refund_fact_allocation_block SET reason = reason',
+        // Core V2 S6e-D (migration 0019): dispute evidence is never deleted or truncated; observations, evidence and harness commands never edited
+        'DELETE FROM payment_dispute',
+        'TRUNCATE payment_dispute',
+        'UPDATE payment_dispute_observation SET reason = reason',
+        'DELETE FROM payment_dispute_observation',
+        'UPDATE payment_dispute_evidence SET "fileId" = "fileId"',
+        'DELETE FROM payment_dispute_decision',
+        'UPDATE simulation_dispute_command SET instruction = instruction',
+        'DELETE FROM simulation_dispute_command',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }

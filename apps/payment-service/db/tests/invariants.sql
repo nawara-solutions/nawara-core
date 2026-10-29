@@ -654,6 +654,84 @@ SELECT pg_temp.expect_error('S6c', 'a block has a closed reason', format($$INSER
 SELECT pg_temp.assert_eq('S6c', 'FC-1: allocation never changed the facts', (SELECT string_agg(amount::text, ',' ORDER BY amount) FROM provider_transaction_fact WHERE "refundAttemptId" = '00000000-0000-4000-8000-0000000006c1'), '400,600');
 \o
 
+-- ======================================================= Core V2 S6e-D: payment disputes (0019) ----
+\o /dev/null
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-s6e', 'user', 'u-s6e', 'company', '00000000-0000-4000-8000-00000000c6e0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS e1 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'e1', 1, 'test', false) RETURNING id AS e1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'e1';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-s6e-1', "submittedAt" = now() WHERE id = :'e1a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'e1a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-s6e-1', 'capture', :'e1', :'e1a', 1000, 'TND', false, 'status_check') RETURNING id AS e1f \gset
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'e1a', "closedAt" = now() WHERE id = :'e1';
+INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-s6e-1', 'payment.dispute.opened', '\x7b7d') RETURNING id AS w1 \gset
+INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody") VALUES ('simulation', 'evt-s6e-2', 'payment.dispute.opened', '\x7b7d') RETURNING id AS w2 \gset
+\o
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-1: a dispute is bound to the verified capture of its own payment and attempt', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status)
+  VALUES ('test', 'd-x', %L, %L, %L, 100, 'TND', 'open')$$, :'e1', :'e1a', :'rf6c1'), 'payment_dispute_capture');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-1: the provider''s exposure never exceeds the verified capture', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status)
+  VALUES ('test', 'd-x', %L, %L, %L, 1001, 'TND', 'open')$$, :'e1', :'e1a', :'e1f'), 'payment_dispute_exposure');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-1: the exposure is in the capture''s currency', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status)
+  VALUES ('test', 'd-x', %L, %L, %L, 100, 'EUR', 'open')$$, :'e1', :'e1a', :'e1f'), 'payment_dispute_exposure');
+SELECT pg_temp.expect_constraint('S6e-D', 'simulation only: liveMode is false', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status, "liveMode")
+  VALUES ('test', 'd-x', %L, %L, %L, 100, 'TND', 'open', true)$$, :'e1', :'e1a', :'e1f'), 'payment_dispute_live_mode');
+SELECT pg_temp.expect_ok('S6e-D', 'R6E-1: a partial dispute of the verified capture', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status)
+  VALUES ('test', 'd-1', %L, %L, %L, 400, 'TND', 'open')$$, :'e1', :'e1a', :'e1f'));
+\o /dev/null
+SELECT id AS d1 FROM payment_dispute WHERE "providerDisputeId" = 'd-1' \gset
+\o
+SELECT pg_temp.expect_error('S6e-D', 'R6E-1: one dispute per (provider, providerDisputeId)', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status)
+  VALUES ('test', 'd-1', %L, %L, %L, 400, 'TND', 'open')$$, :'e1', :'e1a', :'e1f'), '23505');
+SELECT pg_temp.expect_constraint('S6e-D', 'the provider''s statement is immutable', format($$UPDATE payment_dispute SET amount = 300 WHERE id = %L$$, :'d1'), 'payment_dispute_immutable');
+SELECT pg_temp.expect_constraint('S6e-D', 'FC-1: a chargeback fact belongs to a LOST dispute only', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "disputeId")
+  VALUES ('test', 'cb-s6e-0', 'chargeback', %L, %L, 400, 'TND', false, 'status_check', %L)$$, :'e1', :'e1a', :'d1'), 'provider_transaction_fact_chargeback_dispute');
+SELECT pg_temp.expect_constraint('S6e-D', 'FC-1: a chargeback fact names its dispute', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'cb-s6e-0', 'chargeback', %L, %L, 400, 'TND', false, 'status_check')$$, :'e1', :'e1a'), 'provider_transaction_fact_chargeback_dispute');
+SELECT pg_temp.expect_constraint('S6e-D', 'FC-1: only a chargeback fact names a dispute', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "disputeId")
+  VALUES ('test', 'ptx-s6e-x', 'capture', %L, %L, 400, 'TND', false, 'status_check', %L)$$, :'e1', :'e1a', :'d1'), 'provider_transaction_fact_dispute');
+SELECT pg_temp.expect_ok('S6e-D', 'R6E-1: open -> lost, once', format($$UPDATE payment_dispute SET status = 'lost' WHERE id = %L$$, :'d1'));
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-1: a terminal outcome is never replaced', format($$UPDATE payment_dispute SET status = 'won' WHERE id = %L$$, :'d1'), 'payment_dispute_terminal');
+SELECT pg_temp.expect_ok('S6e-D', 'FC-1: the verified chargeback of the lost dispute', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "disputeId")
+  VALUES ('test', 'cb-s6e-1', 'chargeback', %L, %L, 400, 'TND', false, 'status_check', %L)$$, :'e1', :'e1a', :'d1'));
+\o /dev/null
+SELECT id AS cb1 FROM provider_transaction_fact WHERE "providerTxnId" = 'cb-s6e-1' \gset
+\o
+SELECT pg_temp.expect_ok('S6e-D', 'the lost dispute links its chargeback fact', format($$UPDATE payment_dispute SET "chargebackFactId" = %L WHERE id = %L$$, :'cb1', :'d1'));
+SELECT pg_temp.expect_constraint('S6e-D', 'the chargeback fact is linked once', format($$UPDATE payment_dispute SET "chargebackFactId" = %L WHERE id = %L$$, :'e1f', :'d1'), 'payment_dispute_chargeback_once');
+SELECT pg_temp.expect_error('S6e-D', 'a dispute is never deleted', format($$DELETE FROM payment_dispute WHERE id = %L$$, :'d1'), '23514');
+SELECT pg_temp.expect_error('S6e-D', 'a chargeback fact is never edited', format($$UPDATE provider_transaction_fact SET amount = 1 WHERE id = %L$$, :'cb1'), '23514');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-2: an observation''s webhook event is its provider''s', format($$INSERT INTO payment_dispute_observation ("webhookEventId", provider, "providerDisputeId", kind, "paymentId", "attemptId", "disputeId", amount, currency, disposition)
+  VALUES (%L, 'test', 'd-1', 'lost', %L, %L, %L, 400, 'TND', 'duplicate')$$, :'w2', :'e1', :'e1a', :'d1'), 'payment_dispute_observation_webhook');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-2: a conflict always names its reason', format($$INSERT INTO payment_dispute_observation ("webhookEventId", provider, "providerDisputeId", kind, "paymentId", "attemptId", "disputeId", amount, currency, disposition)
+  VALUES (%L, 'test', 'd-1', 'won', %L, %L, %L, 400, 'TND', 'conflict')$$, :'w1', :'e1', :'e1a', :'d1'), 'payment_dispute_observation_reason');
+SELECT pg_temp.expect_ok('S6e-D', 'R6E-2: a contradictory terminal observation is preserved', format($$INSERT INTO payment_dispute_observation ("webhookEventId", provider, "providerDisputeId", kind, "paymentId", "attemptId", "disputeId", amount, currency, disposition, reason)
+  VALUES (%L, 'test', 'd-1', 'won', %L, %L, %L, 400, 'TND', 'conflict', 'terminal_contradiction')$$, :'w1', :'e1', :'e1a', :'d1'));
+SELECT pg_temp.expect_error('S6e-D', 'R6E-2: one observation per webhook event', format($$INSERT INTO payment_dispute_observation ("webhookEventId", provider, "providerDisputeId", kind, "paymentId", "attemptId", "disputeId", amount, currency, disposition)
+  VALUES (%L, 'test', 'd-1', 'lost', %L, %L, %L, 400, 'TND', 'duplicate')$$, :'w1', :'e1', :'e1a', :'d1'), '23505');
+SELECT pg_temp.expect_error('S6e-D', 'observations are never edited', $$UPDATE payment_dispute_observation SET disposition = 'applied'$$, '23514');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-3: evidence only on an open dispute', format($$INSERT INTO payment_dispute_evidence ("disputeId", "grantId", "fileId", "addedByUserId") VALUES (%L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid())$$, :'d1'), 'payment_dispute_evidence_open');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-3: a decision only on an open dispute of its Company', format($$INSERT INTO payment_dispute_decision (id, "disputeId", decision, "companyId", "requestedByUserId", "idempotencyKey", "receiptDigest")
+  VALUES (gen_random_uuid(), %L, 'contest', '00000000-0000-4000-8000-00000000c6e0', gen_random_uuid(), 'key-s6e-0001', repeat('a', 64))$$, :'d1'), 'payment_dispute_decision_open');
+SELECT pg_temp.expect_ok('S6e-D', 'a second, open dispute of the same payment', format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, status)
+  VALUES ('test', 'd-2', %L, %L, %L, 300, 'TND', 'open')$$, :'e1', :'e1a', :'e1f'));
+\o /dev/null
+SELECT id AS d2 FROM payment_dispute WHERE "providerDisputeId" = 'd-2' \gset
+\o
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-3: not another Company''s', format($$INSERT INTO payment_dispute_decision (id, "disputeId", decision, "companyId", "requestedByUserId", "idempotencyKey", "receiptDigest")
+  VALUES (gen_random_uuid(), %L, 'contest', gen_random_uuid(), gen_random_uuid(), 'key-s6e-0002', repeat('a', 64))$$, :'d2'), 'payment_dispute_decision_open');
+SELECT pg_temp.expect_ok('S6e-D', 'R6E-3: the pending intent of a decision', format($$INSERT INTO payment_dispute_decision (id, "disputeId", decision, "companyId", "requestedByUserId", "idempotencyKey", "receiptDigest")
+  VALUES ('00000000-0000-4000-8000-0000000006e1', %L, 'contest', '00000000-0000-4000-8000-00000000c6e0', gen_random_uuid(), 'key-s6e-0003', repeat('a', 64))$$, :'d2'));
+SELECT pg_temp.expect_error('S6e-D', 'R6E-3: at most one live decision per dispute', format($$INSERT INTO payment_dispute_decision (id, "disputeId", decision, "companyId", "requestedByUserId", "idempotencyKey", "receiptDigest")
+  VALUES (gen_random_uuid(), %L, 'accept', '00000000-0000-4000-8000-00000000c6e0', gen_random_uuid(), 'key-s6e-0004', repeat('a', 64))$$, :'d2'), '23505');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-3: recorded only with Auth''s consumption', $$UPDATE payment_dispute_decision SET status = 'recorded' WHERE id = '00000000-0000-4000-8000-0000000006e1'$$, 'payment_dispute_decision_pairing');
+SELECT pg_temp.expect_ok('S6e-D', 'R6E-3: recorded with the receipt and its approver', $$UPDATE payment_dispute_decision SET status = 'recorded', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid() WHERE id = '00000000-0000-4000-8000-0000000006e1'$$);
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-3: a recorded decision is terminal', $$UPDATE payment_dispute_decision SET status = 'authorization_refused', "receiptId" = NULL, "approvedByUserId" = NULL, refusal = 'x' WHERE id = '00000000-0000-4000-8000-0000000006e1'$$, 'payment_dispute_decision_transition');
+SELECT pg_temp.expect_constraint('S6e-D', 'R6E-3: the decided request is immutable', $$UPDATE payment_dispute_decision SET decision = 'accept' WHERE id = '00000000-0000-4000-8000-0000000006e1'$$, 'payment_dispute_decision_immutable');
+SELECT pg_temp.expect_error('S6e-D', 'a decision is never deleted', $$DELETE FROM payment_dispute_decision$$, '23514');
+SELECT pg_temp.assert_eq('S6e-D', 'a decision never changes the dispute', (SELECT status FROM payment_dispute WHERE id = :'d2'), 'open');
+\o
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

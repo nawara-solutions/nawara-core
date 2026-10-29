@@ -115,6 +115,7 @@ describe('BILLING_MESSAGES', () => {
       [en('refundNotEligible'), 'This payment is not eligible for a refund case.'], // Core V2 S6a
       [en('refundCaseExists'), 'This payment already has an open or completed refund case.'],
       [en('refundDisputeOpen'), 'A dispute on this payment is open: no refund case can be opened.'],
+      [en('refundDisputeUnavailable'), 'The dispute status of this payment could not be verified; nothing was changed.'], // Core V2 S6e-D
       [en('refundCaseNotOpen'), 'The refund case is not open.'],
       [en('refundCaseCompleted'), 'The refund case is completed: it accepts no new refund attempt.'], // Core V2 S6b
       [en('refundAuthorizationInProgress'), 'A refund authorization for this case is still unresolved or in effect.'],

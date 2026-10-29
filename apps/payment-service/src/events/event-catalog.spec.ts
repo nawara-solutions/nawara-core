@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PaymentRow } from '../payments/payment.types.js';
 import { PRODUCED_EVENTS, renderEventContract, type EventField, type PaymentEventName } from './event-catalog.js';
-import { jobContext, paymentEvent, refundCaseCompletedEvent, requestContext, webhookContext } from './payment-events.js';
+import { jobContext, paymentEvent, disputeLostEvent, disputeOpenedEvent, refundCaseCompletedEvent, requestContext, webhookContext } from './payment-events.js';
 
 /** What a payload value must look like for its catalog field (V2 A3M.2). Returns the problems, empty when it conforms. */
 function conformance(payload: Record<string, unknown>, declared: Readonly<Record<string, EventField>>): string[] {
@@ -85,9 +85,28 @@ describe('payment-service event catalog (V2 A3M.2)', () => {
     }
   });
 
+  it('Core V2 S6e-D: payment.dispute.opened and payment.dispute.lost match their catalog entries, with a deterministic id per dispute and liveMode false', () => {
+    const d = { id: '77777777-7777-4777-8777-777777777777', paymentId: row.id, amount: '4000', currency: 'TND', reason: 'fraudulent',
+      recordedAt: new Date('2026-10-29T10:00:00.000Z'), closedAt: new Date('2026-10-30T10:00:00.000Z') };
+    for (const ctx of [webhookContext('simulation', 'evt-3'), webhookContext('simulation', 'evt-4')]) {
+      for (const base of [{ ...s4aRow, organizationId: '33333333-3333-4333-8333-333333333333' }, row]) {
+        const opened = disputeOpenedEvent({ ...d, reason: null }, base, ctx);
+        expect(conformance(JSON.parse(JSON.stringify(opened.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.dispute.opened'].payload)).toEqual([]);
+        expect(opened.payload).toMatchObject({ disputeId: d.id, amount: 4000, openedAt: '2026-10-29T10:00:00.000Z', liveMode: false });
+        for (const cb of [null, { id: '88888888-8888-4888-8888-888888888888', amount: '4000', currency: 'TND' }]) {
+          const lost = disputeLostEvent(d, base, cb, ctx);
+          expect(conformance(JSON.parse(JSON.stringify(lost.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.dispute.lost'].payload)).toEqual([]);
+          expect(lost.payload).toMatchObject({ lostAt: '2026-10-30T10:00:00.000Z', chargeback: cb ? { factId: cb.id, amount: 4000, currency: 'TND' } : null, liveMode: false });
+          expect(lost.id).toBe(disputeLostEvent(d, base, null, webhookContext('simulation', 'evt-9')).id); // one id per dispute
+        }
+        expect(opened.id).not.toBe(disputeLostEvent(d, base, null, ctx).id);
+      }
+    }
+  });
+
   it('every event the builder produces matches its catalog entry, with the extras each call site passes', () => {
     // The extras exactly as the call sites pass them: attempt.service (succeeded, failed), expiry-sweeper (expired).
-    const extras: Record<Exclude<PaymentEventName, 'refund.case_completed'>, Array<Record<string, unknown>>> = {
+    const extras: Record<Exclude<PaymentEventName, 'refund.case_completed' | 'payment.dispute.opened' | 'payment.dispute.lost'>, Array<Record<string, unknown>>> = {
       'payment.created': [{}],
       'payment.succeeded': [{ settledMethod: 'gateway', succeededAt: row.closedAt?.toISOString() }, { settledMethod: 'gateway', succeededAt: undefined }],
       'payment.failed': [{ failureCode: 'card_declined' }, { failureCode: null }],

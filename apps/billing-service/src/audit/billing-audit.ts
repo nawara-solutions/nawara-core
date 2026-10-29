@@ -40,6 +40,7 @@ export function auditActor(ctx: TransitionContext): AuditActor {
   if (ctx.actor.type === 'system' && ctx.cause.type === 'reconciliation') return { type: 'system', id: 'payment_reconciler' };
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'assistance_sweep') return { type: 'system', id: 'assistance_sweep' }; // Core V2 S5b (E-6)
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'refund_effect_worker') return { type: 'system', id: 'refund_effect_worker' }; // Core V2 S6d
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'dispute_loss_worker') return { type: 'system', id: 'dispute_loss_worker' }; // Core V2 S6e-D
   throw new Error(`billing_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 

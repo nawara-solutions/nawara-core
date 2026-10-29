@@ -8,11 +8,11 @@ import { PAYMENT_MESSAGES } from '../messages.js';
 import type { PaymentRow } from '../payments/payment.types.js';
 import {
   SIMULATION_PROVIDER_ID, SIMULATION_SIGNATURE_HEADER, SimulationPaymentProvider, simulationRefundId, simulationTransactionId, type SimulationCommandRow,
-  type SimulationRefundCommandRow,
+  type SimulationDisputeCommandRow, type SimulationRefundCommandRow,
 } from '../providers/simulation-provider.js';
 import type { RefundAttemptRow } from '../refunds/refund.types.js';
 import { WebhookService } from '../webhooks/webhook.service.js';
-import type { SimulationInitiationDto, SimulationOutcomeDto, SimulationRefundDispatchPlanDto, SimulationRefundOutcomeDto } from './dto/simulation-command.dto.js';
+import type { SimulationDisputeDto, SimulationInitiationDto, SimulationOutcomeDto, SimulationRefundDispatchPlanDto, SimulationRefundOutcomeDto } from './dto/simulation-command.dto.js';
 
 export interface SimulationRefundCommandResult {
   command: SimulationRefundCommandRow;
@@ -30,6 +30,13 @@ export interface SimulationCommandResult {
 /** The fields that make two commands under one `commandId` the same command (F-S6); everything else is derived from them. */
 const CONTENT = ['kind', 'paymentId', 'attemptId', 'instruction', 'failureCode', 'delivery'] as const;
 const REFUND_CONTENT = ['kind', 'paymentId', 'refundAttemptId', 'instruction', 'failureCode', 'delivery'] as const;
+const DISPUTE_CONTENT = ['paymentId', 'providerDisputeId', 'instruction', 'amount', 'reason', 'chargebackTxnId', 'chargebackAmount', 'delivery'] as const;
+
+export interface SimulationDisputeCommandResult {
+  command: SimulationDisputeCommandRow;
+  replayed: boolean;
+  delivered: { status: number } | null;
+}
 
 /**
  * Core V2 S4f (register PAY-14; the Owner's F-S2 to F-S6): the non-production harness that tells the `simulation` provider what to answer.
@@ -198,6 +205,73 @@ export class SimulationService {
     const stored = existing[0]!;
     if (REFUND_CONTENT.some((k) => (stored[k] ?? null) !== (row[k] ?? null))) throw paymentError(409, 'simulation_command_conflict', PAYMENT_MESSAGES.simulationCommandConflict);
     return { command: stored, replayed: true, delivered: null };
+  }
+
+  /**
+   * Core V2 S6e-D (R6E-2): what the simulated provider reports about a dispute of one captured simulation payment, delivered (now or later)
+   * through the signed webhook pipeline: the harness never writes a dispute, an observation or a chargeback fact itself. The disputed attempt,
+   * the currency and the provider references are derived from Payment's own rows (F-S3); a payment with no captured simulation attempt has
+   * nothing to dispute.
+   */
+  async recordDispute(paymentId: string, dto: SimulationDisputeDto): Promise<SimulationDisputeCommandResult> {
+    this.assertEnabled();
+    const lossOnly = dto.chargeback !== undefined || dto.chargebackAmount !== undefined || dto.chargebackRef !== undefined;
+    if (lossOnly && dto.event !== 'lost') throw paymentError(400, 'invalid_simulation_command', PAYMENT_MESSAGES.invalidSimulationCommand);
+    if (dto.chargeback === 'none' && (dto.chargebackAmount !== undefined || dto.chargebackRef !== undefined)) {
+      throw paymentError(400, 'invalid_simulation_command', PAYMENT_MESSAGES.invalidSimulationCommand);
+    }
+    const { rows } = await this.db.query<PaymentRow & { attemptProvider: string | null }>(
+      `SELECT p.*, a.provider AS "attemptProvider" FROM payment p LEFT JOIN payment_attempt a ON a.id = p."succeededAttemptId" WHERE p.id = $1`, [paymentId]);
+    const payment = rows[0];
+    if (!payment || payment.liveMode === true) throw notFound();
+    if (!payment.succeededAttemptId || payment.attemptProvider !== SIMULATION_PROVIDER_ID) {
+      throw paymentError(409, 'simulation_nothing_to_dispute', PAYMENT_MESSAGES.simulationNothingToDispute);
+    }
+    const amount = dto.amount ?? Number(payment.amount);
+    const currency = payment.currency.trim();
+    const providerDisputeId = `simd_${dto.disputeRef}`;
+    const chargeback = dto.event === 'lost' && dto.chargeback !== 'none'
+      ? { txnId: `simcb_${dto.chargebackRef ?? dto.disputeRef}`, amount: dto.chargebackAmount ?? amount, currency }
+      : null;
+    const eventBody = SimulationPaymentProvider.disputeNotificationBody({
+      commandId: dto.commandId, attemptId: payment.succeededAttemptId, instruction: dto.event, providerDisputeId, amount, currency, reason: dto.reason ?? null, chargeback,
+    });
+    const delivery = dto.delivery ?? 'immediate';
+    const inserted = await this.db.query<SimulationDisputeCommandRow>(
+      `INSERT INTO simulation_dispute_command ("commandId", "paymentId", "attemptId", "providerDisputeId", instruction, amount, currency, reason,
+         "chargebackTxnId", "chargebackAmount", "chargebackCurrency", "eventBody", delivery)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT ("commandId") DO NOTHING RETURNING *`,
+      [dto.commandId, paymentId, payment.succeededAttemptId, providerDisputeId, dto.event, amount, currency, dto.reason ?? null,
+        chargeback?.txnId ?? null, chargeback?.amount ?? null, chargeback ? currency : null, eventBody, delivery],
+    );
+    if (!inserted.rows[0]) {
+      const stored = (await this.db.query<SimulationDisputeCommandRow>('SELECT * FROM simulation_dispute_command WHERE "commandId" = $1', [dto.commandId])).rows[0]!;
+      const now: Record<(typeof DISPUTE_CONTENT)[number], unknown> = {
+        paymentId, providerDisputeId, instruction: dto.event, amount: String(amount), reason: dto.reason ?? null, chargebackTxnId: chargeback?.txnId ?? null,
+        chargebackAmount: chargeback ? String(chargeback.amount) : null, delivery,
+      };
+      if (DISPUTE_CONTENT.some((k) => (stored[k] === null ? null : String(stored[k])) !== now[k])) {
+        throw paymentError(409, 'simulation_command_conflict', PAYMENT_MESSAGES.simulationCommandConflict);
+      }
+      return { command: stored, replayed: true, delivered: null };
+    }
+    const command = inserted.rows[0];
+    this.logger.log(`simulation_dispute_command_recorded command=${command.commandId} event=${command.instruction} payment=${paymentId}`);
+    return { command, replayed: false, delivered: delivery === 'immediate' ? await this.deliverDisputeBody(command) : null };
+  }
+
+  /** Delivers (again) a dispute command's notification: a held one late, or a repeat (the webhook key makes a repeat a no-op). */
+  async deliverDispute(commandId: string): Promise<SimulationDisputeCommandResult> {
+    this.assertEnabled();
+    const command = (await this.db.query<SimulationDisputeCommandRow>('SELECT * FROM simulation_dispute_command WHERE "commandId" = $1', [commandId])).rows[0];
+    if (!command) throw notFound();
+    return { command, replayed: false, delivered: await this.deliverDisputeBody(command) };
+  }
+
+  private async deliverDisputeBody(command: SimulationDisputeCommandRow): Promise<{ status: number }> {
+    const result = await this.webhooks.receive(this.provider, command.eventBody, { [SIMULATION_SIGNATURE_HEADER]: this.provider.sign(command.eventBody) });
+    this.logger.log(`simulation_dispute_notification_delivered command=${command.commandId} status=${result.status}`);
+    return result;
   }
 
   private assertEnabled(): void {

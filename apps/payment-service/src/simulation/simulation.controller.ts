@@ -4,8 +4,8 @@ import type { Response } from 'express';
 import { RequireServiceOperation, ServiceOperationGuard, ServiceTokenGuard } from '@nawara/service-kit';
 import { notFound } from '../errors.js';
 import { SIMULATION_RESOLVE_OPERATION } from '../authorization/caller-admission.policy.js';
-import { SimulationInitiationDto, SimulationOutcomeDto, SimulationRefundDispatchPlanDto, SimulationRefundOutcomeDto } from './dto/simulation-command.dto.js';
-import { SimulationService, type SimulationCommandResult, type SimulationRefundCommandResult } from './simulation.service.js';
+import { SimulationDisputeDto, SimulationInitiationDto, SimulationOutcomeDto, SimulationRefundDispatchPlanDto, SimulationRefundOutcomeDto } from './dto/simulation-command.dto.js';
+import { SimulationService, type SimulationCommandResult, type SimulationDisputeCommandResult, type SimulationRefundCommandResult } from './simulation.service.js';
 
 const COMMAND_ID = /^[A-Za-z0-9._:-]{8,128}$/;
 
@@ -106,6 +106,42 @@ export class SimulationController {
     if (!COMMAND_ID.test(commandId)) throw notFound();
     return representRefund(await this.simulation.deliverRefund(commandId), res, 200);
   }
+
+  @Post('payments/:paymentId/disputes')
+  @ApiOperation({ summary: 'Core V2 S6e-D (R6E-2): what the simulation provider reports about a dispute of a captured payment; its signed notification is delivered or held.' })
+  @ApiResponse({ status: 201, description: 'Recorded (and delivered, when `delivered` is present).' })
+  @ApiResponse({ status: 200, description: 'Identical replay of the same commandId (Idempotent-Replayed: true): nothing changed, nothing delivered.' })
+  @ApiResponse({ status: 400, description: 'validation_error / invalid_simulation_command' })
+  @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted' })
+  @ApiResponse({ status: 404, description: 'not_found' })
+  @ApiResponse({ status: 409, description: 'simulation_command_conflict | simulation_nothing_to_dispute' })
+  async dispute(@Param('paymentId', new ParseUUIDPipe()) paymentId: string, @Body() dto: SimulationDisputeDto, @Res({ passthrough: true }) res: Response) {
+    return representDispute(await this.simulation.recordDispute(paymentId, dto), res);
+  }
+
+  @Post('dispute-commands/:commandId/deliver')
+  @HttpCode(200)
+  @ApiOperation({ summary: "Deliver a dispute command's notification (a held one late, or again): delayed, duplicate and out-of-order delivery." })
+  @ApiResponse({ status: 200, description: 'Delivered; `delivered.status` is the webhook pipeline answer.' })
+  @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted' })
+  @ApiResponse({ status: 404 })
+  async deliverDispute(@Param('commandId') commandId: string, @Res({ passthrough: true }) res: Response) {
+    if (!COMMAND_ID.test(commandId)) throw notFound();
+    return representDispute(await this.simulation.deliverDispute(commandId), res, 200);
+  }
+}
+
+function representDispute(result: SimulationDisputeCommandResult, res: Response, status?: number) {
+  res.status(status ?? (result.replayed ? 200 : 201));
+  if (result.replayed) res.setHeader('Idempotent-Replayed', 'true');
+  const c = result.command;
+  return {
+    commandId: c.commandId, paymentId: c.paymentId, attemptId: c.attemptId, providerDisputeId: c.providerDisputeId, event: c.instruction, amount: Number(c.amount),
+    currency: c.currency, reason: c.reason, chargeback: c.chargebackTxnId ? { providerTxnId: c.chargebackTxnId, amount: Number(c.chargebackAmount), currency: c.chargebackCurrency } : null,
+    eventId: `simd_${c.commandId}`, delivery: c.delivery, createdAt: c.createdAt, delivered: result.delivered,
+  };
 }
 
 function representRefund(result: SimulationRefundCommandResult, res: Response, status?: number) {

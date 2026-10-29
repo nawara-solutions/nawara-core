@@ -6,6 +6,8 @@ import { webhookContext } from '../events/payment-events.js';
 import type { AttemptRow } from '../attempts/attempt.types.js';
 import type { FetchStatusResult, PaymentProvider, RefundStatusResult } from '../providers/provider.port.js';
 import { RefundEvidenceService } from '../refunds/refund-evidence.service.js';
+import { DisputeIngestionService } from '../disputes/dispute-ingestion.service.js';
+import { isDisputeNotificationType, parseDisputeNotice } from '../disputes/dispute.types.js';
 import type { WebhookEventRow } from './webhook-event.types.js';
 
 export interface WebhookResult {
@@ -28,6 +30,8 @@ export class WebhookService {
     private readonly attempts: AttemptService,
     /** Core V2 S6b: present only where refunds are configured (never production); without it a refund notification is never applied. */
     @Optional() @Inject(RefundEvidenceService) private readonly refunds?: RefundEvidenceService,
+    /** Core V2 S6e-D: present only where disputes are configured (never production); without it a dispute notification is never applied. */
+    @Optional() @Inject(DisputeIngestionService) private readonly disputes?: DisputeIngestionService,
   ) {}
 
   async receive(provider: PaymentProvider, rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<WebhookResult> {
@@ -91,6 +95,7 @@ export class WebhookService {
     claim?: Queryable,
   ): Promise<WebhookResult> {
     if (parsed.type.startsWith('refund.')) return this.processRefund(eventId, provider, parsed, claim);
+    if (isDisputeNotificationType(parsed.type)) return this.processDispute(eventId, provider, parsed, claim);
     const status = this.toStatus(parsed);
     if (!status) {
       await this.markState(eventId, 'ignored', `unknown_event_type:${parsed.type}`, undefined, claim);
@@ -145,6 +150,37 @@ export class WebhookService {
       await this.markState(eventId, 'processed', `refund_attempt:${attempt.id}`, undefined, claim);
       return { status: 200 };
     } catch {
+      await this.markState(eventId, 'failed', 'transient_error', undefined, claim);
+      return { status: 500 };
+    }
+  }
+
+  /**
+   * Core V2 S6e-D (register PAY-09, EVT-03; R6E-2): a verified dispute notification, through the same pipeline (signature, permanent event key),
+   * then `DisputeIngestionService`'s rules. It names the disputed attempt OF THIS PROVIDER. A notification Payment cannot read is kept as a
+   * `conflict` (never retried, never applied); a preserved dispute conflict is a `conflict` too. Without disputes configured: `ignored`.
+   */
+  private async processDispute(
+    eventId: string,
+    provider: PaymentProvider,
+    parsed: { type: string; reference: string; amount?: number; currency?: string; data: unknown; providerOccurredAt?: Date },
+    claim?: Queryable,
+  ): Promise<WebhookResult> {
+    if (!this.disputes) {
+      await this.markState(eventId, 'ignored', 'disputes_not_enabled', undefined, claim);
+      return { status: 200 };
+    }
+    const notice = parseDisputeNotice(parsed);
+    if (!notice) {
+      await this.markState(eventId, 'conflict', 'malformed_dispute', undefined, claim);
+      return { status: 200 };
+    }
+    try {
+      const r = await this.disputes.ingest(eventId, provider.id, parsed.reference, notice, webhookContext(provider.id, eventId));
+      await this.markState(eventId, r.state, r.outcome, r.attemptId, claim);
+      return { status: 200 };
+    } catch (e) {
+      this.logger.warn(`dispute notification ${eventId} failed transiently: ${(e as Error).message}`);
       await this.markState(eventId, 'failed', 'transient_error', undefined, claim);
       return { status: 500 };
     }

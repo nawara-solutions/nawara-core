@@ -86,6 +86,14 @@ export const CONSUMED_EVENTS = [
       producer: { type: 'string' }, approvedAmount: { type: 'integer' }, currency: { type: 'string' }, completedAt: { type: 'datetime' }, liveMode: { type: 'boolean' },
     },
   },
+  // Core V2 S6e-D (register EVT-03; the Owner's R6E-5, R6E-6): what `DisputeLossService` requires of Payment's verified final loss
+  {
+    source: 'payment-service', name: 'payment.dispute.lost', version: 1,
+    requires: {
+      disputeId: { type: 'uuid' }, paymentId: { type: 'uuid' }, producer: { type: 'string' }, amount: { type: 'integer' }, currency: { type: 'string' },
+      lostAt: { type: 'datetime' }, chargeback: { type: 'object', nullable: true }, liveMode: { type: 'boolean' },
+    },
+  },
 ] as const satisfies readonly ConsumedEvent[];
 
 export type BillingEventName = keyof typeof PRODUCED_EVENTS;

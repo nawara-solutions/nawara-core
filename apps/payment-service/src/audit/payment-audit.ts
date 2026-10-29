@@ -18,6 +18,8 @@ const CORRELATION = /^[A-Za-z0-9._:-]{8,128}$/;
 export type PaymentAuditAction = 'payment.created' | 'payment.cancelled' | 'payment.expired' | 'payment.succeeded' | 'payment.failed';
 /** Core V2 S6b (R6B-7): the refund attempt actions (version 1, no trusted scope, no `approvedBy`: the approver stays on Payment's own row). */
 export type RefundAuditAction = 'refund_attempt.authorized' | 'refund_attempt.failed' | 'refund_attempt.succeeded';
+/** Core V2 S6e-D (R6E-8): the dispute actions (version 1, no trusted scope): provider observations by the verified webhook, Owner actions by the Owner. */
+export type DisputeAuditAction = 'payment_dispute.opened' | 'payment_dispute.closed' | 'payment_dispute.evidence_added' | 'payment_dispute.decided';
 
 /**
  * The catalog actor of a Payment transition, from Payment's own verified attribution (never a request value). A service caller is the
@@ -85,6 +87,25 @@ export class PaymentAudit {
       { action: 'refund_authorization.completed', actor: auditActor(ctx), organizationId, resource: { type: 'refund_authorization', id: z.id }, outcome: 'succeeded',
         changes: { payment_id: z.paymentId, refund_case_id: z.refundCaseId, refund_attempt_id: z.refundAttemptId } } as never,
       { eventId: deterministicEventId(z.id, 'audit.refund_authorization.completed'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /**
+   * Core V2 S6e-D (R6E-8): the central audit intent of a dispute change, on its own transaction. Identifiers and codes only (the dispute is the
+   * resource; its payment, and the outcome, file or decision); never an amount, evidence content, a receipt or its secret. The event id is
+   * derived from (`idOf`, action): written once.
+   */
+  async recordDispute(q: Queryable, action: DisputeAuditAction, d: { id: string; paymentId: string }, organizationId: string | null, ctx: EventContext,
+    extra: { outcome?: 'won' | 'lost'; fileId?: string; grantId?: string; decision?: 'contest' | 'accept' } = {}, idOf: string = d.id): Promise<void> {
+    const changes: Record<string, unknown> = { payment_id: d.paymentId };
+    if (extra.outcome) changes.outcome = extra.outcome;
+    if (extra.fileId) changes.file_id = extra.fileId;
+    if (extra.grantId) changes.grant_id = extra.grantId;
+    if (extra.decision) changes.decision = extra.decision;
+    await this.writer.write(
+      q,
+      { action, actor: auditActor(ctx), organizationId, resource: { type: 'payment_dispute', id: d.id }, outcome: 'succeeded', changes } as never,
+      { eventId: deterministicEventId(idOf, `audit.${action}`), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
 }

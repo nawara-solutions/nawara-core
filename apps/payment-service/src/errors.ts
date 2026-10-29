@@ -38,7 +38,18 @@ export type ErrorCode =
   | 'refund_authorization_invalid'
   | 'refund_authorization_expired'
   | 'refund_authorization_unresolved'
-  | 'refund_case_completed'; // Core V2 S6c (FC-3, frozen)
+  | 'refund_case_completed' // Core V2 S6c (FC-3, frozen)
+  // Core V2 S6e-D (PAY-09 to PAY-11, R6E-3)
+  | 'invalid_dispute_request'
+  | 'dispute_not_open'
+  | 'dispute_evidence_invalid'
+  | 'dispute_evidence_unavailable'
+  | 'dispute_decision_exists'
+  | 'dispute_decision_refused'
+  | 'dispute_decision_conflict'
+  | 'dispute_decision_unresolved'
+  | 'owner_authority_unavailable'
+  | 'simulation_nothing_to_dispute';
 
 /** `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that echo a client value. */
 export function paymentError(status: number, code: ErrorCode, message: string | MessageTexts, params?: MessageParams): HttpException {

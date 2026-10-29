@@ -13,6 +13,7 @@ import { createEventBus } from './events/event-bus.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { ProvidersModule } from './providers/providers.module.js';
 import { RefundsModule } from './refunds/refunds.module.js';
+import { DisputesModule } from './disputes/disputes.module.js';
 import { SimulationModule } from './simulation/simulation.module.js';
 import { WebhooksModule } from './webhooks/webhooks.module.js';
 
@@ -49,6 +50,7 @@ const config = loadPaymentConfig();
     AttemptsModule,
     // Core V2 S6b (R6B-1): refund attempts exist only where Billing holds the refund relay (production configuration refuses it)
     RefundsModule.register(config),
+    DisputesModule.register(config), // Core V2 S6e-D: exactly where refunds are (never production)
     WebhooksModule,
     // Core V2 S4f (F-S5): the simulation harness exists only where the simulation provider is enabled; never in production routing
     ...(config.simulation && !config.isProduction ? [SimulationModule] : []),
