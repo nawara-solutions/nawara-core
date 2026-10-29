@@ -68,7 +68,7 @@ publishes to RabbitMQ (`RABBITMQ_URL`, required in production); nothing is consu
 
 **Evidence grants (Core V2 S2-File.1, ADR-0048 Amendment 1; `src/grants/`):** `POST /file/files/{id}/evidence-grants` (owner, `grant`;
 `{ purpose, caseRef, expiresInSeconds? }`, `Idempotency-Key` required: `201`, a replay `200`, a different request `422`) and
-`POST /file/evidence-grants/{grantId}/revoke` (the grantor; terminal, idempotent). The purpose fixes the grantee (`dispute_evidence` →
+`POST /file/evidence-grants/{grantId}/revoke` (the grantor; terminal, idempotent). The purpose fixes the grantee (Core V2 S6e-H adds `fraud_evidence` → `billing-service`, whose grant must also name `companyId` and `subjectUserId`, immutable, refused for every other purpose; `dispute_evidence` →
 `payment-service`; `surplus_evidence`, `settlement_evidence` → `billing-service`) and must be in the caller's `grantPurposes`; the grant
 takes the file's organization; the file must be `AVAILABLE` and attached; 24 hours by default, at most 7 days, never extended.
 `file_evidence_grant` (migration `0004`) re-checks every binding and keeps the row immutable except its one revocation; rows are never

@@ -9,7 +9,7 @@ import { FILE_MESSAGES } from '../messages.js';
 import { GRANT_LIFETIME_DEFAULT_SECONDS, GrantRepository, type GrantRow } from '../persistence/grant.repository.js';
 import type { CallerPolicy } from '../policy/caller-policy.js';
 import { FILE_NOT_FOUND, fileError, idempotencyKey, organizationHeader } from '../upload/upload-http.js';
-import { EVIDENCE_GRANTEES, type EvidencePurpose } from './evidence-purposes.js';
+import { EVIDENCE_GRANTEES, SUBJECT_BOUND_PURPOSES, type EvidencePurpose } from './evidence-purposes.js';
 
 /** What the grantor sees of a grant. Never its idempotency key or request hash. */
 export interface GrantView {
@@ -23,18 +23,24 @@ export interface GrantView {
   expiresAt: string;
   revokedAt: string | null;
   createdAt: string;
+  /** Core V2 S6e-H: a `fraud_evidence` grant only. */
+  companyId?: string;
+  subjectUserId?: string;
 }
+
+/** Core V2 S6e-H: the Company and subject a subject-bound grant names (absent for every other purpose, whose shape is unchanged). */
+export const subjectOf = (g: GrantRow) => (g.companyId && g.subjectUserId ? { companyId: g.companyId, subjectUserId: g.subjectUserId } : {});
 
 export function grantView(g: GrantRow): GrantView {
   return {
     grantId: g.id, fileId: g.fileId, purpose: g.purpose, grantee: g.granteeService, caseRef: g.caseRef, organizationId: g.organizationId,
     status: g.revokedAt ? 'revoked' : g.active ? 'active' : 'expired',
-    expiresAt: g.expiresAt.toISOString(), revokedAt: g.revokedAt?.toISOString() ?? null, createdAt: g.createdAt.toISOString(),
+    expiresAt: g.expiresAt.toISOString(), revokedAt: g.revokedAt?.toISOString() ?? null, createdAt: g.createdAt.toISOString(), ...subjectOf(g),
   };
 }
 
 /** The keyed hash of what an issuance asks for (the upload's `nawara.file.upload.v1` pattern, its own domain). */
-export function grantRequestHash(key: Buffer, request: { fileId: string; organizationId: string | null; purpose: string; caseRef: string; lifetimeSeconds: number }): string {
+export function grantRequestHash(key: Buffer, request: { fileId: string; organizationId: string | null; purpose: string; caseRef: string; lifetimeSeconds: number; companyId?: string; subjectUserId?: string }): string {
   return createHmac('sha256', key).update(`nawara.file.evidence_grant.v1|${canonicalJson(request)}`, 'utf8').digest('hex');
 }
 
@@ -66,18 +72,23 @@ export class GrantService {
     @Inject(FileAudit) private readonly audit: FileAudit,
   ) {}
 
-  async issue(caller: string, req: Request, fileId: string, input: { purpose: EvidencePurpose; caseRef: string; expiresInSeconds?: number }): Promise<{ created: boolean; grant: GrantView }> {
+  async issue(caller: string, req: Request, fileId: string, input: { purpose: EvidencePurpose; caseRef: string; expiresInSeconds?: number; companyId?: string; subjectUserId?: string }): Promise<{ created: boolean; grant: GrantView }> {
     const policy = this.policy(caller);
     const organizationId = this.organization(policy, organizationHeader(req));
     const key = idempotencyKey(req);
     const grantee = EVIDENCE_GRANTEES[input.purpose];
     if (!policy.grantPurposes?.has(input.purpose) || grantee === caller) throw fileError(403, 'purpose_not_allowed', FILE_MESSAGES.purposeNotAllowed);
+    // Core V2 S6e-H (H-3): a subject-bound purpose names its Company and subject; no other purpose may carry them
+    const bound = SUBJECT_BOUND_PURPOSES.has(input.purpose);
+    if (bound !== (input.companyId !== undefined) || bound !== (input.subjectUserId !== undefined)) throw fileError(400, 'validation_error', FILE_MESSAGES.grantSubjectInvalid);
+    const subject = bound ? { companyId: input.companyId!.toLowerCase(), subjectUserId: input.subjectUserId!.toLowerCase() } : {};
     const lifetimeSeconds = input.expiresInSeconds ?? GRANT_LIFETIME_DEFAULT_SECONDS;
-    const request = { fileId, organizationId, purpose: input.purpose, caseRef: input.caseRef, lifetimeSeconds };
+    // the subject joins the hashed request only when present: every existing grant's request hash is unchanged
+    const request = { fileId, organizationId, purpose: input.purpose, caseRef: input.caseRef, lifetimeSeconds, ...subject };
     const requestHash = grantRequestHash(this.config.upload.requestHashKey, request);
 
     const outcome = await this.grants.issue(
-      { scope: { ownerService: caller, organizationId }, fileId, purpose: input.purpose, granteeService: grantee, caseRef: input.caseRef, lifetimeSeconds, idempotencyKey: key, requestHash },
+      { scope: { ownerService: caller, organizationId }, fileId, purpose: input.purpose, granteeService: grantee, caseRef: input.caseRef, lifetimeSeconds, idempotencyKey: key, requestHash, ...subject },
       (q, grant) => this.audit.grantIssued(q, grant),
     );
     switch (outcome.kind) {

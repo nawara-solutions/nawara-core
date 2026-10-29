@@ -18,17 +18,20 @@ export interface GrantRow {
   purpose: EvidencePurpose;
   caseRef: string;
   organizationId: string | null;
+  /** Core V2 S6e-H: a `fraud_evidence` grant's Company and subject (null for every other purpose). */
+  companyId: string | null;
+  subjectUserId: string | null;
   expiresAt: Date;
   revokedAt: Date | null;
   createdAt: Date;
   active: boolean;
 }
 
-const COLUMNS = `id, "fileId", "grantorService", "granteeService", purpose, "caseRef", "organizationId", "expiresAt", "revokedAt", "createdAt",
+const COLUMNS = `id, "fileId", "grantorService", "granteeService", purpose, "caseRef", "organizationId", "companyId", "subjectUserId", "expiresAt", "revokedAt", "createdAt",
   ("revokedAt" IS NULL AND "expiresAt" > now()) AS active`;
 
 /** The same columns, qualified, for a statement that joins `file`. */
-const G_COLUMNS = `g.id, g."fileId", g."grantorService", g."granteeService", g.purpose, g."caseRef", g."organizationId", g."expiresAt",
+const G_COLUMNS = `g.id, g."fileId", g."grantorService", g."granteeService", g.purpose, g."caseRef", g."organizationId", g."companyId", g."subjectUserId", g."expiresAt",
   g."revokedAt", g."createdAt", (g."revokedAt" IS NULL AND g."expiresAt" > now()) AS active`;
 
 export interface NewGrant {
@@ -38,6 +41,9 @@ export interface NewGrant {
   purpose: EvidencePurpose;
   granteeService: EvidenceGrantee;
   caseRef: string;
+  /** Core V2 S6e-H: only for a subject-bound purpose. */
+  companyId?: string;
+  subjectUserId?: string;
   lifetimeSeconds: number;
   idempotencyKey: string;
   requestHash: string;
@@ -92,12 +98,12 @@ export class GrantRepository {
       if (file.status !== 'AVAILABLE' || file.attachedAt === null) return { kind: 'not_grantable', file };
       const { rows } = await q.query<Record<string, unknown>>(
         `INSERT INTO file_evidence_grant (id, "fileId", "grantorService", "granteeService", purpose, "caseRef", "organizationId", "idempotencyKey",
-           "requestHash", "expiresAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + make_interval(secs => $10))
+           "requestHash", "expiresAt", "companyId", "subjectUserId")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + make_interval(secs => $10), $11, $12)
          ON CONFLICT ("grantorService", "idempotencyKey") DO NOTHING
          RETURNING ${COLUMNS}`,
         [randomUUID(), file.id, input.scope.ownerService, input.granteeService, input.purpose, input.caseRef, file.organizationId,
-          input.idempotencyKey, input.requestHash, input.lifetimeSeconds],
+          input.idempotencyKey, input.requestHash, input.lifetimeSeconds, input.companyId ?? null, input.subjectUserId ?? null],
       );
       if (!rows[0]) return (await this.byKey(q, input.scope.ownerService, input.idempotencyKey))!; // a concurrent issuance won
       const grant = reviveGrantRow(rows[0]);

@@ -164,6 +164,11 @@ export const FILE_MESSAGES = defineMessages({
     fr: 'Seul un fichier disponible et rattaché peut être autorisé.',
     ar: 'لا يمكن منح سوى ملف متاح ومرفق.',
   },
+  grantSubjectInvalid: { // Core V2 S6e-H (H-3)
+    en: 'companyId and subjectUserId are required for, and only for, fraud_evidence.',
+    fr: "companyId et subjectUserId sont requis pour fraud_evidence, et uniquement pour cette finalité.",
+    ar: 'الحقلان companyId وsubjectUserId مطلوبان لـ fraud_evidence فقط.',
+  },
   grantIdempotencyKeyReused: {
     en: 'This Idempotency-Key was used for a different grant.',
     fr: 'Cette Idempotency-Key a été utilisée pour une autre autorisation.',
