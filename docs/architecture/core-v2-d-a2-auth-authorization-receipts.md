@@ -400,6 +400,15 @@ only the binding, the step-up purpose and the audience differ.
 | Separation | the canonical binding includes the operation, Company, hold, beneficiary, product and reason: one receipt never authorizes another hold, beneficiary, product, reason, Company or the other action |
 | Database | no migration |
 
+## 17c. S6f amendment: external recovery-surplus receipts (the Owner's R6F-5, 2026-10-29; IMPLEMENTED)
+
+| Item | Contract |
+|---|---|
+| `Binding` | `recovery_surplus_external`: `audience: 'billing-service'`, `companyId`, `surplusId`, `organizationId`, `amount` (minor units, > 0), `currency` (ISO 4217). Exactly these fields |
+| Step-up | `billing.recovery_surplus.record_external`, factor-only, Auth-local, consumed only by this operation's issuance |
+| Separation | the canonical binding separates Company, surplus, Organization, amount and currency; billing-service alone consumes it (F-7 as amended in §17b) |
+| Meaning | the Owner's authorization to RECORD an external repayment; it moves no money and is not a provider fact. Billing still requires File evidence and the Organization's confirmation (R-3b) |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)

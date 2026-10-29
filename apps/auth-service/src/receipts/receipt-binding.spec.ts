@@ -98,7 +98,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     });
 
     it('each operation consumes its own step-up purpose, never the other one', () => {
-      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release' });
+      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external' });
     });
   });
 
@@ -112,7 +112,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     it('parses exactly their own fields, for billing-service only', () => {
       expect(parseBinding(place())).toEqual(place());
       expect(parseBinding(release())).toEqual(release());
-      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service' });
+      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service' });
     });
 
     it('refuses anything unknown, missing, mistyped or for another audience', () => {
@@ -130,6 +130,30 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
       const c = (b: Record<string, unknown>) => canonicalBinding(parseBinding(b));
       const all = [c(place()), c(release()), c({ ...place(), holdId: '99999999-9999-4999-8999-999999999999' }), c({ ...place(), beneficiaryUserId: '99999999-9999-4999-8999-999999999999' }),
         c({ ...place(), productId: '99999999-9999-4999-8999-999999999999' }), c({ ...place(), companyId: '99999999-9999-4999-8999-999999999999' }), c({ ...place(), reason: 'chargeback_abuse' })];
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  describe('external recovery-surplus repayment (S6f Auth prerequisite, R6F-5)', () => {
+    const ext = () => ({
+      operation: 'recovery_surplus_external', audience: 'billing-service', companyId: '11111111-1111-4111-8111-111111111111',
+      surplusId: '22222222-2222-4222-8222-222222222222', organizationId: '33333333-3333-4333-8333-333333333333', amount: 1200, currency: 'TND',
+    });
+    it('parses exactly its fields, billing-service only', () => {
+      expect(parseBinding(ext())).toEqual(ext());
+    });
+    it('refuses anything unknown, missing, mistyped or for another audience', () => {
+      const bad: Array<[string, unknown]> = [
+        ['payment audience', { ...ext(), audience: 'payment-service' }], ['a zero amount', { ...ext(), amount: 0 }], ['a fractional amount', { ...ext(), amount: 1.5 }],
+        ['a string amount', { ...ext(), amount: '1200' }], ['a lower-case currency', { ...ext(), currency: 'tnd' }], ['an extra field', { ...ext(), evidence: 'x' }],
+        ['a missing Organization', (({ organizationId: _o, ...o }) => o)(ext())], ['a non-uuid surplus', { ...ext(), surplusId: 's' }],
+      ];
+      for (const [what, b] of bad) expect(code(() => parseBinding(b)), what).toBe('receipt_binding_invalid');
+    });
+    it('the canonical form separates surpluses, Organizations, amounts, currencies and Companies', () => {
+      const c = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...ext(), ...o }));
+      const all = [c(), c({ surplusId: '44444444-4444-4444-8444-444444444444' }), c({ organizationId: '44444444-4444-4444-8444-444444444444' }), c({ amount: 1201 }),
+        c({ currency: 'EUR' }), c({ companyId: '44444444-4444-4444-8444-444444444444' })];
       expect(new Set(all).size).toBe(all.length);
     });
   });

@@ -114,6 +114,8 @@ Core V2 S6e (the Owner's R6E-3): a second binding operation, `dispute_decision` 
 Core V2 S6e-H (the Owner's H-2): `fraud_hold_place` (`companyId`, `holdId`, `beneficiaryUserId`, `productId`, `reason`) and
 `fraud_hold_release` (the same without `reason`), audience `billing-service`, after the dedicated `billing.fraud_hold.place` /
 `billing.fraud_hold.release` step-ups; `AUTH_SERVICE_POLICY` may admit `billing-service`, which consumes only bindings naming it.
+Core V2 S6f (the Owner's R6F-5): `recovery_surplus_external` (`companyId`, `surplusId`, `organizationId`, `amount`, `currency`), audience
+`billing-service`, after the dedicated `billing.recovery_surplus.record_external` step-up.
 
 | Route | Caller | Purpose |
 |---|---|---|
