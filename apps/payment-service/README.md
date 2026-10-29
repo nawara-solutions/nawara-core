@@ -20,8 +20,10 @@ accounting system: it never decides what is owed and keeps no ledger.
   Organization payer need the default-denied operation `payment.create.organization_payer` (never implied by `payment.create`; refused in
   production configuration; no configured producer holds it, so the capability is inactive until S5b / S6f and a separate Owner decision).
   **Core V2 S5b (Owner E-2, PAY-03 G):** the grant is purpose-bound. `assisted_settlement` needs exactly `payment.create.assisted_settlement`,
-  which only `billing-service` may hold, in non-production configuration only. The broad operation no longer admits it and stays
-  default-denied, for `recovery_settlement` only.
+  which only `billing-service` may hold, in non-production configuration only. **Core V2 S6f (Owner R6F-2):** `recovery_settlement` likewise
+  needs exactly `payment.create.recovery_settlement` (only `billing-service`, non-production configuration only); the broad operation admits
+  neither purpose any more and stays default-denied. A captured `recovery_settlement` payment is refundable in full (reason `recovery_surplus`,
+  migration `0020`; Billing refunds only an entirely-surplus one), and `refund.case_completed` may carry that purpose.
   The payer is the payment's `organizationId`. Its attempts are started and synced, and its payments read, only by an **Organization actor**:
   an ordinary member whom Auth's live `/auth/me` shows active with an `active` administrator membership in that Organization, on the
   Organization's authoritative Platform (the reference read). Everyone else gets the collapsed `404`; Auth or the reference unavailable is

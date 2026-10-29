@@ -42,7 +42,8 @@ export const refusalError = (code: RefusalCode) => paymentError(REFUSAL_STATUS[c
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const OPERATION = 'refund_attempt.create';
 /** Refunds return Nawara-sold, verified purchases or non-entitlement payments (S6a R6A-1); never an Organization subscription or a recovery. */
-const REFUNDABLE_PURPOSES = new Set(['direct_purchase', 'assisted_settlement', 'non_entitlement']);
+// Core V2 S6f (R6F-5 Path A): also a recovery settlement (Billing refunds one only when it is entirely surplus owed to the Organization)
+const REFUNDABLE_PURPOSES = new Set(['direct_purchase', 'assisted_settlement', 'non_entitlement', 'recovery_settlement']);
 
 export interface RefundRequestResult {
   attempt: RefundAttemptRow;

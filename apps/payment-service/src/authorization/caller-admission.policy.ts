@@ -25,13 +25,20 @@ import { ConfigError, parseCallerPolicy, policyList, type CallerPolicyMap } from
  * (an Auth receipt) as a durable refund attempt. Held only by `billing-service`, never implied (no wildcard; `payment.create` does not include
  * it), and refused in production configuration: refunds are development and simulation only.
  */
-export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer', 'payment.create.assisted_settlement', 'payment.refund.create'] as const;
+export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer', 'payment.create.assisted_settlement', 'payment.refund.create', 'payment.create.recovery_settlement'] as const;
 export const SIMULATION_RESOLVE_OPERATION = 'payment.simulation.resolve';
 export const ORGANIZATION_PAYER_CREATE_OPERATION = 'payment.create.organization_payer';
 export const ASSISTED_SETTLEMENT_CREATE_OPERATION = 'payment.create.assisted_settlement';
 /** Core V2 S5b (E-2): the one service identity that may hold the assisted-settlement grant. */
 export const ASSISTED_SETTLEMENT_CALLER = 'billing-service';
 export const REFUND_CREATE_OPERATION = 'payment.refund.create';
+/**
+ * Core V2 S6f (the Owner's R6F-2): `payment.create.recovery_settlement` is the NARROW, purpose-bound grant for an Organization's recovery
+ * settlement: the only operation that admits `recovery_settlement`; held only by `billing-service`, never implied, no wildcard, refused in
+ * production configuration like the other Organization-payer grants.
+ */
+export const RECOVERY_SETTLEMENT_CREATE_OPERATION = 'payment.create.recovery_settlement';
+export const RECOVERY_SETTLEMENT_CALLER = 'billing-service';
 /** Core V2 S6b (R6B-1): the one service identity that may relay a refund authorization. */
 export const REFUND_CALLER = 'billing-service';
 export type PaymentOperation = (typeof PAYMENT_OPERATIONS)[number];
@@ -70,6 +77,10 @@ export function parsePaymentServicePolicy(raw: string | undefined, registered: r
     if (caller !== ASSISTED_SETTLEMENT_CALLER && policy.of(caller)?.operations.has(ASSISTED_SETTLEMENT_CREATE_OPERATION)) {
       throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${ASSISTED_SETTLEMENT_CREATE_OPERATION} may be held only by ${ASSISTED_SETTLEMENT_CALLER} (Core V2 S5b, E-2)`);
     }
+    // Core V2 S6f (R6F-2): so does the recovery-settlement grant
+    if (caller !== RECOVERY_SETTLEMENT_CALLER && policy.of(caller)?.operations.has(RECOVERY_SETTLEMENT_CREATE_OPERATION)) {
+      throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${RECOVERY_SETTLEMENT_CREATE_OPERATION} may be held only by ${RECOVERY_SETTLEMENT_CALLER} (Core V2 S6f, R6F-2)`);
+    }
     // Core V2 S6b (R6B-1): so does the refund relay
     if (caller !== REFUND_CALLER && policy.of(caller)?.operations.has(REFUND_CREATE_OPERATION)) {
       throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${REFUND_CREATE_OPERATION} may be held only by ${REFUND_CALLER} (Core V2 S6b, R6B-1)`);
@@ -95,7 +106,7 @@ export function assertSimulationGrant(policy: CallerPolicyMap<PaymentCallerPolic
 export function assertOrganizationPayerGrant(policy: CallerPolicyMap<PaymentCallerPolicy>, isProduction: boolean): void {
   if (!isProduction) return;
   for (const caller of policy.callers()) {
-    for (const op of [ORGANIZATION_PAYER_CREATE_OPERATION, ASSISTED_SETTLEMENT_CREATE_OPERATION]) {
+    for (const op of [ORGANIZATION_PAYER_CREATE_OPERATION, ASSISTED_SETTLEMENT_CREATE_OPERATION, RECOVERY_SETTLEMENT_CREATE_OPERATION]) {
       if (policy.of(caller)?.operations.has(op)) {
         throw new ConfigError(`PAYMENT_SERVICE_POLICY grants ${op}, which no production configuration may hold yet (a separate Owner decision)`);
       }

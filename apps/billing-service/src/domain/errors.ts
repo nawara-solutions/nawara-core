@@ -87,7 +87,17 @@ export type BillingErrorCode =
   | 'fraud_evidence_unavailable'
   | 'fraud_hold_authorization_refused'
   | 'fraud_hold_authorization_unresolved'
-  | 'fraud_hold_unavailable';
+  | 'fraud_hold_unavailable'
+  // Core V2 S6f recovery (register BIL-28 to BIL-31; R6F-1 to R6F-8)
+  | 'invalid_recovery_request'
+  | 'recovery_obligation_closed'
+  | 'surplus_not_owed'
+  | 'surplus_not_evidenced'
+  | 'surplus_evidence_invalid'
+  | 'surplus_evidence_unavailable'
+  | 'recovery_authorization_refused'
+  | 'recovery_authorization_unresolved'
+  | 'recovery_authorization_unavailable';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

@@ -14,6 +14,9 @@ export const ASSISTANCE_PRODUCER = 'billing-assistance';
 /** Core V2 S3g (D-CAT-8): the reserved provenance of a product the verified Owner created (never a service-token caller). */
 export const OWNER_CATALOG_PRODUCER = 'billing-owner';
 
+/** Core V2 S6f (R6F-1, R6F-2): the reserved internal producer of recovery-settlement invoices and their product (never a service-token caller). */
+export const RECOVERY_PRODUCER = 'billing-recovery';
+
 /**
  * billing-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16 lists the settings a Core
  * service needs). Stage 1 carries ONLY what the foundation itself uses; every later stage adds its own values with the feature
@@ -117,6 +120,8 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
   if (serviceTokens.some((t) => t.caller === ASSISTANCE_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${ASSISTANCE_PRODUCER} is reserved by Billing`);
   // Core V2 S3g (D-CAT-8): so is `billing-owner`, the provenance of the Owner's products; a producer can never act as the Owner's catalog.
   if (serviceTokens.some((t) => t.caller === OWNER_CATALOG_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${OWNER_CATALOG_PRODUCER} is reserved by Billing`);
+  // Core V2 S6f: so is `billing-recovery`, the producer of recovery-settlement invoices
+  if (serviceTokens.some((t) => t.caller === RECOVERY_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${RECOVERY_PRODUCER} is reserved by Billing`);
   const servicePolicy = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(serviceTokens));
   const config = {
     ...base,

@@ -135,6 +135,9 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         refund_case_effect: ['INSERT', 'SELECT'], subscription_purchase_reversal_cause: ['INSERT', 'SELECT'], refund_case_effect_attempt: ['INSERT', 'SELECT', 'UPDATE'], // S6d (0036)
         payment_dispute_loss: ['INSERT', 'SELECT'], dispute_loss_effect: ['INSERT', 'SELECT'], dispute_loss_effect_attempt: ['INSERT', 'SELECT', 'UPDATE'], // S6e-D (0037)
         fraud_hold: ['INSERT', 'SELECT'], fraud_hold_evidence: ['INSERT', 'SELECT'], fraud_hold_release: ['INSERT', 'SELECT'], fraud_hold_expiry: ['INSERT', 'SELECT'], fraud_hold_compensation: ['INSERT', 'SELECT'], // S6e-H (0038)
+        recovery_obligation: ['INSERT', 'SELECT', 'UPDATE'], recovery_review: ['INSERT', 'SELECT'], recovery_settlement_channel: ['INSERT', 'SELECT', 'UPDATE'], // S6f (0039)
+        recovery_payment: ['INSERT', 'SELECT'], recovery_surplus: ['INSERT', 'SELECT'], recovery_surplus_external: ['INSERT', 'SELECT'],
+        recovery_surplus_confirmation: ['INSERT', 'SELECT'], recovery_surplus_refund: ['INSERT', 'SELECT'],
       };
       for (const [table, privileges] of Object.entries(expected)) {
         const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);

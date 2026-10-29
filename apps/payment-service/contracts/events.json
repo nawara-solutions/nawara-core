@@ -487,7 +487,8 @@
           "values": [
             "direct_purchase",
             "assisted_settlement",
-            "non_entitlement"
+            "non_entitlement",
+            "recovery_settlement"
           ]
         },
         "refundAttemptId": {

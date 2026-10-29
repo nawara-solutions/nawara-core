@@ -589,6 +589,30 @@ SELECT pg_temp.expect_ok('S6b', 'a refused authorization frees the payment for a
 SELECT pg_temp.assert_eq('S6b', 'no column of Payment stores a receipt secret', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND column_name ~* 'secret'), '0');
 \o
 
+-- ======================================================= Core V2 S6f: recovery-surplus refunds (0020) ----
+\o /dev/null
+-- a captured recovery settlement, paid by its Organization to the Company (Billing refunds it only when it is entirely surplus, R6F-5 Path A)
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "organizationId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-s6f', 'organization', '00000000-0000-4000-8000-0000000006f0', '00000000-0000-4000-8000-0000000006f0', 'company',
+          '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'recovery_settlement', false) RETURNING id AS f1 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'f1', 1, 'test', false) RETURNING id AS f1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'f1';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-s6f-1', "submittedAt" = now() WHERE id = :'f1a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'f1a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-s6f-1', 'capture', :'f1', :'f1a', 1000, 'TND', false, 'status_check');
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'f1a', "closedAt" = now() WHERE id = :'f1';
+CREATE FUNCTION pg_temp.s6f(pid uuid, reason text) RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId",
+      provider, "liveMode", "receiptDigest", status)
+    SELECT gen_random_uuid(), p.id, 'billing-service', gen_random_uuid(), '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', %L, false, f.id, f."attemptId", 'test', false, repeat('a', 64), 'authorization_pending'
+      FROM payment p JOIN provider_transaction_fact f ON f."paymentId" = p.id AND f.kind = 'capture' WHERE p.id = %L$$, reason, pid);
+$f$;
+SELECT pg_temp.expect_constraint('S6f', 'the refund reasons are the five approved plus recovery_surplus only', pg_temp.s6f(:'f1', 'surplus'), 'refund_attempt_reason');
+SELECT pg_temp.expect_ok('S6f', 'R6F-5 Path A: a captured recovery settlement admits a full refund intent with reason recovery_surplus', pg_temp.s6f(:'f1', 'recovery_surplus'));
+SELECT pg_temp.expect_error('S6f', 'the other refund rules still hold (one effective attempt per payment)', pg_temp.s6f(:'f1', 'recovery_surplus'), '23505');
+\o
+
 -- ======================================================= Core V2 S6c: refund allocation and completion (0018) ----
 \o /dev/null
 INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")

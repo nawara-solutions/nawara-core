@@ -9,8 +9,8 @@ describe('Core V2 S6a refund-case input (BIL-23; R6A-1, R6A-4, R6A-5)', () => {
     expect(normaliseRefundCaseInput({ paymentId: PAYMENT, reason: 'legal_requirement', legalOverride: true }).legalOverride).toBe(true);
   });
 
-  it('the five approved reasons only, no free text', () => {
-    expect([...REFUND_REASONS]).toEqual(['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement']);
+  it('the five approved reasons, plus (Core V2 S6f, R6F-5 Path A) recovery_surplus only; no free text', () => {
+    expect([...REFUND_REASONS]).toEqual(['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement', 'recovery_surplus']);
     for (const reason of ['other', 'Duplicate_charge', 'the customer asked', '', 1]) {
       expect(() => normaliseRefundCaseInput({ paymentId: PAYMENT, reason }), String(reason)).toThrow();
     }

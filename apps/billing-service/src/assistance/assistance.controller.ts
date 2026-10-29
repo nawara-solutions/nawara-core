@@ -445,9 +445,9 @@ export class AssistanceAdminController {
 }
 
 class RestrictionDto {
-  @ApiProperty({ enum: RESTRICTION_KINDS, description: 'T1: a request past its settlement deadline, not settled and not confirmed returned. T2: a cash-return obligation not confirmed by the beneficiary. (T3 and inactive are reserved and never returned in Core V2 S5d.)' }) kind!: string;
-  @ApiProperty({ format: 'uuid', description: 'The assistance request (T1) or the cash-return obligation (T2).' }) sourceId!: string;
-  @ApiProperty({ format: 'date-time', description: 'settleBy (T1) or the obligation\'s opening (T2).' }) since!: string;
+  @ApiProperty({ enum: RESTRICTION_KINDS, description: 'T1: a request past its settlement deadline, not settled and not confirmed returned. T2: a cash-return obligation not confirmed by the beneficiary. T3 (Core V2 S6f): an open recovery obligation (a verified assisted chargeback loss not yet recovered). (inactive is reserved and never returned.)' }) kind!: string;
+  @ApiProperty({ format: 'uuid', description: 'The assistance request (T1), the cash-return obligation (T2) or the recovery obligation (T3).' }) sourceId!: string;
+  @ApiProperty({ format: 'date-time', description: 'settleBy (T1) or the obligation\'s opening (T2, T3).' }) since!: string;
 }
 
 class RestrictionsDto {
@@ -469,7 +469,7 @@ export class OrganizationRestrictionsController {
   @Header('Cache-Control', 'no-store')
   @RequireServiceOperation('restriction.read')
   @ApiOperation({
-    summary: "An Organization's financial restrictions (T1, T2): the Owner of its Platform, its administrator, or a service holding restriction.read.",
+    summary: "An Organization's financial restrictions (T1, T2, T3): the Owner of its Platform, its administrator, or a service holding restriction.read.",
     description: 'Restrictions block NEW assistance requests only; every discharge action stays available. Nothing here creates, clears or stores a restriction.',
   })
   @ApiParam({ name: 'organizationId', format: 'uuid' })

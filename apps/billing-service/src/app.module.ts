@@ -20,6 +20,7 @@ import { PlatformsModule } from './platforms/platforms.module.js';
 import type { OwnerAuthority } from './platforms/owner-authority.client.js';
 import type { DisputeExposure } from './refunds/dispute-exposure.js';
 import { RefundModule } from './refunds/refund.module.js';
+import { RecoveryModule } from './recovery/recovery.module.js';
 import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 import type { PaymentDisputeClient } from './refunds/payment-dispute-client.js';
@@ -108,6 +109,8 @@ export class AppModule {
         AssistanceModule.register(config, overrides.ownerAuthority), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
         // Core V2 S6a (BIL-23, BIL-25) and S6b (BIL-24): development and simulation only
         RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient, fraudHoldReceipts: overrides.fraudHoldReceipts, fraudEvidenceFiles: overrides.fraudEvidenceFiles }),
+        // Core V2 S6f (BIL-26 T3, BIL-28 to BIL-31): recovery of verified assisted losses; development and simulation only
+        RecoveryModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler }),
       ],
     };
   }

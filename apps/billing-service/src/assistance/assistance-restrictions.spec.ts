@@ -16,9 +16,9 @@ describe('Core V2 S5d restriction error (S5D-4)', () => {
     expect(JSON.stringify(body)).not.toMatch(/"a"|"b"|"c"|sourceId|since/); // kinds only, never a source
   });
 
-  it('S5d produces T1 and T2 only; T3 and inactive are reserved', () => {
-    expect([...RESTRICTION_KINDS]).toEqual(['T1', 'T2']);
-    expect([...RESERVED_RESTRICTION_KINDS]).toEqual(['T3', 'inactive']);
+  it('T1, T2 and (Core V2 S6f) T3 are produced; inactive stays reserved', () => {
+    expect([...RESTRICTION_KINDS]).toEqual(['T1', 'T2', 'T3']);
+    expect([...RESERVED_RESTRICTION_KINDS]).toEqual(['inactive']);
   });
 });
 

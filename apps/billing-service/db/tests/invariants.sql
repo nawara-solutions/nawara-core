@@ -73,7 +73,10 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND NOT (table_name = 'refund_case' AND column_name = 'amount') -- S6a: the full captured amount, equal to the payment request's (guard, e2e)
     AND NOT (table_name = 'refund_case_completion' AND column_name = 'approvedAmount') -- S6c: Payment's approved amount, equal to the case's (guard, e2e)
     AND NOT (table_name = 'payment_dispute_loss' AND column_name IN ('disputeAmount', 'chargebackAmount')) -- S6e-D
-    AND NOT (table_name = 'fraud_hold_compensation' AND column_name = 'deniedMs')), '8'); -- S6e-H: a duration (ms), not money -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
+    AND NOT (table_name = 'fraud_hold_compensation' AND column_name = 'deniedMs') -- S6e-H: a duration (ms), not money
+    -- S6f: the recovery base, a channel's outstanding amount at issue, a verified recovery payment and its split, a surplus (checked below)
+    AND NOT (table_name = 'recovery_obligation' AND column_name = 'baseAmount') AND NOT (table_name = 'recovery_settlement_channel' AND column_name = 'amount')
+    AND NOT (table_name = 'recovery_payment' AND column_name IN ('amount', 'principalAmount', 'surplusAmount')) AND NOT (table_name = 'recovery_surplus' AND column_name = 'amount')), '8'); -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -1107,7 +1110,9 @@ SELECT pg_temp.assert_eq('S5d', 'the beneficiary''s confirmation clears T1 and T
   (SELECT (NOT EXISTS (SELECT 1 FROM billing_assistance_restrictions(:'d_org', now())) AND a."settleBy" < now())::text FROM assistance_request a WHERE a.id = :'d_req'), 'true');
 SELECT pg_temp.expect_ok('S5d', 'an unrestricted Organization admits a new request again', format($$INSERT INTO assistance_request ("beneficiaryUserId", "organizationId", "platformId", "productId", "priceId", currency, "baseAmount", "feeAmount", "totalAmount", "feeCapVersion", consent)
   VALUES (%L, %L, %L, %L, %L, 'TND', 9000, 0, 9000, %L, true)$$, :'d_ben', :'d_org', :'f_p', :'f_prod', :'a_price', :'a_cap'));
-SELECT pg_temp.assert_eq('S5d', 'the reserved kinds (T3, inactive) have no source in the model', (SELECT (prosrc NOT LIKE '%''T3''%' AND prosrc NOT LIKE '%''inactive''%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+-- Core V2 S6f (R6F-6 / FC-9): T3 now has its source (an open recovery obligation); D6 inactivity stays reserved (V-4)
+SELECT pg_temp.assert_eq('S5d', 'the reserved kind (inactive) has no source in the model; T3 is sourced from open recovery obligations only (S6f)',
+  (SELECT (prosrc NOT LIKE '%''inactive''%' AND prosrc LIKE '%''T3''%' AND prosrc LIKE '%recovery_obligation%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
 SELECT pg_temp.assert_eq('S5d', 'no restriction or violation state is stored (FC-9)',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')), '0');
 
@@ -1229,6 +1234,37 @@ SELECT pg_temp.assert_eq('S6e-H', 'H-6: the K-3 fold is unchanged: billing_perso
   (SELECT (prosrc NOT LIKE '%fraud%')::text FROM pg_proc WHERE proname = 'billing_personal_spans'), 'true');
 SELECT pg_temp.assert_eq('S6e-H', 'every fraud-hold table is append-only (an update/delete guard on each)',
   (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_10_append_only' AND tgrelid::regclass::text IN ('fraud_hold', 'fraud_hold_evidence', 'fraud_hold_release', 'fraud_hold_expiry', 'fraud_hold_compensation')), '5');
+
+-- ------------------------------------------------------------------------------------------------------------- S6f recovery (0039)
+-- Obligations, settlement, recovery payments, surplus and both resolution paths run end to end in test/recovery.e2e-spec.ts; here, the schema's own rules.
+SELECT pg_temp.expect_error('S6f', 'R6F-3 / R6F-8: an obligation needs the verified loss of an assisted purchase', $$INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'TND')$$, '23514', 'recovery_obligation_basis');
+SELECT pg_temp.assert_eq('S6f', 'R6F-8: one obligation per verified loss; one review per loss; one recovery per payment request and per receipt',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('recovery_obligation_disputeId_key', 'recovery_review_pkey', 'recovery_payment_paymentRequestId_key', 'recovery_payment_receiptId_key')), '4');
+SELECT pg_temp.assert_eq('S6f', 'R6F-3 Option A / R6F-4: review reasons are the two approved exclusions only',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%partial_chargeback%' AND pg_get_constraintdef(oid) LIKE '%refund_completed%')::text FROM pg_constraint WHERE conname = 'recovery_review_reason'), 'true');
+SELECT pg_temp.assert_eq('S6f', 'B8: the database splits a recovery payment into principal (never above the outstanding) and surplus',
+  (SELECT (prosrc LIKE '%LEAST(NEW.amount, outstanding)%')::text FROM pg_proc WHERE proname = 'billing_recovery_payment_insert_guard'), 'true');
+SELECT pg_temp.assert_eq('S6f', 'B8: a recovery payment is only the applied, verified payment.succeeded of its paid request',
+  (SELECT (prosrc LIKE '%payment.succeeded%' AND prosrc LIKE '%applied%' AND prosrc LIKE '%paid%')::text FROM pg_proc WHERE proname = 'billing_recovery_payment_insert_guard'), 'true');
+SELECT pg_temp.assert_eq('S6f', 'DB-13: a channel is open or uncertain until its request is paid, failed, cancelled, expired or rejected (derived, never stored)',
+  (SELECT (prosrc LIKE '%paid%' AND prosrc LIKE '%failed%' AND prosrc LIKE '%expired%')::text FROM pg_proc WHERE proname = 'billing_recovery_channel_active'), 'true');
+SELECT pg_temp.assert_eq('S6f', 'BIL-26: T3 is derived from open recovery obligations; inactive stays reserved',
+  (SELECT (prosrc LIKE '%recovery_obligation%' AND prosrc LIKE '%''T3''%' AND prosrc NOT LIKE '%''inactive''%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+SELECT pg_temp.assert_eq('S6f', 'R-1: a surplus is never revenue, offset or expiring (no such column on any recovery table)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name ~ '^recovery_' AND column_name ~* '(expir|offset|revenue|writeoff|write_off)'), '0');
+SELECT pg_temp.assert_eq('S6f', 'R6F-5: one external record and one confirmation per surplus; one Auth receipt and one File grant per record; one refund per surplus',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('recovery_surplus_external_pkey', 'recovery_surplus_external_receiptId_key', 'recovery_surplus_external_grantId_key',
+    'recovery_surplus_confirmation_pkey', 'recovery_surplus_refund_pkey', 'recovery_surplus_refund_refundCaseId_key')), '6');
+SELECT pg_temp.assert_eq('S6f', 'R-3b: a confirmation needs the external record (FK); the recorder never confirms (guard)',
+  (SELECT (contype = 'f')::text FROM pg_constraint WHERE conrelid = 'recovery_surplus_confirmation'::regclass AND contype = 'f' LIMIT 1), 'true');
+SELECT pg_temp.assert_eq('S6f', 'R6F-7 / FC: no recovery or FinancialLoss table beyond the approved eight',
+  (SELECT count(*)::text FROM information_schema.tables WHERE table_schema = 'public' AND (table_name ~ '^recovery_' OR table_name ~* 'financial_loss|write_?off')), '8');
+SELECT pg_temp.assert_eq('S6f', 'every recovery ledger table is append-only (an update/delete guard on each)',
+  (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_10_append_only' AND tgrelid::regclass::text IN ('recovery_review', 'recovery_payment', 'recovery_surplus',
+    'recovery_surplus_external', 'recovery_surplus_confirmation', 'recovery_surplus_refund')), '6');
+SELECT pg_temp.assert_eq('S6f', 'obligations and channels are never deleted (no-delete guards)',
+  (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_90_no_delete' AND tgrelid::regclass::text IN ('recovery_obligation', 'recovery_settlement_channel')), '2');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

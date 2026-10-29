@@ -107,13 +107,15 @@ export class RefundCaseService {
       if (pr.status !== 'paid' || !pr.purpose || pr.purpose === 'organization_subscription') throw notEligible();
       const basis = await this.basis(q, facts.paymentRequestId, facts.invoiceId, pr.purpose);
       if (!basis) throw notEligible();
+      // Core V2 S6f (R6F-5 Path A): the recovery-surplus reason is required for, and only for, the recovery-surplus basis
+      if ((input.reason === 'recovery_surplus') !== (basis.eligibility === 'recovery_surplus')) throw notEligible();
       if ((await q.query(`SELECT 1 FROM refund_case WHERE "paymentId" = $1 AND status IN ('open', 'completed')`, [input.paymentId])).rows.length > 0) throw caseExists();
       const { id } = (await q.query<{ id: string }>(
         `INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", "receiptId", eligibility, "purchaseId", "lateSettlementId", "companyId", "platformId",
-           "organizationId", amount, currency, reason, "legalOverride", "openedBy")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+           "organizationId", amount, currency, reason, "legalOverride", "openedBy", "surplusId")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`,
         [input.paymentId, facts.paymentRequestId, facts.invoiceId, basis.receiptId, basis.eligibility, basis.purchaseId, basis.lateSettlementId, owner.companyId, platformId,
-          pr.organizationId, pr.amount, pr.currency, input.reason, input.legalOverride, owner.userId])).rows[0]!;
+          pr.organizationId, pr.amount, pr.currency, input.reason, input.legalOverride, owner.userId, basis.surplusId ?? null])).rows[0]!;
       const c = await this.load(q, id);
       await this.audit.record(q, 'refund_case.opened', {
         organizationId: c.organizationId, resource: { type: 'refund_case', id },
@@ -177,7 +179,16 @@ export class RefundCaseService {
    * else a late assisted settlement (no purchase), else a `non_entitlement` invoice. Anything else (a routed purchase whose settlement was
    * never recorded, for one) is not eligible: a Payment record alone never makes a payment refundable.
    */
-  private async basis(q: Queryable, paymentRequestId: string, invoiceId: string, purpose: string) {
+  private async basis(q: Queryable, paymentRequestId: string, invoiceId: string, purpose: string): Promise<{ eligibility: string; receiptId: string; purchaseId: string | null; lateSettlementId: string | null; surplusId?: string } | null> {
+    // Core V2 S6f (R6F-5 Path A): a recovery payment is refundable only when it is ENTIRELY surplus owed to the Organization and no external
+    // repayment of that surplus was recorded; a mixed payment (principal and surplus) is never refunded
+    if (purpose === 'recovery_settlement') {
+      const s = (await q.query<{ id: string; receiptId: string }>(
+        `SELECT su.id, p."receiptId" FROM recovery_surplus su JOIN recovery_payment p ON p.id = su."recoveryPaymentId"
+          WHERE p."paymentRequestId" = $1 AND p."principalAmount" = 0 AND su.amount = p.amount
+            AND NOT EXISTS (SELECT 1 FROM recovery_surplus_external x WHERE x."surplusId" = su.id)`, [paymentRequestId])).rows[0];
+      return s ? { eligibility: 'recovery_surplus', receiptId: s.receiptId, purchaseId: null, lateSettlementId: null, surplusId: s.id } : null;
+    }
     const purchase = (await q.query<{ id: string; receiptId: string; reversed: boolean }>(
       `SELECT s.id, s."receiptId", EXISTS (SELECT 1 FROM subscription_purchase_reversal v WHERE v."purchaseId" = s.id) AS reversed
          FROM subscription_purchase s WHERE s."invoiceId" = $1 AND s."paymentRequestId" = $2 AND s.purpose IN ('direct_purchase', 'assisted_settlement')`,
