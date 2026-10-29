@@ -138,6 +138,104 @@
       }
     },
     {
+      "name": "payment.dispute.lost",
+      "version": 1,
+      "payload": {
+        "amount": {
+          "type": "integer"
+        },
+        "chargeback": {
+          "type": "object",
+          "nullable": true
+        },
+        "currency": {
+          "type": "string"
+        },
+        "disputeId": {
+          "type": "uuid"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "lostAt": {
+          "type": "datetime"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "nullable": true
+        }
+      }
+    },
+    {
+      "name": "payment.dispute.opened",
+      "version": 1,
+      "payload": {
+        "amount": {
+          "type": "integer"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "disputeId": {
+          "type": "uuid"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "openedAt": {
+          "type": "datetime"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "nullable": true
+        },
+        "reason": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    {
       "name": "payment.expired",
       "version": 1,
       "payload": {

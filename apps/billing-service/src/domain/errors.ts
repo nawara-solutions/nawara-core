@@ -66,6 +66,7 @@ export type BillingErrorCode =
   | 'refund_not_eligible'
   | 'refund_case_exists'
   | 'refund_dispute_open'
+  | 'refund_dispute_unavailable' // Core V2 S6e-D (R6E-4): Payment's exposure could not be established
   | 'refund_case_not_open'
   // Core V2 S6b refund authorization relay (register BIL-24; R6B-10)
   | 'refund_case_completed'

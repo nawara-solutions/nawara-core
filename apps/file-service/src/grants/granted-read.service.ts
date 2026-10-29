@@ -41,15 +41,19 @@ export class GrantedReadService {
     @Inject(FileAudit) private readonly audit: FileAudit,
   ) {}
 
-  async metadata(caller: string, grantId: string, fileId: string): Promise<FileView> {
+  /**
+   * Core V2 S6e-D (PAY-10; the Owner's R6E-3), additive: the grant the read went through (its id, purpose, case and expiry) beside the file, so
+   * the grantee can bind the evidence to exactly the case it was granted for. Never the grantor's request, idempotency data or storage.
+   */
+  async metadata(caller: string, grantId: string, fileId: string): Promise<FileView & { grant: { id: string; purpose: string; caseRef: string; expiresAt: string } }> {
     const policy = this.policy(caller);
-    const { file } = await this.db.tx(async (q) => {
+    const { file, grant } = await this.db.tx(async (q) => {
       const found = await this.authorize(q, caller, policy, grantId, fileId);
       await this.audit.grantedRead(q, found.grant, 'metadata');
       return found;
     });
     this.logger.log(`file_granted_read access=metadata grantee=${caller} grant=${grantId} file=${file.id}`);
-    return fileView(file);
+    return { ...fileView(file), grant: { id: grant.id, purpose: grant.purpose, caseRef: grant.caseRef, expiresAt: new Date(grant.expiresAt).toISOString() } };
   }
 
   async content(caller: string, req: Request, res: Response, grantId: string, fileId: string): Promise<void> {

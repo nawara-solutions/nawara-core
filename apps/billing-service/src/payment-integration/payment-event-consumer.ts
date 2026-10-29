@@ -6,10 +6,11 @@ import { CONSUMED_EVENTS as CATALOG } from '../events/event-catalog.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
 import { PaymentEventOriginRepository, trustedEnvelope, type TrustedPaymentEnvelope } from './payment-event-origin.js';
 import { RefundCompletionService } from '../refunds/refund-completion.service.js';
+import { DisputeLossService } from '../refunds/dispute-loss.service.js';
 
 /** V2 A3M.2: the consumed names and their supported versions come from the event catalog (`events/event-catalog.ts`). */
-const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.filter((c) => c.name.startsWith('payment.')).map((c) => c.name as PaymentEventName);
-/** Core V2 S6c: every name the queue binds (the payment outcomes and Payment's refund completion). */
+const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.filter((c) => c.name.startsWith('payment.') && !c.name.startsWith('payment.dispute.')).map((c) => c.name as PaymentEventName);
+/** Core V2 S6c: every name the queue binds (the payment outcomes, Payment's refund completion and, S6e-D, its verified dispute loss). */
 const BOUND_EVENTS: readonly string[] = CATALOG.map((c) => c.name);
 const SUPPORTED_VERSION: ReadonlyMap<string, number> = new Map(CATALOG.map((c) => [c.name, c.version]));
 /** V2 A3M.3 (G11): the only source each consumed event may come from. A sanity filter on an ASSERTED header, never authentication. */
@@ -93,6 +94,8 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     private readonly origins: PaymentEventOriginRepository,
     /** Core V2 S6c: present only where refund cases are mounted (never production); without it a refund completion is never applied. */
     @Optional() @Inject(RefundCompletionService) private readonly refundCompletions?: RefundCompletionService,
+    /** Core V2 S6e-D: present only where refund cases are mounted (never production); without it a dispute loss is never applied. */
+    @Optional() @Inject(DisputeLossService) private readonly disputeLosses?: DisputeLossService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -194,6 +197,7 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
       throw new PermanentEventFailure('wrong_source');
     }
     if (t.name === 'refund.case_completed') return this.processRefundCompletion(event, t, correlationId, who, tag);
+    if (t.name === 'payment.dispute.lost') return this.processDisputeLoss(event, t, who, tag);
     let facts: PaymentEventFacts;
     let settledAt: Date;
     try {
@@ -273,5 +277,35 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
       throw new PermanentEventFailure(`refund_completion_${outcome}`);
     }
     this.logger.log(`${tag('refund_completion_applied', 'refund_completion_replay')} outcome=${outcome}`, who);
+  }
+
+  /**
+   * Core V2 S6e-D (register EVT-03; the Owner's R6E-5, R6E-6): Payment's verified final loss of a dispute. The payload is parsed trusting nothing;
+   * `liveMode` must be false (simulation only) and the producer Billing. `DisputeLossService` records it once, only with its verified
+   * chargeback (a loss without one is acknowledged and recovered later from Payment's losses read). A binding mismatch or a conflict is never
+   * applied and never retried: dead-lettered for review (permanent). Without the refund module (production) nothing is applied.
+   */
+  private async processDisputeLoss(event: EventEnvelope, t: TrustedPaymentEnvelope, who: Record<string, string>, tag: (b: string, r: string) => string): Promise<void> {
+    const p = event.payload;
+    const c = p.chargeback as Record<string, unknown> | null | undefined;
+    if (p.liveMode !== false || p.producer !== 'billing-service' || typeof p.disputeId !== 'string' || typeof p.paymentId !== 'string' || typeof p.amount !== 'number'
+      || typeof p.currency !== 'string' || typeof p.lostAt !== 'string' || (c !== null && (typeof c !== 'object' || c === undefined))) {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`, who);
+      throw new MalformedPaymentEventError();
+    }
+    if (!this.disputeLosses) {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=disputes_not_enabled`, who);
+      throw new PermanentEventFailure('disputes_not_enabled');
+    }
+    const outcome = await this.disputeLosses.record(
+      { disputeId: p.disputeId, paymentId: p.paymentId, amount: p.amount, currency: p.currency, lostAt: p.lostAt,
+        chargeback: c ? { factId: c.factId as string, amount: c.amount as number, currency: c.currency as string } : null },
+      { kind: 'event', eventId: t.eventId },
+    );
+    if (outcome === 'binding_mismatch' || outcome === 'conflict') {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=dispute_loss_${outcome}`, who);
+      throw new PermanentEventFailure(`dispute_loss_${outcome}`);
+    }
+    this.logger.log(`${tag('dispute_loss_received', 'dispute_loss_replay')} outcome=${outcome}`, who);
   }
 }

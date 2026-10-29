@@ -80,7 +80,7 @@ describeWithEnv('granted reads and grant tickets (real PostgreSQL)', ['TEST_DATA
     const r = await request(server()).post(`/file/files/${f.id}/evidence-grants`).set({ ...auth(drive, opts.org), 'idempotency-key': randomUUID() })
       .send({ purpose: opts.purpose ?? 'dispute_evidence', caseRef: randomUUID(), ...(opts.expiresInSeconds ? { expiresInSeconds: opts.expiresInSeconds } : {}) });
     expect(r.status).toBe(201);
-    return { fileId: f.id, bytes: f.bytes, grantId: r.body.grantId as string, expiresAt: r.body.expiresAt as string, org: opts.org ?? null };
+    return { fileId: f.id, bytes: f.bytes, grantId: r.body.grantId as string, expiresAt: r.body.expiresAt as string, org: opts.org ?? null, caseRef: r.body.caseRef as string };
   }
   const base = (grantId: string, fileId: string) => `/file/evidence-grants/${grantId}/files/${fileId}`;
   const meta = (g: { grantId: string; fileId: string }, who = payment, srv = server()) => request(srv).get(base(g.grantId, g.fileId)).set(auth(who));
@@ -113,6 +113,9 @@ describeWithEnv('granted reads and grant tickets (real PostgreSQL)', ['TEST_DATA
       expect(r.status).toBe(200);
       expect(r.headers['cache-control']).toBe('private, no-store');
       expect(r.body).toMatchObject({ id: g.fileId, status: 'AVAILABLE', mediaType: 'application/pdf', organizationId: org });
+      // Core V2 S6e-D (PAY-10): the grant the read went through, so the grantee binds the evidence to exactly its case
+      expect(r.body.grant).toEqual({ id: g.grantId, purpose: 'dispute_evidence', caseRef: g.caseRef, expiresAt: new Date(g.expiresAt).toISOString() });
+      expect(Object.keys(r.body.grant).sort()).toEqual(['caseRef', 'expiresAt', 'id', 'purpose']);
       expect(JSON.stringify(r.body)).not.toMatch(/storageKey|storageProvider/);
       const [rec] = await reads(g.grantId);
       expect(rec!.payload).toMatchObject({

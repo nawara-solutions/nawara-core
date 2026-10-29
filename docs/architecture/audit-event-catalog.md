@@ -91,9 +91,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `refund_case.cancelled` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company cancelled an open refund case before any refund processing (the payment may get a new case). |
 | `refund_case.authorization_relayed` | commercial | user (owner) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_attempt_id`: uuid<br>`company_id`: uuid<br>`platform_id`: uuid | The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization). |
 | `refund_case.completed` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | refund_case | — | succeeded | `payment_id`: uuid<br>`refund_approval_id`: uuid<br>`refund_attempt_id`: uuid | Payment's verified evidence shows the case's full refund was returned: the refund case is completed (no new attempt is ever accepted). |
-| `subscription_purchase.reversed` | commercial | system (`refund_effect_worker`) | as recorded (UUID or null) | subscription_purchase | — | succeeded | `refund_case_id`: uuid<br>`cause`: refund_completion | A completed refund reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept). |
+| `subscription_purchase.reversed` | commercial | system (`refund_effect_worker`, `dispute_loss_worker`) | as recorded (UUID or null) | subscription_purchase | — | succeeded | `refund_case_id`?: uuid<br>`dispute_id`?: uuid<br>`cause`: refund_completion \| final_lost_chargeback | A completed refund, or a direct purchase's verified final lost chargeback, reversed a Personal purchase: its span is removed and later paid periods are re-laid (the purchase record itself is kept). |
 
-## payment-service (9)
+## payment-service (13)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -104,6 +104,10 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `payment.expired` | commercial | system (`payment_expiry_sweep`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection lapsed unpaid. |
 | `refund_attempt.authorized` | commercial | service; system (`payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid | Auth confirmed the Owner's single-use refund authorization for exactly this refund attempt: the refund may now be sent to the provider. |
 | `refund_attempt.failed` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid | The provider definitively refused or failed an authorized refund (a further attempt needs a new authorization). |
+| `payment_dispute.opened` | commercial | system (`payment_webhook`) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid | A verified provider dispute of a captured payment was recorded, in the exposure the provider states (it changes no entitlement). |
+| `payment_dispute.closed` | commercial | system (`payment_webhook`) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`outcome`: won \| lost | The provider's final outcome of a dispute, once (a later contradictory notification never replaces it). |
+| `payment_dispute.evidence_added` | commercial | user (owner) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`file_id`: uuid<br>`grant_id`: uuid | The Owner of the seller Company added a reference to a file File granted Payment as evidence of this open dispute. |
+| `payment_dispute.decided` | commercial | user (owner) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`decision`: contest \| accept | The Owner's contest-or-accept decision on a dispute, authorized by a consumed Auth dispute-decision receipt (the provider still decides the outcome). |
 | `refund_authorization.completed` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_authorization | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid<br>`refund_attempt_id`: uuid | Verified provider refund evidence reached the full approved refund: the refund is financially complete, once. |
 | `refund_attempt.succeeded` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid<br>`fact_id`: uuid | The provider's verified evidence shows the full refund was made (money returned); its commercial effects are later stages. |
 
@@ -141,4 +145,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 88 actions.**
+**Total: 92 actions.**

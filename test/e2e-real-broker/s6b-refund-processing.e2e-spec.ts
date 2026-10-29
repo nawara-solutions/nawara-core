@@ -355,5 +355,49 @@ describeWithEnv(
       const cancelled = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${c.id}/cancel`, undefined);
       expect(cancelled.status, JSON.stringify(cancelled.json)).toBe(200);
     }, 180_000);
+
+    it('Core V2 S6e-D, REAL AUTH: a dispute blocks refunds, the Owner decides with a real dispute-decision receipt, and a full chargeback over the broker reverses the purchase once', async () => {
+      const { paymentId, invoiceId } = await purchase();
+      const ref = `rb-${randomUUID()}`;
+      const sim = (send: Record<string, unknown>) => call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/payments/${paymentId}/disputes`, { commandId: `s6e-${randomUUID()}`, disputeRef: ref, ...send });
+      expect((await sim({ event: 'opened' })).json?.delivered).toEqual({ status: 200 });
+      const d = (await paymentAdmin.query(`SELECT id, status FROM payment_dispute WHERE "providerDisputeId" = $1`, [`simd_${ref}`])).rows[0];
+      expect(d.status).toBe('open');
+      // R6E-4: Billing reads Payment's authoritative exposure (real HTTP): no refund case while the dispute is open
+      expect((await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId, reason: 'customer_request' })).json?.code).toBe('refund_dispute_open');
+      // R6E-3: the Owner reads it, verified live by the real Auth
+      expect((await call(PAYMENT_URL, 'GET', ownerToken, `/payment/admin/disputes/${d.id}`)).json).toMatchObject({ disputeId: d.id, status: 'open', paymentId });
+      const binding = { operation: 'dispute_decision', audience: 'payment-service', companyId: COMPANY, disputeId: d.id, paymentId, decision: 'contest' };
+      // a refund-authorization proof never yields a decision receipt (and is not burned)
+      await nextTotpStep();
+      const refundProof = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/step-up', { purpose: 'refund.authorize', method: 'totp', code: totp(totpSecret) }, null);
+      expect(refundProof.status).toBe(200);
+      expect((await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/authorization-receipts', { stepUpToken: refundProof.json.stepUpToken, binding })).status).toBe(403);
+      await nextTotpStep();
+      const su = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/step-up', { purpose: 'payment.dispute.decide', method: 'totp', code: totp(totpSecret) }, null);
+      expect(su.status, JSON.stringify(su.json)).toBe(200);
+      const r = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/authorization-receipts', { stepUpToken: su.json.stepUpToken, binding });
+      expect(r.status, JSON.stringify(r.json)).toBe(201);
+      // a receipt for "contest" cannot record "accept"; it records "contest" once, consumed by Payment at the real Auth
+      expect((await call(PAYMENT_URL, 'POST', ownerToken, `/payment/admin/disputes/${d.id}/decision`, { decision: 'accept', receiptSecret: r.json.secret })).json?.code).toBe('dispute_decision_refused');
+      const decided = await call(PAYMENT_URL, 'POST', ownerToken, `/payment/admin/disputes/${d.id}/decision`, { decision: 'contest', receiptSecret: r.json.secret });
+      expect(decided.status, `${JSON.stringify(decided.json)}\n${tails()}`).toBe(201);
+      expect(decided.json).toMatchObject({ decision: 'contest', status: 'recorded', receiptId: r.json.receiptId, approvedBy: { userId: OWNER } });
+      expect(await receiptRow(r.json.receiptId)).toMatchObject({ status: 'consumed', consumeRef: decided.json.decisionId, consumedBy: 'payment-service' });
+      expect((await paymentAdmin.query(`SELECT status FROM payment_dispute WHERE id = $1`, [d.id])).rows[0].status).toBe('open'); // the provider decides
+      // R6E-5: the provider's final loss with its full chargeback, over the broker, reverses the direct purchase once (cause final_lost_chargeback)
+      expect((await sim({ event: 'lost' })).json?.delivered).toEqual({ status: 200 });
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM dispute_loss_effect WHERE "disputeId" = $1`, [d.id])).rowCount === 1,
+        30_000, `Billing's dispute loss worker to apply the verified loss\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT source FROM payment_dispute_loss WHERE "disputeId" = $1`, [d.id])).rows).toEqual([{ source: 'event' }]);
+      expect((await billingAdmin.query(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [d.id])).rows[0].outcome).toBe('reversed_purchase');
+      expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
+        .toEqual([{ cause: 'final_lost_chargeback' }]);
+      expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'payment.dispute.%' AND payload->>'disputeId' = $1 ORDER BY name`, [d.id])).rows.map((x) => x.name))
+        .toEqual(['payment.dispute.lost', 'payment.dispute.opened']);
+      const ch = await amqpConn.createChannel();
+      expect((await ch.checkQueue(BILLING_DEAD_QUEUE)).messageCount).toBe(0);
+      await ch.close();
+    }, 240_000);
   },
 );

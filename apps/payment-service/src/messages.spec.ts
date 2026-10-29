@@ -46,6 +46,16 @@ describe('PAYMENT_MESSAGES', () => {
       refundAmountNotFull: 'Only a full refund of the captured amount, in its currency, is supported.',
       refundDisputeOpen: 'A dispute on this payment blocks a new refund attempt.',
       refundDisputeUnavailable: 'The dispute status of this payment could not be verified; nothing was changed.',
+      invalidDisputeRequest: 'The dispute request is invalid.', // Core V2 S6e-D
+      disputeNotOpen: 'This dispute is no longer open.', // Core V2 S6e-D
+      disputeEvidenceInvalid: 'This file is not granted to Payment as evidence of this dispute.', // Core V2 S6e-D
+      disputeEvidenceUnavailable: 'The evidence grant could not be verified; nothing was recorded.', // Core V2 S6e-D
+      disputeDecisionExists: 'A decision on this dispute is already recorded or pending.', // Core V2 S6e-D
+      disputeDecisionRefused: 'The authorization of this decision was refused or has expired.', // Core V2 S6e-D
+      disputeDecisionConflict: 'This Idempotency-Key names a decision authorized by another receipt.', // Core V2 S6e-D
+      disputeDecisionUnresolved: 'The authorization of this decision could not be confirmed; repeat the same request.', // Core V2 S6e-D
+      ownerAuthorityUnavailable: "The Owner's authority could not be verified; nothing was changed.", // Core V2 S6e-D
+      simulationNothingToDispute: 'This payment has no verified capture to dispute.', // Core V2 S6e-D
       refundInProgress: 'Another refund attempt for this payment is unresolved or may still take effect.',
       refundAlreadyRecorded: 'Refund evidence already exists for this payment.',
       refundAttemptConflict: 'This refund attempt already exists with different content or another authorization receipt.',

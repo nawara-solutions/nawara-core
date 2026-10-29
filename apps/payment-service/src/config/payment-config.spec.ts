@@ -342,6 +342,17 @@ describe('loadPaymentConfig', () => {
       expect(() => loadPaymentConfig({ ...prod, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.refund.create']) })).toThrow(/no production configuration may hold/);
       expect(() => loadPaymentConfig({ ...prod, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create']) })).toThrow(/AUTH_SERVICE_TOKEN must not be configured/);
     });
+
+    it("Core V2 S6e-D (PAY-10): File Service for dispute evidence only beside refunds, set together, Payment's own token, never in production", () => {
+      const fileToken = generateServiceToken().token;
+      const refunds = { ...env, AUTH_SERVICE_TOKEN: authToken, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.refund.create']) };
+      expect(loadPaymentConfig({ ...refunds, FILE_SERVICE_URL: 'http://file:3000', FILE_SERVICE_TOKEN: fileToken }).disputeEvidence).toEqual({ fileServiceUrl: 'http://file:3000', fileServiceToken: fileToken });
+      expect(loadPaymentConfig(refunds).disputeEvidence).toBeUndefined();
+      expect(loadPaymentConfig({ ...env, FILE_SERVICE_URL: 'http://file:3000', FILE_SERVICE_TOKEN: fileToken, PAYMENT_SERVICE_POLICY: policy(['payment.create']) }).disputeEvidence).toBeUndefined(); // no refunds, no disputes
+      expect(() => loadPaymentConfig({ ...refunds, FILE_SERVICE_URL: 'http://file:3000' })).toThrow(/set together/);
+      expect(() => loadPaymentConfig({ ...refunds, FILE_SERVICE_URL: 'http://file:3000', FILE_SERVICE_TOKEN: 'short' })).toThrow(/FILE_SERVICE_TOKEN/);
+      expect(() => loadPaymentConfig({ ...prod, FILE_SERVICE_URL: 'http://file:3000', FILE_SERVICE_TOKEN: fileToken, PAYMENT_SERVICE_POLICY: policy(['payment.create']) })).toThrow(/FILE_SERVICE_URL must not be configured/);
+    });
   });
 
   describe('Core V2 S5b (E-2): payment.create.assisted_settlement is a narrow, purpose-bound grant for billing-service only', () => {

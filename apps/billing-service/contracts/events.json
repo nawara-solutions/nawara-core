@@ -116,6 +116,38 @@
     },
     {
       "source": "payment-service",
+      "name": "payment.dispute.lost",
+      "version": 1,
+      "requires": {
+        "amount": {
+          "type": "integer"
+        },
+        "chargeback": {
+          "type": "object",
+          "nullable": true
+        },
+        "currency": {
+          "type": "string"
+        },
+        "disputeId": {
+          "type": "uuid"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "lostAt": {
+          "type": "datetime"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "producer": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "source": "payment-service",
       "name": "payment.expired",
       "version": 1,
       "requires": {

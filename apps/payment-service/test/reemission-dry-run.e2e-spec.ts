@@ -64,6 +64,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0016_organization_payer_scope.sql', // Core V2 S4e: an Organization payer is the payment's Organization (insert guard)
       '0017_refund_attempt.sql', // Core V2 S6b: refund_attempt, refund_attempt_refusal, refund facts, the simulated provider's refund records
       '0018_refund_allocation.sql', // Core V2 S6c: refund_authorization, refund_allocation, blocked facts, the allocation lease
+      '0019_payment_dispute.sql', // Core V2 S6e-D: disputes, observations, evidence, decisions, chargeback facts, the dispute harness
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

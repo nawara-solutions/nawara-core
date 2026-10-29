@@ -485,6 +485,11 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Un litige sur ce paiement est ouvert : aucun dossier de remboursement ne peut être ouvert.",
     ar: 'يوجد نزاع مفتوح على هذه الدفعة: لا يمكن فتح ملف استرداد.',
   },
+  refundDisputeUnavailable: { // Core V2 S6e-D (R6E-4)
+    en: "The dispute status of this payment could not be verified; nothing was changed.",
+    fr: "L'état des litiges de ce paiement n'a pas pu être vérifié ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من حالة النزاعات على هذه الدفعة؛ لم يتغيّر شيء.',
+  },
   refundCaseNotOpen: {
     en: 'The refund case is not open.',
     fr: "Le dossier de remboursement n'est pas ouvert.",

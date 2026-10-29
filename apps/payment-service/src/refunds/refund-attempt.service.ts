@@ -9,7 +9,7 @@ import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 import type { PaymentRow } from '../payments/payment.types.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
-import { REFUND_DISPUTE_EXPOSURE, type RefundDisputeExposure } from './dispute-exposure.js';
+import { disputeExposure } from '../disputes/dispute.types.js';
 import { RECEIPT_AUTHORITY, type ReceiptAuthority, type ReceiptConsumption } from './receipt-authority.js';
 import { bindingOf, receiptDigest, type RefundAttemptRow, type RefundReason } from './refund.types.js';
 
@@ -75,7 +75,6 @@ export class RefundAttemptService {
     @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
     @Inject(RECEIPT_AUTHORITY) private readonly receipts: ReceiptAuthority,
-    @Inject(REFUND_DISPUTE_EXPOSURE) private readonly disputes: RefundDisputeExposure,
   ) {}
 
   assertEnabled(): void {
@@ -93,14 +92,6 @@ export class RefundAttemptService {
     const known = await this.known(this.db, caller, key, requestHash, paymentId, input);
     if (known) return { attempt: await this.authorize(known, digest, receiptSecret, ctx), created: false };
 
-    // R6B-8: the dispute boundary, outside any transaction, only for a NEW attempt (one in flight keeps its own state); fail closed
-    let disputed: boolean;
-    try {
-      disputed = (await this.disputes.status(paymentId, AbortSignal.timeout(this.config.authTimeoutMs))) !== 'none';
-    } catch {
-      throw paymentError(503, 'refund_dispute_unavailable', PAYMENT_MESSAGES.refundDisputeUnavailable);
-    }
-
     const outcome = await this.db.tx(async (q) => {
       const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [paymentId]);
       const payment = rows[0];
@@ -108,7 +99,7 @@ export class RefundAttemptService {
       // a concurrent identical request may have won the lock first
       const raced = await this.known(q, caller, key, requestHash, paymentId, input);
       if (raced) return { kind: 'existing' as const, attempt: raced };
-      const verdict = disputed ? { refusal: 'refund_dispute_open' as const } : await this.verify(q, payment, input);
+      const verdict = await this.verify(q, payment, input);
       if ('refusal' in verdict) {
         await q.query(
           `INSERT INTO refund_attempt_refusal (id, "paymentId", producer, "refundCaseId", code) VALUES ($1, $2, $3, $4, $5)`,
@@ -193,6 +184,13 @@ export class RefundAttemptService {
       return { refusal: 'refund_capture_unverified' };
     }
     const capture = facts[0]!;
+    // Core V2 S6e-D (R6E-4; S0 D3, FC-5), for a NEW attempt only (one in flight keeps its own state), under the payment's row lock that dispute
+    // ingestion also takes: Payment's own dispute exposure. An open dispute or a chargeback leaves less than the full amount: refused. An
+    // exposure Payment cannot establish (a preserved conflict, a loss without its chargeback fact) is never read as zero: the transaction is
+    // abandoned (503, nothing written; not a permanent refusal of this attempt id).
+    const exposure = await disputeExposure(q, p.id);
+    if (exposure.state === 'unresolved') throw paymentError(503, 'refund_dispute_unavailable', PAYMENT_MESSAGES.refundDisputeUnavailable);
+    if (exposure.state === 'exposed') return { refusal: 'refund_dispute_open' };
     if (input.amount !== Number(p.amount) || input.currency !== p.currency.trim()) return { refusal: 'refund_amount_not_full' }; // no partial refund (D4)
     const provider = this.providers.tryGet(capture.provider);
     if (!provider?.capabilities.refunds || !provider.refund || !provider.fetchRefundStatus) return { refusal: 'payment_not_refundable' };

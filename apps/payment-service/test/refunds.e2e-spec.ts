@@ -6,7 +6,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { RefundWorker } from '../src/refunds/refund-worker.js';
-import type { RefundDisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
@@ -29,13 +28,6 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
   let admin: pg.Pool;
   let auth: FakeReceiptServer;
   let worker: RefundWorker;
-  const dispute: { answer: 'none' | 'exposed' | 'throw' } = { answer: 'none' };
-  const disputeExposure: RefundDisputeExposure = {
-    status: async () => {
-      if (dispute.answer === 'throw') throw new Error('dispute source unavailable');
-      return dispute.answer;
-    },
-  };
   const billing = generateServiceToken();
   const other = generateServiceToken();
   const harness = generateServiceToken();
@@ -85,7 +77,7 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
     admin = new pg.Pool({ connectionString: db.url, max: 16 });
     auth = await startFakeReceiptServer();
     t = await createTestApp({
-      databaseUrl: db.url, authClient, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], disputeExposure, refundWorker: false,
+      databaseUrl: db.url, authClient, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], refundWorker: false,
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
         AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
@@ -106,7 +98,6 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
     await db?.drop();
   });
   beforeEach(() => {
-    dispute.answer = 'none';
     auth.revoked.clear();
     auth.unavailable.consume = 0;
     auth.unavailable.lookup = 0;
@@ -226,20 +217,34 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
       expect((await refund(contested.id, body(c4, receiptFor(contested.id, c4).secret)).expect(409)).body.code).toBe('refund_capture_unverified');
     });
 
-    it('dispute exposure (R6B-8): exposed refuses a new attempt; an unanswerable source writes nothing; an attempt in flight is not affected', async () => {
-      const { payment } = await captured();
+    it("dispute exposure (R6B-8; S6e-D R6E-4): Payment's own disputes; unresolved writes nothing; an attempt in flight is not affected", async () => {
+      const dispute = (pid: string, send: Row) => sim(`payments/${pid}/disputes`, { commandId: cmd(), ...send }).expect(201);
+      // a loss the provider reported WITHOUT its chargeback: the exposure cannot be established, so nothing is written (not a refusal)
+      const unfunded = (await captured()).payment;
+      await dispute(unfunded.id, { disputeRef: `u-${randomUUID()}`, event: 'lost', chargeback: 'none' });
       const caseId = randomUUID();
-      dispute.answer = 'throw';
-      const b = body(caseId, receiptFor(payment.id, caseId).secret);
-      expect((await refund(payment.id, b).expect(503)).body.code).toBe('refund_dispute_unavailable');
+      const b = body(caseId, receiptFor(unfunded.id, caseId).secret);
+      expect((await refund(unfunded.id, b).expect(503)).body.code).toBe('refund_dispute_unavailable');
       expect(await attemptRow(b.refundAttemptId)).toBeUndefined();
       expect((await admin.query(`SELECT 1 FROM refund_attempt_refusal WHERE id = $1`, [b.refundAttemptId])).rows).toEqual([]);
-      dispute.answer = 'exposed';
-      expect((await refund(payment.id, b).expect(409)).body.code).toBe('refund_dispute_open');
-      dispute.answer = 'none';
-      const ok = await authorized(payment.id);
-      dispute.answer = 'exposed';
-      await refund(payment.id, ok.body).expect(200); // the existing attempt is answered from its own state
+      // an open dispute (a partial exposure) refuses a new full refund: a permanent refusal of that attempt id
+      const open = (await captured()).payment;
+      await dispute(open.id, { disputeRef: `o-${randomUUID()}`, event: 'opened', amount: 100 });
+      const c2 = randomUUID();
+      const b2 = body(c2, receiptFor(open.id, c2).secret);
+      expect((await refund(open.id, b2).expect(409)).body.code).toBe('refund_dispute_open');
+      expect((await refund(open.id, b2).expect(409)).body.code).toBe('refund_dispute_open');
+      // a dispute won: nothing is exposed any more; a new attempt is admitted
+      const won = (await captured()).payment;
+      const ref = `w-${randomUUID()}`;
+      await dispute(won.id, { disputeRef: ref, event: 'opened' });
+      await dispute(won.id, { disputeRef: ref, event: 'won' });
+      await authorized(won.id);
+      // an attempt already in flight when a dispute arrives keeps its own state
+      const flight = (await captured()).payment;
+      const ok = await authorized(flight.id);
+      await dispute(flight.id, { disputeRef: `f-${randomUUID()}`, event: 'opened' });
+      expect((await refund(flight.id, ok.body).expect(200)).body).toMatchObject({ refundAttemptId: ok.body.refundAttemptId, status: 'authorized' });
     });
   });
 

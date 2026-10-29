@@ -57,7 +57,7 @@ export type { PaymentEventName };
  * transition can never enqueue a second event. `payment` must be the row AFTER the transition (`RETURNING *`) so `status`
  * and `revision` describe the state the event announces.
  */
-export function paymentEvent(name: Exclude<PaymentEventName, 'refund.case_completed'>, payment: PaymentRow, ctx: EventContext, extra: Record<string, unknown> = {}): NewEvent {
+export function paymentEvent(name: Exclude<PaymentEventName, 'refund.case_completed' | 'payment.dispute.opened' | 'payment.dispute.lost'>, payment: PaymentRow, ctx: EventContext, extra: Record<string, unknown> = {}): NewEvent {
   return {
     id: deterministicEventId(payment.id, name),
     name,
@@ -125,6 +125,50 @@ export function refundCaseCompletedEvent(z: CompletedRefundAuthorization, paymen
       liveMode: false,
       organizationId: payment.organizationId,
       purpose: payment.purpose,
+    },
+  };
+}
+
+/** The dispute fields the dispute events carry (a `payment_dispute` row) and, for a loss, its verified chargeback fact. */
+export interface DisputeEventSource {
+  id: string;
+  paymentId: string;
+  amount: string | number;
+  currency: string;
+  reason: string | null;
+  recordedAt: Date;
+  closedAt: Date | null;
+}
+
+/**
+ * Core V2 S6e-D (register EVT-03; the Owner's R6E-6): a verified provider dispute, version 1. Its id is derived from the dispute, so a retried
+ * transaction never enqueues a second event. Identifiers, the provider-stated exposure and its currency only; `liveMode` false.
+ */
+export function disputeOpenedEvent(d: DisputeEventSource, payment: PaymentRow, ctx: EventContext): NewEvent {
+  return {
+    id: deterministicEventId(d.id, 'payment.dispute.opened'),
+    name: 'payment.dispute.opened',
+    correlationId: ctx.correlationId,
+    payload: {
+      disputeId: d.id, paymentId: d.paymentId, paymentRequestId: payment.paymentRequestId, producer: payment.producer, organizationId: payment.organizationId,
+      purpose: payment.purpose, amount: Number(d.amount), currency: d.currency.trim(), reason: d.reason, openedAt: new Date(d.recordedAt).toISOString(), liveMode: false,
+    },
+  };
+}
+
+/**
+ * Core V2 S6e-D (EVT-03; R6E-5, R6E-6): the provider's final loss, version 1, once per dispute. `chargeback` is the verified chargeback fact
+ * linked to the dispute in the same transaction, or null when the provider reported none: the event never implies a movement that has no fact.
+ */
+export function disputeLostEvent(d: DisputeEventSource, payment: PaymentRow, chargeback: { id: string; amount: string | number; currency: string } | null, ctx: EventContext): NewEvent {
+  return {
+    id: deterministicEventId(d.id, 'payment.dispute.lost'),
+    name: 'payment.dispute.lost',
+    correlationId: ctx.correlationId,
+    payload: {
+      disputeId: d.id, paymentId: d.paymentId, paymentRequestId: payment.paymentRequestId, producer: payment.producer, organizationId: payment.organizationId,
+      purpose: payment.purpose, amount: Number(d.amount), currency: d.currency.trim(), lostAt: new Date(d.closedAt ?? d.recordedAt).toISOString(),
+      chargeback: chargeback ? { factId: chargeback.id, amount: Number(chargeback.amount), currency: chargeback.currency.trim() } : null, liveMode: false,
     },
   };
 }

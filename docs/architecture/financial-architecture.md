@@ -79,7 +79,7 @@ accounting-service, ledger, wallet or cash-service exists (S0 §1.1: no wallets,
   never a `payment.succeeded` event; it reaches reconciliation instead (S6h). **IMPLEMENTED** (S4c).
 - **Provider transaction facts (FC-1):** every distinct provider money movement is an immutable `provider_transaction_fact`
   (`capture` kind today), committed in its own transaction independently of allocation, never refused, edited or deleted. **IMPLEMENTED**
-  for captures (S4d) and refunds (S6b, simulation only); the chargeback kind is FROZEN (S6e).
+  for captures (S4d), refunds (S6b) and chargebacks linked to their dispute (S6e-D), simulation only.
 - **Idempotency:** money commands are class M (90 days, S0 D7) backed by permanent uniqueness keys; other commands class K. **IMPLEMENTED**
   (S4g, S3f, S5).
 - **Simulation:** a non-production simulation provider and harness; production refuses them; clients never choose outcomes (FC-10).
@@ -121,18 +121,24 @@ The cash workflow of §3 and §5 below (`cash_payment`, cash confirmation) there
 | Refund case (BIL-23, BIL-25) | Owner of the seller Company only; a full refund of a verified personal purchase (`direct_purchase`, `assisted_settlement`) or of a verified captured payment that produced no entitlement (eligible late assisted settlements, `non_entitlement`); Organization-subscription refunds excluded; Billing computes the amount; closed reason codes; `legalOverride` grants nothing; states `open`, `cancelled`, `completed`; opening needs no step-up; no new case while a dispute on the payment is open (D3) | IMPLEMENTED (S6a, simulation only; cases only: no attempt, no money moved) |
 | Refund attempt (PAY-07, PAY-08, BIL-24) | a durable intent (`consumeRef` = the attempt = the provider key) → receipt consumption at Auth → `authorized`; asynchronous provider dispatch with the stable key; only Auth's definitive answer ends an authorization (no expiry margin, Q8); a pre-attempt refusal is permanent for its id; one potentially effective attempt per payment; verified `refund` facts; mismatches are `discrepancy`; Billing relays from a durable record and mirrors Payment's state; a case is cancellable only while every relay is proven unconsumed | IMPLEMENTED (S6b, simulation only; the Owner's R6B-1 to R6B-10); no `refund.*` event, allocation, completion or reversal (S6c, S6d) |
 | Allocation and completion (FC-2, FC-3) | lock order `payment` → `refund_authorization`; bounded counter and deferred sum check; `completedAt` set once; a completed case refuses every new attempt (`409 refund_case_completed`) | IMPLEMENTED (S6c, simulation only; the Owner's R6C-1 to R6C-12): cumulative allocation of verified refund facts, excess kept, contested or foreign-currency facts blocked for S6h, `refund.case_completed` from Payment, Billing completes the case once (event or PAY-08 reconciliation); no reversal (S6d) |
-| Reversal (FC-4) | at most one per purchase; causes appended separately; an assisted purchase lost at final stage is never reversed | mechanism IMPLEMENTED (S3c); refund-completion flow IMPLEMENTED (S6d, simulation only; the Owner's R6D-1 to R6D-6): direct and assisted purchases reversed once by Billing's refund effect worker, causes recorded; chargeback flows FROZEN (S6e) |
+| Reversal (FC-4) | at most one per purchase; causes appended separately; an assisted purchase lost at final stage is never reversed | mechanism IMPLEMENTED (S3c); final-lost-chargeback flow IMPLEMENTED (S6e-D, simulation only: a direct purchase charged back in full, the dispute recorded as its cause; partial chargebacks held for review); refund-completion flow IMPLEMENTED (S6d, simulation only; the Owner's R6D-1 to R6D-6): direct and assisted purchases reversed once by Billing's refund effect worker, causes recorded; chargeback flows FROZEN (S6e) |
 | Assisted refund | the base returns to the Organization's card electronically, and the Organization owes the beneficiary the full cash; that obligation arises only from a completed refund (S6c / S6d), never from opening a case | IMPLEMENTED (S6d, simulation only; R6D-2 Option A): a `refund_completion`-origin cash-return obligation for the frozen total (base + fee), a T2 restriction while unresolved, discharged by the existing report / confirmation / dispute paths |
 | Scope | full refunds only; partial refunds deferred (S0 D4) | FROZEN |
 
 ### 0.9 Disputes, recovery, reconciliation and losses (S6)
 
-All **FROZEN, not implemented**: provider disputes, evidence and decisions; fraud holds (evidence-based, Owner step-up, 14-day review)
-(S6e; OD-10, OD-11 **OPEN**); recovery obligations after an assisted final-lost chargeback, recovery settlement for the base amount only,
+**Provider disputes, evidence and decisions: IMPLEMENTED (S6e-D, simulation only; the Owner's R6E-1 to R6E-6, R6E-8, R6E-9).** Payment owns
+`payment_dispute` (provider identity, bound to the verified capture, the provider's stated exposure, `open → won | lost` once, every observation
+kept; conflicts preserved for S6h); a chargeback moves money only as a verified `chargeback` fact linked to its dispute (FC-1). Exposure (FC-5):
+open disputes' stated amounts net of their chargebacks, plus chargebacks taken; an unresolvable exposure is never zero (no new refund case or
+attempt; work in flight continues). Owner reads, File-granted evidence references and the contest-or-accept decision behind a
+`payment.dispute.decide` receipt. Billing reverses a DIRECT purchase charged back in full once (cause `final_lost_chargeback`; K-3 Option D);
+an assisted purchase keeps its entitlement (its verified loss recorded for S6f); a partial chargeback of a direct purchase is held for review
+(no frozen threshold). **Still FROZEN, not implemented**: fraud holds (evidence-based, Owner step-up, 14-day review; OD-10 **OPEN**, R6E-7 not
+authorized); recovery obligations after an assisted final-lost chargeback, recovery settlement for the base amount only,
 `recovery_surplus` (R-1 to R-5) and T3 (S6f); late assisted settlement L-1 to L-6 including L-4's five conditions (S6g); reconciliation
 cases, fact association, balances that are never clamped (FC-5) and `FinancialLoss` only from evidence (FC-6) (S6h). Payment has no
-dispute or refund records today; S6a's dispute check is an integration boundary that S6e must supply before disputes are active
-(R6A-3).
+dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.
 
 ### 0.10 Open items that block production
 

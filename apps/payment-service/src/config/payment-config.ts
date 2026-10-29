@@ -40,6 +40,11 @@ export interface PaymentConfig extends BaseConfig {
    * recovery lookup (AUTH-02, AUTH-03), the only Payment -> Auth service call (ADR-0035 C4). Never echoed or logged.
    */
   refunds?: { authServiceToken: string };
+  /**
+   * Core V2 S6e-D (PAY-10; the Owner's R6E-3): File Service, for verifying an Owner's `dispute_evidence` grant with Payment's OWN service token
+   * (`read_granted`). Only beside refunds (never production); absent, an evidence reference is refused (503) and nothing is recorded.
+   */
+  disputeEvidence?: { fileServiceUrl: string; fileServiceToken: string };
   returnUrlAllowlist: string[];
   /** Baseline abuse limits (SDD section 16): requests per minute per authenticated caller. Technical values, no business meaning. */
   rateLimits: { createPerMinute: number; attemptPerMinute: number };
@@ -106,6 +111,17 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   } else if (base.isProduction && reader.optional('AUTH_SERVICE_TOKEN') !== undefined) {
     throw new ConfigError('AUTH_SERVICE_TOKEN must not be configured when NODE_ENV=production (Core V2 S6b: refunds are simulation only)');
   }
+  // Core V2 S6e-D (PAY-10): File Service for dispute evidence, only where refunds (and so disputes) exist; set together or not at all
+  let disputeEvidence: PaymentConfig['disputeEvidence'];
+  const fileUrl = reader.optional('FILE_SERVICE_URL');
+  const fileToken = reader.optional('FILE_SERVICE_TOKEN');
+  if ((fileUrl === undefined) !== (fileToken === undefined)) throw new ConfigError('FILE_SERVICE_URL and FILE_SERVICE_TOKEN are set together or not at all');
+  if (fileUrl !== undefined && base.isProduction) throw new ConfigError('FILE_SERVICE_URL must not be configured when NODE_ENV=production (Core V2 S6e: disputes are simulation only)');
+  if (fileUrl !== undefined && refunds) {
+    const token = reader.secret('FILE_SERVICE_TOKEN', 32);
+    if (isPublishedDevelopmentSecret(token)) throw new ConfigError('FILE_SERVICE_TOKEN must not be a development value published in this repository');
+    disputeEvidence = { fileServiceUrl: reader.url('FILE_SERVICE_URL', ['http:', 'https:']), fileServiceToken: token };
+  }
   return {
     ...base,
     databaseUrl,
@@ -122,6 +138,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     testProviderEnabled,
     ...(simulation ? { simulation } : {}),
     ...(refunds ? { refunds } : {}),
+    ...(disputeEvidence ? { disputeEvidence } : {}),
     returnUrlAllowlist: (reader.optional('PAYMENT_RETURN_URL_ALLOWLIST', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     rateLimits: {
       createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),

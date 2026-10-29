@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString, Matches, ValidateIf } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, ValidateIf } from 'class-validator';
 
 /** The caller's stable identity for one command (F-S6): the shape of an Idempotency-Key. */
 const COMMAND_ID = /^[A-Za-z0-9._:-]{8,128}$/;
@@ -95,6 +95,67 @@ export class SimulationRefundOutcomeDto {
   failureCode?: string;
 
   @ApiPropertyOptional({ enum: DELIVERIES, default: 'immediate', description: 'For an outcome with a notification: deliver it now, or hold it for a later deliver call.' })
+  @IsOptional()
+  @IsIn(DELIVERIES)
+  delivery?: (typeof DELIVERIES)[number];
+}
+
+/**
+ * Core V2 S6e-D (R6E-2): what the simulated provider reports about a dispute of one captured simulation payment. The provider states the
+ * exposure (default: the payment's amount; any positive amount, so a statement Payment must refuse can be simulated) and, with a loss, the
+ * chargeback it took (default: the disputed amount, reported with the loss). Currency, attempt and references are derived by Payment.
+ */
+export const DISPUTE_EVENTS = ['opened', 'won', 'lost'] as const;
+export const DISPUTE_CHARGEBACKS = ['with_loss', 'none'] as const;
+const DISPUTE_REF = /^[A-Za-z0-9._:-]{4,64}$/;
+
+export class SimulationDisputeDto {
+  @ApiProperty({ description: 'Stable identity of this command: an identical replay changes nothing; other content under it is refused.', pattern: COMMAND_ID.source })
+  @IsString()
+  @Matches(COMMAND_ID)
+  commandId!: string;
+
+  @ApiProperty({ description: "The provider's dispute: every notification about one dispute names the same reference (`simd_<disputeRef>`).", pattern: DISPUTE_REF.source })
+  @IsString()
+  @Matches(DISPUTE_REF)
+  disputeRef!: string;
+
+  @ApiProperty({ enum: DISPUTE_EVENTS, description: 'payment.dispute.opened, payment.dispute.won or payment.dispute.lost.' })
+  @IsIn(DISPUTE_EVENTS)
+  event!: (typeof DISPUTE_EVENTS)[number];
+
+  @ApiPropertyOptional({ description: "The exposure the provider states, minor units (default: the payment's amount)." })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(9007199254740991)
+  amount?: number;
+
+  @ApiPropertyOptional({ description: "The provider's reason code.", pattern: FAILURE_CODE.source })
+  @IsOptional()
+  @IsString()
+  @Matches(FAILURE_CODE)
+  reason?: string;
+
+  @ApiPropertyOptional({ enum: DISPUTE_CHARGEBACKS, description: '`lost` only: report the chargeback with the loss (default) or none (a loss with no money movement reported).' })
+  @IsOptional()
+  @IsIn(DISPUTE_CHARGEBACKS)
+  chargeback?: (typeof DISPUTE_CHARGEBACKS)[number];
+
+  @ApiPropertyOptional({ description: '`lost` only: the chargeback amount the provider reports (default: the disputed amount).' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(9007199254740991)
+  chargebackAmount?: number;
+
+  @ApiPropertyOptional({ description: "`lost` only: the provider's chargeback reference (`simcb_<chargebackRef>`; default: the disputeRef).", pattern: DISPUTE_REF.source })
+  @IsOptional()
+  @IsString()
+  @Matches(DISPUTE_REF)
+  chargebackRef?: string;
+
+  @ApiPropertyOptional({ enum: DELIVERIES, default: 'immediate', description: 'Deliver the signed notification now, or hold it for a later deliver call (delayed / out-of-order delivery).' })
   @IsOptional()
   @IsIn(DELIVERIES)
   delivery?: (typeof DELIVERIES)[number];

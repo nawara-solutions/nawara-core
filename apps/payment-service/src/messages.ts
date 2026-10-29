@@ -221,4 +221,54 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "Impossible de faire échouer une tentative qui a déjà réussi.",
     ar: 'لا يمكن إفشال محاولة نجحت بالفعل.',
   },
+  invalidDisputeRequest: { // Core V2 S6e-D
+    en: 'The dispute request is invalid.',
+    fr: 'La demande relative au litige est invalide.',
+    ar: 'طلب النزاع غير صالح.',
+  },
+  disputeNotOpen: { // Core V2 S6e-D
+    en: 'This dispute is no longer open.',
+    fr: "Ce litige n'est plus ouvert.",
+    ar: 'لم يعد هذا النزاع مفتوحًا.',
+  },
+  disputeEvidenceInvalid: { // Core V2 S6e-D
+    en: 'This file is not granted to Payment as evidence of this dispute.',
+    fr: "Ce fichier n'est pas accordé au service de paiement comme preuve de ce litige.",
+    ar: 'هذا الملف غير ممنوح لخدمة الدفع كدليل على هذا النزاع.',
+  },
+  disputeEvidenceUnavailable: { // Core V2 S6e-D
+    en: 'The evidence grant could not be verified; nothing was recorded.',
+    fr: "L'autorisation de preuve n'a pas pu être vérifiée ; rien n'a été enregistré.",
+    ar: 'تعذّر التحقق من منح الدليل؛ لم يُسجَّل شيء.',
+  },
+  disputeDecisionExists: { // Core V2 S6e-D
+    en: 'A decision on this dispute is already recorded or pending.',
+    fr: 'Une décision sur ce litige est déjà enregistrée ou en attente.',
+    ar: 'يوجد قرار مسجّل أو معلّق بالفعل بشأن هذا النزاع.',
+  },
+  disputeDecisionRefused: { // Core V2 S6e-D
+    en: 'The authorization of this decision was refused or has expired.',
+    fr: "L'autorisation de cette décision a été refusée ou a expiré.",
+    ar: 'رُفض تفويض هذا القرار أو انتهت صلاحيته.',
+  },
+  disputeDecisionConflict: { // Core V2 S6e-D
+    en: 'This Idempotency-Key names a decision authorized by another receipt.',
+    fr: 'Cette Idempotency-Key désigne une décision autorisée par un autre reçu.',
+    ar: 'يشير مفتاح Idempotency-Key هذا إلى قرار مفوَّض بإيصال آخر.',
+  },
+  disputeDecisionUnresolved: { // Core V2 S6e-D
+    en: 'The authorization of this decision could not be confirmed; repeat the same request.',
+    fr: "L'autorisation de cette décision n'a pas pu être confirmée ; répétez la même requête.",
+    ar: 'تعذّر تأكيد تفويض هذا القرار؛ أعد إرسال الطلب نفسه.',
+  },
+  ownerAuthorityUnavailable: { // Core V2 S6e-D
+    en: "The Owner's authority could not be verified; nothing was changed.",
+    fr: "L'autorité du propriétaire n'a pas pu être vérifiée ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من صلاحية المالك؛ لم يتغيّر شيء.',
+  },
+  simulationNothingToDispute: { // Core V2 S6e-D
+    en: 'This payment has no verified capture to dispute.',
+    fr: "Ce paiement n'a aucune capture vérifiée à contester.",
+    ar: 'لا يوجد لهذه الدفعة تحصيل موثَّق يمكن الاعتراض عليه.',
+  },
 });

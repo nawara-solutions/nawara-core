@@ -79,6 +79,48 @@ export const PRODUCED_EVENTS = {
       purpose: { type: 'enum', values: ['direct_purchase', 'assisted_settlement', 'non_entitlement'] },
     },
   },
+  /**
+   * Core V2 S6e-D (register EVT-03; ADR-0044 B10; the Owner's R6E-6): a verified provider dispute, as Payment recorded it. `amount` is the
+   * exposure the PROVIDER states (never the capture inferred). Written to the outbox in the transaction that records the dispute; its id is
+   * derived from the dispute. Development and simulation only (`liveMode` false). No evidence content, no provider data beyond the reason code.
+   */
+  'payment.dispute.opened': {
+    version: 1,
+    payload: {
+      disputeId: { type: 'uuid' },
+      paymentId: { type: 'uuid' },
+      paymentRequestId: { type: 'string' },
+      producer: { type: 'string' },
+      organizationId: { type: 'string', nullable: true },
+      purpose: { type: 'enum', values: ['organization_subscription', 'direct_purchase', 'assisted_settlement', 'recovery_settlement', 'non_entitlement'], nullable: true },
+      amount: { type: 'integer' },
+      currency: { type: 'string' },
+      reason: { type: 'string', nullable: true },
+      openedAt: { type: 'datetime' },
+      liveMode: { type: 'boolean' },
+    },
+  },
+  /**
+   * Core V2 S6e-D (EVT-03; R6E-5, R6E-6): the provider's final `lost` outcome, once per dispute. `chargeback` is the VERIFIED chargeback fact
+   * linked to the dispute when the provider reported one with the loss, else null: a loss alone never implies money moved. A chargeback
+   * reported after the loss is read through `GET /payment/disputes/losses` (no second event).
+   */
+  'payment.dispute.lost': {
+    version: 1,
+    payload: {
+      disputeId: { type: 'uuid' },
+      paymentId: { type: 'uuid' },
+      paymentRequestId: { type: 'string' },
+      producer: { type: 'string' },
+      organizationId: { type: 'string', nullable: true },
+      purpose: { type: 'enum', values: ['organization_subscription', 'direct_purchase', 'assisted_settlement', 'recovery_settlement', 'non_entitlement'], nullable: true },
+      amount: { type: 'integer' },
+      currency: { type: 'string' },
+      lostAt: { type: 'datetime' },
+      chargeback: { type: 'object', nullable: true },
+      liveMode: { type: 'boolean' },
+    },
+  },
 } as const satisfies Readonly<Record<string, ProducedEvent>>;
 
 export const CONSUMED_EVENTS = [] as const satisfies readonly ConsumedEvent[];

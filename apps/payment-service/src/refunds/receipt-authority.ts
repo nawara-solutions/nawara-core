@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { correlationHeaders } from '@nawara/service-kit';
-import type { RefundBinding } from './refund.types.js';
+import type { ReceiptBinding } from './refund.types.js';
 
 /** DI token of Auth's receipt consumption boundary (Core V2 S6b; AUTH-02, AUTH-03). */
 export const RECEIPT_AUTHORITY = Symbol('PAYMENT_RECEIPT_AUTHORITY');
@@ -31,8 +31,8 @@ export type ConsumeOutcome =
 export type LookupOutcome = { kind: 'consumed'; consumption: ReceiptConsumption } | { kind: 'absent' } | { kind: 'unresolved'; reason: string };
 
 export interface ReceiptAuthority {
-  consume(input: { secret: string; binding: RefundBinding; consumeRef: string }): Promise<ConsumeOutcome>;
-  lookup(input: { binding: RefundBinding; consumeRef: string }): Promise<LookupOutcome>;
+  consume(input: { secret: string; binding: ReceiptBinding; consumeRef: string }): Promise<ConsumeOutcome>;
+  lookup(input: { binding: ReceiptBinding; consumeRef: string }): Promise<LookupOutcome>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -51,7 +51,7 @@ export class HttpReceiptAuthority implements ReceiptAuthority {
 
   constructor(private readonly opts: { baseUrl: string; serviceToken: string; timeoutMs: number }) {}
 
-  async consume(input: { secret: string; binding: RefundBinding; consumeRef: string }): Promise<ConsumeOutcome> {
+  async consume(input: { secret: string; binding: ReceiptBinding; consumeRef: string }): Promise<ConsumeOutcome> {
     const r = await this.post('/auth/service/authorization-receipts/consume', { secret: input.secret, binding: input.binding, consumeRef: input.consumeRef });
     if (r.status === 200) {
       const c = this.consumption(r.body, input.consumeRef, input.binding);
@@ -65,7 +65,7 @@ export class HttpReceiptAuthority implements ReceiptAuthority {
     return { kind: 'unresolved', reason: code ?? `status_${r.status}` };
   }
 
-  async lookup(input: { binding: RefundBinding; consumeRef: string }): Promise<LookupOutcome> {
+  async lookup(input: { binding: ReceiptBinding; consumeRef: string }): Promise<LookupOutcome> {
     const r = await this.post('/auth/service/authorization-receipts/consumptions/lookup', { binding: input.binding, consumeRef: input.consumeRef });
     if (r.status === 200) {
       const c = this.consumption(r.body, input.consumeRef, input.binding);
@@ -76,7 +76,7 @@ export class HttpReceiptAuthority implements ReceiptAuthority {
     return { kind: 'unresolved', reason: code ?? `status_${r.status}` };
   }
 
-  private consumption(body: ConsumptionWire | null, consumeRef: string, binding: RefundBinding): ReceiptConsumption | null {
+  private consumption(body: ConsumptionWire | null, consumeRef: string, binding: ReceiptBinding): ReceiptConsumption | null {
     const consumedAt = typeof body?.consumedAt === 'string' ? new Date(body.consumedAt) : null;
     if (!body || typeof body.receiptId !== 'string' || !UUID.test(body.receiptId) || body.consumeRef !== consumeRef || body.companyId !== binding.companyId
       || typeof body.approvedBy?.userId !== 'string' || !UUID.test(body.approvedBy.userId) || !consumedAt || Number.isNaN(consumedAt.getTime())) {
