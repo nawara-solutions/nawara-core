@@ -49,13 +49,24 @@ export class FraudHoldReleaseBindingDto {
   @ApiProperty({ format: 'uuid' }) productId!: string;
 }
 
-/** A refund, dispute-decision or fraud-hold binding, by `operation` (parsed strictly by `parseBinding`). */
-const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+/** Core V2 S6f Auth prerequisite (the Owner's R6F-5): an Owner's record of one external recovery-surplus repayment (billing-service only). */
+export class SurplusExternalBindingDto {
+  @ApiProperty({ enum: ['recovery_surplus_external'] }) operation!: 'recovery_surplus_external';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid' }) surplusId!: string;
+  @ApiProperty({ format: 'uuid', description: 'The Organization the surplus is owed to.' }) organizationId!: string;
+  @ApiProperty({ type: 'integer', minimum: 1, description: 'Minor units.' }) amount!: number;
+  @ApiProperty({ pattern: '^[A-Z]{3}$' }) currency!: string;
+}
 
-@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto)
+/** A refund, dispute-decision, fraud-hold or external-surplus binding, by `operation` (parsed strictly by `parseBinding`). */
+const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+
+@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto)
 /** AUTH-01 body. The step-up proof is never stored with the receipt, logged, audited or part of the replay hash (D-A2 §12). */
 export class IssueReceiptDto {
-  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release)." })
+  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external)." })
   @IsString() @MaxLength(64) stepUpToken!: string;
 
   @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;

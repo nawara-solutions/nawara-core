@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto/hmac.js';
 import { canonicalJson } from '../hierarchy/snapshot.js';
-import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, REFUND_AUTHORIZE_PURPOSE } from '../owner/step-up.service.js';
+import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE } from '../owner/step-up.service.js';
 import { receiptError } from './receipt-errors.js';
 
 /**
@@ -63,8 +63,23 @@ export interface FraudHoldReleaseBinding {
   productId: string;
 }
 
+/**
+ * Core V2 S6f Auth prerequisite (the Owner's R6F-5, 2026-10-29): an Owner's record that ONE recovery surplus, owed to one Organization, was
+ * repaid outside Core: the Company, the surplus, the Organization, the exact amount (minor units) and currency. Only `billing-service`
+ * consumes it, after the dedicated factor-only step-up. It moves no money and is not a provider fact.
+ */
+export interface SurplusExternalBinding {
+  operation: 'recovery_surplus_external';
+  audience: 'billing-service';
+  companyId: string;
+  surplusId: string;
+  organizationId: string;
+  amount: number;
+  currency: string;
+}
+
 /** Every receipt binding. `operation` selects the exact field set; the canonical form (and so every digest) includes it. */
-export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding;
+export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding | SurplusExternalBinding;
 export type ReceiptOperation = ReceiptBinding['operation'];
 
 export const RECEIPT_AUDIENCE = 'payment-service';
@@ -72,11 +87,13 @@ export const RECEIPT_AUDIENCE = 'payment-service';
 /** The one audience each operation names (and so the only service that may consume it, F-7). */
 export const RECEIPT_AUDIENCES = {
   refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service',
+  recovery_surplus_external: 'billing-service',
 } as const satisfies Record<ReceiptOperation, string>;
 
 /** The one step-up purpose each operation's issuance consumes (Auth-local purposes, `step-up.service.ts`). */
 export const RECEIPT_PURPOSES = {
   refund: REFUND_AUTHORIZE_PURPOSE, dispute_decision: DISPUTE_DECIDE_PURPOSE, fraud_hold_place: FRAUD_HOLD_PLACE_PURPOSE, fraud_hold_release: FRAUD_HOLD_RELEASE_PURPOSE,
+  recovery_surplus_external: SURPLUS_EXTERNAL_PURPOSE,
 } as const satisfies Record<ReceiptOperation, string>;
 
 const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride'] as const;
@@ -85,6 +102,7 @@ const DISPUTE_FIELDS = ['operation', 'audience', 'companyId', 'disputeId', 'paym
 const DECISIONS: readonly string[] = ['contest', 'accept'];
 const HOLD_PLACE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId', 'reason'] as const;
 const HOLD_RELEASE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId'] as const;
+const SURPLUS_FIELDS = ['operation', 'audience', 'companyId', 'surplusId', 'organizationId', 'amount', 'currency'] as const;
 /** Canonical lower-case UUIDs only: two spellings of one id must never yield two digests. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURRENCY = /^[A-Z]{3}$/;
@@ -107,6 +125,7 @@ export function parseBinding(value: unknown): ReceiptBinding {
   const v = value as Record<string, unknown>;
   if (v.operation === 'dispute_decision') return parseDisputeDecision(v);
   if (v.operation === 'fraud_hold_place' || v.operation === 'fraud_hold_release') return parseFraudHold(v);
+  if (v.operation === 'recovery_surplus_external') return parseSurplusExternal(v);
   for (const k of Object.keys(v)) if (!(FIELDS as readonly string[]).includes(k)) throw invalid();
   for (const k of FIELDS) if (!OPTIONAL.has(k) && !(k in v)) throw invalid();
   const legalOverride = v.legalOverride === undefined ? false : v.legalOverride;
@@ -147,6 +166,20 @@ function parseFraudHold(v: Record<string, unknown>): FraudHoldPlaceBinding | Fra
   if (!place) return { operation: 'fraud_hold_release', ...ids };
   if (typeof v.reason !== 'string' || !REASON.test(v.reason)) throw invalid();
   return { operation: 'fraud_hold_place', ...ids, reason: v.reason };
+}
+
+function parseSurplusExternal(v: Record<string, unknown>): SurplusExternalBinding {
+  const invalid = () => receiptError('receipt_binding_invalid');
+  for (const k of Object.keys(v)) if (!(SURPLUS_FIELDS as readonly string[]).includes(k)) throw invalid();
+  for (const k of SURPLUS_FIELDS) if (!(k in v)) throw invalid();
+  if (v.audience !== 'billing-service') throw invalid();
+  for (const k of ['companyId', 'surplusId', 'organizationId'] as const) if (typeof v[k] !== 'string' || !UUID.test(v[k] as string)) throw invalid();
+  if (typeof v.amount !== 'number' || !Number.isSafeInteger(v.amount) || v.amount <= 0) throw invalid();
+  if (typeof v.currency !== 'string' || !CURRENCY.test(v.currency)) throw invalid();
+  return {
+    operation: 'recovery_surplus_external', audience: 'billing-service', companyId: v.companyId as string, surplusId: v.surplusId as string,
+    organizationId: v.organizationId as string, amount: v.amount, currency: v.currency,
+  };
 }
 
 /** `canonicalJson` (sorted keys) over exactly the fields of a parsed binding. Never logged, never stored. */

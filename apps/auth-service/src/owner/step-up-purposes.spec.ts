@@ -39,6 +39,8 @@ const ASSISTANCE = ['billing.assistance.correct', 'billing.assistance.dispute.re
 const DISPUTE = 'payment.dispute.decide';
 /** S6e-H prerequisite (the Owner's H-2): Auth-local; only the issuance of a fraud-hold receipt consumes each, through the exported constants. */
 const FRAUD_HOLD = ['billing.fraud_hold.place', 'billing.fraud_hold.release'] as const;
+/** S6f prerequisite (the Owner's R6F-5): Auth-local; only the issuance of an external-surplus receipt consumes it. */
+const SURPLUS = 'billing.recovery_surplus.record_external';
 
 describe('step-up purposes (A5.4-A1)', () => {
   it('the 19 earlier purposes keep exactly their methods', () => {
@@ -47,7 +49,7 @@ describe('step-up purposes (A5.4-A1)', () => {
   });
 
   it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key); S2-Auth.1 then adds refund.authorize', () => {
-    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE, DISPUTE, ...FRAUD_HOLD]);
+    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE, DISPUTE, ...FRAUD_HOLD, SURPLUS]);
     expect([...STEP_UP_METHODS[PURPOSE]]).toEqual(['totp', 'webauthn']);
   });
 
@@ -71,6 +73,10 @@ describe('step-up purposes (A5.4-A1)', () => {
     for (const p of FRAUD_HOLD) expect([...STEP_UP_METHODS[p]], p).toEqual(['totp', 'webauthn']);
   });
 
+  it('S6f prerequisite (the Owner\'s R6F-5): the external-surplus purpose is factor-only, never the secret key', () => {
+    expect([...STEP_UP_METHODS[SURPLUS]]).toEqual(['totp', 'webauthn']);
+  });
+
   it('no application source outside the allow-list names an Auth-local purpose literally (each has one Auth-local consumer)', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const apps = resolve(here, '../../..');
@@ -82,7 +88,7 @@ describe('step-up purposes (A5.4-A1)', () => {
         const path = join(dir, name);
         if (statSync(path).isDirectory()) walk(path);
         else if (/\.(ts|tsx|mts|cts|js|mjs|cjs)$/.test(name) && !/\.spec\.ts$/.test(name) && path !== allowList
-          && /hierarchy\.reference\.repair|refund\.authorize|payment\.dispute\.decide|billing\.fraud_hold\.(place|release)/.test(readFileSync(path, 'utf8'))) hits.push(path);
+          && /hierarchy\.reference\.repair|refund\.authorize|payment\.dispute\.decide|billing\.fraud_hold\.(place|release)|billing\.recovery_surplus\.record_external/.test(readFileSync(path, 'utf8'))) hits.push(path);
       }
     };
     walk(apps);
