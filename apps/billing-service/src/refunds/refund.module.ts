@@ -10,6 +10,7 @@ import { HttpPaymentRefundClient, PAYMENT_REFUND_CLIENT, type PaymentRefundClien
 import { RefundAuthorizationService } from './refund-authorization.service.js';
 import { RefundRelayReconciler, RefundRelayReconcilerService } from './refund-relay-reconciler.js';
 import { RefundCompletionService } from './refund-completion.service.js';
+import { RefundEffectService, RefundEffectWorkerService } from './refund-effect.service.js';
 
 /**
  * Core V2 S6a refund cases (register BIL-23, BIL-25; the Owner's R6A-1 to R6A-9). PRODUCTION REFUSAL, first line: in production the module
@@ -29,6 +30,8 @@ export class RefundModule {
         RefundCaseService, RefundCommandIdempotency, RefundOwnerGuard,
         // Core V2 S6b (BIL-24): the relay to Payment and its reconciler (Billing's own service token; never an Owner's bearer)
         RefundAuthorizationService, RefundRelayReconciler, RefundCompletionService, ...(refunds.reconciler === false ? [] : [RefundRelayReconcilerService]),
+        // Core V2 S6d (R6D-3): the commercial effects of completed cases, asynchronously (tests drive `drainOnce` themselves)
+        RefundEffectService, ...(refunds.reconciler === false ? [] : [RefundEffectWorkerService]),
         {
           provide: PAYMENT_REFUND_CLIENT,
           useValue: refunds.paymentRefundClient ?? new HttpPaymentRefundClient({ baseUrl: config.paymentServiceUrl, serviceToken: config.paymentServiceToken, timeoutMs: config.paymentTimeoutMs }),
@@ -38,7 +41,7 @@ export class RefundModule {
       ],
       // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
       global: true,
-      exports: [RefundRelayReconciler, RefundCompletionService],
+      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService],
     };
   }
 }

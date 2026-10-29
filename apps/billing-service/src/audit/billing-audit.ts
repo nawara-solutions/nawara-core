@@ -22,7 +22,8 @@ export type BillingAuditAction =
   | 'assistance_dispute.resolved' | 'assistance_request.corrected' // Core V2 S5c (H-2, H-6): the Owner, with a dedicated step-up
   | 'refund_case.opened' | 'refund_case.cancelled' // Core V2 S6a (R6A-2): the Owner of the seller Company
   | 'refund_case.authorization_relayed' // Core V2 S6b (R6B-7)
-  | 'refund_case.completed'; // Core V2 S6c (R6C-9, R6C-11): from Payment's verified completion
+  | 'refund_case.completed' // Core V2 S6c (R6C-9, R6C-11): from Payment's verified completion
+  | 'subscription_purchase.reversed'; // Core V2 S6d (R6D-5): the refund effect worker
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in
@@ -38,6 +39,7 @@ export function auditActor(ctx: TransitionContext): AuditActor {
   if (ctx.actor.type === 'system' && ctx.cause.type === 'payment_event') return { type: 'system', id: 'payment_event_consumer' };
   if (ctx.actor.type === 'system' && ctx.cause.type === 'reconciliation') return { type: 'system', id: 'payment_reconciler' };
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'assistance_sweep') return { type: 'system', id: 'assistance_sweep' }; // Core V2 S5b (E-6)
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'refund_effect_worker') return { type: 'system', id: 'refund_effect_worker' }; // Core V2 S6d
   throw new Error(`billing_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 

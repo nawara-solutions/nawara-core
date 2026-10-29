@@ -7,7 +7,7 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
  * original assertion; `effectiveReturnedAt` is it after the Owner's corrections, if any (Core V2 S5c, H-2: derived, never stored).
  */
 export function representCashReturnObligation(o: {
-  id: string; assistanceRequestId: string; status: string; amount: string; currency: string; openedAt: Date; returnedAt: Date | null; returnReportedAt: Date | null;
+  id: string; assistanceRequestId: string; status: string; amount: string; currency: string; origin?: string; openedAt: Date; returnedAt: Date | null; returnReportedAt: Date | null;
   confirmedAt: Date | null; effectiveReturnedAt: Date | null;
 }) {
   return {
@@ -16,6 +16,7 @@ export function representCashReturnObligation(o: {
     status: o.status,
     amount: Number(o.amount),
     currency: o.currency.trim(),
+    origin: o.origin ?? 'deadline', // Core V2 S6d (R6D-2): `deadline` or `refund_completion`
     openedAt: iso(o.openedAt),
     returnedAt: iso(o.returnedAt),
     returnReportedAt: iso(o.returnReportedAt),
@@ -24,7 +25,7 @@ export function representCashReturnObligation(o: {
   };
 }
 
-export const OBLIGATION_COLUMNS = `id, "assistanceRequestId", status, amount, currency, "openedAt", "returnedAt", "returnReportedAt", "confirmedAt",
+export const OBLIGATION_COLUMNS = `id, "assistanceRequestId", status, amount, currency, origin, "openedAt", "returnedAt", "returnReportedAt", "confirmedAt",
   billing_assistance_effective_time("assistanceRequestId", 'returnedAt') AS "effectiveReturnedAt"`;
 
 /**

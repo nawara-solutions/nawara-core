@@ -1164,6 +1164,23 @@ SELECT pg_temp.assert_eq('S6c', 'the refund_case.completed transition requires t
 SELECT pg_temp.assert_eq('S6c', 'R6C-10: completion adds no reversal, entitlement or obligation column',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'refund_case_completion' AND column_name ~* '(reversal|entitlement|obligation|purchase)'), '0');
 
+-- ------------------------------------------------------------------------------------------------------------- S6d commercial effects (0036)
+-- The effects run end to end in test/refund-cases.e2e-spec.ts (Core V2 S6d block); here, the guards that need no completed-case fixture.
+SELECT pg_temp.assert_eq('S6d', 'R6D-2: every existing obligation keeps origin deadline; a refund origin always names its case',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%refund_completion%' AND pg_get_constraintdef(oid) LIKE '%refundCaseId%')::text FROM pg_constraint WHERE conname = 'cash_return_obligation_origin'), 'true');
+SELECT pg_temp.expect_error('S6d', 'R6D-3: an effect needs a completed case', $$INSERT INTO refund_case_effect ("refundCaseId", outcome, reason) VALUES (gen_random_uuid(), 'none', 'no_entitlement_basis')$$, '23514', 'refund_case_effect_completed');
+SELECT pg_temp.assert_eq('S6d', 'R6D-3: the effect outcomes are exactly the three approved ones, with their shapes',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%reversed_purchase_and_obligation_opened%')::text FROM pg_constraint WHERE conname = 'refund_case_effect_outcome'), 'true');
+SELECT pg_temp.assert_eq('S6d', 'V-1: one reversal per purchase (its primary key) and every cause recorded once',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('subscription_purchase_reversal_pkey', 'subscription_purchase_reversal_cause_once')), '2');
+SELECT pg_temp.expect_error('S6d', 'a refund cause names a completed case', $$INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "refundCaseId") VALUES (gen_random_uuid(), 'refund_completion', NULL)$$, '23514');
+SELECT pg_temp.assert_eq('S6d', 'one refund-origin obligation per completed case (and one per request, unchanged)',
+  (SELECT count(*)::text FROM pg_indexes WHERE indexname IN ('cash_return_obligation_refund_case_unique') AND indexdef LIKE '%UNIQUE%'), '1');
+SELECT pg_temp.assert_eq('S6d', 'no artificial deadline: a refund-origin obligation adds no settleBy or overdue column',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'cash_return_obligation' AND column_name ~* '(settleby|deadline|overdue|due)'), '0');
+SELECT pg_temp.assert_eq('S6d', 'T2 is the S5d model, unchanged: it counts every unresolved obligation, whatever its origin',
+  (SELECT (prosrc NOT LIKE '%origin%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

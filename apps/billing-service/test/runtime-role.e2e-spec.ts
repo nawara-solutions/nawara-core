@@ -132,6 +132,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         refund_case: ['INSERT', 'SELECT', 'UPDATE'], refund_command_idempotency: ['INSERT', 'SELECT'], // S6a (0033)
         refund_authorization_relay: ['INSERT', 'SELECT', 'UPDATE'], // S6b (0034)
         refund_case_completion: ['INSERT', 'SELECT'], // S6c (0035)
+        refund_case_effect: ['INSERT', 'SELECT'], subscription_purchase_reversal_cause: ['INSERT', 'SELECT'], refund_case_effect_attempt: ['INSERT', 'SELECT', 'UPDATE'], // S6d (0036)
       };
       for (const [table, privileges] of Object.entries(expected)) {
         const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);

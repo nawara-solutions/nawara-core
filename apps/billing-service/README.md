@@ -167,7 +167,11 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   - Cancellation is refused (`409 refund_processing_started`) unless Payment proved every relay ended unconsumed and undispatched.
   - Core V2 S6c (`db/migrations/0035`, `src/refunds/refund-completion.service.ts`): the case is completed once from Payment's verified
     `refund.case_completed` (bound on `billing.payment-events`), or from Payment's PAY-08 read by the relay reconciler when the event is lost,
-    with strict binding to the case, payment, full amount, currency and a relay Billing recorded. Nothing is reversed (S6d).
+    with strict binding to the case, payment, full amount, currency and a relay Billing recorded.
+  - Core V2 S6d (`db/migrations/0036`, `src/refunds/refund-effect.service.ts`): the refund effect worker applies each completed case's
+    commercial effect once: the refunded Personal purchase is reversed (K-3 Option D re-lays later periods) and, for an assisted purchase,
+    the Organization owes the beneficiary the full frozen cash total (a `refund_completion` cash-return obligation, T2 while unresolved).
+    Contradictions are kept for review, never applied; no `billing.*` event.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
 import pg from 'pg';
 import request from 'supertest';
@@ -22,6 +22,8 @@ import { PaymentRequestRepository } from '../src/invoices/payment-request.reposi
 import { HttpOwnerAuthority } from '../src/platforms/owner-authority.client.js';
 import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundModule } from '../src/refunds/refund.module.js';
+import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
+import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
 import { paymentPurposeOf } from './support/settlement.js';
@@ -44,6 +46,12 @@ class FakePaymentClient implements PaymentClient {
     return { kind: 'cancelled' };
   }
 }
+
+/** Core V2 S6d: Payment's refund port, authorizing every relayed attempt (the S6b/S6c Payment behaviour is certified in its own suites). */
+const refundsAtPayment: PaymentRefundClient = {
+  relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
+  refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+};
 
 const COMPANY = randomUUID();
 const OTHER_COMPANY = randomUUID();
@@ -218,6 +226,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     auth.platforms.set(PLATFORM, COMPANY);
     t = await createTestApp({
       databaseUrl: db.url, authClient, organizationReference: reference, paymentClient: payment, disputeExposure, ownerAuthority: new HttpOwnerAuthority({ baseUrl: auth.url }),
+      paymentRefundClient: refundsAtPayment, // Core V2 S6d: Payment authorizes every relay (S6b's own behaviour is certified elsewhere)
       tokens: [{ caller: 'test-producer', digest: producer.digest }],
       env: { BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'test-producer': { operations: [...BILLING_OPERATIONS], allowedPlatforms: [PLATFORM] } } }) },
     });
@@ -239,9 +248,9 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
 
   // ── S6a fixtures: verified captures through Billing's real paths
   /** A direct purchase through the real checkout route, accepted by Payment, then Payment's verified success. */
-  const directPurchase = async (buyer = 'b1') => {
-    const productId = await productOf();
-    const priceId = await priceOf(productId, 4900);
+  const directPurchase = async (buyer = 'b1', given?: { productId: string; priceId: string }) => {
+    const productId = given?.productId ?? await productOf();
+    const priceId = given?.priceId ?? await priceOf(productId, 4900);
     const c = await send(request(server()).post('/billing/checkout/direct'), buyer, key()).send({ platformId: PLATFORM, productId, priceId });
     expect(c.status, JSON.stringify(c.body)).toBe(201);
     const inv = await one(`SELECT * FROM invoice WHERE id = $1`, [c.body.invoiceId]);
@@ -512,6 +521,233 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     await expect(ins({ eligibility: 'non_entitlement', purchaseId: null })).rejects.toMatchObject({ constraint: 'refund_case_not_eligible' });
     await expect(ins({ eligibility: 'late_assisted_settlement', purchaseId: null })).rejects.toMatchObject({ code: '23514' });
     expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "paymentId" = $1`, [p.paymentId])).toBe(0);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────── Core V2 S6d: commercial effects
+
+  describe('Core V2 S6d: commercial effects of a completed refund (R6D-1 to R6D-6)', () => {
+    const effects = () => t.app.get(RefundEffectService);
+    /** S6c: the Owner relays a receipt, then Payment's verified `refund.case_completed` completes the case. */
+    const completeRefund = async (caseId: string) => {
+      const r = await send(request(server()).post(`/billing/admin/refund-cases/${caseId}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') });
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      const c = await one(`SELECT c.id, c."paymentId", c.amount::int, trim(c.currency) AS currency, r.id AS "attemptId" FROM refund_case c JOIN refund_authorization_relay r ON r."refundCaseId" = c.id WHERE c.id = $1`, [caseId]);
+      const id = randomUUID();
+      await t.bus.deliver({ id, name: 'refund.case_completed', payload: {
+        refundCaseId: c.id, refundAuthorizationId: randomUUID(), refundAttemptId: c.attemptId, paymentId: c.paymentId, paymentRequestId: randomUUID(), producer: 'billing-service',
+        approvedAmount: c.amount, currency: c.currency, completedAt: new Date().toISOString(), liveMode: false, organizationId: null, purpose: 'direct_purchase',
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      expect((await one(`SELECT status FROM refund_case WHERE id = $1`, [caseId])).status).toBe('completed');
+    };
+    const caseFor = async (paymentId: string) => (await openCase({ paymentId, reason: 'customer_request' })).body.id as string;
+    const effect = (caseId: string) => one(`SELECT outcome, "purchaseId", "obligationId", reason FROM refund_case_effect WHERE "refundCaseId" = $1`, [caseId]);
+    const purchaseOf = (paymentId: string) => one(`SELECT s.* FROM subscription_purchase s JOIN payment_request pr ON pr.id = s."paymentRequestId" WHERE pr."paymentId" = $1`, [paymentId]);
+    const spans = async (personalSubscriptionId: string) => (await admin.query(`SELECT "purchaseId", "effectiveStart", "effectiveEnd" FROM billing_personal_spans($1)`, [personalSubscriptionId])).rows as Row[];
+    const reversals = (purchaseId: string) => count(`SELECT count(*) AS n FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [purchaseId]);
+    const obligationsOf = async (requestId: string) => (await admin.query(`SELECT id, origin, amount::int, status, "refundCaseId" FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [requestId])).rows as Row[];
+
+    it('a completed direct-purchase refund reverses that purchase once; the entitlement ends; the purchase record is kept; audited', async () => {
+      const p = await directPurchase('b2');
+      const caseId = await caseFor(p.paymentId);
+      const purchase = await purchaseOf(p.paymentId);
+      expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(true);
+      // no effect before the authoritative completion: an open case with an authorized relay changes nothing
+      await send(request(server()).post(`/billing/admin/refund-cases/${caseId}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      await effects().drainOnce();
+      expect(await reversals(purchase.id)).toBe(0);
+      expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(true);
+      // now the completion
+      const c = await one(`SELECT c."paymentId", c.amount::int, r.id AS "attemptId" FROM refund_case c JOIN refund_authorization_relay r ON r."refundCaseId" = c.id WHERE c.id = $1`, [caseId]);
+      const id = randomUUID();
+      await t.bus.deliver({ id, name: 'refund.case_completed', payload: { refundCaseId: caseId, refundAuthorizationId: randomUUID(), refundAttemptId: c.attemptId, paymentId: c.paymentId,
+        paymentRequestId: randomUUID(), producer: 'billing-service', approvedAmount: c.amount, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false, organizationId: null,
+        purpose: 'direct_purchase' }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      expect(await effects().drainOnce()).toMatchObject({ applied: 1 });
+      expect(await effect(caseId)).toEqual({ outcome: 'reversed_purchase', purchaseId: purchase.id, obligationId: null, reason: null });
+      expect(await reversals(purchase.id)).toBe(1);
+      expect((await one(`SELECT cause FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [purchase.id])).cause).toBe('refund_completion');
+      expect((await one(`SELECT "refundCaseId" FROM subscription_purchase_reversal_cause WHERE "purchaseId" = $1`, [purchase.id])).refundCaseId).toBe(caseId);
+      expect(await purchaseOf(p.paymentId)).toEqual(purchase); // the original purchase is untouched
+      expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(false);
+      const a = (await audit(purchase.id)).find((e) => e.name === 'audit.subscription_purchase.reversed')!;
+      expect(a.payload.actor).toEqual({ type: 'system', id: 'refund_effect_worker' });
+      expect(a.payload.changes).toEqual({ refund_case_id: caseId, cause: 'refund_completion' });
+      expect((await readCase(caseId)).body.commercialEffect).toMatchObject({ outcome: 'reversed_purchase', purchaseId: purchase.id });
+      // a repeated pass, a duplicate completion delivery: nothing more
+      await t.bus.deliver({ id, name: 'refund.case_completed', payload: {}, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      expect(await effects().drainOnce()).toMatchObject({ applied: 0 });
+      expect(await reversals(purchase.id)).toBe(1);
+    });
+
+    it('K-3 Option D: reversing an earlier purchase re-lays the later paid periods at full duration, with no gap; other products and users are untouched', async () => {
+      const productId = await productOf();
+      const priceId = await priceOf(productId, 4900);
+      const first = await directPurchase('b1', { productId, priceId });
+      const second = await directPurchase('b1', { productId, priceId });
+      const third = await directPurchase('b1', { productId, priceId });
+      const other = await directPurchase('b2', { productId, priceId }); // another user, the same product
+      const unrelated = await directPurchase('b1'); // the same user, another product
+      const sub = (await purchaseOf(first.paymentId)).personalSubscriptionId;
+      const before = await spans(sub);
+      expect(before).toHaveLength(3);
+      const caseId = await caseFor(first.paymentId);
+      await completeRefund(caseId);
+      await effects().drainOnce();
+      const after = await spans(sub);
+      expect(after.map((s) => s.purchaseId)).toEqual([before[1]!.purchaseId, before[2]!.purchaseId]);
+      // the second period now starts at its own settlement (nothing before it), the third continues it with no gap, each a full month
+      const p2 = await purchaseOf(second.paymentId);
+      expect(after[0]!.effectiveStart).toEqual(p2.settledAt);
+      expect(after[1]!.effectiveStart).toEqual(after[0]!.effectiveEnd);
+      expect(after[1]!.effectiveEnd < before[2]!.effectiveEnd).toBe(true);
+      expect((await entitlement(U.b1, productId).expect(200)).body).toMatchObject({ valid: true, expiresAt: new Date(after[1]!.effectiveEnd).toISOString() });
+      expect((await entitlement(U.b2, productId).expect(200)).body.valid).toBe(true);
+      expect((await entitlement(U.b1, unrelated.productId).expect(200)).body.valid).toBe(true);
+      expect(await reversals((await purchaseOf(other.paymentId)).id)).toBe(0);
+      expect(third.paymentId).toBeDefined();
+    });
+
+    it('a completed assisted-purchase refund reverses the purchase AND opens the Organization\'s full-cash obligation (base + fee), in one effect', async () => {
+      const a = await assistedPurchase();
+      const caseId = await caseFor(a.paymentId);
+      const purchase = await purchaseOf(a.paymentId);
+      const terms = await one(`SELECT "baseAmount"::int AS base, "feeAmount"::int AS fee, "totalAmount"::int AS total, status FROM assistance_request WHERE id = $1`, [a.requestId]);
+      expect(terms).toMatchObject({ base: 6100, fee: 400, total: 6500, status: 'settled' });
+      await completeRefund(caseId);
+      await effects().drainOnce();
+      const e = await effect(caseId);
+      expect(e).toMatchObject({ outcome: 'reversed_purchase_and_obligation_opened', purchaseId: purchase.id, reason: null });
+      expect(await reversals(purchase.id)).toBe(1);
+      // the electronic refund (Payment) returned the base; the Organization owes the beneficiary the FULL frozen cash total: never netted
+      expect(await obligationsOf(a.requestId)).toEqual([{ id: e.obligationId, origin: 'refund_completion', amount: 6500, status: 'open', refundCaseId: caseId }]);
+      expect(Number((await one(`SELECT amount FROM refund_case WHERE id = $1`, [caseId])).amount)).toBe(6100);
+      const opened = (await audit(e.obligationId)).find((x) => x.name === 'audit.cash_return_obligation.opened')!;
+      expect(opened.payload.actor).toEqual({ type: 'system', id: 'refund_effect_worker' });
+      expect(opened.payload.changes).toEqual({ assistance_request_id: a.requestId, amount: 6500, origin: 'refund_completion' });
+      expect((await entitlement(U.b1, purchase.productId).expect(200)).body.valid).toBe(false);
+      // R6D-2 T2: the unresolved refund-origin obligation restricts NEW assistance requests of the Organization (no deadline is manufactured)
+      expect((await admin.query(`SELECT kind, "sourceId" FROM billing_assistance_restrictions($1, now())`, [ORG])).rows).toEqual([{ kind: 'T2', sourceId: e.obligationId }]);
+      const productId = await productOf();
+      const priceId = await priceOf(productId, 3000);
+      expect((await create({ organizationId: ORG, productId, priceId, consent: true }, 'b2')).body.code).toBe('assistance_restricted');
+      // discharge stays open: a dispute blocks confirmation; the Organization reports the return; the beneficiary confirms; the request is returned
+      const dispute = await send(request(server()).post(`/billing/assistance-requests/${a.requestId}/disputes`), 'b1', key()).send({ reasonCode: 'cash_not_returned' });
+      expect(dispute.status, JSON.stringify(dispute.body)).toBe(201);
+      const reported = await send(request(server()).post(`/billing/cash-return-obligations/${e.obligationId}/return`), 'a1', key()).send({ returnedAt: new Date(Date.now() - 1000).toISOString() });
+      expect(reported.status, JSON.stringify(reported.body)).toBe(200);
+      expect((await send(request(server()).post(`/billing/cash-return-obligations/${e.obligationId}/confirm`), 'b1', key()).send()).body.code).toBe('assistance_dispute_open');
+      expect((await admin.query(`SELECT kind FROM billing_assistance_restrictions($1, now())`, [ORG])).rows).toEqual([{ kind: 'T2' }]); // a report is not a confirmation
+      expect(dispute.body.id).toBeDefined();
+    });
+
+    it('the beneficiary\'s confirmation discharges a refund-origin obligation, returns the settled request and clears T2', async () => {
+      const a = await assistedPurchase();
+      const caseId = await caseFor(a.paymentId);
+      await completeRefund(caseId);
+      await effects().drainOnce();
+      const o = (await obligationsOf(a.requestId))[0]!;
+      await send(request(server()).post(`/billing/cash-return-obligations/${o.id}/return`), 'a1', key()).send({ returnedAt: new Date(Date.now() - 1000).toISOString() }).expect(200);
+      const confirmed = await send(request(server()).post(`/billing/cash-return-obligations/${o.id}/confirm`), 'b1', key()).send();
+      expect(confirmed.status, JSON.stringify(confirmed.body)).toBe(200);
+      expect((await obligationsOf(a.requestId))[0]).toMatchObject({ status: 'confirmed_returned', origin: 'refund_completion' });
+      expect((await one(`SELECT status FROM assistance_request WHERE id = $1`, [a.requestId])).status).toBe('returned');
+      expect((await admin.query(`SELECT 1 FROM billing_assistance_restrictions($1, now())`, [ORG])).rows).toEqual([]);
+      // the settled -> returned edge exists only for a confirmed refund-origin obligation
+      const other = await assistedPurchase();
+      await expect(admin.query(`UPDATE assistance_request SET status = 'returned' WHERE id = $1`, [other.requestId])).rejects.toMatchObject({ constraint: 'assistance_request_returned_by_confirmation' });
+    });
+
+    it('a late assisted settlement keeps its deadline obligation and gets nothing new; a non-entitlement refund has no effect', async () => {
+      const late = await lateSettlement();
+      const lateCase = await caseFor(late.paymentId);
+      await completeRefund(lateCase);
+      const np = await producerPayment({ target: 'none' });
+      const npCase = await caseFor(np.paymentId);
+      await completeRefund(npCase);
+      await effects().drainOnce();
+      expect(await effect(lateCase)).toEqual({ outcome: 'none', purchaseId: null, obligationId: null, reason: 'late_assisted_settlement' });
+      expect((await obligationsOf(late.requestId)).map((x) => [x.origin, x.refundCaseId])).toEqual([['deadline', null]]);
+      expect(await effect(npCase)).toEqual({ outcome: 'none', purchaseId: null, obligationId: null, reason: 'no_entitlement_basis' });
+      expect(await count(`SELECT count(*) AS n FROM subscription WHERE "organizationId" = $1`, [ORG])).toBe(0); // no Organization subscription touched
+    });
+
+    it('R6D-4: a purchase already reversed by another cause gets no second reversal; this refund cause is appended for S6h', async () => {
+      const p = await directPurchase('b2');
+      const caseId = await caseFor(p.paymentId);
+      await completeRefund(caseId);
+      const purchase = await purchaseOf(p.paymentId);
+      await admin.query(`INSERT INTO subscription_purchase_reversal ("purchaseId", cause) VALUES ($1, 'final_lost_chargeback')`, [purchase.id]); // a prior cause (S6e's, simulated)
+      await effects().drainOnce();
+      expect(await effect(caseId)).toEqual({ outcome: 'none', purchaseId: purchase.id, obligationId: null, reason: 'already_reversed' });
+      expect((await admin.query(`SELECT cause FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [purchase.id])).rows).toEqual([{ cause: 'final_lost_chargeback' }]);
+      expect((await admin.query(`SELECT cause, "refundCaseId" FROM subscription_purchase_reversal_cause WHERE "purchaseId" = $1`, [purchase.id])).rows).toEqual([{ cause: 'refund_completion', refundCaseId: caseId }]);
+      expect((await audit(purchase.id)).filter((e) => e.name === 'audit.subscription_purchase.reversed')).toEqual([]);
+    });
+
+    it('concurrent workers apply one effect: one reversal and one obligation', async () => {
+      const a = await assistedPurchase();
+      const caseId = await caseFor(a.paymentId);
+      await completeRefund(caseId);
+      const outcomes = await Promise.all(Array.from({ length: 8 }, () => effects().apply(caseId)));
+      expect(outcomes.filter((o) => o.kind === 'applied')).toHaveLength(1);
+      expect(outcomes.filter((o) => o.kind === 'already_applied')).toHaveLength(7);
+      expect(await reversals((await purchaseOf(a.paymentId)).id)).toBe(1);
+      expect(await obligationsOf(a.requestId)).toHaveLength(1);
+    });
+
+    it('a failure between the reversal and the obligation rolls both back; the effect is retried with backoff and applied once (also for a completion recorded earlier)', async () => {
+      const a = await assistedPurchase();
+      const caseId = await caseFor(a.paymentId);
+      await completeRefund(caseId); // recorded while the effect worker could not succeed: a historical completion for the next pass
+      await admin.query(`CREATE FUNCTION pg_temp_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '40001'; END $$;
+        CREATE TRIGGER zz_injected BEFORE INSERT ON cash_return_obligation FOR EACH ROW EXECUTE FUNCTION pg_temp_fail();`);
+      try {
+        expect(await effects().drainOnce()).toMatchObject({ failed: 1 });
+      } finally {
+        await admin.query(`DROP TRIGGER zz_injected ON cash_return_obligation; DROP FUNCTION pg_temp_fail();`);
+      }
+      expect(await reversals((await purchaseOf(a.paymentId)).id)).toBe(0); // the reversal did not survive without its obligation
+      expect(await obligationsOf(a.requestId)).toEqual([]);
+      expect(await one(`SELECT state, reason, attempts FROM refund_case_effect_attempt WHERE "refundCaseId" = $1`, [caseId])).toEqual({ state: 'retry', reason: 'technical_failure', attempts: 1 });
+      expect((await readCase(caseId)).body.commercialEffectPending).toMatchObject({ state: 'retry' });
+      await admin.query(`UPDATE refund_case_effect_attempt SET "workAfter" = now() WHERE "refundCaseId" = $1`, [caseId]);
+      await effects().drainOnce();
+      expect(await effect(caseId)).toMatchObject({ outcome: 'reversed_purchase_and_obligation_opened' });
+      expect((await readCase(caseId)).body).toMatchObject({ commercialEffect: { outcome: 'reversed_purchase_and_obligation_opened' }, commercialEffectPending: null });
+    });
+
+    it('R6D-6: contradictory evidence applies nothing, stays visible and non-terminal, and is applied once reconciled', async () => {
+      const a = await assistedPurchase();
+      const caseId = await caseFor(a.paymentId);
+      await completeRefund(caseId);
+      await backdate(a.requestId, `UPDATE assistance_request SET status = 'cash_collected' WHERE id = $1`); // a contradiction (test-only bypass)
+      expect(await effects().drainOnce()).toMatchObject({ review: 1 });
+      expect(await effect(caseId)).toBeUndefined();
+      expect(await reversals((await purchaseOf(a.paymentId)).id)).toBe(0);
+      expect((await readCase(caseId)).body.commercialEffectPending).toMatchObject({ state: 'review', reason: 'request_not_settled' });
+      await backdate(a.requestId, `UPDATE assistance_request SET status = 'settled' WHERE id = $1`); // reconciled
+      await admin.query(`UPDATE refund_case_effect_attempt SET "workAfter" = now() WHERE "refundCaseId" = $1`, [caseId]);
+      await effects().drainOnce();
+      expect(await effect(caseId)).toMatchObject({ outcome: 'reversed_purchase_and_obligation_opened' });
+    });
+
+    it('the database: one effect per case, append-only; a refund-origin obligation needs the case\'s reversed assisted purchase; a refund reversal needs its cause', async () => {
+      const a = await assistedPurchase();
+      const caseId = await caseFor(a.paymentId);
+      await completeRefund(caseId);
+      const purchase = await purchaseOf(a.paymentId);
+      const r = await one(`SELECT * FROM assistance_request WHERE id = $1`, [a.requestId]);
+      const ins = () => admin.query(`INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt", origin, "refundCaseId")
+        VALUES ($1, $2, $3, $4, $5, $6, 'refund_completion', $7)`, [r.id, r.organizationId, r.beneficiaryUserId, r.totalAmount, r.currency, r.cashCollectedAt, caseId]);
+      await expect(ins()).rejects.toMatchObject({ constraint: 'cash_return_obligation_refund_not_due' }); // the purchase is not reversed yet
+      await expect(admin.query(`INSERT INTO refund_case_effect ("refundCaseId", outcome, "purchaseId") VALUES ($1, 'reversed_purchase', $2)`, [caseId, purchase.id])).rejects.toMatchObject({ constraint: 'refund_case_effect_purchase' });
+      await effects().drainOnce();
+      await expect(admin.query(`UPDATE refund_case_effect SET reason = 'x'`)).rejects.toThrow();
+      await expect(admin.query(`DELETE FROM subscription_purchase_reversal_cause`)).rejects.toThrow();
+      await expect(admin.query(`INSERT INTO refund_case_effect ("refundCaseId", outcome, reason) VALUES ($1, 'none', 'no_entitlement_basis')`, [caseId])).rejects.toThrow(); // one per case
+      await expect(ins()).rejects.toThrow(); // one obligation per request
+      await expect(admin.query(`UPDATE cash_return_obligation SET origin = 'deadline' WHERE "refundCaseId" = $1`, [caseId])).rejects.toThrow(); // the origin is immutable
+    });
   });
 
   it('production mounts no refund route', () => {
