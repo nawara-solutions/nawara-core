@@ -116,6 +116,9 @@ Core V2 S6e-H (the Owner's H-2): `fraud_hold_place` (`companyId`, `holdId`, `ben
 `billing.fraud_hold.release` step-ups; `AUTH_SERVICE_POLICY` may admit `billing-service`, which consumes only bindings naming it.
 Core V2 S6f (the Owner's R6F-5): `recovery_surplus_external` (`companyId`, `surplusId`, `organizationId`, `amount`, `currency`), audience
 `billing-service`, after the dedicated `billing.recovery_surplus.record_external` step-up.
+Core V2 S6g (the Owner's R6G-1, R6G-3): `late_settlement_apply` (`companyId`, `lateSettlementId`, `assistanceRequestId`, `beneficiaryUserId`,
+`reasonCode` ∈ `cash_not_returned_attested` / `cash_not_returned_evidenced`), audience `billing-service`, after the dedicated
+`billing.late_settlement.apply` step-up.
 
 | Route | Caller | Purpose |
 |---|---|---|

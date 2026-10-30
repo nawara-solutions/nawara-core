@@ -409,6 +409,15 @@ only the binding, the step-up purpose and the audience differ.
 | Separation | the canonical binding separates Company, surplus, Organization, amount and currency; billing-service alone consumes it (F-7 as amended in §17b) |
 | Meaning | the Owner's authorization to RECORD an external repayment; it moves no money and is not a provider fact. Billing still requires File evidence and the Organization's confirmation (R-3b) |
 
+## 17d. S6g amendment: late-settlement application receipts (the Owner's R6G-1, R6G-3, 2026-10-30; IMPLEMENTED)
+
+| Item | Contract |
+|---|---|
+| `Binding` | `late_settlement_apply`: `audience: 'billing-service'`, `companyId`, `lateSettlementId`, `assistanceRequestId`, `beneficiaryUserId`, `reasonCode` ∈ `cash_not_returned_attested` \| `cash_not_returned_evidenced` (closed; no free text, no override). Exactly these fields |
+| Step-up | `billing.late_settlement.apply`, factor-only, Auth-local, consumed only by this operation's issuance |
+| Separation | the canonical binding separates Company, late settlement, request, beneficiary and reason code; billing-service alone consumes it (F-7 as amended in §17b) |
+| Meaning | S0 §3.4 L-4 condition 1 only: the Owner's authorization to APPLY one verified late assisted settlement as its request's single purchase. It moves no money and proves no evidence: Billing still checks the attestation or evidence, the absence of a purchase, the unconfirmed cash return and every contradiction rule (L-4 conditions 2 to 5, L-6) |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)
