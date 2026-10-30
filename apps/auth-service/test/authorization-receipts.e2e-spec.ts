@@ -832,6 +832,58 @@ describe('authorization receipts (S2-Auth.1)', () => {
       expect(await objects()).toEqual(before);
     });
   });
+
+  describe('capture-specific refund receipts (Core V2 R6H-5, the Owner\'s decision 2026-10-30)', () => {
+    it('a receipt bound to one capture fact is consumed only for exactly that capture; never as an ordinary refund or for another capture', async () => {
+      const o = await ready();
+      const capture = randomUUID();
+      const r = await issue(o, binding(o.companyId, { captureFactId: capture }));
+      const ordinary = (({ captureFactId: _c, ...b }) => b)(r.binding as Record<string, unknown>);
+      // a refused consumption changes nothing: the receipt stays issued and is then consumed for its own capture
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: ordinary, consumeRef: randomUUID() }))).toBe('receipt_invalid');
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: { ...r.binding, captureFactId: randomUUID() }, consumeRef: randomUUID() }))).toBe('receipt_invalid');
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: { ...r.binding, captureFactId: capture.toUpperCase() }, consumeRef: randomUUID() })))
+        .toBe('receipt_binding_invalid');
+      expect((await row(r.receiptId)).status).toBe('issued');
+      const ref = randomUUID();
+      const c = await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: ref });
+      expect(c).toMatchObject({ consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
+      expect(await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: ref })).toEqual(c); // the same consumption, answered again
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('consume_ref_conflict'); // never twice
+      // recovery after a lost response: only for the same capture-specific binding
+      expect(await svc.lookupConsumption(CALLER, { consumeRef: ref, binding: r.binding })).toEqual(c);
+      expect(await codeOf(svc.lookupConsumption(CALLER, { consumeRef: ref, binding: ordinary }))).toBe('not_found');
+      expect(await codeOf(svc.lookupConsumption(CALLER, { consumeRef: ref, binding: { ...r.binding, captureFactId: randomUUID() } }))).toBe('not_found');
+    });
+
+    it('an ordinary receipt never authorizes a capture-specific refund; its shape and behaviour are unchanged', async () => {
+      const o = await ready();
+      const r = await issue(o);
+      expect('captureFactId' in r.binding).toBe(false);
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: { ...r.binding, captureFactId: randomUUID() }, consumeRef: randomUUID() }))).toBe('receipt_invalid');
+      expect((await row(r.receiptId)).status).toBe('issued');
+      await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() });
+      expect((await row(r.receiptId)).status).toBe('consumed');
+    });
+
+    it('issuance: the same refund.authorize factor-only proof; a malformed capture fact or an unexpected field is refused before the proof is burned', async () => {
+      const o = await ready();
+      const su = await t.stepUpToken(o.tokens as Tokens, PURPOSE, o.totpSecret);
+      for (const bad of [{ captureFactId: null }, { captureFactId: 'fact-1' }, { captureFactId: randomUUID().toUpperCase() }, { captureFactIds: [randomUUID()] }]) {
+        expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: binding(o.companyId, bad) })), JSON.stringify(bad)).toBe('receipt_binding_invalid');
+      }
+      expect(await stepUpConsumed(su)).toBe(false);
+      const k = key();
+      const b = binding(o.companyId, { captureFactId: randomUUID() });
+      const r = await svc.issue(o.owner, { stepUpToken: su, idempotencyKey: k, binding: b });
+      expect(r.secret).toEqual(expect.any(String));
+      expect(await stepUpConsumed(su)).toBe(true);
+      // the issue replay hash covers the capture fact: the same key with another capture is a different request
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: k, binding: { ...b, captureFactId: randomUUID() } }))).toBe('idempotency_key_reused');
+      const audit = (await t.db.query(`SELECT metadata FROM auth_audit_event WHERE type='authorization_receipt.issued' AND "targetId"=$1`, [r.receiptId])).rows;
+      expect(audit.map((a) => a.metadata)).toEqual([{ companyId: o.companyId, operation: 'refund' }]); // no capture fact in Auth's audit (no scope change)
+    });
+  });
 });
 
 describe('authorization receipts without the pepper (fail closed)', () => {

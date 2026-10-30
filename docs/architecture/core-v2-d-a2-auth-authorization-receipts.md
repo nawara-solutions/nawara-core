@@ -428,6 +428,19 @@ only the binding, the step-up purpose and the audience differ.
 | Meaning | the Owner's authorization of ONE association of an unmatched verified provider fact with ONE destination (Payment re-validates the fact, the destination, the Company, the amount, the currency and the kind under its locks; it moves no money), and of ONE recognition of a recovery obligation's outstanding amount as a loss (accounting only: never forgiveness, never a recovery, T3 unchanged) |
 | Not added | AUTH-03b (a definitive proof of NON-consumption): Q8 stays fail-closed (the Owner's R6H-9, Option B) |
 
+## 17f. R6H-5 amendment: capture-specific refund receipts (the Owner's decision, 2026-10-30; IMPLEMENTED in Auth)
+
+The Owner resolved the R6H-5 contract gap (register PAY-13 G) with the narrowly scoped optional `captureFactId` approach.
+
+| Item | Contract |
+|---|---|
+| `Binding` | the `refund` binding of §5.1 with ONE optional field, `captureFactId` (a canonical lower-case UUID: Payment's verified `provider_transaction_fact` of kind `capture`). Absent for an ordinary refund, never null; null, empty, another spelling or any other type is `receipt_binding_invalid`, as is any other new field |
+| Ordinary refunds | unchanged: the field is absent, so the canonical form, the binding digest, the request hash and every behaviour of an ordinary receipt are exactly what they were (pinned by a canonical-form test) |
+| Separation | the field is part of the canonical binding and so of every digest: a capture-specific receipt is never consumed or looked up as an ordinary one, nor the reverse, and a receipt for one capture never for another (`receipt_invalid` / `not_found`; a refused consumption changes nothing). An issue replay with another capture under the same key is `idempotency_key_reused` |
+| Step-up, lifetime, consumption | unchanged: the factor-only `refund.authorize` purpose, the live Owner, 10 minutes, single consumption under one `consumeRef`, lookup recovery, audience `payment-service` only. Auth's audit metadata stays `{companyId, operation}` (no scope change) |
+| Meaning | the Owner's authorization of a FULL refund of exactly that captured movement (its amount and currency), under the bound refund case and payment. Billing and Payment validate the identical binding: Billing binds the case to the capture; Payment re-verifies the capture fact, its exposure and the case under its locks before consuming. Auth never verifies that the fact exists (Payment's evidence, not Auth's) |
+| Not added | AUTH-03b: Q8 stays fail-closed (R6H-9). No new purpose, operation or route |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)

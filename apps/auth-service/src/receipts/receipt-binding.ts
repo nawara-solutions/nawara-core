@@ -22,6 +22,13 @@ export interface RefundBinding {
   currency: string;
   reason: string;
   legalOverride: boolean;
+  /**
+   * Core V2 S6h R6H-5 (the Owner's decision, 2026-10-30): the ONE verified capture fact (Payment's `provider_transaction_fact`) a
+   * capture-specific refund returns. ABSENT for an ordinary refund, never null: an ordinary binding's canonical form, and so every digest of
+   * an ordinary receipt, is exactly what it was. Present, it is part of what the Owner approved: a receipt for one capture never refunds
+   * another, and (the digests differ) a capture-specific receipt is never consumed as an ordinary one, nor the reverse.
+   */
+  captureFactId?: string;
 }
 
 /**
@@ -154,8 +161,8 @@ export const RECEIPT_PURPOSES = {
   provider_fact_associate: PROVIDER_FACT_ASSOCIATE_PURPOSE, recovery_write_off: RECOVERY_WRITE_OFF_PURPOSE,
 } as const satisfies Record<ReceiptOperation, string>;
 
-const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride'] as const;
-const OPTIONAL = new Set(['legalOverride']);
+const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride', 'captureFactId'] as const;
+const OPTIONAL = new Set(['legalOverride', 'captureFactId']);
 const DISPUTE_FIELDS = ['operation', 'audience', 'companyId', 'disputeId', 'paymentId', 'decision'] as const;
 const DECISIONS: readonly string[] = ['contest', 'accept'];
 const HOLD_PLACE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId', 'reason'] as const;
@@ -199,10 +206,14 @@ export function parseBinding(value: unknown): ReceiptBinding {
   if (typeof v.currency !== 'string' || !CURRENCY.test(v.currency)) throw invalid();
   if (typeof v.reason !== 'string' || !REASON.test(v.reason)) throw invalid();
   if (typeof legalOverride !== 'boolean') throw invalid();
-  return {
+  // R6H-5: a capture fact, when given, is a canonical lower-case UUID (null, empty or any other spelling is refused, never treated as absent)
+  if ('captureFactId' in v && (typeof v.captureFactId !== 'string' || !UUID.test(v.captureFactId))) throw invalid();
+  const binding: RefundBinding = {
     operation: 'refund', audience: RECEIPT_AUDIENCE, companyId: v.companyId as string, refundCaseId: v.refundCaseId as string,
     paymentId: v.paymentId as string, amount: v.amount, currency: v.currency, reason: v.reason, legalOverride,
   };
+  if ('captureFactId' in v) binding.captureFactId = v.captureFactId as string;
+  return binding;
 }
 
 function parseDisputeDecision(v: Record<string, unknown>): DisputeDecisionBinding {

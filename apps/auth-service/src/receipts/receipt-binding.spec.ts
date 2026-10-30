@@ -61,6 +61,48 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     expect(Object.values(RECEIPT_DOMAINS).every((v) => v.endsWith('.v1'))).toBe(true);
   });
 
+  describe('capture-specific refund (Core V2 R6H-5, the Owner\'s decision 2026-10-30)', () => {
+    const CAPTURE = '44444444-4444-4444-8444-444444444444';
+    const OTHER = '55555555-5555-4555-8555-555555555555';
+    const pepper = randomBytes(32);
+    const digest = (b: unknown) => bindingDigest(pepper, canonicalBinding(parseBinding(b)));
+
+    it('an ordinary refund keeps exactly its existing shape and canonical form (no captureFactId key, so every ordinary digest is unchanged)', () => {
+      const parsed = parseBinding(valid());
+      expect('captureFactId' in parsed).toBe(false);
+      expect(canonicalBinding(parsed)).toBe('{"amount":4900,"audience":"payment-service","companyId":"11111111-1111-4111-8111-111111111111","currency":"TND",'
+        + '"legalOverride":false,"operation":"refund","paymentId":"33333333-3333-4333-8333-333333333333","reason":"duplicate_charge",'
+        + '"refundCaseId":"22222222-2222-4222-8222-222222222222"}');
+    });
+
+    it('parses the exact capture fact; it is part of the canonical form', () => {
+      const b = parseBinding({ ...valid(), captureFactId: CAPTURE }) as RefundBinding;
+      expect(b).toEqual({ ...valid(), captureFactId: CAPTURE });
+      expect(canonicalBinding(b)).toContain(`"captureFactId":"${CAPTURE}"`);
+    });
+
+    it('separates ordinary from capture-specific, and one capture from another (so no receipt is ever consumed for the other)', () => {
+      const ordinary = digest(valid());
+      const one = digest({ ...valid(), captureFactId: CAPTURE });
+      const other = digest({ ...valid(), captureFactId: OTHER });
+      expect(new Set([ordinary, one, other]).size).toBe(3);
+      expect(digest({ ...valid(), captureFactId: CAPTURE, legalOverride: false })).toBe(one); // key order and the default never matter
+    });
+
+    it('refuses a malformed capture fact: null, empty, upper-case, not a uuid, not a string', () => {
+      const bad: Array<[string, unknown]> = [['null', null], ['empty', ''], ['upper-case', 'abcdef44-4444-4444-8444-44444444444a'.toUpperCase()], ['not a uuid', 'fact-1'],
+        ['a number', 1], ['an object', { id: CAPTURE }], ['undefined', undefined], ['braced', `{${CAPTURE}}`]];
+      for (const [what, v] of bad) expect(code(() => parseBinding({ ...valid(), captureFactId: v })), what).toBe('receipt_binding_invalid');
+    });
+
+    it('is a refund field only: no other operation accepts it, and it never changes the step-up purpose', () => {
+      expect(code(() => parseBinding({ operation: 'dispute_decision', audience: 'payment-service', companyId: valid().companyId, disputeId: OTHER,
+        paymentId: valid().paymentId, decision: 'accept', captureFactId: CAPTURE }))).toBe('receipt_binding_invalid');
+      expect(RECEIPT_PURPOSES.refund).toBe('refund.authorize');
+      expect(RECEIPT_AUDIENCES.refund).toBe('payment-service');
+    });
+  });
+
   describe('dispute decision (S6e Auth prerequisite, R6E-3)', () => {
     const dispute = () => ({
       operation: 'dispute_decision', audience: 'payment-service', companyId: '11111111-1111-4111-8111-111111111111',

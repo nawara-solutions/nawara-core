@@ -16,6 +16,11 @@ export class RefundBindingDto {
   @ApiProperty({ pattern: '^[A-Z]{3}$', description: 'ISO 4217, upper case.' }) currency!: string;
   @ApiProperty({ pattern: '^[a-z][a-z0-9_]{0,63}$', description: 'A bounded reason code, never free text (Q2).' }) reason!: string;
   @ApiPropertyOptional({ default: false, description: 'Part of what the Owner approved; confers no authority (Q1).' }) legalOverride?: boolean;
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Core V2 R6H-5: the one verified capture fact a capture-specific refund returns. Omit it for an ordinary refund (never null): '
+      + 'a capture-specific receipt never authorizes an ordinary refund or another capture, nor the reverse.',
+  }) captureFactId?: string;
 }
 
 /** Core V2 S6e Auth prerequisite (the Owner's R6E-3): an Owner's decision on one Payment dispute of their own Company. */
