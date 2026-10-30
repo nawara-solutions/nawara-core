@@ -389,8 +389,29 @@ describeWithEnv(
       expect((await sim({ event: 'lost' })).json?.delivered).toEqual({ status: 200 });
       await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM dispute_loss_effect WHERE "disputeId" = $1`, [d.id])).rowCount === 1,
         30_000, `Billing's dispute loss worker to apply the verified loss\n${tails()}`);
-      expect((await billingAdmin.query(`SELECT source FROM payment_dispute_loss WHERE "disputeId" = $1`, [d.id])).rows).toEqual([{ source: 'event' }]);
+      // Billing records the verified loss ONCE, from whichever authorized path reaches it first: the broker event (EVT-03) or Payment's
+      // losses read (R6E-6 read recovery, polled by the dispute loss worker every 5 s). Neither order is required by the contract, and the
+      // outcome must be the same either way, so the source is checked for consistency, not for a winner.
+      const lostEventId = (await paymentAdmin.query(`SELECT id FROM outbox WHERE name = 'payment.dispute.lost' AND payload->>'disputeId' = $1`, [d.id])).rows[0].id as string;
+      const loss = (await billingAdmin.query(`SELECT source, "eventId" FROM payment_dispute_loss WHERE "disputeId" = $1`, [d.id])).rows;
+      expect(loss).toHaveLength(1);
+      expect([{ source: 'event', eventId: lostEventId }, { source: 'reconciliation', eventId: null }]).toContainEqual(loss[0]);
+      // whichever path won, the verified event still reaches Billing, broker-verified (S1e), and is deduplicated: no second loss, no second effect
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM event_provenance WHERE "eventId" = $1 AND consumer = $2`, [lostEventId, BILLING_QUEUE])).rowCount === 1,
+        30_000, `Billing to consume the verified payment.dispute.lost event\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT verified, "producerUserId" FROM event_provenance WHERE "eventId" = $1 AND consumer = $2`, [lostEventId, BILLING_QUEUE])).rows)
+        .toEqual([{ verified: true, producerUserId: 'payment-service' }]);
+      expect((await billingAdmin.query(`SELECT source, "eventName" FROM payment_event_origin WHERE "eventId" = $1`, [lostEventId])).rows)
+        .toEqual([{ source: 'payment-service', eventName: 'payment.dispute.lost' }]);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM payment_dispute_loss WHERE "disputeId" = $1`, [d.id])).rows[0].n).toBe(1);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM dispute_loss_effect WHERE "disputeId" = $1`, [d.id])).rows[0].n).toBe(1);
       expect((await billingAdmin.query(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [d.id])).rows[0].outcome).toBe('reversed_purchase');
+      // the business consequences, identical in both orders: the money is not retained, and the buyer keeps no entitlement from this purchase
+      const bal = await call(PAYMENT_URL, 'GET', ownerToken, `/payment/admin/payments/${paymentId}/balance`);
+      expect(bal.json?.currencies, JSON.stringify(bal.json)).toEqual([{ currency: 'TND', captured: 7300, refundedNet: 0, chargebackNet: 7300, netRetained: 0 }]);
+      const productId = (await billingAdmin.query(`SELECT "productId" FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows[0].productId as string;
+      expect((await call(BILLING_URL, 'GET', producerToken.token, `/billing/users/${PAYER}/platforms/${TEST_PLATFORM}/products/${productId}/entitlement`)).json)
+        .toEqual({ valid: false, expiresAt: null });
       expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
         .toEqual([{ cause: 'final_lost_chargeback' }]);
       expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'payment.dispute.%' AND payload->>'disputeId' = $1 ORDER BY name`, [d.id])).rows.map((x) => x.name))
