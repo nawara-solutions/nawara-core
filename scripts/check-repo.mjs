@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow, checkActionPins, checkScheduledBackupEntry, checkScheduledBackupVerifier, checkAuthErrorCoverage, checkAuthOrganizationBoundary, checkRepairAuditProducerScope, repairAuditScanned, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, checkDroneSshFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic, checkOutboxRetentionEligibility, OUTBOX_RETENTION_APPROVED_SERVICES, checkEventProvenanceOptIn, AUDIT_ADMISSION_FILES, KIT_EVENT_BUS, KIT_PROVENANCE, NOTIFICATION_KEYED_FILES, checkEventReemission, checkEnforcementPolicies, checkBrokerDeadLettering, checkNotificationTopologyGate, PROVISION_SCRIPT, TOPOLOGY_VERIFIER, checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, KIT_REEMISSION, KIT_SERIALIZATION, KIT_OUTBOX_RELAY, KIT_PACKAGE } from './lib/checks.mjs';
+import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow, checkPreLifecycleInvariant, HIERARCHY_SCHEMA_SERVICES, KIT_ORGANIZATION_REFERENCE, BILLING_RESTRICTIONS, checkActionPins, checkScheduledBackupEntry, checkScheduledBackupVerifier, checkAuthErrorCoverage, checkAuthOrganizationBoundary, checkRepairAuditProducerScope, repairAuditScanned, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, checkDroneSshFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic, checkOutboxRetentionEligibility, OUTBOX_RETENTION_APPROVED_SERVICES, checkEventProvenanceOptIn, AUDIT_ADMISSION_FILES, KIT_EVENT_BUS, KIT_PROVENANCE, NOTIFICATION_KEYED_FILES, checkEventReemission, checkEnforcementPolicies, checkBrokerDeadLettering, checkNotificationTopologyGate, PROVISION_SCRIPT, TOPOLOGY_VERIFIER, checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, KIT_REEMISSION, KIT_SERIALIZATION, KIT_OUTBOX_RELAY, KIT_PACKAGE } from './lib/checks.mjs';
 import { ACTIVATION_FILE, AUDIT_BINDINGS_FILE, PROVISION_FILE, checkProvisionTopicGrants, checkTopicPermissionSources } from './lib/topic-permissions.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -223,6 +223,20 @@ problems.push(...checkEnvReaderClis(Object.fromEntries([...ENV_READER_CLIS, ENV_
   problems.push(...checkEnforcementPolicies(contracts, sources)); // Core V2 S1e-1 (S0-C6)
   problems.push(...checkBrokerDeadLettering(sources, readOrUndefined(KIT_EVENT_BUS))); // Core V2 OD-BRK-1
   problems.push(...checkNotificationTopologyGate(readOrUndefined(PROVISION_SCRIPT), readOrUndefined(TOPOLOGY_VERIFIER))); // Core V2 OD-BRK-2a
+  { // Core V2 T-A3: the pre-lifecycle invariant (S0-C7; DN-1.4; V5-9)
+    const kit = {};
+    for (const f of walk(join(root, 'libs/service-kit/src'))) if (f.endsWith('.ts') && !f.endsWith('.spec.ts') && !f.endsWith('.d.ts')) kit[relative(root, f).split('\\').join('/')] = readFileSync(f, 'utf8');
+    const migrations = {};
+    for (const app of [...HIERARCHY_SCHEMA_SERVICES, 'billing-service']) {
+      migrations[app] = {};
+      try {
+        for (const f of readdirSync(join(root, 'apps', app, 'db/migrations'))) if (f.endsWith('.sql')) migrations[app][`apps/${app}/db/migrations/${f}`] = readFileSync(join(root, 'apps', app, 'db/migrations', f), 'utf8');
+      } catch {
+        // a service without migrations here is reported by its own checks
+      }
+    }
+    problems.push(...checkPreLifecycleInvariant({ sources, kit, migrations, reference: readOrUndefined(KIT_ORGANIZATION_REFERENCE), restrictions: readOrUndefined(BILLING_RESTRICTIONS) }));
+  }
   problems.push(...checkTopologyMonitor({ // Core V2 OD-BRK-2b-1
     files: Object.fromEntries(TOPOLOGY_MONITOR_FILES.map((n) => [n, readOrUndefined(`${TOPOLOGY_MONITOR_DIR}/${n}`)]).filter(([, t]) => t !== undefined)),
     verifier: readOrUndefined(TOPOLOGY_VERIFIER),
@@ -318,4 +332,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, scheduled-backup pins and installation verifier, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, event provenance opt-in, producer re-emission foundation, consumer enforcement policies, broker dead-lettering topology, Notification topology gate, Notification topology monitor and containment, topic permission sources, generated provisioning topic grants, outbox retention eligibility, Auth to Organization dependency boundary, reference-repair audit producer scope');
+console.log('repository checks passed: workflow safety, scheduled-backup pins and installation verifier, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, event provenance opt-in, producer re-emission foundation, consumer enforcement policies, broker dead-lettering topology, Notification topology gate, Notification topology monitor and containment, topic permission sources, generated provisioning topic grants, outbox retention eligibility, Auth to Organization dependency boundary, reference-repair audit producer scope, pre-lifecycle invariant');
