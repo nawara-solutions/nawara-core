@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { generateServiceToken } from '@nawara/service-kit';
+import { OutboxRelayService, generateServiceToken } from '@nawara/service-kit';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config/app-config.js';
 import { DbService, type Queryable } from '../src/db/db.service.js';
@@ -319,23 +319,85 @@ describe('authorization receipt routes (S2-Auth.2)', () => {
   });
 
   describe('fault injection: lost responses and uncertain outcomes (D-A2 §10)', () => {
-    /** Replaces DbService.tx once with `mode`, for the duration of `fn`. */
+    /** The receipt write of issuance (INSERT) or consumption (UPDATE): the statement each fault below targets. */
+    const RECEIPT_WRITE = /^\s*(INSERT INTO|UPDATE)\s+authorization_receipt\b/;
+    const RECEIPT_READ = /\bauthorization_receipt\b/;
+
+    /**
+     * Injects ONE fault into the transaction that writes a receipt, for the duration of `fn`. The fault is scoped by statement, not by
+     * call order: the service's background workers share this DbService (the outbox relay runs a `tx` every second), so a fault armed
+     * for "the next transaction" could be taken by a relay pass and the request would run unfaulted (an intermittent CI failure).
+     *  - fail_proven / fail_unknown: thrown in place of the receipt write, inside a real transaction that really rolls back (with
+     *    everything it did before, such as issuance's step-up consumption);
+     *  - commit_then_lose: the transaction really commits, then its answer is lost;
+     *  - alsoBreakLookup: afterwards every receipt read through `query` fails too (other statements are untouched).
+     * `fn` must make the fault fire: an injection nothing received fails the test. Nothing is installed once `once` has returned (a
+     * transaction still finishing then cannot leave `query` broken for the tests that follow).
+     */
     const once = async <T>(mode: 'commit_then_lose' | 'fail_proven' | 'fail_unknown', fn: () => Promise<T>, alsoBreakLookup = false) => {
       const dbs = t.app.get(DbService);
       const tx = dbs.tx.bind(dbs);
       const query = dbs.query.bind(dbs);
       let armed = true;
+      let active = true;
       dbs.tx = (async (work: (q: Queryable) => Promise<unknown>) => {
         if (!armed) return tx(work);
-        armed = false;
-        if (mode === 'fail_proven') throw statementError();
-        if (mode === 'fail_unknown') throw connectionLost();
-        await tx(work);
-        if (alsoBreakLookup) dbs.query = (async () => { throw connectionLost(); }) as typeof dbs.query;
+        let target = false;
+        const out = await tx((q) => work({
+          query: ((sql: string, params?: unknown[]) => {
+            if (armed && RECEIPT_WRITE.test(sql)) {
+              armed = false;
+              target = true;
+              if (mode === 'fail_proven') return Promise.reject(statementError());
+              if (mode === 'fail_unknown') return Promise.reject(connectionLost());
+            }
+            return q.query(sql, params);
+          }) as Queryable['query'],
+        }));
+        if (!target) return out;
+        if (alsoBreakLookup && active) {
+          dbs.query = ((sql: string, params?: unknown[]) =>
+            RECEIPT_READ.test(sql) ? Promise.reject(connectionLost()) : query(sql, params)) as typeof dbs.query;
+        }
         throw connectionLost(); // committed, but the answer never arrived
       }) as typeof dbs.tx;
-      try { return await fn(); } finally { dbs.tx = tx; dbs.query = query; }
+      try {
+        const out = await fn();
+        expect(armed, 'the injected fault reached the receipt transaction').toBe(false);
+        return out;
+      } finally { active = false; dbs.tx = tx; dbs.query = query; }
     };
+
+    it('the fault reaches only the receipt transaction: a relay pass while it is armed neither takes nor suffers it', async () => {
+      const relay = t.app.get(OutboxRelayService).relay;
+      const o = await ready();
+      const r = await issue(o); // leaves audit evidence in the outbox for the relay to publish
+      const ref = randomUUID();
+      const first = await once('fail_proven', async () => {
+        const pass = await relay.drainOnce(); // what the relay's timer may run at any instant of the request
+        expect(pass.failed).toBe(0);
+        return svcPost(CONSUME, { secret: r.secret, binding: r.binding, consumeRef: ref });
+      });
+      expect([first.status, first.body.code]).toEqual([503, 'receipt_unavailable']);
+      expect(await status(r.receiptId)).toBe('issued');
+    });
+
+    it('a lost commit with a broken lookup leaves the relay and every non-receipt statement working, and nothing broken afterwards', async () => {
+      const relay = t.app.get(OutboxRelayService).relay;
+      const dbs = t.app.get(DbService);
+      const o = await ready();
+      const r = await issue(o);
+      const ref = randomUUID();
+      const first = await once('commit_then_lose', async () => {
+        const res = await svcPost(CONSUME, { secret: r.secret, binding: r.binding, consumeRef: ref });
+        expect((await relay.drainOnce()).failed).toBe(0); // a pass after the fault fired, while receipt reads are broken
+        expect((await dbs.query<{ one: number }>('SELECT 1 AS one')).rows).toEqual([{ one: 1 }]);
+        return res;
+      }, true);
+      expect([first.status, first.body.code]).toEqual([503, 'receipt_outcome_unknown']);
+      expect((await svcPost(LOOKUP, { consumeRef: ref, binding: r.binding })).status).toBe(200); // restored
+      await ready(); // the next test's fixture works
+    });
 
     it('consumption committed, answer lost: recovered from what committed (200), retries converge, a new reference conflicts', async () => {
       const o = await ready();
