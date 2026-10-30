@@ -4077,3 +4077,33 @@ export function checkRepairAuditProducerScope(sources) {
   }
   return problems;
 }
+
+/** Core V2 Phase 3: workflows that run test suites ON DEMAND only (a schedule or an automatic trigger is a separate Owner decision). */
+export const ON_DEMAND_WORKFLOWS = ['real-broker-certification.yml'];
+
+/**
+ * Core V2 Phase 3: an on-demand test workflow is `workflow_dispatch` only (no schedule, pull request, push or workflow_run), reads the
+ * repository with a read-only token, and holds nothing of production: no environment, no secret, no SSH.
+ */
+export function checkOnDemandWorkflow(fileName, text) {
+  const problems = [];
+  const doc = parse(text);
+  const triggers = triggerNames(doc);
+  if (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch') {
+    problems.push(`${fileName}: an on-demand test workflow runs on workflow_dispatch only (found: ${triggers.join(', ') || 'nothing'}); a schedule or an automatic trigger is a separate Owner decision`);
+  }
+  for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+    const where = `${fileName} job "${jobId}"`;
+    const perms = effectivePermissions(doc, job);
+    const granted = Object.entries(perms).filter(([, v]) => v !== 'none');
+    if (granted.length !== 1 || granted[0][0] !== 'contents' || granted[0][1] !== 'read') {
+      problems.push(`${where}: an on-demand test workflow holds only contents: read (found: ${JSON.stringify(perms)})`);
+    }
+    if (environmentOf(job) !== undefined) problems.push(`${where}: an on-demand test workflow declares no environment`);
+    const secret = [...JSON.stringify(job).matchAll(SECRET_REFERENCE)].map((m) => m[1] ?? m[2]);
+    if (secret.length > 0) problems.push(`${where}: an on-demand test workflow reads no secret (found: ${secret.join(', ')})`);
+    const steps = asArray(job.steps);
+    if (usesSsh(steps) || steps.some((s) => NATIVE_REMOTE_SHELL.test(String(s.run ?? '')))) problems.push(`${where}: an on-demand test workflow uses no SSH`);
+  }
+  return problems;
+}

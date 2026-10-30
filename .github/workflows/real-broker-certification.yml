@@ -1,0 +1,110 @@
+name: real-broker certification (on demand)
+
+# Core V2 Phase 3 (post-S6 stabilization): the five real-broker deploy suites (`npm run test:deploy:real-broker`) on a disposable
+# GitHub-hosted runner, ON DEMAND only. They are not part of `core-ci-passed` and never run on a pull request, a push or a schedule
+# (a recurring run is a separate Owner decision).
+#
+# Each suite provisions its OWN disposable resources on the runner's Docker daemon, named after the suite and its process id
+# (rbreal-, rbtopic-, rbnotif-, rbcontain-, rbcons-): a RabbitMQ node converged by the AUTHENTIC infra/rabbitmq/provision.sh on an
+# internal network, a PostgreSQL 16, generated per-run credentials, and test-only root-owned latches in the run's own temporary
+# directory. Every provenance, authentication, topic-grant, dead-lettering and replay assertion is the suite's own, unchanged.
+# Nothing here reaches production: no secret, no SSH, no environment, no deployed broker, read-only repository token.
+#
+# Run:   gh workflow run real-broker-certification.yml --ref <branch>      (then: gh run watch)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One certification run per ref at a time; a second dispatch waits instead of cancelling a run mid-cleanup.
+concurrency:
+  group: real-broker-certification-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The Node version the SERVICES run on (as core-ci.yml).
+  NODE_VERSION: '22'
+
+jobs:
+  real-broker:
+    name: real-broker deploy suites
+    runs-on: ubuntu-24.04
+    # The five suites take about 25 minutes locally; each suite is also bounded by node --test (30 minutes per file).
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - name: the npm script runs exactly the five real-broker suites
+        run: |
+          node -e '
+            const s = require("./package.json").scripts["test:deploy:real-broker"];
+            const want = ["real-broker.mjs", "real-broker-topic-grants.mjs", "real-broker-notification-topology.mjs",
+              "real-broker-topology-containment.mjs", "real-broker-consumers.mjs"];
+            const got = [...s.matchAll(/scripts\/deploy-tests\/(real-broker[\w-]*\.mjs)/g)].map((m) => m[1]);
+            if (JSON.stringify(got.sort()) !== JSON.stringify(want.sort())) { console.error("suites:", got); process.exit(1); }
+            console.log("suites:", got.join(" "));'
+
+      # The containment suite runs its installer as root of an unprivileged user namespace (`unshare -r`), which Ubuntu 24.04 restricts
+      # through AppArmor by default. Lifted on this disposable runner only; the suite itself asserts the namespace works.
+      - name: runner prerequisites (Docker, unprivileged user namespaces)
+        run: |
+          docker version --format 'docker {{.Server.Version}}'
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -r true
+
+      - name: real-broker deploy suites
+        timeout-minutes: 100
+        run: |
+          set -o pipefail
+          npm run test:deploy:real-broker 2>&1 | tee "$RUNNER_TEMP/real-broker.log"
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo '### real-broker deploy suites'
+            echo '```'
+            grep -E '^ℹ (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ' "$RUNNER_TEMP/real-broker.log" || echo 'no test summary (the run stopped before the suites finished)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # On failure: the full output and what the suites' own cleanup left behind (their container logs), for diagnosis.
+      - name: collect failure diagnostics
+        if: failure() || cancelled()
+        run: |
+          d="$RUNNER_TEMP/diagnostics"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/real-broker.log" "$d/" 2>/dev/null || true
+          docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' > "$d/containers.txt" || true
+          docker network ls --format '{{.Name}}' > "$d/networks.txt" || true
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E '^(rbreal|rbtopic|rbnotif|rbcontain|rbcons)-' || true); do
+            docker logs --tail 500 "$c" > "$d/container-$c.log" 2>&1 || true
+          done
+      - name: upload failure diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: real-broker-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # The suites remove what they created, by recorded id. This removes only what a crashed or timed-out suite left behind (the five
+      # suites' own name prefixes), then reports anything that remains.
+      - name: clean up disposable containers and networks
+        if: always()
+        run: |
+          prefix='^(rbreal|rbtopic|rbnotif|rbcontain|rbcons)-'
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E "$prefix" || true); do echo "removing container $c"; docker rm -f -v "$c" >/dev/null; done
+          for n in $(docker network ls --format '{{.Name}}' | grep -E "$prefix" || true); do echo "removing network $n"; docker network rm "$n" >/dev/null; done
+          for v in $(docker volume ls --format '{{.Name}}' | grep -E "$prefix" || true); do echo "removing volume $v"; docker volume rm "$v" >/dev/null; done
+          left=$(docker ps -a --format '{{.Names}}' | grep -E "$prefix" || true)
+          if [ -n "$left" ]; then echo "::error::disposable containers remain: $left"; exit 1; fi
+          echo 'no disposable container remains'
