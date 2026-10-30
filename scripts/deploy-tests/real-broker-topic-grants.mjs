@@ -292,7 +292,11 @@ test('producers: each of the six publishes EVERY key of its generated grant, car
   const auditSent = [...sent].filter(([, s]) => s.key.startsWith('audit.')).map(([id]) => id);
   assert.ok(await until(() => auditSent.every((id) => received.audit.has(id))), 'Audit receives every authorized audit action');
   const payments = [...sent].filter(([, s]) => s.svc === 'payment-service' && !s.key.startsWith('audit.'));
-  assert.ok(await until(() => payments.filter(([, s]) => s.key !== 'payment.created').every(([id]) => received.billing.has(id))), 'Billing receives its Payment events');
+  // exactly the Payment events Billing binds (its consumed contract): never payment.created, and (since Core V2 S6e-D) never
+  // payment.dispute.opened, which Billing deliberately does not consume (the S6 certification corrected this stale expectation)
+  assert.ok(await until(() => payments.filter(([, s]) => BILLING_BINDINGS.includes(s.key)).every(([id]) => received.billing.has(id))), 'Billing receives its Payment events');
+  assert.ok(payments.some(([, s]) => !BILLING_BINDINGS.includes(s.key)), 'Payment also publishes events Billing does not bind');
+  for (const [id, s] of payments) if (!BILLING_BINDINGS.includes(s.key)) assert.ok(!received.billing.has(id), `Billing never receives ${s.key}`);
   assert.ok(!payments.some(([id, s]) => s.key === 'payment.created' && received.billing.has(id)));
   assert.equal(received.notification.size, 0, 'nothing reaches Notification while Auth domain events are inactive');
 });
