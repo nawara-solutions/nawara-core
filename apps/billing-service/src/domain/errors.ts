@@ -98,6 +98,11 @@ export type BillingErrorCode =
   | 'recovery_authorization_refused'
   | 'recovery_authorization_unresolved'
   | 'recovery_authorization_unavailable'
+  // Core V2 S6h-B reconciliation and losses (register BIL-33, BIL-34; R6H-1 to R6H-12)
+  | 'invalid_reconciliation_request'
+  | 'reconciliation_case_not_acknowledgeable'
+  | 'reconciliation_case_resolved'
+  | 'write_off_not_permitted'
   // Core V2 S6g late assisted settlement application (register BIL-32; R6G-1 to R6G-9)
   | 'invalid_late_settlement_request'
   | 'late_settlement_refused'

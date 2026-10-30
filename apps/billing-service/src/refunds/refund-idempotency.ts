@@ -4,7 +4,7 @@ import { requestHash } from '../domain/canonical.js';
 import { billingError } from '../domain/errors.js';
 import { BILLING_MESSAGES } from '../messages.js';
 
-export type RefundOperation = 'refund_case.open' | 'refund_case.cancel';
+export type RefundOperation = 'refund_case.open' | 'refund_case.cancel' | 'reconciliation_case.acknowledge'; // + Core V2 S6h-B
 
 export interface RefundCommandResult {
   status: number;

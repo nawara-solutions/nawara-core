@@ -127,7 +127,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     await until(async () => (await sql<{ n: number }>(d.adminUrl, `SELECT count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[])`, [events.map((e) => e.id)]))[0]!.n === events.length, 30_000);
     const bySource = await sql<{ s: string; n: number }>(d.adminUrl, `SELECT "sourceService" AS s, count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[]) GROUP BY 1 ORDER BY 1`, [events.map((e) => e.id)]);
     expect(bySource).toEqual([
-      { s: 'auth-service', n: 31 }, { s: 'billing-service', n: 39 } /* + Core V2 S6e-H: the three fraud_hold actions; + Core V2 S6f: the six recovery actions; + Core V2 S6g: the three late-settlement actions */, { s: 'file-service', n: 7 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 14 }, // + Core V2 S6e-D: the four payment_dispute actions; + Core V2 S6h-P: provider_fact.associated
+      { s: 'auth-service', n: 31 }, { s: 'billing-service', n: 44 } /* + Core V2 S6h-B: the five reconciliation, loss and write-off actions; + Core V2 S6e-H: the three fraud_hold actions; + Core V2 S6f: the six recovery actions; + Core V2 S6g: the three late-settlement actions */, { s: 'file-service', n: 7 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 14 }, // + Core V2 S6e-D: the four payment_dispute actions; + Core V2 S6h-P: provider_fact.associated
       { s: 'release-service', n: 4 },
     ]);
     const dead = await deadLetters(1);

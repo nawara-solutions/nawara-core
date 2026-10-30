@@ -16,6 +16,10 @@ import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/ow
 import type { DisputeExposure } from '../../src/refunds/dispute-exposure.js';
 import type { PaymentRefundClient } from '../../src/refunds/payment-refund-client.js';
 import type { PaymentDisputeClient } from '../../src/refunds/payment-dispute-client.js';
+import type { PaymentReconciliationClient } from '../../src/reconciliation/payment-reconciliation-client.js';
+
+/** Core V2 S6h-B: Payment's reconciliation read, unreachable by default (a suite that needs it passes its own). */
+const unreachablePaymentReconciliation: PaymentReconciliationClient = { items: async () => { throw new Error('payment reconciliation read not configured in this test'); } };
 import type { FraudEvidenceFiles, FraudHoldReceipts } from '../../src/fraud-holds/fraud-hold-clients.js';
 
 export interface TestApp {
@@ -80,6 +84,8 @@ export async function createTestApp(opts: {
   fraudHoldReceipts?: FraudHoldReceipts;
   fraudEvidenceFiles?: FraudEvidenceFiles;
   refundRelayReconciler?: boolean;
+  /** Core V2 S6h-B: Payment's reconciliation read under test control (default: Payment unreachable, so the worker reads nothing). */
+  paymentReconciliationClient?: PaymentReconciliationClient;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
   const config = loadBillingConfig({
@@ -116,6 +122,7 @@ export async function createTestApp(opts: {
         fraudHoldReceipts: opts.fraudHoldReceipts,
         fraudEvidenceFiles: opts.fraudEvidenceFiles,
         refundRelayReconciler: opts.refundRelayReconciler ?? false,
+        paymentReconciliationClient: opts.paymentReconciliationClient ?? unreachablePaymentReconciliation,
       }),
       ProbeModule,
     ],

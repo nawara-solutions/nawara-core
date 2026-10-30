@@ -197,7 +197,19 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     an entirely surplus payment) or by the Owner's evidenced external repayment (`POST /billing/admin/recovery-surpluses/:id/resolution`, File
     `surplus_evidence` and an Auth `recovery_surplus_external` receipt) confirmed by the Organization's administrator
     (`POST /billing/recovery-surpluses/:id/recipient-confirmation`). The Owner reads (`GET /billing/admin/recovery-obligations/:id`) but
-    never settles or confirms. Six audit actions; no `billing.*` event (EVT-06); no FinancialLoss.
+    never settles or confirms. Six audit actions; no `billing.*` event (EVT-06); FinancialLoss is S6h-B's (below).
+  - Core V2 S6h-B (`db/migrations/0042`, `src/reconciliation/`; BIL-33, BIL-34, EVT-10; the Owner's R6H-1 to R6H-12): Payment's verified
+    `payment.late_success.recorded` (and, when an event is lost, Payment's reconciliation read with `payment.reconciliation.read`) is recorded
+    once per late success and provider fact and never treated as `payment.succeeded`: a late recovery success is a `recovery_payment`
+    (principal, then surplus owed to the Organization; T3 clears once), anything else a reconciliation case. The reconciliation worker opens
+    durable, append-only cases from Billing's and Payment's evidence (late and unrouted settlements, surpluses, unmatched captures,
+    over-returns, discrepancies, partial chargebacks, second reversal causes, contradictory effects, unanswered authorizations, refund and
+    chargeback overlaps) and resolves each only by its evidence; the Owner acknowledges review-only cases
+    (`GET /billing/admin/reconciliation-cases[/:id]`, `POST …/:id/acknowledgement`). `FinancialLoss` only from evidence (over-return excess,
+    full direct final-lost chargeback, the Owner's recovery write-off with Auth's `recovery_write_off` receipt,
+    `POST /billing/admin/recovery-obligations/:id/write-off`, accounting only: the obligation and T3 stay), corrected by append-only
+    adjustments (`GET /billing/admin/financial-losses`). An entirely surplus LATE recovery payment is refunded as exactly its captured movement
+    (R6H-5). Five audit actions; no `billing.*` event.
   - Core V2 S6g (`db/migrations/0040`, `src/late-settlements/`; BIL-32; the Owner's R6G-1 to R6G-9 and Option A): a verified late assisted
     settlement (S5b) keeps Payment's original instant and is never applied automatically. The beneficiary may attest, once, that the cash was
     (not) returned (`POST /billing/assistance-late-settlements/:id/attestation`); the Owner may apply it as the request's single purchase

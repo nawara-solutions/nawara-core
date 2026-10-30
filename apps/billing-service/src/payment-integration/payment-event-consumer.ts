@@ -6,6 +6,7 @@ import { CONSUMED_EVENTS as CATALOG } from '../events/event-catalog.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
 import { PaymentEventOriginRepository, trustedEnvelope, type TrustedPaymentEnvelope } from './payment-event-origin.js';
 import { RefundCompletionService } from '../refunds/refund-completion.service.js';
+import { LateSuccessService } from '../reconciliation/late-success.service.js';
 import { DisputeLossService } from '../refunds/dispute-loss.service.js';
 
 /** V2 A3M.2: the consumed names and their supported versions come from the event catalog (`events/event-catalog.ts`). */
@@ -96,6 +97,8 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     @Optional() @Inject(RefundCompletionService) private readonly refundCompletions?: RefundCompletionService,
     /** Core V2 S6e-D: present only where refund cases are mounted (never production); without it a dispute loss is never applied. */
     @Optional() @Inject(DisputeLossService) private readonly disputeLosses?: DisputeLossService,
+    /** Core V2 S6h-B: present only where reconciliation is mounted (never production); without it a late success is never applied. */
+    @Optional() @Inject(LateSuccessService) private readonly lateSuccesses?: LateSuccessService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -198,6 +201,7 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     }
     if (t.name === 'refund.case_completed') return this.processRefundCompletion(event, t, correlationId, who, tag);
     if (t.name === 'payment.dispute.lost') return this.processDisputeLoss(event, t, who, tag);
+    if (t.name === 'payment.late_success.recorded') return this.processLateSuccess(event, t, who, tag);
     let facts: PaymentEventFacts;
     let settledAt: Date;
     try {
@@ -287,6 +291,34 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
    * chargeback (a loss without one is acknowledged and recovered later from Payment's losses read). A binding mismatch or a conflict is never
    * applied and never retried: dead-lettered for review (permanent). Without the refund module (production) nothing is applied.
    */
+  /**
+   * Core V2 S6h-B (register EVT-10; the Owner's R6H-4): Payment's verified success of a payment after it ended. Parsed trusting nothing; recorded
+   * once per late success and per provider fact, classified by Billing's own routing (a recovery payment, or a reconciliation case). It is
+   * NEVER a `payment.succeeded`: the payment request keeps its terminal state. A different statement of the same late success is permanent.
+   */
+  private async processLateSuccess(event: EventEnvelope, t: TrustedPaymentEnvelope, who: Record<string, string>, tag: (b: string, r: string) => string): Promise<void> {
+    const p = event.payload;
+    if (p.liveMode !== false || p.producer !== 'billing-service' || typeof p.lateSuccessId !== 'string' || typeof p.paymentId !== 'string' || typeof p.amount !== 'number'
+      || typeof p.currency !== 'string' || typeof p.paymentStatus !== 'string' || typeof p.recordedAt !== 'string' || (p.factId !== null && typeof p.factId !== 'string')) {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`, who);
+      throw new MalformedPaymentEventError();
+    }
+    if (!this.lateSuccesses) {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=reconciliation_not_enabled`, who);
+      throw new PermanentEventFailure('reconciliation_not_enabled');
+    }
+    const outcome = await this.lateSuccesses.record(
+      { lateSuccessId: p.lateSuccessId, paymentId: p.paymentId, factId: (p.factId as string | null) ?? null, amount: p.amount, currency: p.currency,
+        paymentStatus: p.paymentStatus, recordedAt: new Date(p.recordedAt).toISOString() },
+      { kind: 'event', eventId: t.eventId },
+    );
+    if (outcome === 'binding_mismatch' || outcome === 'conflict') {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=late_success_${outcome}`, who);
+      throw new PermanentEventFailure(`late_success_${outcome}`);
+    }
+    this.logger.log(`${tag('late_success_received', 'late_success_replay')} outcome=${outcome}`, who);
+  }
+
   private async processDisputeLoss(event: EventEnvelope, t: TrustedPaymentEnvelope, who: Record<string, string>, tag: (b: string, r: string) => string): Promise<void> {
     const p = event.payload;
     const c = p.chargeback as Record<string, unknown> | null | undefined;

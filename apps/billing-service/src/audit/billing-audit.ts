@@ -27,7 +27,8 @@ export type BillingAuditAction =
   | 'fraud_hold.placed' | 'fraud_hold.released' | 'fraud_hold.expired' // Core V2 S6e-H (H-7): the Owner; the expiry by the sweep
   | 'recovery_obligation.opened' | 'recovery_payment.recorded' | 'recovery_obligation.recovered' // Core V2 S6f (R6F-6)
   | 'recovery_surplus.recorded' | 'recovery_surplus.resolved' | 'recovery_surplus.recipient_confirmed'
-  | 'assistance_late_settlement.attested' | 'assistance_late_settlement.applied' | 'cash_return_obligation.superseded'; // Core V2 S6g (R6G-9)
+  | 'assistance_late_settlement.attested' | 'assistance_late_settlement.applied' | 'cash_return_obligation.superseded' // Core V2 S6g (R6G-9)
+  | 'reconciliation_case.opened' | 'reconciliation_case.resolved' | 'financial_loss.recorded' | 'financial_loss.adjusted' | 'recovery_obligation.written_off'; // Core V2 S6h-B (R6H-11)
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in
@@ -47,6 +48,7 @@ export function auditActor(ctx: TransitionContext): AuditActor {
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'dispute_loss_worker') return { type: 'system', id: 'dispute_loss_worker' }; // Core V2 S6e-D
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'fraud_hold_sweep') return { type: 'system', id: 'fraud_hold_sweep' }; // Core V2 S6e-H
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'recovery_worker') return { type: 'system', id: 'recovery_worker' }; // Core V2 S6f
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'reconciliation_worker') return { type: 'system', id: 'reconciliation_worker' }; // Core V2 S6h-B
   throw new Error(`billing_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 

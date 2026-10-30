@@ -53,13 +53,21 @@ const BILLING_MIGRATIONS = [
   '0039_recovery.sql', // Core V2 S6f: recovery obligations, reviews, settlement channels, recovery payments, surpluses and their resolution
   '0040_late_settlement_application.sql', // Core V2 S6g: L-4 application, attestation, evidence; obligation history (one live per request)
   '0041_capture_specific_refund_cases.sql', // Core V2 R6H-5: capture-specific refund cases (one live per capture fact), no commercial effect
+  '0042_reconciliation.sql', // Core V2 S6h-B: reconciliation cases, late successes, real surplus, FinancialLoss and write-off
 ];
 /** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022) and S3d's billing_platform (0023) and S3f's fee tables (0025) and checkout_idempotency (0026) and S5a's assistance tables (0029) and S5b's settlement channel, cash-return obligation and late-settlement record (0030) and S5c's disputes, dispute responses and corrections (0031) and S6a's refund cases and their idempotency (0033) and S6b's authorization relays (0034) and S6c's case completions (0035) and S6d's commercial effects (0036). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
-  'assistance_command_idempotency', 'assistance_correction', 'assistance_dispute', 'assistance_dispute_response', 'assistance_late_settlement', 'assistance_request', 'assistance_settlement_channel', 'billing_platform', 'billing_transition', 'cash_return_obligation', 'checkout_idempotency', 'currency', 'dispute_loss_effect', 'dispute_loss_effect_attempt', 'event_provenance', 'event_provenance_conflict',
-  'fee_cap', 'fee_command_idempotency', 'fee_delegation', 'fee_delegation_revocation', 'fee_proposal', 'fraud_hold', 'fraud_hold_compensation', 'fraud_hold_evidence', 'fraud_hold_expiry', 'fraud_hold_release', 'inbox', 'invoice', 'invoice_entitlement', 'invoice_line', 'invoice_number_sequence', 'kit_rate_limit', 'late_settlement_application', 'late_settlement_attestation', 'late_settlement_evidence', 'outbox',
-  'payment_dispute_loss', 'payment_event_origin', 'payment_event_receipt', 'payment_request', 'personal_subscription', 'platform_currency', 'price', 'product', 'recovery_obligation', 'recovery_payment', 'recovery_review', 'recovery_settlement_channel', 'recovery_surplus',
-  'recovery_surplus_confirmation', 'recovery_surplus_external', 'recovery_surplus_refund', 'refund_authorization_relay', 'refund_case', 'refund_case_completion', 'refund_case_effect', 'refund_case_effect_attempt', 'refund_command_idempotency', 'schema_migrations', 'subscription', 'subscription_purchase', 'subscription_purchase_reversal', 'subscription_purchase_reversal_cause', 'subscription_settlement',
+  'assistance_command_idempotency', 'assistance_correction', 'assistance_dispute', 'assistance_dispute_response', 'assistance_late_settlement',
+  'assistance_request', 'assistance_settlement_channel', 'billing_platform', 'billing_transition', 'cash_return_obligation', 'checkout_idempotency',
+  'currency', 'dispute_loss_effect', 'dispute_loss_effect_attempt', 'event_provenance', 'event_provenance_conflict', 'fee_cap', 'fee_command_idempotency',
+  'fee_delegation', 'fee_delegation_revocation', 'fee_proposal', 'financial_loss', 'financial_loss_adjustment', 'fraud_hold', 'fraud_hold_compensation',
+  'fraud_hold_evidence', 'fraud_hold_expiry', 'fraud_hold_release', 'inbox', 'invoice', 'invoice_entitlement', 'invoice_line', 'invoice_number_sequence',
+  'kit_rate_limit', 'late_settlement_application', 'late_settlement_attestation', 'late_settlement_evidence', 'outbox', 'payment_dispute_loss',
+  'payment_event_origin', 'payment_event_receipt', 'payment_late_success', 'payment_request', 'personal_subscription', 'platform_currency', 'price', 'product',
+  'reconciliation_case', 'reconciliation_case_resolution', 'recovery_obligation', 'recovery_payment', 'recovery_review', 'recovery_settlement_channel',
+  'recovery_surplus', 'recovery_surplus_confirmation', 'recovery_surplus_external', 'recovery_surplus_refund', 'refund_authorization_relay', 'refund_case',
+  'refund_case_completion', 'refund_case_effect', 'refund_case_effect_attempt', 'refund_command_idempotency', 'schema_migrations', 'subscription',
+  'subscription_purchase', 'subscription_purchase_reversal', 'subscription_purchase_reversal_cause', 'subscription_settlement',
 ];
 
 /** Migration infrastructure and the Stage 2 schema (SDD section 28), against a real PostgreSQL. */

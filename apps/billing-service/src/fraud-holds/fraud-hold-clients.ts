@@ -10,6 +10,8 @@ export type FraudHoldBinding =
   | { operation: 'fraud_hold_release'; audience: 'billing-service'; companyId: string; holdId: string; beneficiaryUserId: string; productId: string }
   // Core V2 S6f (R6F-5 Path B; Auth #396): an Owner's record that one recovery surplus was repaid outside Core
   | { operation: 'recovery_surplus_external'; audience: 'billing-service'; companyId: string; surplusId: string; organizationId: string; amount: number; currency: string }
+  // Core V2 S6h-B (R6H-8; Auth #400): the Owner's write-off of one recovery obligation's outstanding principal
+  | { operation: 'recovery_write_off'; audience: 'billing-service'; companyId: string; obligationId: string; organizationId: string; amount: number; currency: string }
   // Core V2 S6g (R6G-1; Auth #398): an Owner's L-4 application of one late assisted settlement
   | { operation: 'late_settlement_apply'; audience: 'billing-service'; companyId: string; lateSettlementId: string; assistanceRequestId: string; beneficiaryUserId: string; reasonCode: string };
 

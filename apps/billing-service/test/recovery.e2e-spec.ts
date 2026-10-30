@@ -4,7 +4,7 @@ import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
-  DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity, type AuthMembership, type EventEnvelope, type OrganizationReferenceResolver,
+  generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity, type AuthMembership, type EventEnvelope, type OrganizationReferenceResolver,
 } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { BILLING_OPERATIONS } from '../src/admission/caller-admission.policy.js';
@@ -14,7 +14,6 @@ import type { PaymentEventFacts, PaymentEventName } from '../src/domain/payment-
 import type { PaymentCreateBody } from '../src/domain/payment-request-mapping.js';
 import { PaymentDispatcher } from '../src/payment-integration/payment-dispatcher.js';
 import type { CancelPaymentOutcome, CreatePaymentOutcome, PaymentClient, PaymentSnapshot } from '../src/payment-integration/payment-client.js';
-import type { TransitionContext } from '../src/domain/actors.js';
 import { HttpOwnerAuthority } from '../src/platforms/owner-authority.client.js';
 import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
@@ -22,10 +21,12 @@ import { DisputeLossService } from '../src/refunds/dispute-loss.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
 import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
-import { BillingAudit } from '../src/audit/billing-audit.js';
-import { applyRecoveryPayment } from '../src/recovery/recovery-ledger.js';
 import { RecoveryModule } from '../src/recovery/recovery.module.js';
 import { RecoveryService } from '../src/recovery/recovery.service.js';
+import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
+import { ReconciliationModule } from '../src/reconciliation/reconciliation.module.js';
+import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
+import { RefundAuthorizationService } from '../src/refunds/refund-authorization.service.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
 import { paymentPurposeOf } from './support/settlement.js';
@@ -50,10 +51,24 @@ class FakePaymentClient implements PaymentClient {
 }
 
 /** Core V2 S6d: Payment's refund port, authorizing every relayed attempt (the S6b/S6c Payment behaviour is certified in its own suites). */
+const relayAnswer = { unknown: false, bodies: [] as Record<string, unknown>[] };
 const refundsAtPayment: PaymentRefundClient = {
-  relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
+  relay: async (_paymentId, _key, body) => {
+    relayAnswer.bodies.push({ ...body, receiptSecret: undefined });
+    if (relayAnswer.unknown) return { kind: 'unknown', reason: 'status_0' }; // Core V2 S6h-B: Payment's answer lost (Q8 tests)
+    return { kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } };
+  },
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
   capture: async () => ({ kind: 'not_found' as const }), // Core V2 R6H-5: no capture-specific case in this suite
+};
+
+/** Core V2 S6h-B: Payment's reconciliation read (PAY-12) under test control: items per kind, or Payment unavailable. */
+const paymentItems = { items: new Map<PaymentItemKind, PaymentItem[]>(), down: false };
+const paymentReconciliation: PaymentReconciliationClient = {
+  items: async (kind, after, limit) => {
+    if (paymentItems.down) throw new Error('payment-service unavailable');
+    return (paymentItems.items.get(kind) ?? []).filter((i) => !after || i.id > after).sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, limit);
+  },
 };
 
 /** Core V2 S6e-D: Payment's losses read under test control (a page of verified losses, or Payment unavailable). */
@@ -265,6 +280,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       paymentRefundClient: refundsAtPayment, // Core V2 S6d: Payment authorizes every relay (S6b's own behaviour is certified elsewhere)
       paymentDisputeClient: paymentDisputes, // Core V2 S6e-D: Payment's losses read
       fraudHoldReceipts, fraudEvidenceFiles, // Core V2 S6e-H
+      paymentReconciliationClient: paymentReconciliation, // Core V2 S6h-B
       tokens: [{ caller: 'test-producer', digest: producer.digest }],
       env: { BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'test-producer': { operations: [...BILLING_OPERATIONS], allowedPlatforms: [PLATFORM] } } }) },
     });
@@ -369,28 +385,21 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
     return { paymentId, envelope, inv };
   };
   /**
-   * TEST FIXTURE — SIMULATES S6h, WHICH S6f DOES NOT IMPLEMENT. With one channel at a time for exactly the outstanding amount, no runtime path of
-   * S6f produces a surplus: only a LATE verified success of an earlier, already-failed channel does, and applying late successes is S6h's
-   * reconciliation (S4c F-4: Payment emits no later success after finality). This fixture plays that S6h step: as a superuser it records the
-   * failed request as verified paid (a receipt of an applied `payment.succeeded`), then applies it through S6f's one ledger entry point.
+   * Core V2 S6h-B (R6H-4): Payment's VERIFIED late success of an already-failed recovery channel, delivered as Payment emits it
+   * (`payment.late_success.recorded`, through the verified consumer). The request keeps its terminal state; Billing counts the captured money
+   * once, as principal still outstanding or (here, the base already recovered) as surplus owed to the Organization. It replaces S6f's labelled
+   * fixture, which simulated this step before S6h existed.
    */
-  const s6hLateSuccess = async (paymentRequestId: string, paymentId: string) => {
-    const cl = await admin.connect();
-    let receiptId: string;
-    try {
-      await cl.query(`SET session_replication_role = replica`);
-      await cl.query(`UPDATE payment_request SET status = 'paid' WHERE id = $1`, [paymentRequestId]);
-      receiptId = (await cl.query(`INSERT INTO payment_event_receipt ("eventId", "eventName", "paymentRequestId", "paymentId", outcome, "paymentRevision", "causeType")
-        VALUES (gen_random_uuid(), 'payment.succeeded', $1, $2, 'applied', 2, 'payment_event') RETURNING id`, [paymentRequestId, paymentId])).rows[0].id;
-    } finally {
-      await cl.query(`SET session_replication_role = origin`);
-      cl.release();
-    }
-    const pr = await one(`SELECT pr."invoiceId", pr.amount, pr.currency, e."recoveryObligationId" FROM payment_request pr JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId" WHERE pr.id = $1`, [paymentRequestId]);
-    const ctx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: randomUUID() }, correlationId: 's6h-fixture' };
-    return t.app.get(DbService).tx((q) => applyRecoveryPayment(q, t.app.get(BillingAudit), {
-      obligationId: pr.recoveryObligationId, invoiceId: pr.invoiceId, paymentRequestId, receiptId: receiptId!, amount: pr.amount, currency: pr.currency,
-    }, ctx));
+  const s6hLateSuccess = async (paymentRequestId: string, paymentId: string, factId: string = randomUUID()) => {
+    const pr = await one(`SELECT pr.amount, trim(pr.currency) AS currency, pr.status, i."organizationId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1`, [paymentRequestId]);
+    const id = randomUUID();
+    const lateSuccessId = randomUUID();
+    await t.bus.deliver({ id, name: 'payment.late_success.recorded', payload: {
+      lateSuccessId, paymentId, paymentRequestId, producer: 'billing-service', organizationId: pr.organizationId, purpose: 'recovery_settlement', attemptId: randomUUID(),
+      factId, amount: Number(pr.amount), currency: pr.currency, paymentStatus: pr.status === 'expired' ? 'expired' : 'failed', recordedAt: new Date().toISOString(), liveMode: false,
+    }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as never);
+    const rp = await one(`SELECT "surplusAmount"::int AS surplus FROM recovery_payment WHERE "lateSuccessId" = $1`, [lateSuccessId]);
+    return rp ? 'recovery' : 'none';
   };
   /** An obligation recovered by channel 2 while channel 1's failed payment later succeeds (S6h fixture): an entirely-surplus payment. */
   const surplusFixture = async () => {
@@ -417,6 +426,9 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
   };
 
   beforeEach(() => {
+    paymentItems.items = new Map();
+    paymentItems.down = false;
+    relayAnswer.unknown = false;
     lossesAtPayment.items = [];
     lossesAtPayment.down = false;
     fraudAuth.down = false;
@@ -639,7 +651,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── surplus (R6F-5)
 
-  describe('surplus (R6F-5; S6h late success simulated by a labelled fixture)', () => {
+  describe('surplus (R6F-5; the late success is Payment\'s real event since S6h-B)', () => {
     it('a late verified success after recovery is entirely surplus owed to the Organization: never revenue, never offset, never re-opens T3', async () => {
       const s = await surplusFixture();
       expect(s.surplusAmount).toBe(6100);
@@ -758,8 +770,306 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
     });
   });
 
-  it('no FinancialLoss, no write-off, no expiry or offset: no such table or column exists', async () => {
-    expect(await count(`SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name ~* '(financial_loss|write_off|writeoff)'`)).toBe(0);
+  // ─────────────────────────────────────────────────────────────────────────────────────────────── Core V2 S6h-B
+
+  describe('Core V2 S6h-B: late successes, real surplus, FinancialLoss, write-off and reconciliation cases (R6H-1 to R6H-12)', () => {
+    const reconcile = () => t.app.get(ReconciliationService).drainOnce();
+    /** Payment's verified final loss of a DIRECT purchase (its effect, a reversal, has no reason code), applied by the dispute-loss worker. */
+    const loseDirect = async (paymentId: string, amount: number, chargeback = amount) => {
+      const id = randomUUID();
+      const disputeId = randomUUID();
+      await t.bus.deliver({ id, name: 'payment.dispute.lost', payload: {
+        disputeId, paymentId, paymentRequestId: randomUUID(), producer: 'billing-service', organizationId: null, purpose: 'direct_purchase', amount, currency: 'TND',
+        lostAt: new Date().toISOString(), chargeback: { factId: randomUUID(), amount: chargeback, currency: 'TND' }, liveMode: false,
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as never);
+      await losses().drainOnce();
+      return disputeId;
+    };
+    /** Payment's `payment.late_success.recorded` for one of Billing's payment requests, as Payment emits it (verified consumer). */
+    const lateEvent = async (paymentRequestId: string, paymentId: string, o: { factId?: string; lateSuccessId?: string; status?: string; amount?: number; purpose?: string } = {}) => {
+      const pr = await one(`SELECT pr.amount::int AS amount, trim(pr.currency) AS currency, i."organizationId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1`, [paymentRequestId]);
+      const lateSuccessId = o.lateSuccessId ?? randomUUID();
+      const factId = o.factId ?? randomUUID();
+      const id = randomUUID();
+      const envelope = { id, name: 'payment.late_success.recorded', payload: {
+        lateSuccessId, paymentId, paymentRequestId, producer: 'billing-service', organizationId: pr.organizationId, purpose: o.purpose ?? 'recovery_settlement', attemptId: randomUUID(),
+        factId, amount: o.amount ?? pr.amount, currency: pr.currency, paymentStatus: o.status ?? 'failed', recordedAt: new Date().toISOString(), liveMode: false,
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as EventEnvelope;
+      await t.bus.deliver(envelope);
+      return { lateSuccessId, factId, envelope };
+    };
+    const asItem = (kind: PaymentItemKind, i: Partial<PaymentItem> & { paymentId: string }): PaymentItem =>
+      ({ kind, id: randomUUID(), factId: null, amount: null, currency: null, detail: {}, at: new Date().toISOString(), ...i });
+    const put = (i: PaymentItem) => paymentItems.items.set(i.kind, [...(paymentItems.items.get(i.kind) ?? []), i]);
+    const cases = (q = '', bearer = 'owner-tok') => send(request(server()).get(`/billing/admin/reconciliation-cases${q}`), bearer, null);
+    const caseOf = (type: string, evidence: string) => one(`SELECT c.*, r.kind AS resolution FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+      WHERE c."caseType" = $1 AND c."evidenceKey" = $2`, [type, evidence]);
+    const recoveredAudits = (obligationId: string) => count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.recovery_obligation.recovered' AND payload->'resource'->>'id' = $1`, [obligationId]);
+    const writeOffReceipt = (o: { obligationId: string }, over: Record<string, unknown> = {}, issuer: string = U.owner) => {
+      const secret = randomBytes(32).toString('base64url');
+      fraudAuth.issued.set(secret, { id: randomUUID(), issuer, binding: { operation: 'recovery_write_off', audience: 'billing-service', companyId: COMPANY, obligationId: o.obligationId,
+        organizationId: ORG, amount: 6100, currency: 'TND', ...over } });
+      return secret;
+    };
+    const writeOff = (obligationId: string, secret: string, bearer = 'owner-tok') =>
+      send(request(server()).post(`/billing/admin/recovery-obligations/${obligationId}/write-off`), bearer, null).send({ receiptSecret: secret });
+    /** An ordinary refund of a direct purchase, completed by Payment's verified completion (S6a to S6c), and its S6d effect. */
+    const completeRefund = async (paymentId: string) => {
+      const c = (await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId, reason: 'customer_request' })).body;
+      await send(request(server()).post(`/billing/admin/refund-cases/${c.id}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      const att = await one(`SELECT id FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [c.id]);
+      const ev = randomUUID();
+      await t.bus.deliver({ id: ev, name: 'refund.case_completed', payload: { refundCaseId: c.id, refundAuthorizationId: randomUUID(), refundAttemptId: att.id, paymentId,
+        paymentRequestId: randomUUID(), producer: 'billing-service', approvedAmount: c.amount, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false,
+        organizationId: null, purpose: 'direct_purchase' }, headers: { eventId: ev, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      await t.app.get(RefundEffectService).drainOnce();
+      return c.id as string;
+    };
+
+    it('CERTIFICATION: A undecided blocks a second attempt; A fails, B recovers the base (T3 clears once); A\'s verified LATE success is counted once, as surplus', async () => {
+      const o = await opened();
+      expect(await restrictions()).toEqual([{ kind: 'T3', sourceId: o.obligationId }]);
+      const cA = (await settleRecovery(o.obligationId)).body;
+      // A is undecided: the frozen one-open-or-uncertain-channel rule refuses any second attempt (never bypassed to build this test)
+      expect((await settleRecovery(o.obligationId)).body).toMatchObject({ code: 'settlement_channel_open' });
+      const failedA = await recoveryEvent(cA.paymentRequestId, 'payment.failed'); // A definitively closed (Payment's verified failure)
+      const cB = (await settleRecovery(o.obligationId)).body;
+      expect(cB.amount ?? 6100).toBe(6100);
+      await recoveryEvent(cB.paymentRequestId);
+      expect((await obligationOf(o.disputeId)).status).toBe('recovered');
+      expect(await restrictions()).toEqual([]);
+      // Payment later verifies A's success after A's finality: never a payment.succeeded; the request stays failed; counted once, as surplus
+      const late = await lateEvent(cA.paymentRequestId, failedA.paymentId);
+      expect((await one(`SELECT status FROM payment_request WHERE id = $1`, [cA.paymentRequestId])).status).toBe('failed');
+      expect(await one(`SELECT "principalAmount"::int AS p, "surplusAmount"::int AS s FROM recovery_payment WHERE "lateSuccessId" = $1`, [late.lateSuccessId])).toEqual({ p: 0, s: 6100 });
+      // the same verified success again, by every channel: the event redelivered, Payment's read, another statement of the same provider fact
+      await t.bus.deliver(late.envelope);
+      put(asItem('late_success', { id: late.lateSuccessId, paymentId: failedA.paymentId, factId: late.factId, amount: 6100, currency: 'TND', detail: { paymentStatus: 'failed' } }));
+      await reconcile();
+      await lateEvent(cA.paymentRequestId, failedA.paymentId, { factId: late.factId });
+      expect(await count(`SELECT count(*) AS n FROM recovery_payment WHERE "obligationId" = $1`, [o.obligationId])).toBe(2);
+      expect((await readRecovery(o.obligationId)).body).toMatchObject({ recovered: 6100, outstanding: 0, status: 'recovered' });
+      expect(await recoveredAudits(o.obligationId)).toBe(1); // T3 cleared exactly once
+      expect(await restrictions()).toEqual([]); // R-5: a surplus never re-opens T3
+      // the surplus is owed to the Organization until resolved: a case, never revenue, never offset, never expiring
+      expect((await caseOf('recovery_surplus', (await one(`SELECT id FROM recovery_surplus WHERE "obligationId" = $1`, [o.obligationId])).id))).toMatchObject({ resolution: null });
+      expect(await count(`SELECT count(*) AS n FROM payment_event_receipt WHERE "paymentRequestId" = $1 AND "eventName" = 'payment.succeeded'`, [cA.paymentRequestId])).toBe(0);
+    });
+
+    it('a late success BEFORE the second channel succeeds recovers the principal (T3 clears there, once); the second success is then entirely surplus', async () => {
+      const o = await opened();
+      const cA = (await settleRecovery(o.obligationId)).body;
+      const failedA = await recoveryEvent(cA.paymentRequestId, 'payment.failed');
+      const cB = (await settleRecovery(o.obligationId)).body;
+      await lateEvent(cA.paymentRequestId, failedA.paymentId);
+      expect((await obligationOf(o.disputeId)).status).toBe('recovered');
+      expect(await restrictions()).toEqual([]);
+      await recoveryEvent(cB.paymentRequestId);
+      const pays = (await admin.query(`SELECT "principalAmount"::int AS p, "surplusAmount"::int AS s FROM recovery_payment WHERE "obligationId" = $1 ORDER BY "recordedAt"`, [o.obligationId])).rows;
+      expect(pays).toEqual([{ p: 6100, s: 0 }, { p: 0, s: 6100 }]);
+      expect(await recoveredAudits(o.obligationId)).toBe(1);
+    });
+
+    it('a LOST late-success event is recovered from Payment\'s read; the event arriving afterwards changes nothing; Payment unavailable infers nothing', async () => {
+      const o = await opened();
+      const cA = (await settleRecovery(o.obligationId)).body;
+      const failedA = await recoveryEvent(cA.paymentRequestId, 'payment.failed');
+      paymentItems.down = true;
+      expect(await reconcile()).toMatchObject({ read: false });
+      expect((await obligationOf(o.disputeId)).status).toBe('open');
+      paymentItems.down = false;
+      const lateSuccessId = randomUUID();
+      const factId = randomUUID();
+      put(asItem('late_success', { id: lateSuccessId, paymentId: failedA.paymentId, factId, amount: 6100, currency: 'TND', detail: { paymentStatus: 'failed' } }));
+      await reconcile();
+      expect(await one(`SELECT source FROM payment_late_success WHERE "lateSuccessId" = $1`, [lateSuccessId])).toEqual({ source: 'reconciliation' });
+      expect((await obligationOf(o.disputeId)).status).toBe('recovered');
+      await lateEvent(cA.paymentRequestId, failedA.paymentId, { lateSuccessId, factId });
+      expect(await count(`SELECT count(*) AS n FROM recovery_payment WHERE "obligationId" = $1`, [o.obligationId])).toBe(1);
+      const rec = (await audit(o.obligationId)).find((x) => x.name === 'audit.recovery_payment.recorded')!;
+      expect(rec.payload.actor).toEqual({ type: 'system', id: 'payment_reconciler' });
+    });
+
+    it('the Owner writes off the outstanding principal (dedicated receipt): a loss once; the obligation and T3 STAY; a later recovery adjusts the loss append-only', async () => {
+      const o = await opened();
+      const secret = writeOffReceipt(o);
+      const w = await writeOff(o.obligationId, secret);
+      expect(w.status, JSON.stringify(w.body)).toBe(201);
+      expect(w.body).toMatchObject({ obligationId: o.obligationId, amount: 6100, currency: 'TND', writtenOffBy: { userId: U.owner }, obligationStatus: 'open' });
+      expect(await restrictions()).toEqual([{ kind: 'T3', sourceId: o.obligationId }]); // accounting only: never forgiveness
+      expect((await writeOff(o.obligationId, secret)).status).toBe(200); // the same request: answered, consumed once
+      expect((await writeOff(o.obligationId, writeOffReceipt(o))).body).toMatchObject({ code: 'write_off_not_permitted' }); // never twice
+      expect(await auditNames(o.obligationId)).toContain('audit.recovery_obligation.written_off');
+      // a later verified recovery: the obligation is recovered (T3 ends) and the loss is reduced by an adjustment, never edited
+      const c = (await settleRecovery(o.obligationId)).body;
+      await recoveryEvent(c.paymentRequestId);
+      expect((await obligationOf(o.disputeId)).status).toBe('recovered');
+      expect(await restrictions()).toEqual([]);
+      const losses = (await send(request(server()).get('/billing/admin/financial-losses'), 'owner-tok', null).expect(200)).body.items as Row[];
+      const loss = losses.find((l) => l.obligationId === o.obligationId)!;
+      expect(loss).toMatchObject({ kind: 'recovery_write_off', amount: 6100, netAmount: 0 });
+      expect(loss.adjustments.map((a: Row) => [a.reason, a.amount])).toEqual([['recovered_after_write_off', -6100]]);
+      await expect(admin.query(`UPDATE financial_loss SET amount = 1 WHERE id = $1`, [loss.id])).rejects.toThrow();
+      await expect(admin.query(`DELETE FROM financial_loss_adjustment WHERE "lossId" = $1`, [loss.id])).rejects.toThrow();
+      expect((await writeOff(o.obligationId, writeOffReceipt(o))).body).toMatchObject({ code: 'write_off_not_permitted' }); // recovered: nothing to write off
+    });
+
+    it('write-off refusals: a receipt for another amount, another issuer, a non-Owner, another Company, Auth unanswerable; nothing is recorded', async () => {
+      const o = await opened();
+      expect((await writeOff(o.obligationId, writeOffReceipt(o, { amount: 6000 }))).body).toMatchObject({ code: 'recovery_authorization_refused' });
+      expect((await writeOff(o.obligationId, writeOffReceipt(o, {}, randomUUID()))).body).toMatchObject({ code: 'recovery_authorization_refused' });
+      expect((await writeOff(o.obligationId, writeOffReceipt(o), 'member-tok')).status).toBe(403);
+      expect((await writeOff(o.obligationId, writeOffReceipt(o), 'foreign-owner-tok')).status).toBe(404);
+      fraudAuth.down = true;
+      expect((await writeOff(o.obligationId, writeOffReceipt(o))).body).toMatchObject({ code: 'recovery_authorization_unresolved' });
+      fraudAuth.down = false;
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "obligationId" = $1`, [o.obligationId])).toBe(0);
+    });
+
+    it('over-return: the loss is the allocation EXCESS only, recognized once (concurrent passes too); its case resolves by that loss', async () => {
+      const p = await directPurchase('b2');
+      const factId = randomUUID();
+      put(asItem('over_return', { paymentId: p.paymentId, factId, amount: 500, currency: 'TND', detail: { factAmount: 5400, intended: 4900 } }));
+      await Promise.all([reconcile(), reconcile(), t.app.get(ReconciliationService).drainOnce()]);
+      await reconcile();
+      expect((await admin.query(`SELECT kind, amount::int FROM financial_loss WHERE "evidenceKey" = $1`, [factId])).rows).toEqual([{ kind: 'over_return', amount: 500 }]);
+      expect(await caseOf('over_return', factId)).toMatchObject({ resolution: 'loss_recognized', amount: '500' });
+      expect(await count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.financial_loss.recorded' AND payload->'changes'->>'evidence_id' = $1`, [factId])).toBe(1);
+    });
+
+    it('a FULL final-lost chargeback of a direct purchase is a loss once; a partial one is review only (no effect invented); the Owner acknowledges it', async () => {
+      const full = await directPurchase('b2');
+      const fullDispute = await loseDirect(full.paymentId, full.amount);
+      const partial = await directPurchase('b1');
+      const partialDispute = await loseDirect(partial.paymentId, partial.amount, partial.amount - 100);
+      await reconcile();
+      await reconcile();
+      expect((await admin.query(`SELECT kind, amount::int FROM financial_loss WHERE "disputeId" = $1`, [fullDispute])).rows).toEqual([{ kind: 'direct_chargeback_write_off', amount: full.amount }]);
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "disputeId" = $1`, [partialDispute])).toBe(0);
+      const pc = await caseOf('partial_chargeback', partialDispute);
+      expect(pc).toMatchObject({ resolution: null });
+      const k = key();
+      const ack = await send(request(server()).post(`/billing/admin/reconciliation-cases/${pc.id}/acknowledgement`), 'owner-tok', k).send({ reason: 'provider_statement_reviewed' });
+      expect([ack.status, ack.body.status, ack.body.resolution?.kind]).toEqual([200, 'resolved', 'acknowledged']);
+      expect((await send(request(server()).post(`/billing/admin/reconciliation-cases/${pc.id}/acknowledgement`), 'owner-tok', k).send({ reason: 'provider_statement_reviewed' })).headers['idempotent-replayed']).toBe('true');
+      expect((await send(request(server()).post(`/billing/admin/reconciliation-cases/${pc.id}/acknowledgement`), 'owner-tok', key()).send({ reason: 'provider_statement_reviewed' })).body)
+        .toMatchObject({ code: 'reconciliation_case_resolved' });
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "disputeId" = $1`, [partialDispute])).toBe(0); // still no financial effect
+    });
+
+    it('a refunded purchase also charged back: no loss (never double recognition) but an overlap case; the second reversal cause is a review case', async () => {
+      const p = await directPurchase('b2');
+      await completeRefund(p.paymentId);
+      const dispute = await loseDirect(p.paymentId, p.amount);
+      await reconcile();
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toBe(0);
+      const overlap = await caseOf('chargeback_refund_overlap', dispute);
+      expect(overlap).toMatchObject({ resolution: null, detail: 'refund_and_chargeback' });
+      // a financial case is never acknowledged away
+      expect((await send(request(server()).post(`/billing/admin/reconciliation-cases/${overlap.id}/acknowledgement`), 'owner-tok', key()).send({ reason: 'reviewed_no_financial_effect' })).body)
+        .toMatchObject({ code: 'reconciliation_case_not_acknowledgeable' });
+      const purchase = await one(`SELECT s.id FROM subscription_purchase s JOIN payment_request pr ON pr.id = s."paymentRequestId" WHERE pr."paymentId" = $1`, [p.paymentId]);
+      if (await count(`SELECT count(*) AS n FROM subscription_purchase_reversal_cause WHERE "purchaseId" = $1`, [purchase.id]) > 1) {
+        expect(await caseOf('second_reversal_cause', purchase.id)).toMatchObject({ resolution: null });
+      }
+    });
+
+    it('a late success of a purchase is a reconciliation case (no purchase, no entitlement, never acknowledgeable); a sale with no routing record is discovered', async () => {
+      const p = await directPurchase('b2');
+      const purchases = await count(`SELECT count(*) AS n FROM subscription_purchase`);
+      const late = await lateEvent(p.paymentRequestId, p.paymentId, { status: 'succeeded', purpose: 'direct_purchase' });
+      const c = await caseOf('late_success', late.lateSuccessId);
+      expect(c).toMatchObject({ captureFactId: late.factId, amount: String(p.amount), resolution: null, companyId: COMPANY });
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase`)).toBe(purchases);
+      expect(await count(`SELECT count(*) AS n FROM recovery_payment WHERE "lateSuccessId" = $1`, [late.lateSuccessId])).toBe(0);
+      const listed = (await cases('?type=late_success&status=open').expect(200)).body.items as Row[];
+      expect(listed.find((x) => x.id === c.id)).toMatchObject({ captureFactId: late.factId, reviewOnly: false, status: 'open' });
+      expect((await send(request(server()).post(`/billing/admin/reconciliation-cases/${c.id}/acknowledgement`), 'owner-tok', key()).send({ reason: 'reviewed_no_financial_effect' })).body)
+        .toMatchObject({ code: 'reconciliation_case_not_acknowledgeable' });
+      // historical evidence: a paid sale with no routing record (issued before routing existed) — a test-only reproduction
+      const u = await directPurchase('b1');
+      const cl = await admin.connect();
+      try {
+        await cl.query(`SET session_replication_role = replica`);
+        await cl.query(`DELETE FROM invoice_entitlement WHERE "invoiceId" = $1`, [u.invoiceId]);
+      } finally {
+        await cl.query(`SET session_replication_role = origin`);
+        cl.release();
+      }
+      await reconcile();
+      expect(await caseOf('unrouted_settlement', u.paymentRequestId)).toMatchObject({ resolution: null, paymentId: u.paymentId });
+    });
+
+    it('Q8: a refund authorization Auth never answered stays an open case while unresolved; only a definitive outcome resolves it', async () => {
+      const p = await directPurchase('b2');
+      const c = (await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: p.paymentId, reason: 'customer_request' })).body;
+      relayAnswer.unknown = true;
+      await send(request(server()).post(`/billing/admin/refund-cases/${c.id}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') });
+      const relay = await one(`SELECT id, "attemptStatus" FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [c.id]);
+      expect(relay.attemptStatus).toBeNull();
+      put(asItem('authorization_pending', { id: relay.id, paymentId: p.paymentId, amount: p.amount, currency: 'TND', detail: { operation: 'refund', refundCaseId: c.id } }));
+      await reconcile();
+      await reconcile();
+      expect(await caseOf('authorization_pending', relay.id)).toMatchObject({ resolution: null }); // never released on missing evidence
+      await t.app.get(RefundAuthorizationService).mirror(relay.id, 'authorization_refused', null);
+      await reconcile();
+      expect(await caseOf('authorization_pending', relay.id)).toMatchObject({ resolution: 'authorization_resolved' });
+    });
+
+    it('the late surplus is refunded as exactly its capture (R6H-5): the case names the fact, the relay carries it, completion resolves the surplus and its case', async () => {
+      const o = await opened();
+      const cA = (await settleRecovery(o.obligationId)).body;
+      const failedA = await recoveryEvent(cA.paymentRequestId, 'payment.failed');
+      const cB = (await settleRecovery(o.obligationId)).body;
+      await recoveryEvent(cB.paymentRequestId);
+      const late = await lateEvent(cA.paymentRequestId, failedA.paymentId);
+      await reconcile();
+      const surplus = await one(`SELECT id FROM recovery_surplus WHERE "obligationId" = $1`, [o.obligationId]);
+      const rc = (await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: failedA.paymentId, reason: 'recovery_surplus' })).body;
+      expect(rc).toMatchObject({ eligibility: 'recovery_surplus', amount: 6100, capture: { captureFactId: late.factId, basis: 'late_capture' } });
+      await send(request(server()).post(`/billing/admin/refund-cases/${rc.id}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      expect(relayAnswer.bodies.at(-1)).toMatchObject({ refundCaseId: rc.id, captureFactId: late.factId, amount: 6100 });
+      const att = await one(`SELECT id FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [rc.id]);
+      const ev = randomUUID();
+      await t.bus.deliver({ id: ev, name: 'refund.case_completed', payload: { refundCaseId: rc.id, refundAuthorizationId: randomUUID(), refundAttemptId: att.id, paymentId: failedA.paymentId,
+        paymentRequestId: cA.paymentRequestId, producer: 'billing-service', approvedAmount: 6100, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false,
+        organizationId: ORG, purpose: 'recovery_settlement' }, headers: { eventId: ev, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      await t.app.get(RefundEffectService).drainOnce();
+      await reconcile();
+      expect(await caseOf('recovery_surplus', surplus.id)).toMatchObject({ resolution: 'surplus_refunded' });
+      expect(await recoveredAudits(o.obligationId)).toBe(1);
+    });
+
+    it('isolation and authority: another Company sees nothing; a member is refused; the database refuses an unsupported resolution and any edit', async () => {
+      const p = await directPurchase('b2');
+      const factId = randomUUID();
+      put(asItem('over_return', { paymentId: p.paymentId, factId, amount: 100, currency: 'TND' }));
+      put(asItem('refund_discrepancy', { paymentId: p.paymentId, amount: p.amount, currency: 'TND' }));
+      await reconcile();
+      const c = await caseOf('over_return', factId);
+      expect((await cases('', 'foreign-owner-tok').expect(200)).body.items).toEqual([]);
+      expect((await send(request(server()).get(`/billing/admin/reconciliation-cases/${c.id}`), 'foreign-owner-tok', null)).status).toBe(404);
+      expect((await cases('', 'member-tok')).status).toBe(403);
+      expect((await cases('?status=closed')).body).toMatchObject({ code: 'invalid_reconciliation_request' });
+      await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, 'acknowledged', $2, 'reviewed_no_financial_effect')`,
+        [(await caseOf('late_success', randomUUID()))?.id ?? c.id, U.owner])).rejects.toThrow();
+      await expect(admin.query(`UPDATE reconciliation_case SET amount = 1 WHERE id = $1`, [c.id])).rejects.toThrow();
+      await expect(admin.query(`INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "paymentId", amount, currency) VALUES ('over_return', $1, $2, $3, 1, 'TND')`,
+        [randomUUID(), OTHER_COMPANY, p.paymentId])).rejects.toMatchObject({ constraint: 'financial_loss_evidence' });
+      await expect(admin.query(`INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "obligationId", amount, currency, "recordedByUserId", "receiptId", "consumeRef")
+        VALUES ('recovery_write_off', gen_random_uuid(), $1, gen_random_uuid(), 1, 'TND', gen_random_uuid(), gen_random_uuid(), gen_random_uuid())`, [COMPANY])).rejects.toThrow();
+    });
+
+    it('production mounts no reconciliation route, worker or late-success handler', () => {
+      expect(ReconciliationModule.register({ isProduction: true } as BillingConfig)).toEqual({ module: ReconciliationModule });
+    });
+  });
+
+  it('no expiry or offset; a write-off exists only as S6h-B\'s FinancialLoss (accounting), never on the obligation itself', async () => {
+    // Core V2 S6h-B (R6H-7, R6H-8): the losses are their own append-only tables; the obligation and its surplus have no write-off column
+    expect((await admin.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name ~* '(financial_loss|write_off|writeoff)' ORDER BY 1`)).rows
+      .map((r) => r.table_name)).toEqual(['financial_loss', 'financial_loss_adjustment']);
+    expect(await count(`SELECT count(*) AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name ~ '^recovery_' AND column_name ~* '(write|forgiv)'`)).toBe(0);
     expect(await count(`SELECT count(*) AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name ~ '^recovery_' AND column_name ~* '(expir|offset|revenue)'`)).toBe(0);
   });
 

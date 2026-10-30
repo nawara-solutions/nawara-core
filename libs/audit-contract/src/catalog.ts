@@ -659,6 +659,54 @@ const SPEC = {
     },
     purpose: 'A surplus resolution: the completed full refund of an entirely surplus payment, or the Owner\'s evidenced record of an external repayment (which the Organization then confirms).',
   },
+  // Core V2 S6h-B (R6H-1, R6H-2, R6H-7, R6H-8, R6H-11): reconciliation cases, FinancialLoss and the Owner's recovery write-off
+  'reconciliation_case.opened': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['reconciliation_worker'] }, organization: 'optional',
+    resource: ['reconciliation_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      case_type: { type: 'code', shape: 'value', required: true, values: ['late_assisted_settlement', 'recovery_surplus', 'late_success', 'unmatched_capture',
+        'unrouted_settlement', 'over_return', 'refund_discrepancy', 'partial_chargeback', 'second_reversal_cause', 'contradictory_effect', 'authorization_pending',
+        'chargeback_refund_overlap'] },
+      evidence_id: { type: 'uuid', shape: 'value', required: true },
+      amount: { type: 'integer', shape: 'value', required: false, min: 1, max: 9007199254740991 },
+    },
+    purpose: 'The reconciliation worker opened one durable case for one piece of unresolved financial evidence (deterministic per type and evidence; nothing is discarded).',
+  },
+  'reconciliation_case.resolved': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'], system: ['reconciliation_worker'] }, organization: 'optional',
+    resource: ['reconciliation_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      resolution: { type: 'code', shape: 'value', required: true, values: ['refund_completed', 'late_settlement_applied', 'surplus_refunded', 'surplus_repaid',
+        'recovery_counted', 'loss_recognized', 'effect_applied', 'authorization_resolved', 'acknowledged'] },
+      reason: { type: 'code', shape: 'value', required: false, values: ['reviewed_no_financial_effect', 'provider_statement_reviewed', 'duplicate_evidence_reviewed'] },
+    },
+    purpose: 'A reconciliation case was resolved by the authoritative evidence its resolution names, or (review-only cases) acknowledged by the Owner; the evidence stays.',
+  },
+  'financial_loss.recorded': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'], system: ['reconciliation_worker'] }, organization: 'optional',
+    resource: ['financial_loss'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      kind: { type: 'code', shape: 'value', required: true, values: ['over_return', 'direct_chargeback_write_off', 'recovery_write_off'] },
+      amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+      evidence_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'A FinancialLoss recognized once from recorded evidence of money not retained, or from the Owner\'s write-off of a recovery obligation (accounting only).',
+  },
+  'financial_loss.adjusted': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['payment_event_consumer', 'payment_reconciler'] }, organization: 'optional',
+    resource: ['financial_loss'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      reason: { type: 'code', shape: 'value', required: true, values: ['recovered_after_write_off'] },
+      amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+    },
+    purpose: 'An append-only adjustment reduced a recognized loss by a later verified recovery (the original loss is never edited).',
+  },
+  'recovery_obligation.written_off': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 } },
+    purpose: 'The Owner recognized a recovery obligation\'s outstanding principal as a loss, with a dedicated receipt: accounting only, never forgiveness; the obligation and T3 stay.',
+  },
   'recovery_surplus.recipient_confirmed': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
     resource: ['recovery_surplus'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
