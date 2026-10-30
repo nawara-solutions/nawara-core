@@ -42,6 +42,8 @@ export interface PaymentCapture {
   basis: CaptureBasis;
   conflicted: boolean;
   refund: 'none' | 'in_progress' | 'refunded';
+  /** S6 certification: false when Payment would refuse to refund this capture on its own (the last capture backing the sale) */
+  refundableOnItsOwn: boolean;
 }
 /** What Payment's capture read proves: the capture, or that this payment has no such capture (404); anything else proves nothing. */
 export type CaptureReadOutcome = { kind: 'capture'; capture: PaymentCapture } | { kind: 'not_found' } | { kind: 'unknown'; reason: string };
@@ -143,11 +145,11 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
     if (r.status !== 200 || !b) return { kind: 'unknown', reason: `status_${r.status}` };
     if (b.factId !== factId || b.paymentId !== paymentId || typeof b.amount !== 'number' || !Number.isSafeInteger(b.amount) || b.amount < 1
       || typeof b.currency !== 'string' || !/^[A-Z]{3}$/.test(b.currency) || typeof b.paymentStatus !== 'string' || !CAPTURE_BASES.includes(b.basis as string)
-      || typeof b.conflicted !== 'boolean' || !CAPTURE_REFUND.includes(b.refund as string)) {
+      || typeof b.conflicted !== 'boolean' || !CAPTURE_REFUND.includes(b.refund as string) || typeof b.refundableOnItsOwn !== 'boolean') {
       return { kind: 'unknown', reason: 'malformed_capture' };
     }
     return { kind: 'capture', capture: { factId, paymentId, amount: b.amount, currency: b.currency, paymentStatus: b.paymentStatus, basis: b.basis as CaptureBasis,
-      conflicted: b.conflicted, refund: b.refund as PaymentCapture['refund'] } };
+      conflicted: b.conflicted, refund: b.refund as PaymentCapture['refund'], refundableOnItsOwn: b.refundableOnItsOwn } };
   }
 
   async refunds(paymentId: string): Promise<PaymentRefunds | null> {

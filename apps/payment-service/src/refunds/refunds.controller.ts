@@ -114,7 +114,7 @@ export class RefundsController {
 
 const representCapture = (c: CaptureEvidence) => ({
   factId: c.factId, paymentId: c.paymentId, provider: c.provider, amount: c.amount, currency: c.currency, paymentStatus: c.paymentStatus, basis: c.basis,
-  conflicted: c.conflicted, refund: c.refund, observedAt: iso(c.observedAt),
+  conflicted: c.conflicted, refund: c.refund, refundableOnItsOwn: c.refundableOnItsOwn, observedAt: iso(c.observedAt),
 });
 
 /**
