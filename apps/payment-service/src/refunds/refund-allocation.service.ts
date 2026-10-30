@@ -25,7 +25,7 @@ export type AllocationOutcome =
   | { kind: 'already_allocated' }
   | { kind: 'blocked'; reason: 'contested' | 'currency_mismatch' | 'no_authorization' };
 
-interface FactRow { id: string; kind: string; paymentId: string; refundAttemptId: string | null; amount: string; currency: string }
+interface FactRow { id: string; kind: string; paymentId: string | null; refundAttemptId: string | null; amount: string; currency: string; associatedAuthorizationId: string | null }
 
 /** The worker's bounded backoff for a technical allocation failure: 2^attempts seconds, at most one hour (R6C-6: never a tight loop). */
 export const allocationBackoffSeconds = (attempts: number) => Math.min(3600, 2 ** Math.min(attempts, 12));
@@ -60,9 +60,18 @@ export class RefundAllocationService {
 
   async allocate(factId: string, ctx: EventContext): Promise<AllocationOutcome> {
     const { rows: found } = await this.db.query<FactRow>(
-      `SELECT id, kind, "paymentId", "refundAttemptId", amount, currency FROM provider_transaction_fact WHERE id = $1`, [factId]);
-    const fact = found[0];
-    if (!fact || fact.kind !== 'refund' || !fact.refundAttemptId) throw new Error('refund_allocation_not_a_refund_fact');
+      `SELECT f.id, f.kind, f."paymentId", f."refundAttemptId", f.amount, f.currency,
+              (SELECT s."refundAuthorizationId" FROM provider_fact_association s WHERE s."factId" = f.id AND s.status = 'associated') AS "associatedAuthorizationId"
+         FROM provider_transaction_fact f WHERE f.id = $1`, [factId]);
+    const found0 = found[0];
+    // Core V2 S6h (R6H-3, FC-2): an UNMATCHED refund fact is allocated only through its append-only association, against exactly the
+    // authorization the Owner associated it with (its payment and attempt are that authorization's); the arithmetic below is unchanged
+    const associated = found0 && found0.paymentId === null && found0.associatedAuthorizationId
+      ? (await this.db.query<{ paymentId: string; refundAttemptId: string }>(
+        `SELECT "paymentId", "refundAttemptId" FROM refund_authorization WHERE id = $1`, [found0.associatedAuthorizationId])).rows[0]
+      : undefined;
+    const fact = found0 && associated ? { ...found0, paymentId: associated.paymentId, refundAttemptId: associated.refundAttemptId } : found0;
+    if (!fact || fact.kind !== 'refund' || !fact.refundAttemptId || !fact.paymentId) throw new Error('refund_allocation_not_a_refund_fact');
     const outcome = await this.db.tx(async (q) => {
       const { rows: pay } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [fact.paymentId]); // FC-2 lock order: payment first
       const payment = pay[0]!;
@@ -149,6 +158,8 @@ export class RefundAllocationService {
       `SELECT f.id FROM provider_transaction_fact f
          LEFT JOIN refund_fact_allocation_lease l ON l."factId" = f.id
         WHERE f.kind = 'refund'
+          -- Core V2 S6h (R6H-3): an unmatched refund fact waits for its association (it is a reconciliation item until then)
+          AND (f."paymentId" IS NOT NULL OR EXISTS (SELECT 1 FROM provider_fact_association s WHERE s."factId" = f.id AND s.status = 'associated'))
           AND NOT EXISTS (SELECT 1 FROM refund_allocation a WHERE a."factId" = f.id)
           AND NOT EXISTS (SELECT 1 FROM refund_fact_allocation_block b WHERE b."factId" = f.id)
           AND (l."workAfter" IS NULL OR l."workAfter" <= now())

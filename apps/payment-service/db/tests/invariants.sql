@@ -756,6 +756,58 @@ SELECT pg_temp.expect_error('S6e-D', 'a decision is never deleted', $$DELETE FRO
 SELECT pg_temp.assert_eq('S6e-D', 'a decision never changes the dispute', (SELECT status FROM payment_dispute WHERE id = :'d2'), 'open');
 \o
 
+-- ======================================================= Core V2 S6h-P: unmatched facts and association (0021) ----
+\o /dev/null
+INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-s6h-c', 'payment.succeeded', '\x7b7d') RETURNING id AS hwc \gset
+INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-s6h-r', 'refund.succeeded', '\x7b7d') RETURNING id AS hwr \gset
+INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-s6h-d', 'payment.dispute.opened', '\x7b7d') RETURNING id AS hwd \gset
+\o
+SELECT pg_temp.expect_constraint('S6h-P', 'R6H-3: an unmatched fact needs its verified webhook of the same movement', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source, "webhookEventId")
+  VALUES ('test', 'utx-s6h-x', 'capture', 1000, 'TND', false, 'webhook', %L)$$, :'hwr'), 'provider_transaction_fact_unmatched_webhook');
+SELECT pg_temp.expect_constraint('S6h-P', 'R6H-3: never from another kind of notification', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source, "webhookEventId")
+  VALUES ('test', 'utx-s6h-x', 'capture', 1000, 'TND', false, 'webhook', %L)$$, :'hwd'), 'provider_transaction_fact_unmatched_webhook');
+SELECT pg_temp.expect_constraint('S6h-P', 'R6H-3: never without a webhook (a status read never creates an unmatched fact)', $$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source)
+  VALUES ('test', 'utx-s6h-x', 'capture', 1000, 'TND', false, 'status_check')$$, 'provider_transaction_fact_unmatched_webhook');
+SELECT pg_temp.expect_constraint('S6h-P', 'a matched fact names its attempt too', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", amount, currency, "liveMode", source)
+  VALUES ('test', 'utx-s6h-x', 'capture', %L, 1000, 'TND', false, 'status_check')$$, :'e1'), 'provider_transaction_fact_matched_shape');
+SELECT pg_temp.expect_error('S6h-P', 'an unmatched refund fact never names a refund attempt', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "refundAttemptId", amount, currency, "liveMode", source, "webhookEventId")
+  VALUES ('test', 'utx-s6h-x', 'refund', '00000000-0000-4000-8000-0000000006c1', 100, 'TND', false, 'webhook', %L)$$, :'hwr'), '23514');
+SELECT pg_temp.expect_ok('S6h-P', 'R6H-3: the verified unmatched capture', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source, "webhookEventId")
+  VALUES ('test', 'utx-s6h-1', 'capture', 1000, 'TND', false, 'webhook', %L)$$, :'hwc'));
+SELECT pg_temp.expect_ok('S6h-P', 'R6H-3: the verified unmatched refund', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source, "webhookEventId")
+  VALUES ('test', 'utx-s6h-2', 'refund', 300, 'TND', false, 'webhook', %L)$$, :'hwr'));
+SELECT pg_temp.expect_ok('S6h-P', 'R6H-3: another verified unmatched refund', format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source, "webhookEventId")
+  VALUES ('test', 'utx-s6h-3', 'refund', 100, 'TND', false, 'webhook', %L)$$, :'hwr'));
+\o /dev/null
+SELECT id AS hu1 FROM provider_transaction_fact WHERE "providerTxnId" = 'utx-s6h-1' \gset
+SELECT id AS hu2 FROM provider_transaction_fact WHERE "providerTxnId" = 'utx-s6h-2' \gset
+SELECT id AS hu3 FROM provider_transaction_fact WHERE "providerTxnId" = 'utx-s6h-3' \gset
+\o
+SELECT pg_temp.expect_error('S6h-P', 'FC-1: an unmatched fact is immutable', format($$UPDATE provider_transaction_fact SET "paymentId" = %L, "attemptId" = %L WHERE id = %L$$, :'e1', :'e1a', :'hu1'), '23514');
+CREATE FUNCTION pg_temp.assoc(id uuid, f uuid, target text, pay uuid, z uuid, company uuid, k text, status text DEFAULT 'authorization_pending') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO provider_fact_association (id, "factId", "targetType", "paymentId", "refundAuthorizationId", "companyId", "requestedByUserId", "idempotencyKey", "receiptDigest", status)
+    VALUES (%L, %L, %L, %L, %L, %L, '00000000-0000-4000-8000-0000000006a1', %L, repeat('a', 64), %L)$$, id, f, target, pay, z, company, k, status);
+$f$;
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: an association is created pending', pg_temp.assoc(gen_random_uuid(), :'hu1', 'payment', :'e1', NULL, '00000000-0000-4000-8000-00000000c6e0', 'key-s6h-0001', 'associated'), 'provider_fact_association_created_pending');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: a matched fact is never associated', pg_temp.assoc(gen_random_uuid(), :'e1f', 'payment', :'e1', NULL, '00000000-0000-4000-8000-00000000c6e0', 'key-s6h-0002'), 'provider_fact_association_unmatched');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: only to a payment of the Company that asks', pg_temp.assoc(gen_random_uuid(), :'hu1', 'payment', :'e1', NULL, gen_random_uuid(), 'key-s6h-0003'), 'provider_fact_association_company');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: a refund fact is never a capture of a payment', pg_temp.assoc(gen_random_uuid(), :'hu2', 'payment', :'e1', NULL, '00000000-0000-4000-8000-00000000c6e0', 'key-s6h-0004'), 'provider_fact_association_match');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: a capture fact is never a refund under an authorization', pg_temp.assoc(gen_random_uuid(), :'hu1', 'refund_authorization', :'c1', :'z1', '00000000-0000-4000-8000-00000000c6b0', 'key-s6h-0005'), 'provider_fact_association_match');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: the authorization is the destination payment''s own', pg_temp.assoc(gen_random_uuid(), :'hu2', 'refund_authorization', :'e1', :'z1', '00000000-0000-4000-8000-00000000c6e0', 'key-s6h-0006'), 'provider_fact_association_match');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: a payment target names no authorization', pg_temp.assoc(gen_random_uuid(), :'hu1', 'payment', :'c1', :'z1', '00000000-0000-4000-8000-00000000c6b0', 'key-s6h-0007'), 'provider_fact_association_target');
+SELECT pg_temp.expect_ok('S6h-P', 'PAY-13: the pending intent of an association', pg_temp.assoc('00000000-0000-4000-8000-0000000006b1', :'hu1', 'payment', :'e1', NULL, '00000000-0000-4000-8000-00000000c6e0', 'key-s6h-0008'));
+SELECT pg_temp.expect_error('S6h-P', 'PAY-13: at most one live association per fact', pg_temp.assoc(gen_random_uuid(), :'hu1', 'payment', :'e1', NULL, '00000000-0000-4000-8000-00000000c6e0', 'key-s6h-0009'), '23505');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: associated only with Auth''s consumption', $$UPDATE provider_fact_association SET status = 'associated' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'provider_fact_association_shape');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: the approver is the Owner who asked', $$UPDATE provider_fact_association SET status = 'associated', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'provider_fact_association_approver');
+SELECT pg_temp.expect_ok('S6h-P', 'PAY-13: associated with the receipt and its approver', $$UPDATE provider_fact_association SET status = 'associated', "receiptId" = gen_random_uuid(), "approvedByUserId" = '00000000-0000-4000-8000-0000000006a1' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$);
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: an association is decided once', $$UPDATE provider_fact_association SET status = 'authorization_refused', "receiptId" = NULL, "approvedByUserId" = NULL, "associatedAt" = NULL, refusal = 'x' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'provider_fact_association_transition');
+SELECT pg_temp.expect_constraint('S6h-P', 'PAY-13: its destination never changes', format($$UPDATE provider_fact_association SET "paymentId" = %L WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, :'c1'), 'provider_fact_association_transition');
+SELECT pg_temp.expect_error('S6h-P', 'an association is never deleted', $$DELETE FROM provider_fact_association$$, '23514');
+SELECT pg_temp.assert_eq('S6h-P', 'FC-1: the association never rewrites the fact', (SELECT coalesce("paymentId"::text, 'null') FROM provider_transaction_fact WHERE id = :'hu1'), 'null');
+SELECT pg_temp.expect_ok('S6h-P', 'PAY-13: an unmatched refund to an authorization of the payment', pg_temp.assoc('00000000-0000-4000-8000-0000000006b2', :'hu2', 'refund_authorization', :'c1', :'z1', '00000000-0000-4000-8000-00000000c6b0', 'key-s6h-0010'));
+SELECT pg_temp.expect_constraint('S6h-P', 'FC-2: a pending association never allows an allocation', pg_temp.alloc(:'hu2', 300, 0, 300), 'refund_allocation_binding');
+SELECT pg_temp.expect_constraint('S6h-P', 'FC-2: an unassociated unmatched refund is never allocated', pg_temp.alloc(:'hu3', 100, 0, 100), 'refund_allocation_binding');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

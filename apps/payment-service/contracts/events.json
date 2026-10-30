@@ -379,6 +379,61 @@
       }
     },
     {
+      "name": "payment.late_success.recorded",
+      "version": 1,
+      "payload": {
+        "amount": {
+          "type": "integer"
+        },
+        "attemptId": {
+          "type": "uuid"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "factId": {
+          "type": "uuid",
+          "nullable": true
+        },
+        "lateSuccessId": {
+          "type": "uuid"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "paymentStatus": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "nullable": true
+        },
+        "recordedAt": {
+          "type": "datetime"
+        }
+      }
+    },
+    {
       "name": "payment.succeeded",
       "version": 1,
       "payload": {

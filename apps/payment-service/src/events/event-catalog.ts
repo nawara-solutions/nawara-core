@@ -121,6 +121,31 @@ export const PRODUCED_EVENTS = {
       liveMode: { type: 'boolean' },
     },
   },
+  /**
+   * Core V2 S6h (register EVT-10; the Owner's R6H-4): a VERIFIED provider success that Payment could not apply because the payment's workflow
+   * had already ended (S4c F-4), once per recorded late success. It is NOT `payment.succeeded`: the payment is never reopened, no attempt is
+   * created and nothing is settled. `factId` is the verified capture fact (null only when the provider supplied no transaction reference);
+   * `purpose` is the payment's own routing purpose, so a consumer classifies it. A consumer that missed it reads
+   * `GET /payment/reconciliation/items?kind=late_success`.
+   */
+  'payment.late_success.recorded': {
+    version: 1,
+    payload: {
+      lateSuccessId: { type: 'uuid' },
+      paymentId: { type: 'uuid' },
+      paymentRequestId: { type: 'string' },
+      producer: { type: 'string' },
+      organizationId: { type: 'string', nullable: true },
+      purpose: { type: 'enum', values: ['organization_subscription', 'direct_purchase', 'assisted_settlement', 'recovery_settlement', 'non_entitlement'], nullable: true },
+      attemptId: { type: 'uuid' },
+      factId: { type: 'uuid', nullable: true },
+      amount: { type: 'integer' },
+      currency: { type: 'string' },
+      paymentStatus: { type: 'string' },
+      recordedAt: { type: 'datetime' },
+      liveMode: { type: 'boolean' },
+    },
+  },
 } as const satisfies Readonly<Record<string, ProducedEvent>>;
 
 export const CONSUMED_EVENTS = [] as const satisfies readonly ConsumedEvent[];

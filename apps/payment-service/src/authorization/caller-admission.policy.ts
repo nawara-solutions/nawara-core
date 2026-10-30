@@ -25,7 +25,7 @@ import { ConfigError, parseCallerPolicy, policyList, type CallerPolicyMap } from
  * (an Auth receipt) as a durable refund attempt. Held only by `billing-service`, never implied (no wildcard; `payment.create` does not include
  * it), and refused in production configuration: refunds are development and simulation only.
  */
-export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer', 'payment.create.assisted_settlement', 'payment.refund.create', 'payment.create.recovery_settlement'] as const;
+export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer', 'payment.create.assisted_settlement', 'payment.refund.create', 'payment.create.recovery_settlement', 'payment.reconciliation.read'] as const;
 export const SIMULATION_RESOLVE_OPERATION = 'payment.simulation.resolve';
 export const ORGANIZATION_PAYER_CREATE_OPERATION = 'payment.create.organization_payer';
 export const ASSISTED_SETTLEMENT_CREATE_OPERATION = 'payment.create.assisted_settlement';
@@ -41,6 +41,13 @@ export const RECOVERY_SETTLEMENT_CREATE_OPERATION = 'payment.create.recovery_set
 export const RECOVERY_SETTLEMENT_CALLER = 'billing-service';
 /** Core V2 S6b (R6B-1): the one service identity that may relay a refund authorization. */
 export const REFUND_CALLER = 'billing-service';
+/**
+ * Core V2 S6h (the Owner's R6H-6): `payment.reconciliation.read` lets the Billing producer read Payment's reconciliation evidence for ITS OWN
+ * payments (late successes, chargebacks, over-returns, associations, unresolved refund outcomes). Held only by `billing-service`, never
+ * implied, no wildcard, refused in production configuration (reconciliation is development and simulation only).
+ */
+export const RECONCILIATION_READ_OPERATION = 'payment.reconciliation.read';
+export const RECONCILIATION_READ_CALLER = 'billing-service';
 export type PaymentOperation = (typeof PAYMENT_OPERATIONS)[number];
 
 export interface PaymentCallerPolicy {
@@ -81,6 +88,10 @@ export function parsePaymentServicePolicy(raw: string | undefined, registered: r
     if (caller !== RECOVERY_SETTLEMENT_CALLER && policy.of(caller)?.operations.has(RECOVERY_SETTLEMENT_CREATE_OPERATION)) {
       throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${RECOVERY_SETTLEMENT_CREATE_OPERATION} may be held only by ${RECOVERY_SETTLEMENT_CALLER} (Core V2 S6f, R6F-2)`);
     }
+    // Core V2 S6h (R6H-6): so does the reconciliation read
+    if (caller !== RECONCILIATION_READ_CALLER && policy.of(caller)?.operations.has(RECONCILIATION_READ_OPERATION)) {
+      throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${RECONCILIATION_READ_OPERATION} may be held only by ${RECONCILIATION_READ_CALLER} (Core V2 S6h, R6H-6)`);
+    }
     // Core V2 S6b (R6B-1): so does the refund relay
     if (caller !== REFUND_CALLER && policy.of(caller)?.operations.has(REFUND_CREATE_OPERATION)) {
       throw new ConfigError(`PAYMENT_SERVICE_POLICY: ${REFUND_CREATE_OPERATION} may be held only by ${REFUND_CALLER} (Core V2 S6b, R6B-1)`);
@@ -106,7 +117,7 @@ export function assertSimulationGrant(policy: CallerPolicyMap<PaymentCallerPolic
 export function assertOrganizationPayerGrant(policy: CallerPolicyMap<PaymentCallerPolicy>, isProduction: boolean): void {
   if (!isProduction) return;
   for (const caller of policy.callers()) {
-    for (const op of [ORGANIZATION_PAYER_CREATE_OPERATION, ASSISTED_SETTLEMENT_CREATE_OPERATION, RECOVERY_SETTLEMENT_CREATE_OPERATION]) {
+    for (const op of [ORGANIZATION_PAYER_CREATE_OPERATION, ASSISTED_SETTLEMENT_CREATE_OPERATION, RECOVERY_SETTLEMENT_CREATE_OPERATION, RECONCILIATION_READ_OPERATION]) {
       if (policy.of(caller)?.operations.has(op)) {
         throw new ConfigError(`PAYMENT_SERVICE_POLICY grants ${op}, which no production configuration may hold yet (a separate Owner decision)`);
       }

@@ -75,7 +75,20 @@ export interface DisputeDecisionBinding {
 }
 
 /** Every receipt binding Payment consumes. */
-export type ReceiptBinding = RefundBinding | DisputeDecisionBinding;
+/** Core V2 S6h (R6H-3; Auth #400): an Owner's association of one unmatched provider fact with one destination, exactly as Auth issued it. */
+export interface ProviderFactAssociateBinding {
+  operation: 'provider_fact_associate';
+  audience: 'payment-service';
+  companyId: string;
+  factId: string;
+  kind: 'capture' | 'refund' | 'chargeback';
+  amount: number;
+  currency: string;
+  targetType: 'payment' | 'refund_authorization';
+  targetId: string;
+}
+
+export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | ProviderFactAssociateBinding;
 
 export function bindingOf(a: Pick<RefundAttemptRow, 'companyId' | 'refundCaseId' | 'paymentId' | 'amount' | 'currency' | 'reason' | 'legalOverride'>): RefundBinding {
   return {

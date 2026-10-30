@@ -49,7 +49,15 @@ export type ErrorCode =
   | 'dispute_decision_conflict'
   | 'dispute_decision_unresolved'
   | 'owner_authority_unavailable'
-  | 'simulation_nothing_to_dispute';
+  | 'simulation_nothing_to_dispute'
+  // Core V2 S6h (PAY-12, PAY-13; R6H-3)
+  | 'invalid_reconciliation_request'
+  | 'provider_fact_matched'
+  | 'fact_already_associated'
+  | 'provider_fact_association_invalid'
+  | 'provider_fact_association_refused'
+  | 'provider_fact_association_conflict'
+  | 'provider_fact_association_unresolved';
 
 /** `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that echo a client value. */
 export function paymentError(status: number, code: ErrorCode, message: string | MessageTexts, params?: MessageParams): HttpException {

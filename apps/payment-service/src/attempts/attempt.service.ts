@@ -4,7 +4,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
-import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
+import { lateSuccessEvent, paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
 import { paymentError } from '../errors.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { completeClosingIfResolved, isPaymentUncertain } from '../payments/payment-closing.js';
@@ -272,11 +272,18 @@ export class AttemptService {
    */
   private async recordLateSuccess(attemptId: string, f: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string }, ctx: EventContext, factId: string | null): Promise<void> {
     const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
-    const { rowCount } = await this.db.query(
-      `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT ON CONSTRAINT payment_late_success_once DO NOTHING`,
-      [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus, factId],
-    );
+    // Core V2 S6h (R6H-4): with its `payment.late_success.recorded` event, in the same transaction, only when newly recorded
+    const rowCount = await this.db.tx(async (q) => {
+      const { rows } = await q.query<{ id: string; attemptId: string; factId: string | null; amount: string; currency: string; paymentStatus: string; recordedAt: Date }>(
+        `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT ON CONSTRAINT payment_late_success_once DO NOTHING RETURNING id, "attemptId", "factId", amount, currency, "paymentStatus", "recordedAt"`,
+        [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus, factId],
+      );
+      if (!rows[0]) return 0;
+      const payment = (await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [f.paymentId])).rows[0]!;
+      await this.outbox.enqueue(q, lateSuccessEvent(rows[0], payment, ctx));
+      return 1;
+    });
     this.logger.warn(`payment_late_success_recorded payment=${f.paymentId} attempt=${attemptId} paymentStatus=${f.paymentStatus} reason=${f.conflict} ${rowCount ? 'new' : 'already_recorded'} — needs reconciliation; nothing was settled`);
   }
 

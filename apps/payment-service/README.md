@@ -107,6 +107,14 @@ no production traffic can reach any of this (the test provider refuses to start 
   Producer reads (`payment.read`): `GET /payment/payments/:id/dispute-exposure` and `GET /payment/disputes/losses`. Events
   `payment.dispute.opened` / `payment.dispute.lost` (v1, outbox); audit `payment_dispute.opened`, `.closed`, `.evidence_added`, `.decided`.
   Harness: `POST /payment/simulation/payments/:paymentId/disputes` and `POST /payment/simulation/dispute-commands/:commandId/deliver`.
+- **Reconciliation (Core V2 S6h-P; register PAY-12, PAY-13, EVT-10; the Owner's R6H-1 to R6H-12) — DEVELOPMENT AND SIMULATION ONLY**
+  (`src/reconciliation/`, migration 0021; mounted exactly where refunds are). A signed capture or refund notification that names no attempt
+  becomes an immutable unmatched fact after a 5-minute grace window. Owner routes (live Owner check): `GET
+  /payment/admin/reconciliation-items?kind&after&limit`, `GET /payment/admin/balances`, `GET /payment/admin/payments/:id/balance` (signed,
+  per currency, never clamped) and `POST /payment/admin/provider-facts/:id/associations` `{targetType, targetId, receiptSecret}` +
+  `Idempotency-Key` (an Auth `provider_fact_associate` receipt, consumed once; append-only; audit `provider_fact.associated`). Billing:
+  `GET /payment/reconciliation/items?kind` (`payment.reconciliation.read`, billing-service only, never in production). Event
+  `payment.late_success.recorded` (v1). A refund of one specific capture is not available (contract gap, register PAY-13 G).
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
@@ -133,7 +141,8 @@ no production traffic can reach any of this (the test provider refuses to start 
 - Cash submissions and their confirm/reject flow — **O-4** (who may submit), **O-5** (who may
   confirm/reject).
 - Refunds beyond Core V2 S6b's simulation scope: partial refunds stay deferred (S0 D4); real provider refunds, allocation and completion
-  (S6c), reversal (S6d), disputes (S6e) and reconciliation (S6h) are later stages.
+  (S6c), reversal (S6d), disputes (S6e) and reconciliation cases and `FinancialLoss` (S6h-B) are later stages; the refund of one specific
+  capture (R6H-5) waits on a contract decision.
 - Producer service-token scopes and non-test-fixture producers — **O-13**, **O-14**.
 - Organization/platform/company hierarchy validation with no user context — **O-15**.
 - Any currency beyond the configured list, and a default/maximum payment lifetime — **O-10**, **O-16**.
