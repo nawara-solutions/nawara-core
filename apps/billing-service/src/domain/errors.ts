@@ -97,7 +97,16 @@ export type BillingErrorCode =
   | 'surplus_evidence_unavailable'
   | 'recovery_authorization_refused'
   | 'recovery_authorization_unresolved'
-  | 'recovery_authorization_unavailable';
+  | 'recovery_authorization_unavailable'
+  // Core V2 S6g late assisted settlement application (register BIL-32; R6G-1 to R6G-9)
+  | 'invalid_late_settlement_request'
+  | 'late_settlement_refused'
+  | 'late_settlement_already_attested'
+  | 'late_settlement_evidence_invalid'
+  | 'late_settlement_evidence_unavailable'
+  | 'late_settlement_authorization_refused'
+  | 'late_settlement_authorization_unresolved'
+  | 'late_settlement_authorization_unavailable';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

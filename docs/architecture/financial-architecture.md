@@ -143,8 +143,14 @@ is kept for review: no debt, no T3); the Organization's administrator settles th
 invoice at a time (Payment's narrow `payment.create.recovery_settlement`); only Payment's verified success is a recovery payment, split by
 the database into principal and `recovery_surplus` owed to the Organization (never revenue, never offset, no expiry); T3 clears once when
 principal reaches the base. A surplus is resolved by the full refund of an entirely surplus payment (refund cases) or by the Owner's
-evidenced external repayment confirmed by the Organization. No `billing.recovery` event (EVT-06), no FinancialLoss. **Still FROZEN, not
-implemented**: late assisted settlement L-1 to L-6 including L-4's five conditions (S6g); reconciliation
+evidenced external repayment confirmed by the Organization. No `billing.recovery` event (EVT-06), no FinancialLoss.
+**Late assisted settlement: IMPLEMENTED (L-1 to L-3 and L-5 in S5b and S6a to S6d; L-4 / L-6 in S6g, simulation only; the Owner's R6G-1 to R6G-9)**:
+a verified late success is recorded with Payment's original instant and never applied automatically; the default is the full refund of
+that payment; the Owner may apply it as the request's single purchase only with a factor-step-up receipt and the beneficiary's attestation
+or File evidence that the cash was not returned, never with a purchase, a confirmed or reported return, an open dispute or any refund case;
+the open deadline obligation is then superseded (kept as history; one live obligation per request), and the beneficiary's entitlement
+starts at the application. **Still FROZEN, not
+implemented**: reconciliation
 cases, fact association, balances that are never clamped (FC-5) and `FinancialLoss` only from evidence (FC-6) (S6h). Payment has no
 dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.
 

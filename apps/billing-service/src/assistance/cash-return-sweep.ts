@@ -75,7 +75,7 @@ export class CashReturnSweep {
       const o = (await q.query<{ id: string; organizationId: string; amount: string }>(
         `INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt")
          SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt" FROM assistance_request WHERE id = $1
-         ON CONFLICT ("assistanceRequestId") DO NOTHING RETURNING id, "organizationId", amount`, [requestId])).rows[0];
+         ON CONFLICT ("assistanceRequestId") WHERE status IN ('open', 'return_reported') DO NOTHING RETURNING id, "organizationId", amount`, [requestId])).rows[0]; // Core V2 S6g: the live-obligation index
       if (!o) return false;
       const ctx: TransitionContext = { actor: { type: 'system', id: 'assistance_sweep' }, cause: { type: 'sweep', id: requestId }, correlationId: `assistance-sweep:${requestId}` };
       await this.audit.record(q, 'cash_return_obligation.opened', {

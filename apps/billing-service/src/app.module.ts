@@ -21,6 +21,7 @@ import type { OwnerAuthority } from './platforms/owner-authority.client.js';
 import type { DisputeExposure } from './refunds/dispute-exposure.js';
 import { RefundModule } from './refunds/refund.module.js';
 import { RecoveryModule } from './recovery/recovery.module.js';
+import { LateSettlementModule } from './late-settlements/late-settlement.module.js';
 import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 import type { PaymentDisputeClient } from './refunds/payment-dispute-client.js';
@@ -111,6 +112,8 @@ export class AppModule {
         RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient, fraudHoldReceipts: overrides.fraudHoldReceipts, fraudEvidenceFiles: overrides.fraudEvidenceFiles }),
         // Core V2 S6f (BIL-26 T3, BIL-28 to BIL-31): recovery of verified assisted losses; development and simulation only
         RecoveryModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler }),
+        // Core V2 S6g (BIL-32): the L-4 application of verified late assisted settlements; development and simulation only
+        LateSettlementModule.register(config, overrides.ownerAuthority),
       ],
     };
   }

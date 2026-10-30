@@ -226,7 +226,7 @@ test('provisioning: every identity selected gets EXACTLY its generated topic gra
   assert.equal(GEN['auth-service'].domainEvents, 'inactive');
   assert.deepEqual(Object.fromEntries(ALL.map((s) => [s, [GEN[s].write.keys.length, GEN[s].read.keys.length]])), {
     // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1) + file.granted_read (S2-File.2) + the two hold actions (S2-File.3); billing-service: 12 + the three assistance-request actions (S5a, D-9) + the three settlement / cash-return actions (S5b, E-13) + the five confirmation / dispute / correction actions (S5c) + the two refund-case actions (S6a) + refund_case.authorization_relayed (S6b) + refund_case.completed (S6c) + subscription_purchase.reversed (S6d), reading + refund.case_completed (S6c); payment-service: 10 + the three refund-attempt actions (S6b, R6B-7) + refund_authorization.completed and refund.case_completed (S6c) + the four payment_dispute actions and payment.dispute.opened / lost (S6e-D); billing-service reading + payment.dispute.lost (S6e-D), writing + the three fraud_hold actions (S6e-H)
-    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [37, 6], 'file-service': [7, 0], 'notification-service': [0, 9],
+    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [40, 6], 'file-service': [7, 0], 'notification-service': [0, 9],
     'organization-service': [7, 0], 'payment-service': [21, 0], 'release-service': [4, 0],
   });
 });

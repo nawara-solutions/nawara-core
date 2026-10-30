@@ -70,7 +70,7 @@ class CashReturnDto {
 class CashReturnObligationDto {
   @ApiProperty({ format: 'uuid' }) id!: string;
   @ApiProperty({ format: 'uuid' }) assistanceRequestId!: string;
-  @ApiProperty({ enum: ['open', 'return_reported', 'confirmed_returned'], description: 'confirmed_returned (Core V2 S5c): only the beneficiary confirms; a report alone never discharges.' }) status!: string;
+  @ApiProperty({ enum: ['open', 'return_reported', 'confirmed_returned', 'superseded_by_settlement'], description: 'confirmed_returned (Core V2 S5c): only the beneficiary confirms; a report alone never discharges. superseded_by_settlement (Core V2 S6g, L-4): an open deadline obligation closed by the Owner\'s application of a late settlement; terminal history.' }) status!: string;
   @ApiProperty({ description: 'The frozen total (base + Organization fee), minor units.' }) amount!: number;
   @ApiProperty() currency!: string;
   @ApiProperty({ format: 'date-time' }) openedAt!: string;
@@ -78,6 +78,7 @@ class CashReturnObligationDto {
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) returnReportedAt!: string | null;
   @ApiProperty({ type: String, nullable: true, format: 'date-time', description: "returnedAt after the Owner's corrections, if any (derived; the original stays)." }) effectiveReturnedAt!: string | null;
   @ApiProperty({ type: String, nullable: true, format: 'date-time', description: "The beneficiary's confirmation (Billing's time)." }) confirmedAt!: string | null;
+  @ApiProperty({ type: String, nullable: true, format: 'date-time', description: 'Core V2 S6g: when a late-settlement application superseded it.' }) supersededAt!: string | null;
 }
 
 class DisputeCreateDto {

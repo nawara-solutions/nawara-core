@@ -107,7 +107,7 @@ export class AssistanceResolutionService {
     await this.beneficiary(identity, parties);
     return this.idempotency.run(identity.id, key, 'assistance_request.dispute', { id: requestId, ...input }, async (q): Promise<AssistanceCommandResult> => {
       const r = (await q.query<{ status: string }>(`SELECT status FROM assistance_request WHERE id = $1 FOR UPDATE`, [requestId])).rows[0]!;
-      const o = (await q.query<{ returnedAt: Date | null }>(`SELECT "returnedAt" FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [requestId])).rows[0];
+      const o = (await q.query<{ returnedAt: Date | null }>(`SELECT "returnedAt" FROM cash_return_obligation WHERE id = billing_assistance_current_obligation($1)`, [requestId])).rows[0]; // Core V2 S6g: the current obligation
       if (!['cash_collected', 'settled', 'returned'].includes(r.status) || (input.reasonCode === 'cash_not_returned' && !o)
         || (input.reasonCode === 'return_time_incorrect' && !o?.returnedAt)) throw billingError(409, 'dispute_not_permitted', BILLING_MESSAGES.disputeNotPermitted);
       if (await this.hasOpenDispute(q, requestId)) throw disputeOpen();
@@ -244,7 +244,7 @@ export class AssistanceResolutionService {
               billing_assistance_effective_time(a.id, $2) = $3::timestamptz AS unchanged,
               (a."consentAt" <= c.v AND c.v <= a."reportedAt" AND (r.v IS NULL OR (c.v <= r.v AND r.v <= o."returnReportedAt"))) AS ok
          FROM assistance_request a
-         LEFT JOIN cash_return_obligation o ON o."assistanceRequestId" = a.id
+         LEFT JOIN cash_return_obligation o ON o.id = billing_assistance_current_obligation(a.id) -- Core V2 S6g: the current obligation
          CROSS JOIN LATERAL (SELECT CASE WHEN $2 = 'cashCollectedAt' THEN $3::timestamptz ELSE billing_assistance_effective_time(a.id, 'cashCollectedAt') END AS v) c
          CROSS JOIN LATERAL (SELECT CASE WHEN $2 = 'returnedAt' THEN $3::timestamptz ELSE billing_assistance_effective_time(a.id, 'returnedAt') END AS v) r
         WHERE a.id = $1`, [requestId, input.field, input.value])).rows[0]!;

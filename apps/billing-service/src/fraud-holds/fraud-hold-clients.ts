@@ -9,7 +9,9 @@ export type FraudHoldBinding =
   | { operation: 'fraud_hold_place'; audience: 'billing-service'; companyId: string; holdId: string; beneficiaryUserId: string; productId: string; reason: string }
   | { operation: 'fraud_hold_release'; audience: 'billing-service'; companyId: string; holdId: string; beneficiaryUserId: string; productId: string }
   // Core V2 S6f (R6F-5 Path B; Auth #396): an Owner's record that one recovery surplus was repaid outside Core
-  | { operation: 'recovery_surplus_external'; audience: 'billing-service'; companyId: string; surplusId: string; organizationId: string; amount: number; currency: string };
+  | { operation: 'recovery_surplus_external'; audience: 'billing-service'; companyId: string; surplusId: string; organizationId: string; amount: number; currency: string }
+  // Core V2 S6g (R6G-1; Auth #398): an Owner's L-4 application of one late assisted settlement
+  | { operation: 'late_settlement_apply'; audience: 'billing-service'; companyId: string; lateSettlementId: string; assistanceRequestId: string; beneficiaryUserId: string; reasonCode: string };
 
 export interface ReceiptConsumption { receiptId: string; approvedByUserId: string }
 

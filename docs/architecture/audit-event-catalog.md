@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (36)
+## billing-service (39)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -101,6 +101,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `recovery_surplus.recorded` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | required | recovery_surplus | — | succeeded | `amount`: integer 1–9007199254740991 | A verified recovery payment beyond the base: a surplus owed to the Organization (not revenue, not a loss, no expiry, never offset). |
 | `recovery_surplus.resolved` | commercial | user (owner); system (`refund_effect_worker`) | required | recovery_surplus | — | succeeded | `method`: full_refund \| external_execution_evidenced<br>`refund_case_id`?: uuid<br>`file_id`?: uuid | A surplus resolution: the completed full refund of an entirely surplus payment, or the Owner's evidenced record of an external repayment (which the Organization then confirms). |
 | `recovery_surplus.recipient_confirmed` | commercial | user (member) | required | recovery_surplus | — | succeeded | — | The receiving Organization's administrator confirmed an external surplus repayment: the surplus is resolved. |
+| `assistance_late_settlement.attested` | commercial | user (member) | required | assistance_late_settlement | — | succeeded | `assistance_request_id`: uuid<br>`statement`: cash_not_returned \| cash_returned | The beneficiary's own statement about the cash of a late assisted settlement's request: a statement, never a financial fact. |
+| `assistance_late_settlement.applied` | commercial | user (owner) | required | assistance_late_settlement | — | succeeded | `assistance_request_id`: uuid<br>`reason_code`: cash_not_returned_attested \| cash_not_returned_evidenced<br>`purchase_id`: uuid<br>`superseded_obligation_id`?: uuid<br>`evidence_count`: integer 0–5 | The Owner applied a verified late assisted settlement as its request's single purchase (L-4), with the beneficiary's attestation or evidence that the cash was not returned. |
+| `cash_return_obligation.superseded` | commercial | user (owner) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`late_settlement_id`: uuid | An open deadline cash-return obligation closed as superseded_by_settlement by the Owner's L-4 application; it is kept as history. |
 
 ## payment-service (13)
 
@@ -154,4 +157,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 101 actions.**
+**Total: 104 actions.**

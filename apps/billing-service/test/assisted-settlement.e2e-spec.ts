@@ -549,7 +549,8 @@ describeWithEnv('assisted settlement and cash return (Core V2 S5b, simulation) â
         SELECT id, "organizationId", "beneficiaryUserId", "totalAmount" - 1, currency, "cashCollectedAt" FROM assistance_request WHERE id = $1`, [r.id])).rejects.toMatchObject({ code: '23514', constraint: 'cash_return_obligation_terms' });
       await sweep();
       const o = await one(`SELECT id FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [r.id]);
-      await expect(admin.query(ins, [r.id])).rejects.toMatchObject({ code: '23505' });
+      // a second obligation is refused: Core V2 S6g (Option A) refuses a second LIVE one by the guard (and the partial unique index behind it)
+      await expect(admin.query(ins, [r.id])).rejects.toMatchObject({ code: '23514', constraint: 'cash_return_obligation_live_exists' });
       await expect(admin.query(`UPDATE cash_return_obligation SET status = 'return_reported', "returnedAt" = now(), "returnReportedBy" = "beneficiaryUserId" WHERE id = $1`, [o.id])).rejects.toMatchObject({ code: '23514' });
       await expect(admin.query(`UPDATE cash_return_obligation SET amount = 1 WHERE id = $1`, [o.id])).rejects.toMatchObject({ code: '23514' });
       await expect(admin.query(`UPDATE cash_return_obligation SET status = 'confirmed_returned' WHERE id = $1`, [o.id])).rejects.toMatchObject({ code: '23514' });

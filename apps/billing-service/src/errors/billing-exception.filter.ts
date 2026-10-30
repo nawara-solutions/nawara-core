@@ -2,7 +2,7 @@ import { Catch } from '@nestjs/common';
 import { KitExceptionFilter, type JsonLogger } from '@nawara/service-kit';
 
 /** The extra response fields Billing documents, by name: nothing else on an exception's response object ever reaches a body. */
-const BILLING_EXTRA_FIELDS = ['restriction', 'restrictions'] as const;
+const BILLING_EXTRA_FIELDS = ['restriction', 'restrictions', 'reason'] as const; // Core V2 S6g: `reason`, the closed refusal of `late_settlement_refused` (BIL-32)
 
 /**
  * The kit's `KitExceptionFilter` exactly as `configureApp` installs it by default (ADR-0054 localization on, no excluded paths), plus one

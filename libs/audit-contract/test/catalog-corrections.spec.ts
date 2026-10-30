@@ -105,7 +105,11 @@ describe('Core V2 S3g (D-CAT-9): the four catalog actions additionally accept th
       'fraud_hold.placed', 'fraud_hold.released']; // + S6e-H (H-7): the Owner of the seller Company, with dedicated factor-only receipts
     // + Core V2 S6f (R6F-1, R6F-5, R6F-6): the Owner's evidenced external repayment (or the refund effect worker), and the receiving Organization's administrator
     const S6F = ['recovery_surplus.resolved', 'recovery_surplus.recipient_confirmed'];
-    expect(billingWithUser.sort()).toEqual(['invoice.discarded', 'invoice.issued', 'payment_request.cancelled', 'payment_request.created', ...CATALOG, ...S5A, ...S5C_OWNER, ...S6F].sort());
+    // + Core V2 S6g (R6G-9): the beneficiary's attestation (member); the Owner's application and the supersession it causes (owner)
+    const S6G = ['assistance_late_settlement.attested', 'assistance_late_settlement.applied', 'cash_return_obligation.superseded'];
+    expect(billingWithUser.sort()).toEqual(['invoice.discarded', 'invoice.issued', 'payment_request.cancelled', 'payment_request.created', ...CATALOG, ...S5A, ...S5C_OWNER, ...S6F, ...S6G].sort());
+    expect(AUDIT_CATALOG.get('assistance_late_settlement.attested' as never)!.actors).toEqual({ user: ['member'] });
+    for (const a of ['assistance_late_settlement.applied', 'cash_return_obligation.superseded']) expect(AUDIT_CATALOG.get(a as never)!.actors).toEqual({ user: ['owner'] });
     expect(AUDIT_CATALOG.get('recovery_surplus.resolved' as never)!.actors).toEqual({ user: ['owner'], system: ['refund_effect_worker'] });
     expect(AUDIT_CATALOG.get('recovery_surplus.recipient_confirmed' as never)!.actors).toEqual({ user: ['member'] });
     for (const a of S5C_OWNER) expect(AUDIT_CATALOG.get(a as never)!.actors).toEqual({ user: ['owner'] });
@@ -143,7 +147,7 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 
 describe('nothing else was broadened', () => {
   it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the four of A5.4-AC1 (batches 1 and 2), and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(101); // + Core V2 S6f (R6F-6): the six recovery actions; + Core V2 S6e-H (H-7): the three fraud_hold actions; + Core V2 S6e-D (R6E-8): the four payment_dispute actions; + Core V2 S6c (R6C-11): refund_authorization.completed, refund_case.completed; + Core V2 S6d (R6D-5): subscription_purchase.reversed; // + the three assistance-request actions of Core V2 S5a (D-9), the three settlement / cash-return actions of S5b (E-13), the five confirmation / dispute / correction actions of S5c, the two refund-case actions of S6a and the four refund actions of S6b (R6B-7); + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4, the two evidence-grant actions of S2-File.1, file.granted_read (S2-File.2) and the two hold actions of S2-File.3
+    expect(AUDIT_ACTIONS).toHaveLength(104); // + Core V2 S6g (R6G-9): the three late-settlement actions; + Core V2 S6f (R6F-6): the six recovery actions; + Core V2 S6e-H (H-7): the three fraud_hold actions; + Core V2 S6e-D (R6E-8): the four payment_dispute actions; + Core V2 S6c (R6C-11): refund_authorization.completed, refund_case.completed; + Core V2 S6d (R6D-5): subscription_purchase.reversed; // + the three assistance-request actions of Core V2 S5a (D-9), the three settlement / cash-return actions of S5b (E-13), the five confirmation / dispute / correction actions of S5c, the two refund-case actions of S6a and the four refund actions of S6b (R6B-7); + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4, the two evidence-grant actions of S2-File.1, file.granted_read (S2-File.2) and the two hold actions of S2-File.3
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
@@ -162,7 +166,7 @@ describe('nothing else was broadened', () => {
       'admin_invitation.created', 'admin_invitation.revoked', 'hierarchy.admin_operation_denied', 'invoice.issued', 'invoice.discarded', 'payment_request.created',
       'payment_request.cancelled'];
     expect(member.sort()).toEqual([...stage184, 'payment.succeeded', 'payment.failed', 'organization.updated', 'hierarchy.reference_repair_denied', 'assistance_request.cash_collection_reported', 'assistance_request.created', 'assistance_request.declined', 'assistance_request.settlement_requested', 'cash_return_obligation.return_reported',
-      'cash_return_obligation.confirmed', 'assistance_dispute.opened', 'assistance_dispute.responded', 'recovery_surplus.recipient_confirmed'].sort()); // + S6f (R6F-1)
+      'cash_return_obligation.confirmed', 'assistance_dispute.opened', 'assistance_dispute.responded', 'recovery_surplus.recipient_confirmed', 'assistance_late_settlement.attested'].sort()); // + S6f (R6F-1); + S6g (R6G-2)
     // Every other action refuses a member outright.
     for (const a of AUDIT_ACTIONS.filter((x) => !member.includes(x))) expect(ok(a, { actor: USER }), a).toThrow('invalid_actor');
   });
