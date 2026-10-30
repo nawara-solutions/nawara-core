@@ -8,7 +8,7 @@ import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
 import { RefundWorker, RefundWorkerService } from './refund-worker.js';
-import { RefundsController } from './refunds.controller.js';
+import { RefundCapturesController, RefundsController } from './refunds.controller.js';
 
 /**
  * Core V2 S6b refund attempts (register PAY-07, PAY-08; the Owner's R6B-1 to R6B-10). PRODUCTION REFUSAL, first line: without refunds in the
@@ -25,7 +25,7 @@ export class RefundsModule {
     return {
       module: RefundsModule,
       imports: [AuthModule, PaymentsModule],
-      controllers: [RefundsController],
+      controllers: [RefundsController, RefundCapturesController],
       providers: [
         RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundWorker, IdempotencyService,
         ...(opts.worker === false ? [] : [RefundWorkerService]),

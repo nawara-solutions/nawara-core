@@ -7,7 +7,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURRENCY = /^[A-Z]{3}$/;
 /** An Auth receipt secret: base64url of 32 random bytes (AUTH-01). */
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
-const FIELDS = ['refundAttemptId', 'refundCaseId', 'amount', 'currency', 'reason', 'legalOverride', 'receiptSecret'];
+const FIELDS = ['refundAttemptId', 'refundCaseId', 'amount', 'currency', 'reason', 'legalOverride', 'receiptSecret', 'captureFactId'];
 
 const invalid = () => paymentError(400, 'invalid_refund_request', PAYMENT_MESSAGES.invalidRefundRequest);
 
@@ -27,8 +27,12 @@ export function normaliseRefundRequest(raw: unknown): RefundRequestInput {
   if (typeof v.reason !== 'string' || !(REFUND_REASONS as readonly string[]).includes(v.reason)) throw invalid();
   if (typeof v.legalOverride !== 'boolean') throw invalid();
   if (typeof v.receiptSecret !== 'string' || !SECRET.test(v.receiptSecret)) throw invalid();
-  return {
+  // Core V2 R6H-5: a capture-specific refund names the ONE verified capture fact it returns (canonical lower-case, never null)
+  if ('captureFactId' in v && (typeof v.captureFactId !== 'string' || !UUID.test(v.captureFactId))) throw invalid();
+  const input: RefundRequestInput = {
     refundAttemptId: v.refundAttemptId, refundCaseId: v.refundCaseId, amount: v.amount, currency: v.currency, reason: v.reason as RefundReason,
     legalOverride: v.legalOverride, receiptSecret: v.receiptSecret,
   };
+  if ('captureFactId' in v) input.captureFactId = v.captureFactId as string;
+  return input;
 }

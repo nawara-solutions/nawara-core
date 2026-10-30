@@ -92,6 +92,8 @@ export class RefundAuthorizationService {
       const outcome = await this.payment.relay(c.paymentId, `refund-relay:${relay.id}`, {
         refundAttemptId: relay.id, refundCaseId: caseId, amount: Number(c.amount), currency: c.currency, reason: c.reason, legalOverride: c.legalOverride,
         receiptSecret,
+        // Core V2 R6H-5: a capture-specific case's attempt names its capture (the Owner's receipt binding names the same one)
+        ...(c.captureFactId ? { captureFactId: c.captureFactId } : {}),
       });
       relay = await this.apply(relay.id, outcome);
       this.answerOutcome(outcome, relay);

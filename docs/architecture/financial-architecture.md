@@ -154,7 +154,9 @@ attempt is kept as an immutable unmatched fact after a grace window and is assoc
 append-only row the Owner authorizes with a consumed Auth receipt (the fact never changes); a late success emits
 `payment.late_success.recorded` once (with a Billing read for event loss); reconciliation items and signed per-currency balances
 (`netRetained = captured − refundedNet − chargebackNet`, never clamped) come only from verified facts. A refund of one specific capture is
-STOPPED on a contract gap (register PAY-13 G). **Still FROZEN, not implemented**: reconciliation cases and `FinancialLoss` only from evidence
+resolved by the Owner (R6H-5): a capture-specific refund case and attempt return, in full, exactly one verified capture (a late capture,
+a distinct duplicate, an associated or an unrouted settling capture) under an Owner receipt that names it; uniqueness is per capture fact,
+the ordinary per-payment rules are unchanged, and the completion has no commercial effect (register BIL-23 G, PAY-07 H). **Still FROZEN, not implemented**: reconciliation cases and `FinancialLoss` only from evidence
 (FC-6) (S6h-B). Payment has no
 dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.
 

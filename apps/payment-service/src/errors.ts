@@ -39,6 +39,8 @@ export type ErrorCode =
   | 'refund_authorization_expired'
   | 'refund_authorization_unresolved'
   | 'refund_case_completed' // Core V2 S6c (FC-3, frozen)
+  | 'refund_capture_not_eligible' // Core V2 R6H-5
+  | 'capture_not_found' // Core V2 R6H-5
   // Core V2 S6e-D (PAY-09 to PAY-11, R6E-3)
   | 'invalid_dispute_request'
   | 'dispute_not_open'

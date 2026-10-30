@@ -115,9 +115,17 @@ authorization (a refund) of their Company through an append-only `provider_fact_
 `provider_fact_associate` receipt, then the record and its `provider_fact.associated` audit); the database re-checks the destination and
 allows one live association per fact. An associated refund fact is allocated by the refund worker under FC-2. A late success emits
 `payment.late_success.recorded` (v1) once, in the transaction that records it. Reconciliation items (Owner, and Billing's own evidence with
-`payment.reconciliation.read`) and signed per-currency balances are read-only evidence. The refund of one specific capture (R6H-5) is
-stopped on a contract gap: the Auth `refund` binding names no capture. Implemented in `db/migrations/0021_reconciliation.sql`,
+`payment.reconciliation.read`) and signed per-currency balances are read-only evidence. Implemented in `db/migrations/0021_reconciliation.sql`,
 `src/reconciliation/` and `src/webhooks/webhook.service.ts`.
+
+**Core V2 R6H-5 (capture-specific refunds; the Owner's decision, 2026-10-30; register PAY-07 H; Auth receipt contract §17f):** for Core V2
+development and simulation only. A refund attempt may name one verified capture (`captureFactId`): the payment's own (a late capture, a
+capture of another attempt, a further capture of the settling attempt, or the settling capture itself) or an unmatched capture associated with
+it. The attempt is `captureSpecific` (immutable) and its receipt binding names the capture, so no ordinary receipt authorizes it nor the
+reverse. Payment re-verifies the capture, its amount, its refund state and the dispute exposure under the payment lock; the last capture of
+the settling attempt is never refunded on its own. Uniqueness is per capture fact (one potentially effective attempt, one completed
+authorization); the S6b/S6c per-payment rules still hold for ordinary attempts. Dispatch returns the capture's own provider transaction with
+the stable key; allocation and completion are S6c's. Implemented in `db/migrations/0022_capture_specific_refunds.sql` and `src/refunds/`.
 
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a

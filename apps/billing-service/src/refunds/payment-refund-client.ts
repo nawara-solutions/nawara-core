@@ -9,7 +9,7 @@ export const ATTEMPT_STATUSES = ['authorization_pending', 'authorized', 'authori
 export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number];
 /** Payment's permanent refusals of a refund attempt id before any attempt existed. */
 export const PAYMENT_REFUSALS = ['payment_not_refundable', 'refund_capture_unverified', 'refund_amount_not_full', 'refund_dispute_open', 'refund_in_progress',
-  'refund_already_recorded', 'refund_case_completed'] as const; // Core V2 S6c: refund_case_completed (FC-3)
+  'refund_already_recorded', 'refund_case_completed', 'refund_capture_not_eligible'] as const; // Core V2 S6c: refund_case_completed (FC-3); R6H-5
 export type PaymentRefusal = (typeof PAYMENT_REFUSALS)[number];
 
 export interface RefundAttemptSnapshot {
@@ -27,7 +27,26 @@ export interface RefundRelayBody {
   reason: string;
   legalOverride: boolean;
   receiptSecret: string;
+  /** Core V2 R6H-5: present exactly for a capture-specific case (the Owner's receipt names the same capture) */
+  captureFactId?: string;
 }
+
+/** Core V2 R6H-5: Payment's evidence of one verified capture of a payment (`GET /payment/payments/:id/captures/:factId`). */
+export type CaptureBasis = 'settling_capture' | 'duplicate_capture' | 'other_attempt_capture' | 'late_capture' | 'associated_capture';
+export interface PaymentCapture {
+  factId: string;
+  paymentId: string;
+  amount: number;
+  currency: string;
+  paymentStatus: string;
+  basis: CaptureBasis;
+  conflicted: boolean;
+  refund: 'none' | 'in_progress' | 'refunded';
+}
+/** What Payment's capture read proves: the capture, or that this payment has no such capture (404); anything else proves nothing. */
+export type CaptureReadOutcome = { kind: 'capture'; capture: PaymentCapture } | { kind: 'not_found' } | { kind: 'unknown'; reason: string };
+const CAPTURE_BASES: readonly string[] = ['settling_capture', 'duplicate_capture', 'other_attempt_capture', 'late_capture', 'associated_capture'];
+const CAPTURE_REFUND: readonly string[] = ['none', 'in_progress', 'refunded'];
 
 /**
  * What Payment's answer to PAY-07 PROVES (R6B-10), classified once here:
@@ -66,6 +85,8 @@ export interface PaymentRefundClient {
   relay(paymentId: string, idempotencyKey: string, body: RefundRelayBody): Promise<RefundRelayOutcome>;
   /** PAY-08: null on 404; throws when Payment cannot answer (the reconciler isolates it per relay). */
   refunds(paymentId: string): Promise<PaymentRefunds | null>;
+  /** Core V2 R6H-5: one verified capture of the payment, as Payment's evidence states it */
+  capture(paymentId: string, factId: string): Promise<CaptureReadOutcome>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -113,6 +134,20 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
     if (r.status === 503 && code === 'refund_authorization_unresolved') return { kind: 'pending' };
     if (r.status === 409 && code === 'refund_attempt_conflict') return { kind: 'conflict' };
     return { kind: 'unknown', reason: code ?? `status_${r.status}` };
+  }
+
+  async capture(paymentId: string, factId: string): Promise<CaptureReadOutcome> {
+    const r = await this.call('GET', `/payment/payments/${encodeURIComponent(paymentId)}/captures/${encodeURIComponent(factId)}`);
+    if (r.status === 404) return { kind: 'not_found' };
+    const b = r.body;
+    if (r.status !== 200 || !b) return { kind: 'unknown', reason: `status_${r.status}` };
+    if (b.factId !== factId || b.paymentId !== paymentId || typeof b.amount !== 'number' || !Number.isSafeInteger(b.amount) || b.amount < 1
+      || typeof b.currency !== 'string' || !/^[A-Z]{3}$/.test(b.currency) || typeof b.paymentStatus !== 'string' || !CAPTURE_BASES.includes(b.basis as string)
+      || typeof b.conflicted !== 'boolean' || !CAPTURE_REFUND.includes(b.refund as string)) {
+      return { kind: 'unknown', reason: 'malformed_capture' };
+    }
+    return { kind: 'capture', capture: { factId, paymentId, amount: b.amount, currency: b.currency, paymentStatus: b.paymentStatus, basis: b.basis as CaptureBasis,
+      conflicted: b.conflicted, refund: b.refund as PaymentCapture['refund'] } };
   }
 
   async refunds(paymentId: string): Promise<PaymentRefunds | null> {

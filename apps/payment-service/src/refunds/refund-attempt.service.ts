@@ -22,20 +22,41 @@ export interface RefundRequestInput {
   reason: RefundReason;
   legalOverride: boolean;
   receiptSecret: string;
+  /** Core V2 R6H-5: present exactly for a capture-specific refund (the one verified capture fact it returns, in full) */
+  captureFactId?: string;
+}
+
+/** Core V2 R6H-5: how a verified capture relates to its payment (Payment's own evidence; Billing maps it to a refund-case basis). */
+export type CaptureBasis = 'settling_capture' | 'duplicate_capture' | 'other_attempt_capture' | 'late_capture' | 'associated_capture';
+export interface CaptureEvidence {
+  factId: string;
+  paymentId: string;
+  provider: string;
+  providerTxnId: string;
+  amount: number;
+  currency: string;
+  paymentStatus: string;
+  basis: CaptureBasis;
+  /** the attempt the refund facts are bound to: the fact's own, or (associated fact) the payment's first attempt with its provider */
+  capturedAttemptId: string | null;
+  conflicted: boolean;
+  /** refund state of THIS captured money: none, in progress (an attempt that may still refund it), or already refunded / evidenced */
+  refund: 'none' | 'in_progress' | 'refunded';
+  observedAt: Date;
 }
 
 /** A refusal made before any attempt existed (R6B-10): permanent for this refund attempt id. */
 export const REFUSAL_STATUS: Record<RefusalCode, number> = {
   payment_not_refundable: 409, refund_capture_unverified: 409, refund_amount_not_full: 422, refund_dispute_open: 409, refund_in_progress: 409,
-  refund_already_recorded: 409, refund_case_completed: 409,
+  refund_already_recorded: 409, refund_case_completed: 409, refund_capture_not_eligible: 409,
 };
 /** Core V2 S6c (R6C-7; FC-3, V-3): `refund_case_completed` is the frozen refusal of every new attempt once the case's refund is complete. */
 export type RefusalCode = 'payment_not_refundable' | 'refund_capture_unverified' | 'refund_amount_not_full' | 'refund_dispute_open' | 'refund_in_progress'
-  | 'refund_already_recorded' | 'refund_case_completed';
+  | 'refund_already_recorded' | 'refund_case_completed' | 'refund_capture_not_eligible';
 const REFUSAL_MESSAGE: Record<RefusalCode, keyof typeof PAYMENT_MESSAGES> = {
   payment_not_refundable: 'paymentNotRefundable', refund_capture_unverified: 'refundCaptureUnverified', refund_amount_not_full: 'refundAmountNotFull',
   refund_dispute_open: 'refundDisputeOpen', refund_in_progress: 'refundInProgress', refund_already_recorded: 'refundAlreadyRecorded',
-  refund_case_completed: 'refundCaseCompleted',
+  refund_case_completed: 'refundCaseCompleted', refund_capture_not_eligible: 'refundCaptureNotEligible',
 };
 export const refusalError = (code: RefusalCode) => paymentError(REFUSAL_STATUS[code], code, PAYMENT_MESSAGES[REFUSAL_MESSAGE[code]]);
 
@@ -100,7 +121,7 @@ export class RefundAttemptService {
       // a concurrent identical request may have won the lock first
       const raced = await this.known(q, caller, key, requestHash, paymentId, input);
       if (raced) return { kind: 'existing' as const, attempt: raced };
-      const verdict = await this.verify(q, payment, input);
+      const verdict = input.captureFactId ? await this.verifyCapture(q, payment, input, input.captureFactId) : await this.verify(q, payment, input);
       if ('refusal' in verdict) {
         await q.query(
           `INSERT INTO refund_attempt_refusal (id, "paymentId", producer, "refundCaseId", code) VALUES ($1, $2, $3, $4, $5)`,
@@ -111,10 +132,10 @@ export class RefundAttemptService {
       }
       const { rows: inserted } = await q.query<RefundAttemptRow>(
         `INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId",
-           "capturedAttemptId", provider, "liveMode", "receiptDigest")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, $13) RETURNING *`,
+           "capturedAttemptId", provider, "liveMode", "receiptDigest", "captureSpecific")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, $13, $14) RETURNING *`,
         [input.refundAttemptId, paymentId, caller, input.refundCaseId, payment.sellerId, input.amount, input.currency, input.reason, input.legalOverride,
-          verdict.captureFactId, payment.succeededAttemptId, verdict.provider, digest],
+          verdict.captureFactId, verdict.capturedAttemptId, verdict.provider, digest, input.captureFactId !== undefined],
       );
       await this.reserveKey(q, caller, key, requestHash, 201, 'refund_attempt', input.refundAttemptId);
       return { kind: 'created' as const, attempt: inserted[0]! };
@@ -150,7 +171,8 @@ export class RefundAttemptService {
       return null;
     }
     const same = a.paymentId === paymentId && a.producer === caller && a.refundCaseId === input.refundCaseId && Number(a.amount) === input.amount
-      && a.currency.trim() === input.currency && a.reason === input.reason && a.legalOverride === input.legalOverride;
+      && a.currency.trim() === input.currency && a.reason === input.reason && a.legalOverride === input.legalOverride
+      && (a.captureSpecific ? a.captureFactId : undefined) === input.captureFactId; // R6H-5: an ordinary id is never reused for a capture, nor the reverse
     if (!same) throw attemptConflict();
     return a;
   }
@@ -164,14 +186,15 @@ export class RefundAttemptService {
    * R6B-2, under the payment's row lock: Payment's own evidence that the payment is refundable in full, independently of Billing. Every
    * refusal here is definitive for this attempt id (recorded by the caller).
    */
-  private async verify(q: Queryable, p: PaymentRow, input: RefundRequestInput): Promise<{ refusal: RefusalCode } | { captureFactId: string; provider: string }> {
+  private async verify(q: Queryable, p: PaymentRow, input: RefundRequestInput): Promise<{ refusal: RefusalCode } | Verified> {
     if (p.status !== 'succeeded' || p.settledMethod !== 'gateway' || p.sellerType !== 'company' || !UUID.test(p.sellerId) || p.liveMode !== false
       || !p.purpose || !REFUNDABLE_PURPOSES.has(p.purpose) || !p.succeededAttemptId) {
       return { refusal: 'payment_not_refundable' };
     }
-    // Core V2 S6c (R6C-7; FC-3, V-3): a completed refund case (or a payment already refunded in full) refuses every new attempt, forever
+    // Core V2 S6c (R6C-7; FC-3, V-3): a completed refund case (or a payment already refunded in full) refuses every new attempt, forever.
+    // Core V2 R6H-5: "refunded in full" is an ORDINARY completed refund of the payment; a capture-specific one counts on its own capture (below)
     const { rows: completed } = await q.query(
-      `SELECT 1 FROM refund_authorization WHERE "completedAt" IS NOT NULL AND ("refundCaseId" = $1 OR "paymentId" = $2) LIMIT 1`, [input.refundCaseId, p.id]);
+      `SELECT 1 FROM refund_authorization WHERE "completedAt" IS NOT NULL AND ("refundCaseId" = $1 OR ("paymentId" = $2 AND NOT "captureSpecific")) LIMIT 1`, [input.refundCaseId, p.id]);
     if (completed.length > 0) return { refusal: 'refund_case_completed' };
     // the verified original capture (S4d): exactly one fact of the succeeded attempt, for the full amount, never contradicted. A capture
     // recorded before S4d has no fact and is never reconstructed: it stays on its reconciliation path (S6h).
@@ -185,6 +208,7 @@ export class RefundAttemptService {
       return { refusal: 'refund_capture_unverified' };
     }
     const capture = facts[0]!;
+    if (await this.captureRefunded(q, capture.id, 'completed')) return { refusal: 'refund_case_completed' }; // R6H-5: refunded on its own
     // Core V2 S6e-D (R6E-4; S0 D3, FC-5), for a NEW attempt only (one in flight keeps its own state), under the payment's row lock that dispute
     // ingestion also takes: Payment's own dispute exposure. An open dispute or a chargeback leaves less than the full amount: refused. An
     // exposure Payment cannot establish (a preserved conflict, a loss without its chargeback fact) is never read as zero: the transaction is
@@ -197,15 +221,111 @@ export class RefundAttemptService {
     if (!provider?.capabilities.refunds || !provider.refund || !provider.fetchRefundStatus) return { refusal: 'payment_not_refundable' };
     // FC-5: any refund evidence, or any attempt that may still refund, leaves nothing a full refund could admit
     // Core V2 S6h (R6H-3): including an unmatched refund fact associated with this payment (its money was returned all the same)
-    const { rows: evidence } = await q.query(
-      `SELECT 1 FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund'
-       UNION ALL SELECT 1 FROM provider_fact_association s JOIN provider_transaction_fact f ON f.id = s."factId"
-        WHERE s."paymentId" = $1 AND s.status = 'associated' AND f.kind = 'refund' LIMIT 1`, [p.id]);
-    if (evidence.length > 0) return { refusal: 'refund_already_recorded' };
+    // Core V2 R6H-5: scoped to THIS captured money: evidence of an ordinary attempt (always on this capture) or of any attempt on this capture;
+    // a capture-specific refund of ANOTHER capture of the payment returns other money and never blocks the sale's ordinary refund
+    if (await this.captureRefunded(q, capture.id, 'evidence')) return { refusal: 'refund_already_recorded' };
     const { rows: live } = await q.query(
-      `SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed') LIMIT 1`, [p.id]);
+      `SELECT 1 FROM refund_attempt WHERE (("paymentId" = $1 AND NOT "captureSpecific") OR "captureFactId" = $2)
+          AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed') LIMIT 1`, [p.id, capture.id]);
     if (live.length > 0) return { refusal: 'refund_in_progress' };
-    return { captureFactId: capture.id, provider: capture.provider };
+    return { captureFactId: capture.id, provider: capture.provider, capturedAttemptId: p.succeededAttemptId };
+  }
+
+  /**
+   * Core V2 R6H-5 (the Owner's decision, 2026-10-30), under the payment's row lock: Payment's own evidence that ONE verified capture of this
+   * payment (matched, or an unmatched fact associated with it, S6h-P) may be refunded in full on its own. Billing decides the business basis
+   * (a late, duplicate or unrouted capture); Payment decides the money: the capture is verified and uncontested, the amount and currency are the
+   * capture's own, no refund of THIS captured money exists or is in flight, the payment's dispute exposure is clear, and a second capture of
+   * the settling attempt is refunded only while another capture of that attempt stays unrefunded (the sale's money).
+   */
+  private async verifyCapture(q: Queryable, p: PaymentRow, input: RefundRequestInput, factId: string): Promise<{ refusal: RefusalCode } | Verified> {
+    if (!['succeeded', 'failed', 'expired', 'cancelled'].includes(p.status) || p.sellerType !== 'company' || !UUID.test(p.sellerId) || p.liveMode !== false
+      || !p.purpose || !REFUNDABLE_PURPOSES.has(p.purpose)) {
+      return { refusal: 'payment_not_refundable' };
+    }
+    const { rows: completed } = await q.query(
+      `SELECT 1 FROM refund_authorization WHERE "completedAt" IS NOT NULL AND ("refundCaseId" = $1 OR "captureFactId" = $2) LIMIT 1`, [input.refundCaseId, factId]);
+    if (completed.length > 0) return { refusal: 'refund_case_completed' };
+    const c = await this.captureEvidence(q, p, factId);
+    if (!c || c.conflicted || !c.capturedAttemptId) return { refusal: 'refund_capture_unverified' };
+    if (c.basis === 'duplicate_capture' && !(await this.anotherCaptureRemains(q, p, factId))) return { refusal: 'refund_capture_not_eligible' };
+    const exposure = await disputeExposure(q, p.id);
+    if (exposure.state === 'unresolved') throw paymentError(503, 'refund_dispute_unavailable', PAYMENT_MESSAGES.refundDisputeUnavailable);
+    if (exposure.state === 'exposed') return { refusal: 'refund_dispute_open' };
+    if (input.amount !== c.amount || input.currency !== c.currency) return { refusal: 'refund_amount_not_full' }; // the capture, in full (D4)
+    const provider = this.providers.tryGet(c.provider);
+    if (!provider?.capabilities.refunds || !provider.refund || !provider.fetchRefundStatus) return { refusal: 'payment_not_refundable' };
+    if (c.refund === 'refunded') return { refusal: 'refund_already_recorded' };
+    if (c.refund === 'in_progress') return { refusal: 'refund_in_progress' };
+    return { captureFactId: c.factId, provider: c.provider, capturedAttemptId: c.capturedAttemptId };
+  }
+
+  /** R6H-5: another capture of the settling attempt stays unrefunded (no attempt that may refund it, no refund evidence of it). */
+  private async anotherCaptureRemains(q: Queryable, p: PaymentRow, factId: string): Promise<boolean> {
+    const { rows } = await q.query(
+      `SELECT 1 FROM provider_transaction_fact g
+        WHERE g."paymentId" = $1 AND g."attemptId" = $2 AND g.kind = 'capture' AND g.id <> $3
+          AND NOT EXISTS (SELECT 1 FROM refund_attempt a WHERE a."captureFactId" = g.id AND a.status NOT IN ('authorization_expired', 'authorization_refused', 'failed'))
+          AND NOT refund_capture_has_evidence(g.id) LIMIT 1`, [p.id, p.succeededAttemptId, factId]);
+    return rows.length > 0;
+  }
+
+  /** R6H-5: whether THIS captured money was refunded (`completed`: a completed authorization on it) or has refund evidence (`evidence`). */
+  private async captureRefunded(q: Queryable, factId: string, what: 'completed' | 'evidence'): Promise<boolean> {
+    const sql = what === 'completed'
+      ? `SELECT EXISTS (SELECT 1 FROM refund_authorization WHERE "completedAt" IS NOT NULL AND "captureFactId" = $1) AS hit`
+      : `SELECT refund_capture_has_evidence($1) AS hit`;
+    return (await q.query<{ hit: boolean }>(sql, [factId])).rows[0]!.hit;
+  }
+
+  /**
+   * Core V2 R6H-5: one verified capture of `p`, as Payment's evidence states it, or null (not a capture of this payment: unknown, another
+   * payment's, an unmatched fact not associated with it, or a refund / chargeback fact).
+   */
+  async captureEvidence(q: Queryable, p: PaymentRow, factId: string): Promise<CaptureEvidence | null> {
+    const { rows } = await q.query<{ id: string; paymentId: string | null; attemptId: string | null; provider: string; providerTxnId: string; amount: string;
+      currency: string; observedAt: Date; conflicted: boolean; associated: boolean; siblings: number }>(
+      `SELECT f.id, f."paymentId", f."attemptId", f.provider, f."providerTxnId", f.amount, trim(f.currency) AS currency, f."observedAt",
+              EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id) AS conflicted,
+              EXISTS (SELECT 1 FROM provider_fact_association s WHERE s."factId" = f.id AND s.status = 'associated' AND s."targetType" = 'payment'
+                        AND s."paymentId" = $2) AS associated,
+              (SELECT count(*)::int FROM provider_transaction_fact g WHERE g."paymentId" = f."paymentId" AND g."attemptId" = f."attemptId" AND g.kind = 'capture') AS siblings
+         FROM provider_transaction_fact f WHERE f.id = $1 AND f.kind = 'capture' AND f."liveMode" = false`, [factId, p.id]);
+    const f = rows[0];
+    if (!f || (f.paymentId !== p.id && !(f.paymentId === null && f.associated))) return null;
+    let capturedAttemptId = f.attemptId;
+    let basis: CaptureBasis;
+    if (f.paymentId === null) {
+      basis = 'associated_capture';
+      capturedAttemptId = (await q.query<{ id: string }>(
+        `SELECT id FROM payment_attempt WHERE "paymentId" = $1 AND provider = $2 ORDER BY "attemptNumber", id LIMIT 1`, [p.id, f.provider])).rows[0]?.id ?? null;
+    } else if (p.status !== 'succeeded') basis = 'late_capture';
+    else if (f.attemptId !== p.succeededAttemptId) basis = 'other_attempt_capture';
+    else basis = f.siblings > 1 ? 'duplicate_capture' : 'settling_capture';
+    const { rows: live } = await q.query(
+      `SELECT 1 FROM refund_attempt WHERE "captureFactId" = $1 AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed') LIMIT 1`, [f.id]);
+    const refunded = (await this.captureRefunded(q, f.id, 'completed')) || (await this.captureRefunded(q, f.id, 'evidence'));
+    // the settling capture of a succeeded payment is also returned by an ORDINARY refund of the payment
+    const ordinary = basis === 'settling_capture' ? (await q.query<{ live: boolean; done: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND NOT "captureSpecific" AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed')) AS live,
+              EXISTS (SELECT 1 FROM refund_authorization WHERE "paymentId" = $1 AND NOT "captureSpecific" AND "completedAt" IS NOT NULL) AS done`, [p.id])).rows[0]!
+      : { live: false, done: false };
+    return {
+      factId: f.id, paymentId: p.id, provider: f.provider, providerTxnId: f.providerTxnId, amount: Number(f.amount), currency: f.currency, paymentStatus: p.status,
+      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt,
+      refund: refunded || ordinary.done ? 'refunded' : live.length > 0 || ordinary.live ? 'in_progress' : 'none',
+    };
+  }
+
+  /** Core V2 R6H-5 (Billing's capture read, `payment.read`): one verified capture of the caller's own payment; 404 for anything else. */
+  async capture(caller: string, paymentId: string, factId: string): Promise<CaptureEvidence> {
+    this.assertEnabled();
+    const { rows } = await this.db.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [paymentId]);
+    const p = rows[0];
+    if (!p || p.producer !== caller) throw notFound();
+    const c = await this.captureEvidence(this.db, p, factId);
+    if (!c) throw paymentError(404, 'capture_not_found', PAYMENT_MESSAGES.captureNotFound);
+    return c;
   }
 
   /**
@@ -257,9 +377,10 @@ export class RefundAttemptService {
         );
         // Core V2 S6c (R6C-1): the authorization allocations are counted against, created with the consumption it records
         await q.query(
-          `INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [id, a.paymentId, a.refundCaseId, a.producer, c.receiptId, c.approvedByUserId, a.amount, a.currency],
+          `INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency,
+             "captureFactId", "captureSpecific")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [id, a.paymentId, a.refundCaseId, a.producer, c.receiptId, c.approvedByUserId, a.amount, a.currency, a.captureFactId, a.captureSpecific],
         );
         await this.audit.recordRefund(q, 'refund_attempt.authorized', rows[0]!, await this.organizationOf(q, a.paymentId), ctx);
         this.log.log(`refund_attempt_authorized refundAttempt=${id} payment=${a.paymentId}`);
@@ -324,11 +445,14 @@ export class RefundAttemptService {
   }
 }
 
+/** What a verified request may insert: the capture it returns and the attempt its refund facts are bound to. */
+interface Verified { captureFactId: string; provider: string; capturedAttemptId: string }
+
 const attemptConflict = (): HttpException => paymentError(409, 'refund_attempt_conflict', PAYMENT_MESSAGES.refundAttemptConflict);
 
 /** Typing aid for the controller's documented codes. */
 export const REFUND_REQUEST_CODES: readonly ErrorCode[] = [
   'invalid_refund_request', 'payment_not_refundable', 'refund_capture_unverified', 'refund_amount_not_full', 'refund_dispute_open', 'refund_dispute_unavailable',
   'refund_in_progress', 'refund_already_recorded', 'refund_attempt_conflict', 'refund_authorization_invalid', 'refund_authorization_expired',
-  'refund_authorization_unresolved', 'refund_case_completed',
+  'refund_authorization_unresolved', 'refund_case_completed', 'refund_capture_not_eligible',
 ];

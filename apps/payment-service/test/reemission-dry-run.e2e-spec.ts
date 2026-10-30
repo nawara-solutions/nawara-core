@@ -67,6 +67,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0019_payment_dispute.sql', // Core V2 S6e-D: disputes, observations, evidence, decisions, chargeback facts, the dispute harness
       '0020_recovery_refunds.sql', // Core V2 S6f (R6F-5 Path A): the recovery_surplus refund reason; a recovery settlement is refundable
       '0021_reconciliation.sql', // Core V2 S6h-P: unmatched verified facts, append-only association, association-aware allocation
+      '0022_capture_specific_refunds.sql', // Core V2 R6H-5: capture-specific refunds, per-capture refund uniqueness
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

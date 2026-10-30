@@ -28,7 +28,7 @@ import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/pa
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
 import { FraudHoldService } from '../src/fraud-holds/fraud-hold.service.js';
 import { PersonalSubscriptionRepository } from '../src/subscriptions/personal-subscription.repository.js';
-import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
+import type { CaptureReadOutcome, PaymentCapture, PaymentRefundClient, RefundRelayBody } from '../src/refunds/payment-refund-client.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
 import { paymentPurposeOf } from './support/settlement.js';
@@ -53,9 +53,15 @@ class FakePaymentClient implements PaymentClient {
 }
 
 /** Core V2 S6d: Payment's refund port, authorizing every relayed attempt (the S6b/S6c Payment behaviour is certified in its own suites). */
+/** Core V2 R6H-5: Payment's capture read under test control (per payment and fact), and every relayed body. */
+const capturesAtPayment = { items: new Map<string, CaptureReadOutcome>(), relayed: [] as RefundRelayBody[] };
 const refundsAtPayment: PaymentRefundClient = {
-  relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
+  relay: async (_paymentId, _key, body) => {
+    capturesAtPayment.relayed.push(body);
+    return { kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } };
+  },
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+  capture: async (paymentId, factId) => capturesAtPayment.items.get(`${paymentId}:${factId}`) ?? { kind: 'not_found' },
 };
 
 /** Core V2 S6e-D: Payment's losses read under test control (a page of verified losses, or Payment unavailable). */
@@ -1196,6 +1202,160 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
         .rejects.toMatchObject({ constraint: 'fraud_hold_evidence_required' });
       await holds().sweepOnce();
       await expect(admin.query(`UPDATE fraud_hold_compensation SET "deniedMs" = 1 WHERE "holdId" = $1`, [h.holdId])).rejects.toThrow();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────── Core V2 R6H-5: capture-specific cases
+
+  describe('Core V2 R6H-5: capture-specific refund cases (the Owner\'s decision, 2026-10-30)', () => {
+    /** Payment's evidence of one capture of `paymentId` (what GET /payment/payments/:id/captures/:factId would answer). */
+    const atPayment = (paymentId: string, over: Partial<PaymentCapture> = {}) => {
+      const capture: PaymentCapture = { factId: randomUUID(), paymentId, amount: 2500, currency: 'TND', paymentStatus: 'succeeded', basis: 'duplicate_capture',
+        conflicted: false, refund: 'none', ...over };
+      capturesAtPayment.items.set(`${paymentId}:${capture.factId}`, { kind: 'capture', capture });
+      return capture;
+    };
+    const openCapture = (paymentId: string, captureFactId: string, extra: Row = {}) => openCase({ paymentId, captureFactId, reason: 'duplicate_charge', ...extra });
+    const effects = () => t.app.get(RefundEffectService);
+    const complete = async (caseId: string) => {
+      const r = await send(request(server()).post(`/billing/admin/refund-cases/${caseId}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') });
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      const c = await one(`SELECT c.id, c."paymentId", c.amount::int, trim(c.currency) AS currency, r.id AS "attemptId" FROM refund_case c JOIN refund_authorization_relay r ON r."refundCaseId" = c.id WHERE c.id = $1`, [caseId]);
+      const id = randomUUID();
+      await t.bus.deliver({ id, name: 'refund.case_completed', payload: {
+        refundCaseId: c.id, refundAuthorizationId: randomUUID(), refundAttemptId: c.attemptId, paymentId: c.paymentId, paymentRequestId: randomUUID(), producer: 'billing-service',
+        approvedAmount: c.amount, currency: c.currency, completedAt: new Date().toISOString(), liveMode: false, organizationId: null, purpose: 'non_entitlement',
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      expect((await one(`SELECT status FROM refund_case WHERE id = $1`, [caseId])).status).toBe('completed');
+      await effects().drainOnce();
+      return one(`SELECT outcome, "purchaseId", "obligationId", reason FROM refund_case_effect WHERE "refundCaseId" = $1`, [caseId]);
+    };
+    /** A producer payment whose request FAILED (Payment's verified failure applied): nothing was sold. */
+    const failedPayment = async () => {
+      const p = await producerPayment({ target: 'none', paid: false });
+      const pr = await one(`SELECT * FROM payment_request WHERE "paymentId" = $1`, [p.paymentId]);
+      const inv = await one(`SELECT * FROM invoice WHERE id = $1`, [p.invoiceId]);
+      const eventId = randomUUID();
+      await t.app.get(PaymentRequestRepository).applyPaymentEvent(eventId, {
+        name: 'payment.failed', source: 'payment-service', paymentId: p.paymentId, producer: 'billing-service', paymentRequestId: pr.id, sourceType: 'invoice', sourceId: inv.id,
+        payer: { type: inv.payerType, id: inv.payerId }, seller: { type: 'company', id: COMPANY }, organizationId: null, amount: Number(inv.total), currency: inv.currency, revision: 1,
+        ...(await paymentPurposeOf(admin, inv.id)),
+      } as never, { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: eventId }, correlationId: 'refund-fixture' }, new Date());
+      expect((await one(`SELECT status FROM payment_request WHERE id = $1`, [pr.id])).status).toBe('failed');
+      return p;
+    };
+    /** A paid producer payment whose invoice has NO routing record (S3a B9 `unrouted`, e.g. issued before S3a): no ordinary refund basis. */
+    const unroutedPayment = async () => {
+      const p = await producerPayment({ target: 'none' }); // paid through Billing's real path
+      const cl = await admin.connect();
+      try {
+        await cl.query(`SET session_replication_role = replica`); // a test-only reproduction of a paid invoice with no routing record
+        await cl.query(`DELETE FROM invoice_entitlement WHERE "invoiceId" = $1`, [p.invoiceId]);
+      } finally {
+        await cl.query(`SET session_replication_role = origin`);
+        cl.release();
+      }
+      expect((await one(`SELECT status FROM payment_request WHERE "paymentId" = $1`, [p.paymentId])).status).toBe('paid');
+      return p;
+    };
+
+    it('2, 15. a late capture of a failed request: the case binds that capture, the amount is Payment\'s; the relay names it; completion has no commercial effect', async () => {
+      const p = await failedPayment();
+      const cap = atPayment(p.paymentId, { paymentStatus: 'cancelled', basis: 'late_capture', amount: 2500 });
+      expect((await openCase({ paymentId: p.paymentId, reason: 'duplicate_charge' })).body.code).toBe('refund_not_eligible'); // the ordinary path: no paid request
+      expect((await openCapture(p.paymentId, cap.factId, { amount: 1 })).body.code).toBe('invalid_refund_request'); // never a caller amount
+      const before = await untouched();
+      const r = await openCapture(p.paymentId, cap.factId);
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(r.body).toMatchObject({ paymentId: p.paymentId, eligibility: 'capture_specific', amount: 2500, currency: 'TND', status: 'open',
+        capture: { captureFactId: cap.factId, basis: 'late_capture' } });
+      expect(await untouched()).toEqual(before);
+      const ev = (await audit(r.body.id)).find((e) => e.name === 'audit.refund_case.opened')!;
+      expect(ev.payload.changes).toMatchObject({ eligibility: 'capture_specific', amount: 2500 });
+      const effect = await complete(r.body.id);
+      expect(capturesAtPayment.relayed.at(-1)).toMatchObject({ refundCaseId: r.body.id, amount: 2500, captureFactId: cap.factId });
+      expect(effect).toEqual({ outcome: 'none', purchaseId: null, obligationId: null, reason: 'capture_refunded' });
+      expect(await untouched()).toEqual(before);
+    });
+
+    it('3, 5, 16, 17. a duplicate capture of a purchase: refunded on its own, the purchase and its entitlement stand; the ordinary case waits while it is open', async () => {
+      const p = await directPurchase('b2');
+      const cap = atPayment(p.paymentId, { basis: 'duplicate_capture', amount: p.amount });
+      const r = await openCapture(p.paymentId, cap.factId);
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(r.body.capture).toEqual({ captureFactId: cap.factId, basis: 'duplicate_capture' });
+      expect((await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).body.code).toBe('refund_case_exists'); // unresolved exposure
+      const associated = atPayment(p.paymentId, { basis: 'associated_capture', amount: 700 }); // an associated capture: its own money, its own case
+      expect((await openCapture(p.paymentId, associated.factId)).status).toBe(201);
+      const effect = await complete(r.body.id);
+      expect(effect).toEqual({ outcome: 'none', purchaseId: null, obligationId: null, reason: 'capture_refunded' });
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" JOIN payment_request pr ON pr.id = s."paymentRequestId" WHERE pr."paymentId" = $1`, [p.paymentId])).toBe(0);
+      expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(true);
+    });
+
+    it('4. an unrouted settled capture: no ordinary basis; the settling capture is refundable on its own; then no ordinary case ever', async () => {
+      const p = await unroutedPayment();
+      expect((await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).body.code).toBe('refund_not_eligible');
+      const cap = atPayment(p.paymentId, { basis: 'settling_capture', amount: p.amount });
+      const r = await openCapture(p.paymentId, cap.factId);
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(r.body.capture).toEqual({ captureFactId: cap.factId, basis: 'unrouted_capture' });
+      expect((await one(`SELECT "receiptId" FROM refund_case WHERE id = $1`, [r.body.id])).receiptId).not.toBeNull();
+    });
+
+    it('6, 13. the same capture twice, and concurrently: one live case per captured movement', async () => {
+      const p = await failedPayment();
+      const cap = atPayment(p.paymentId, { paymentStatus: 'expired', basis: 'late_capture' });
+      const outs = await Promise.all([0, 1, 2, 3].map(() => openCapture(p.paymentId, cap.factId)));
+      expect(outs.filter((o) => o.status === 201)).toHaveLength(1);
+      expect(outs.filter((o) => o.status !== 201).map((o) => o.body.code)).toEqual(['refund_case_exists', 'refund_case_exists', 'refund_case_exists']);
+      expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "captureFactId" = $1`, [cap.factId])).toBe(1);
+      // cancelled: the capture is free again
+      const live = outs.find((o) => o.status === 201)!.body.id;
+      await cancelCase(live).expect(200);
+      expect((await openCapture(p.paymentId, cap.factId)).status).toBe(201);
+    });
+
+    it('7, 8, 11, 12. Payment\'s evidence decides: a refunded or in-flight capture, a contested one, none, a basis Billing\'s records contradict, Payment unavailable', async () => {
+      const paid = await directPurchase();
+      expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { refund: 'refunded' }).factId)).body.code).toBe('refund_case_exists');
+      expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { refund: 'in_progress' }).factId)).body.code).toBe('refund_case_exists');
+      expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { conflicted: true }).factId)).body.code).toBe('refund_not_eligible');
+      expect((await openCapture(paid.paymentId, randomUUID())).body.code).toBe('refund_not_eligible'); // no such capture of this payment
+      // a late capture claimed for a PAID request, or the settling capture of a ROUTED sale (the ordinary refund returns it)
+      expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { paymentStatus: 'cancelled', basis: 'late_capture' }).factId)).body.code).toBe('refund_not_eligible');
+      expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { basis: 'settling_capture' }).factId)).body.code).toBe('refund_not_eligible');
+      const before = await count(`SELECT count(*) AS n FROM refund_case`);
+      const factId = randomUUID();
+      capturesAtPayment.items.set(`${paid.paymentId}:${factId}`, { kind: 'unknown', reason: 'status_0' });
+      const down = await openCapture(paid.paymentId, factId);
+      expect([down.status, down.body.code]).toEqual([503, 'refund_payment_unavailable']);
+      expect(await count(`SELECT count(*) AS n FROM refund_case`)).toBe(before); // nothing written
+    });
+
+    it('9, 10. another Company\'s payment is the collapsed 404; Organization-subscription payments are never refundable this way', async () => {
+      const theirs = await producerPayment({ target: 'none', seller: { type: 'company', id: OTHER_COMPANY } });
+      expect((await openCapture(theirs.paymentId, atPayment(theirs.paymentId).factId)).status).toBe(404);
+      const org = await producerPayment({ target: 'organization' });
+      expect((await openCapture(org.paymentId, atPayment(org.paymentId).factId)).body.code).toBe('refund_not_eligible');
+    });
+
+    it('19. the database: a capture-specific case binds one capture and a basis; never a purchase; its effect is only capture_refunded', async () => {
+      const p = await failedPayment();
+      const cap = atPayment(p.paymentId, { paymentStatus: 'cancelled', basis: 'late_capture' });
+      const r = await openCapture(p.paymentId, cap.factId);
+      const c = await one(`SELECT * FROM refund_case WHERE id = $1`, [r.body.id]);
+      await expect(admin.query(`UPDATE refund_case SET "captureFactId" = $2 WHERE id = $1`, [c.id, randomUUID()])).rejects.toThrow();
+      const ins = (over: Row) => admin.query(`INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", "receiptId", eligibility, "companyId", "platformId", amount, currency, reason,
+          "openedBy", "captureFactId", "captureBasis") VALUES ($1, $2, $3, $4, 'capture_specific', $5, $6, 2500, 'TND', 'duplicate_charge', $7, $8, $9)`,
+        [c.paymentId, c.paymentRequestId, c.invoiceId, over.receiptId ?? null, COMPANY, PLATFORM, randomUUID(), over.captureFactId ?? randomUUID(), over.captureBasis ?? 'late_capture']);
+      await expect(ins({ captureFactId: cap.factId })).rejects.toMatchObject({ code: '23505' }); // the same capture
+      await expect(ins({ captureBasis: 'duplicate_capture' })).rejects.toMatchObject({ constraint: 'refund_case_not_eligible' }); // a failed request was never paid
+      await expect(ins({ captureBasis: 'unrouted_capture' })).rejects.toMatchObject({ constraint: 'refund_case_not_eligible' }); // a failed request is not a settled sale
+      await expect(ins({ receiptId: randomUUID() })).rejects.toMatchObject({ constraint: 'refund_case_capture_shape' }); // a late capture carries no sale receipt
+      await expect(ins({ captureBasis: 'other' })).rejects.toMatchObject({ constraint: 'refund_case_capture_shape' });
+      await expect(admin.query(`INSERT INTO refund_case_effect ("refundCaseId", outcome, reason) VALUES ($1, 'none', 'capture_refunded')`, [c.id]))
+        .rejects.toMatchObject({ constraint: 'refund_case_effect_completed' }); // only once completed
     });
   });
 

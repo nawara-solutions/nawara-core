@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Headers, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Headers, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import {
@@ -10,7 +10,7 @@ import { requestContext } from '../events/payment-events.js';
 import { notFound, paymentError } from '../errors.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 import { PaymentService } from '../payments/payment.service.js';
-import { RefundAttemptService } from './refund-attempt.service.js';
+import { RefundAttemptService, type CaptureEvidence } from './refund-attempt.service.js';
 import { normaliseRefundRequest } from './refund-input.js';
 import type { RefundAttemptRow } from './refund.types.js';
 
@@ -24,6 +24,8 @@ export function representRefundAttempt(a: RefundAttemptRow) {
     legalOverride: a.legalOverride, status: a.status, approvedBy: a.approvedByUserId ? { userId: a.approvedByUserId } : null, receiptId: a.receiptId,
     authorizationRefusal: a.authorizationRefusal, providerRefundId: a.providerRefundId, failureCode: a.failureCode, requestedAt: iso(a.requestedAt),
     authorizedAt: iso(a.authorizedAt), submittedAt: iso(a.submittedAt), completedAt: iso(a.completedAt),
+    // Core V2 R6H-5: the capture this attempt returns; `captureSpecific` when its receipt names it (an ordinary attempt returns the sale's capture)
+    captureFactId: a.captureFactId, captureSpecific: a.captureSpecific,
   };
 }
 
@@ -107,5 +109,38 @@ export class RefundsController {
         observedAt: iso(f.observedAt), state: f.blockedReason ? 'blocked' : 'pending', blockedReason: f.blockedReason })) } : {}),
       ...(refusals ? { refusals: refusals.map((r) => ({ refundAttemptId: r.id, refundCaseId: r.refundCaseId, code: r.code, refusedAt: iso(r.refusedAt) })) } : {}),
     };
+  }
+}
+
+const representCapture = (c: CaptureEvidence) => ({
+  factId: c.factId, paymentId: c.paymentId, provider: c.provider, amount: c.amount, currency: c.currency, paymentStatus: c.paymentStatus, basis: c.basis,
+  conflicted: c.conflicted, refund: c.refund, observedAt: iso(c.observedAt),
+});
+
+/**
+ * Core V2 R6H-5 (the Owner's decision, 2026-10-30): Payment's evidence of ONE verified capture of a payment, for the payment's own producer
+ * (`payment.read`; another caller, or a fact that is not a capture of this payment, is 404). Billing reads it to bind a capture-specific
+ * refund case to exactly that capture, with the amount and currency of the capture itself (never a caller's). DEVELOPMENT AND SIMULATION ONLY.
+ */
+@ApiTags('refunds')
+@Controller('payment/payments/:paymentId/captures')
+export class RefundCapturesController {
+  constructor(@Inject(RefundAttemptService) private readonly refunds: RefundAttemptService) {}
+
+  @Get(':factId')
+  @Header('Cache-Control', 'no-store')
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment.read')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'R6H-5: one verified capture of the caller\'s own payment: amount, currency, provider, the payment status, its basis '
+      + '(settling_capture | duplicate_capture | other_attempt_capture | late_capture | associated_capture), whether it is contested, and the refund '
+      + 'state of THIS captured money (none | in_progress | refunded).',
+  })
+  @ApiResponse({ status: 200 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted' })
+  @ApiResponse({ status: 404, description: 'not_found (the payment, or not its producer) | capture_not_found' })
+  async read(@Param('paymentId', new ParseUUIDPipe()) paymentId: string, @Param('factId', new ParseUUIDPipe()) factId: string, @CallerService() caller: string) {
+    return representCapture(await this.refunds.capture(caller, paymentId.toLowerCase(), factId.toLowerCase()));
   }
 }
