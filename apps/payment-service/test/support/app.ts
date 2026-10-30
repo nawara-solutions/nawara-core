@@ -15,6 +15,7 @@ import { ProvidersModule } from '../../src/providers/providers.module.js';
 import { RefundsModule } from '../../src/refunds/refunds.module.js';
 import type { ReceiptAuthority } from '../../src/refunds/receipt-authority.js';
 import { DisputesModule } from '../../src/disputes/disputes.module.js';
+import { ReconciliationModule } from '../../src/reconciliation/reconciliation.module.js';
 import type { DisputeEvidenceFiles } from '../../src/disputes/dispute-evidence-files.js';
 import type { OwnerCompanyAuthority } from '../../src/disputes/owner-company.authority.js';
 import { SimulationModule } from '../../src/simulation/simulation.module.js';
@@ -111,6 +112,7 @@ export async function createTestApp(opts: {
       AttemptsModule,
       RefundsModule.register(config, { receiptAuthority: opts.receiptAuthority, worker: opts.refundWorker }), // Core V2 S6b: as AppModule
       DisputesModule.register(config, { ownerAuthority: opts.ownerAuthority, evidenceFiles: opts.evidenceFiles }), // Core V2 S6e-D: as AppModule
+      ReconciliationModule.register(config, { ownerAuthority: opts.ownerAuthority }), // Core V2 S6h-P: as AppModule
       WebhooksModule,
       ...(config.simulation && !config.isProduction ? [SimulationModule] : []), // Core V2 S4f: as AppModule
     ],

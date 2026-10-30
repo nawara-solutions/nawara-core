@@ -105,7 +105,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `assistance_late_settlement.applied` | commercial | user (owner) | required | assistance_late_settlement | — | succeeded | `assistance_request_id`: uuid<br>`reason_code`: cash_not_returned_attested \| cash_not_returned_evidenced<br>`purchase_id`: uuid<br>`superseded_obligation_id`?: uuid<br>`evidence_count`: integer 0–5 | The Owner applied a verified late assisted settlement as its request's single purchase (L-4), with the beneficiary's attestation or evidence that the cash was not returned. |
 | `cash_return_obligation.superseded` | commercial | user (owner) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`late_settlement_id`: uuid | An open deadline cash-return obligation closed as superseded_by_settlement by the Owner's L-4 application; it is kept as history. |
 
-## payment-service (13)
+## payment-service (14)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -120,6 +120,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `payment_dispute.closed` | commercial | system (`payment_webhook`) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`outcome`: won \| lost | The provider's final outcome of a dispute, once (a later contradictory notification never replaces it). |
 | `payment_dispute.evidence_added` | commercial | user (owner) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`file_id`: uuid<br>`grant_id`: uuid | The Owner of the seller Company added a reference to a file File granted Payment as evidence of this open dispute. |
 | `payment_dispute.decided` | commercial | user (owner) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`decision`: contest \| accept | The Owner's contest-or-accept decision on a dispute, authorized by a consumed Auth dispute-decision receipt (the provider still decides the outcome). |
+| `provider_fact.associated` | commercial | user (owner) | as recorded (UUID or null) | provider_transaction_fact | — | succeeded | `target_type`: payment \| refund_authorization<br>`target_id`: uuid<br>`payment_id`: uuid<br>`association_id`: uuid | The Owner associated an unmatched verified provider money fact with one payment or refund authorization of their Company (append-only; the fact never changes). |
 | `refund_authorization.completed` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_authorization | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid<br>`refund_attempt_id`: uuid | Verified provider refund evidence reached the full approved refund: the refund is financially complete, once. |
 | `refund_attempt.succeeded` | commercial | system (`payment_webhook`, `payment_refund_worker`) | as recorded (UUID or null) | refund_attempt | — | succeeded | `payment_id`: uuid<br>`refund_case_id`: uuid<br>`fact_id`: uuid | The provider's verified evidence shows the full refund was made (money returned); its commercial effects are later stages. |
 
@@ -157,4 +158,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 104 actions.**
+**Total: 105 actions.**

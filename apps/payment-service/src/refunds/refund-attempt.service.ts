@@ -196,7 +196,11 @@ export class RefundAttemptService {
     const provider = this.providers.tryGet(capture.provider);
     if (!provider?.capabilities.refunds || !provider.refund || !provider.fetchRefundStatus) return { refusal: 'payment_not_refundable' };
     // FC-5: any refund evidence, or any attempt that may still refund, leaves nothing a full refund could admit
-    const { rows: evidence } = await q.query(`SELECT 1 FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund' LIMIT 1`, [p.id]);
+    // Core V2 S6h (R6H-3): including an unmatched refund fact associated with this payment (its money was returned all the same)
+    const { rows: evidence } = await q.query(
+      `SELECT 1 FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund'
+       UNION ALL SELECT 1 FROM provider_fact_association s JOIN provider_transaction_fact f ON f.id = s."factId"
+        WHERE s."paymentId" = $1 AND s.status = 'associated' AND f.kind = 'refund' LIMIT 1`, [p.id]);
     if (evidence.length > 0) return { refusal: 'refund_already_recorded' };
     const { rows: live } = await q.query(
       `SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed') LIMIT 1`, [p.id]);

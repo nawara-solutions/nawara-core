@@ -311,6 +311,24 @@ describe('loadPaymentConfig', () => {
     });
   });
 
+  describe('Core V2 S6h (R6H-6): payment.reconciliation.read is billing-service\'s alone, never implied, never in production', () => {
+    const producer = generateServiceToken();
+    const other = generateServiceToken();
+    const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${producer.digest},other-producer:${other.digest}` };
+    const policy = (billing: string[], others: string[] = ['payment.create']) =>
+      JSON.stringify({ callers: { 'billing-service': { operations: billing, allowedPlatforms: [P1] }, 'other-producer': { operations: others, allowedPlatforms: [P1] } } });
+    const prod = { ...env, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672' };
+
+    it('billing-service may hold it; no other identity; no wildcard; not in production', () => {
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.reconciliation.read']) })).not.toThrow();
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create'], ['payment.create', 'payment.reconciliation.read']) })).toThrow(/may be held only by billing-service/);
+      for (const op of ['payment.reconciliation', 'payment.reconciliation.*', 'payment.*']) {
+        expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', op]) }), op).toThrow();
+      }
+      expect(() => loadPaymentConfig({ ...prod, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.reconciliation.read']) })).toThrow(/no production configuration may hold/);
+    });
+  });
+
   describe('Core V2 S6b (R6B-1): payment.refund.create is billing-service\'s alone, never in production, and needs Payment\'s own Auth credential', () => {
     const producer = generateServiceToken();
     const other = generateServiceToken();

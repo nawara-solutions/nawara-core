@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PaymentRow } from '../payments/payment.types.js';
 import { PRODUCED_EVENTS, renderEventContract, type EventField, type PaymentEventName } from './event-catalog.js';
-import { jobContext, paymentEvent, disputeLostEvent, disputeOpenedEvent, refundCaseCompletedEvent, requestContext, webhookContext } from './payment-events.js';
+import { jobContext, paymentEvent, disputeLostEvent, disputeOpenedEvent, lateSuccessEvent, refundCaseCompletedEvent, requestContext, webhookContext } from './payment-events.js';
 
 /** What a payload value must look like for its catalog field (V2 A3M.2). Returns the problems, empty when it conforms. */
 function conformance(payload: Record<string, unknown>, declared: Readonly<Record<string, EventField>>): string[] {
@@ -104,9 +104,24 @@ describe('payment-service event catalog (V2 A3M.2)', () => {
     }
   });
 
+  it('Core V2 S6h: payment.late_success.recorded matches its catalog entry, with a deterministic id per late success, liveMode false, and never as payment.succeeded', () => {
+    const l = { id: '99999999-9999-4999-8999-999999999999', attemptId: '12121212-1212-4121-8121-121212121212', amount: '9000', currency: 'TND', paymentStatus: 'failed',
+      recordedAt: new Date('2026-10-30T10:00:00.000Z') };
+    for (const factId of [null, '13131313-1313-4131-8131-131313131313']) {
+      for (const base of [{ ...s4aRow, purpose: 'recovery_settlement' as const, organizationId: '33333333-3333-4333-8333-333333333333' }, row]) {
+        const ev = lateSuccessEvent({ ...l, factId }, base, webhookContext('simulation', 'evt-5'));
+        expect(ev.name).toBe('payment.late_success.recorded');
+        expect(conformance(JSON.parse(JSON.stringify(ev.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.late_success.recorded'].payload)).toEqual([]);
+        expect(ev.payload).toMatchObject({ lateSuccessId: l.id, factId, amount: 9000, paymentStatus: 'failed', recordedAt: '2026-10-30T10:00:00.000Z', liveMode: false });
+        expect(ev.id).toBe(lateSuccessEvent({ ...l, factId }, base, jobContext('attempt_resolver')).id); // one id per late success
+        expect(ev.id).not.toBe(paymentEvent('payment.succeeded', base, webhookContext('simulation', 'evt-5')).id);
+      }
+    }
+  });
+
   it('every event the builder produces matches its catalog entry, with the extras each call site passes', () => {
     // The extras exactly as the call sites pass them: attempt.service (succeeded, failed), expiry-sweeper (expired).
-    const extras: Record<Exclude<PaymentEventName, 'refund.case_completed' | 'payment.dispute.opened' | 'payment.dispute.lost'>, Array<Record<string, unknown>>> = {
+    const extras: Record<Exclude<PaymentEventName, 'refund.case_completed' | 'payment.dispute.opened' | 'payment.dispute.lost' | 'payment.late_success.recorded'>, Array<Record<string, unknown>>> = {
       'payment.created': [{}],
       'payment.succeeded': [{ settledMethod: 'gateway', succeededAt: row.closedAt?.toISOString() }, { settledMethod: 'gateway', succeededAt: undefined }],
       'payment.failed': [{ failureCode: 'card_declined' }, { failureCode: null }],

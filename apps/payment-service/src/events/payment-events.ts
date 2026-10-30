@@ -57,7 +57,7 @@ export type { PaymentEventName };
  * transition can never enqueue a second event. `payment` must be the row AFTER the transition (`RETURNING *`) so `status`
  * and `revision` describe the state the event announces.
  */
-export function paymentEvent(name: Exclude<PaymentEventName, 'refund.case_completed' | 'payment.dispute.opened' | 'payment.dispute.lost'>, payment: PaymentRow, ctx: EventContext, extra: Record<string, unknown> = {}): NewEvent {
+export function paymentEvent(name: Exclude<PaymentEventName, 'refund.case_completed' | 'payment.dispute.opened' | 'payment.dispute.lost' | 'payment.late_success.recorded'>, payment: PaymentRow, ctx: EventContext, extra: Record<string, unknown> = {}): NewEvent {
   return {
     id: deterministicEventId(payment.id, name),
     name,
@@ -169,6 +169,24 @@ export function disputeLostEvent(d: DisputeEventSource, payment: PaymentRow, cha
       disputeId: d.id, paymentId: d.paymentId, paymentRequestId: payment.paymentRequestId, producer: payment.producer, organizationId: payment.organizationId,
       purpose: payment.purpose, amount: Number(d.amount), currency: d.currency.trim(), lostAt: new Date(d.closedAt ?? d.recordedAt).toISOString(),
       chargeback: chargeback ? { factId: chargeback.id, amount: Number(chargeback.amount), currency: chargeback.currency.trim() } : null, liveMode: false,
+    },
+  };
+}
+
+/**
+ * Core V2 S6h (register EVT-10; the Owner's R6H-4): a recorded late success, version 1, once: its id is derived from the late-success row, so a
+ * retried transaction never enqueues a second event. Identifiers, the verified fact, the observed amount and currency, the payment's status.
+ */
+export function lateSuccessEvent(l: { id: string; attemptId: string; factId: string | null; amount: string | number; currency: string; paymentStatus: string; recordedAt: Date },
+  payment: PaymentRow, ctx: EventContext): NewEvent {
+  return {
+    id: deterministicEventId(l.id, 'payment.late_success.recorded'),
+    name: 'payment.late_success.recorded',
+    correlationId: ctx.correlationId,
+    payload: {
+      lateSuccessId: l.id, paymentId: payment.id, paymentRequestId: payment.paymentRequestId, producer: payment.producer, organizationId: payment.organizationId,
+      purpose: payment.purpose, attemptId: l.attemptId, factId: l.factId, amount: Number(l.amount), currency: l.currency.trim(), paymentStatus: l.paymentStatus,
+      recordedAt: new Date(l.recordedAt).toISOString(), liveMode: false,
     },
   };
 }

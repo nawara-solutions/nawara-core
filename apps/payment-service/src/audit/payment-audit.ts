@@ -20,6 +20,8 @@ export type PaymentAuditAction = 'payment.created' | 'payment.cancelled' | 'paym
 export type RefundAuditAction = 'refund_attempt.authorized' | 'refund_attempt.failed' | 'refund_attempt.succeeded';
 /** Core V2 S6e-D (R6E-8): the dispute actions (version 1, no trusted scope): provider observations by the verified webhook, Owner actions by the Owner. */
 export type DisputeAuditAction = 'payment_dispute.opened' | 'payment_dispute.closed' | 'payment_dispute.evidence_added' | 'payment_dispute.decided';
+/** Core V2 S6h (R6H-11): the Owner's association of an unmatched provider fact (version 1, no trusted scope). */
+export type ReconciliationAuditAction = 'provider_fact.associated';
 
 /**
  * The catalog actor of a Payment transition, from Payment's own verified attribution (never a request value). A service caller is the
@@ -106,6 +108,21 @@ export class PaymentAudit {
       q,
       { action, actor: auditActor(ctx), organizationId, resource: { type: 'payment_dispute', id: d.id }, outcome: 'succeeded', changes } as never,
       { eventId: deterministicEventId(idOf, `audit.${action}`), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /**
+   * Core V2 S6h (R6H-3, R6H-11): the association of an unmatched provider fact, in the association's transaction. Identifiers only (the fact, its
+   * destination and the association); never an amount, a provider reference, a receipt or its secret. The event id is derived from the association.
+   */
+  async recordAssociation(q: Queryable, a: { id: string; factId: string; targetType: string; paymentId: string; refundAuthorizationId: string | null },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    // the destination's id (the payment, or the refund authorization) as `target_id`: a change key never names an authorization
+    const changes: Record<string, unknown> = { target_type: a.targetType, target_id: a.refundAuthorizationId ?? a.paymentId, payment_id: a.paymentId, association_id: a.id };
+    await this.writer.write(
+      q,
+      { action: 'provider_fact.associated' satisfies ReconciliationAuditAction, actor: auditActor(ctx), organizationId, resource: { type: 'provider_transaction_fact', id: a.factId }, outcome: 'succeeded', changes } as never,
+      { eventId: deterministicEventId(a.id, 'audit.provider_fact.associated'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
 }

@@ -150,9 +150,12 @@ describeWithEnv('webhook retrier: bounded, backed off, claimed (real PostgreSQL)
       await retrier().drainOnce(); // its last attempt: still unmatched
       await retrier().drainOnce(); // budget spent: terminal
       const mine = lines.filter(([, m]) => m.includes(`event=${id}`));
+      // Core V2 S6h-P (R6H-3): the verified capture is past the grace window, so it is kept as an unmatched fact and the outcome names it
+      const fact = (await dbs.query<{ id: string }>(`SELECT id FROM provider_transaction_fact WHERE "webhookEventId" = $1`, [id])).rows[0]?.id;
+      expect(fact).toEqual(expect.any(String));
       expect(mine).toEqual([
-        ['warn', `webhook_retry_unresolved event=${id} provider=test attempt=${WEBHOOK_RETRY_MAX_ATTEMPTS}/${WEBHOOK_RETRY_MAX_ATTEMPTS} state=unmatched outcome=- — retried again after its backoff`],
-        ['error', `webhook_retry_exhausted event=${id} provider=test attempts=${WEBHOOK_RETRY_MAX_ATTEMPTS} lastState=unmatched lastOutcome=- — terminal for the retrier (failed/retries_exhausted); an operator must look at it`],
+        ['warn', `webhook_retry_unresolved event=${id} provider=test attempt=${WEBHOOK_RETRY_MAX_ATTEMPTS}/${WEBHOOK_RETRY_MAX_ATTEMPTS} state=unmatched outcome=unmatched_fact:${fact} — retried again after its backoff`],
+        ['error', `webhook_retry_exhausted event=${id} provider=test attempts=${WEBHOOK_RETRY_MAX_ATTEMPTS} lastState=unmatched lastOutcome=unmatched_fact:${fact} — terminal for the retrier (failed/retries_exhausted); an operator must look at it`],
       ]);
       expect(await row(id)).toEqual({ state: 'failed', outcome: 'retries_exhausted', attempts: WEBHOOK_RETRY_MAX_ATTEMPTS }); // behaviour unchanged
       expect(lines.map(([, m]) => m).join('\n')).not.toMatch(/ghost-|rawBody/); // never the stored provider body

@@ -261,6 +261,41 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "L'autorisation de cette décision n'a pas pu être confirmée ; répétez la même requête.",
     ar: 'تعذّر تأكيد تفويض هذا القرار؛ أعد إرسال الطلب نفسه.',
   },
+  invalidReconciliationRequest: { // Core V2 S6h
+    en: 'The reconciliation request is invalid.',
+    fr: "La demande de rapprochement n'est pas valide.",
+    ar: 'طلب التسوية غير صالح.',
+  },
+  providerFactMatched: { // Core V2 S6h
+    en: 'This provider fact is already matched to its payment.',
+    fr: 'Ce fait du fournisseur est déjà rattaché à son paiement.',
+    ar: 'هذه الواقعة من المزوّد مرتبطة بالفعل بدفعتها.',
+  },
+  factAlreadyAssociated: { // Core V2 S6h
+    en: 'This provider fact is already associated or being associated.',
+    fr: 'Ce fait du fournisseur est déjà associé ou en cours d’association.',
+    ar: 'هذه الواقعة من المزوّد مرتبطة بالفعل أو قيد الربط.',
+  },
+  providerFactAssociationInvalid: { // Core V2 S6h
+    en: 'This provider fact cannot be associated with that destination.',
+    fr: 'Ce fait du fournisseur ne peut pas être associé à cette destination.',
+    ar: 'لا يمكن ربط هذه الواقعة من المزوّد بهذه الوجهة.',
+  },
+  providerFactAssociationRefused: { // Core V2 S6h
+    en: 'The authorization of this association was refused or has expired.',
+    fr: "L'autorisation de cette association a été refusée ou a expiré.",
+    ar: 'رُفض تفويض هذا الربط أو انتهت صلاحيته.',
+  },
+  providerFactAssociationConflict: { // Core V2 S6h
+    en: 'This Idempotency-Key names an association authorized by another receipt.',
+    fr: 'Cette clé Idempotency-Key désigne une association autorisée par un autre reçu.',
+    ar: 'يشير مفتاح Idempotency-Key هذا إلى ربط مفوَّض بإيصال آخر.',
+  },
+  providerFactAssociationUnresolved: { // Core V2 S6h
+    en: 'The authorization of this association could not be confirmed; repeat the same request.',
+    fr: "L'autorisation de cette association n'a pas pu être confirmée ; répétez la même requête.",
+    ar: 'تعذّر تأكيد تفويض هذا الربط؛ أعد إرسال الطلب نفسه.',
+  },
   ownerAuthorityUnavailable: { // Core V2 S6e-D
     en: "The Owner's authority could not be verified; nothing was changed.",
     fr: "L'autorité du propriétaire n'a pas pu être vérifiée ; rien n'a été modifié.",

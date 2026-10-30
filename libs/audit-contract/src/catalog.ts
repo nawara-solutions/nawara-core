@@ -783,6 +783,19 @@ const SPEC = {
     },
     purpose: "The Owner's contest-or-accept decision on a dispute, authorized by a consumed Auth dispute-decision receipt (the provider still decides the outcome).",
   },
+  // Core V2 S6h (register PAY-13; the Owner's R6H-3, R6H-11): the Owner's association of an unmatched verified provider fact with one destination,
+  // authorized by a consumed Auth provider_fact_associate receipt. Version 1, no trusted scope. The fact itself never changes.
+  'provider_fact.associated': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'optional',
+    resource: ['provider_transaction_fact'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      target_type: { type: 'code', shape: 'value', required: true, values: ['payment', 'refund_authorization'] },
+      target_id: { type: 'uuid', shape: 'value', required: true },
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      association_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: "The Owner associated an unmatched verified provider money fact with one payment or refund authorization of their Company (append-only; the fact never changes).",
+  },
   'refund_authorization.completed': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_authorization'], subject: NO_SUBJECT, outcomes: OK,

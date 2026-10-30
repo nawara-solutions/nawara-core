@@ -54,6 +54,13 @@ describe('PAYMENT_MESSAGES', () => {
       disputeDecisionRefused: 'The authorization of this decision was refused or has expired.', // Core V2 S6e-D
       disputeDecisionConflict: 'This Idempotency-Key names a decision authorized by another receipt.', // Core V2 S6e-D
       disputeDecisionUnresolved: 'The authorization of this decision could not be confirmed; repeat the same request.', // Core V2 S6e-D
+      invalidReconciliationRequest: 'The reconciliation request is invalid.', // Core V2 S6h
+      providerFactMatched: 'This provider fact is already matched to its payment.', // Core V2 S6h
+      factAlreadyAssociated: 'This provider fact is already associated or being associated.', // Core V2 S6h
+      providerFactAssociationInvalid: 'This provider fact cannot be associated with that destination.', // Core V2 S6h
+      providerFactAssociationRefused: 'The authorization of this association was refused or has expired.', // Core V2 S6h
+      providerFactAssociationConflict: 'This Idempotency-Key names an association authorized by another receipt.', // Core V2 S6h
+      providerFactAssociationUnresolved: 'The authorization of this association could not be confirmed; repeat the same request.', // Core V2 S6h
       ownerAuthorityUnavailable: "The Owner's authority could not be verified; nothing was changed.", // Core V2 S6e-D
       simulationNothingToDispute: 'This payment has no verified capture to dispute.', // Core V2 S6e-D
       refundInProgress: 'Another refund attempt for this payment is unresolved or may still take effect.',

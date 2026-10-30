@@ -149,9 +149,13 @@ a verified late success is recorded with Payment's original instant and never ap
 that payment; the Owner may apply it as the request's single purchase only with a factor-step-up receipt and the beneficiary's attestation
 or File evidence that the cash was not returned, never with a purchase, a confirmed or reported return, an open dispute or any refund case;
 the open deadline obligation is then superseded (kept as history; one live obligation per request), and the beneficiary's entitlement
-starts at the application. **Still FROZEN, not
-implemented**: reconciliation
-cases, fact association, balances that are never clamped (FC-5) and `FinancialLoss` only from evidence (FC-6) (S6h). Payment has no
+starts at the application. **S6h-P (Payment, simulation only; register PAY-12 F, PAY-13 F, EVT-10)**: a verified movement that matches no
+attempt is kept as an immutable unmatched fact after a grace window and is associated with a payment or refund authorization only by an
+append-only row the Owner authorizes with a consumed Auth receipt (the fact never changes); a late success emits
+`payment.late_success.recorded` once (with a Billing read for event loss); reconciliation items and signed per-currency balances
+(`netRetained = captured − refundedNet − chargebackNet`, never clamped) come only from verified facts. A refund of one specific capture is
+STOPPED on a contract gap (register PAY-13 G). **Still FROZEN, not implemented**: reconciliation cases and `FinancialLoss` only from evidence
+(FC-6) (S6h-B). Payment has no
 dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.
 
 ### 0.10 Open items that block production

@@ -9,6 +9,7 @@ import { RefundEvidenceService } from '../refunds/refund-evidence.service.js';
 import { DisputeIngestionService } from '../disputes/dispute-ingestion.service.js';
 import { isDisputeNotificationType, parseDisputeNotice } from '../disputes/dispute.types.js';
 import type { WebhookEventRow } from './webhook-event.types.js';
+import { CORE_V2_LIVE_MODE } from '../payments/payment.types.js';
 
 export interface WebhookResult {
   /** The HTTP status the controller should answer with. */
@@ -16,6 +17,13 @@ export interface WebhookResult {
 }
 
 const CONFLICT_CODES = new Set(['provider_error', 'invalid_state_transition']);
+
+/**
+ * Core V2 S6h (R6H-3, FC-1): how long a VERIFIED money notification may stay unmatched before Payment keeps it as an unmatched provider fact.
+ * A notification can legitimately beat the commit of its own attempt (SDD section 12): within this window the retrier simply revisits it, so
+ * an ordinary race never becomes a reconciliation item. Past it, the movement is preserved as evidence (and the retrier still revisits it).
+ */
+export const UNMATCHED_FACT_GRACE_MS = 5 * 60_000;
 
 /**
  * The webhook pipeline (SDD section 7): verify -> persist (transaction A, deduplicated) -> process
@@ -104,7 +112,8 @@ export class WebhookService {
 
     const attempt = await this.findAttemptByReference(provider.id, parsed.reference);
     if (!attempt) {
-      await this.markState(eventId, 'unmatched', null, undefined, claim);
+      const factId = status.kind === 'succeeded' ? await this.recordUnmatchedFact(eventId, provider, 'capture', parsed) : null;
+      await this.markState(eventId, 'unmatched', factId ? `unmatched_fact:${factId}` : null, undefined, claim);
       return { status: 200 }; // the resolver/retrier revisits this — the record may not be visible yet
     }
 
@@ -142,7 +151,8 @@ export class WebhookService {
     }
     const attempt = await this.refunds.findByReference(provider.id, parsed.reference);
     if (!attempt) {
-      await this.markState(eventId, 'unmatched', null, undefined, claim);
+      const factId = status.kind === 'succeeded' ? await this.recordUnmatchedFact(eventId, provider, 'refund', parsed) : null;
+      await this.markState(eventId, 'unmatched', factId ? `unmatched_fact:${factId}` : null, undefined, claim);
       return { status: 200 };
     }
     try {
@@ -184,6 +194,29 @@ export class WebhookService {
       await this.markState(eventId, 'failed', 'transient_error', undefined, claim);
       return { status: 500 };
     }
+  }
+
+  /**
+   * Core V2 S6h (register PAY-13; R6H-3, FC-1): a VERIFIED money notification (its signature was checked when it was stored) that still names
+   * no attempt of this provider once the grace window has passed is kept as an UNMATCHED provider fact: its provider transaction identity,
+   * kind, amount and currency exactly as the provider reported them, and the webhook it came from. No payment, attempt, refund or entitlement
+   * changes; the Owner may later associate it (PAY-13). Identical redeliveries are the same fact; a notification without a provider
+   * transaction reference, amount or currency cannot be keyed and stays an unmatched notification only. Returns the fact id, or null.
+   */
+  private async recordUnmatchedFact(eventId: string, provider: PaymentProvider, kind: 'capture' | 'refund',
+    parsed: { amount?: number; currency?: string; providerTransactionId?: string; providerOccurredAt?: Date }): Promise<string | null> {
+    if (!parsed.providerTransactionId || typeof parsed.amount !== 'number' || !Number.isSafeInteger(parsed.amount) || parsed.amount < 1 || typeof parsed.currency !== 'string') return null;
+    const { rows: due } = await this.db.query(`SELECT 1 FROM webhook_event WHERE id = $1 AND "receivedAt" <= now() - make_interval(secs => $2)`, [eventId, UNMATCHED_FACT_GRACE_MS / 1000]);
+    if (due.length === 0) return null;
+    const { rows } = await this.db.query<{ id: string }>(
+      `INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, amount, currency, "liveMode", source, "webhookEventId", "providerOccurredAt")
+       VALUES ($1, $2, $3, $4, $5, $6, 'webhook', $7, $8) ON CONFLICT ON CONSTRAINT provider_transaction_fact_identity DO NOTHING RETURNING id`,
+      [provider.id, parsed.providerTransactionId, kind, parsed.amount, parsed.currency, CORE_V2_LIVE_MODE, eventId, parsed.providerOccurredAt ?? null],
+    );
+    const id = rows[0]?.id ?? (await this.db.query<{ id: string }>(
+      `SELECT id FROM provider_transaction_fact WHERE provider = $1 AND "providerTxnId" = $2 AND kind = $3`, [provider.id, parsed.providerTransactionId, kind])).rows[0]?.id ?? null;
+    if (rows[0]) this.logger.warn(`provider_fact_unmatched fact=${rows[0].id} provider=${provider.id} kind=${kind} — a verified movement names no attempt; kept for reconciliation (S6h)`);
+    return id;
   }
 
   private toStatus(parsed: { type: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date }): FetchStatusResult | null {

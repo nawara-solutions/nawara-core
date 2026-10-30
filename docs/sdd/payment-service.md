@@ -107,6 +107,18 @@ exposure feeds refund admission (fail closed when unresolved) and Billing (`GET 
 adds File-granted evidence and records a contest-or-accept decision authorized by a consumed Auth `dispute_decision` receipt. Implemented in
 `db/migrations/0019_payment_dispute.sql` and `src/disputes/`. Fraud holds stay out of scope (OD-10).
 
+**Core V2 S6h-P (reconciliation; S0 FC-1, FC-2, FC-5; the Owner's R6H-1 to R6H-12; register PAY-12 F, PAY-13 F and G, EVT-10):** for Core
+V2 development and simulation only. The webhook pipeline keeps a signature-verified capture or refund notification that names no attempt as
+an immutable unmatched `provider_transaction_fact` once it is older than the grace window (5 minutes); an unverified notification is refused
+and never stored, an unkeyable one stays only a notification. The Owner associates an unmatched fact with one payment (a capture) or refund
+authorization (a refund) of their Company through an append-only `provider_fact_association` (intent, then Auth consumes the
+`provider_fact_associate` receipt, then the record and its `provider_fact.associated` audit); the database re-checks the destination and
+allows one live association per fact. An associated refund fact is allocated by the refund worker under FC-2. A late success emits
+`payment.late_success.recorded` (v1) once, in the transaction that records it. Reconciliation items (Owner, and Billing's own evidence with
+`payment.reconciliation.read`) and signed per-currency balances are read-only evidence. The refund of one specific capture (R6H-5) is
+stopped on a contract gap: the Auth `refund` binding names no capture. Implemented in `db/migrations/0021_reconciliation.sql`,
+`src/reconciliation/` and `src/webhooks/webhook.service.ts`.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.
