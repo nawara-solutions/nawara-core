@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -17,13 +18,32 @@ const DOCS_PASSWORD = 'docs-password-0123456789';
 const JSON_HEADERS = { 'content-type': 'application/json' };
 const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded' };
 const key = () => randomBytes(32).toString('base64');
-const freePort = () => new Promise<number>((resolve) => {
-  const s = createServer();
-  s.listen(0, '127.0.0.1', () => {
-    const { port } = s.address() as { port: number };
-    s.close(() => resolve(port));
-  });
-});
+/** The low bound of the OS ephemeral range, from which every `listen(0)` is assigned (Linux; the IANA bound elsewhere is higher). */
+const EPHEMERAL_LOW = (() => {
+  try {
+    return Number(readFileSync('/proc/sys/net/ipv4/ip_local_port_range', 'utf8').trim().split(/\s+/)[0]) || 32_768;
+  } catch {
+    return 32_768;
+  }
+})();
+/**
+ * A port for a spawned process that no other listener of the run can be given meanwhile. Every other server in the Auth suites (each
+ * parallel worker's in-process Auth app, supertest) listens on port 0, which the OS assigns from its ephemeral range: a port released by
+ * a port-0 probe could be handed to one of them before the child binds it, and the readiness poll would then accept THAT server (seen
+ * in CI: `/auth/docs` answered 404 with SWAGGER_PASSWORD set). So the port is drawn below the ephemeral range, and checked by binding it.
+ */
+const freePort = async (): Promise<number> => {
+  for (let i = 0; i < 100; i++) {
+    const port = 10_000 + Math.floor(Math.random() * (EPHEMERAL_LOW - 10_000));
+    const free = await new Promise<boolean>((resolve) => {
+      const s = createServer();
+      s.once('error', () => resolve(false));
+      s.listen(port, '127.0.0.1', () => s.close(() => resolve(true)));
+    });
+    if (free) return port;
+  }
+  throw new Error('no free port below the ephemeral range');
+};
 
 const created: string[] = [];
 const running: ChildProcess[] = [];
