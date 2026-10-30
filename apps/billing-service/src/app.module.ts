@@ -21,6 +21,8 @@ import type { OwnerAuthority } from './platforms/owner-authority.client.js';
 import type { DisputeExposure } from './refunds/dispute-exposure.js';
 import { RefundModule } from './refunds/refund.module.js';
 import { RecoveryModule } from './recovery/recovery.module.js';
+import { ReconciliationModule } from './reconciliation/reconciliation.module.js';
+import type { PaymentReconciliationClient } from './reconciliation/payment-reconciliation-client.js';
 import { LateSettlementModule } from './late-settlements/late-settlement.module.js';
 import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
@@ -58,6 +60,8 @@ export interface AppModuleOverrides {
   fraudHoldReceipts?: FraudHoldReceipts;
   fraudEvidenceFiles?: FraudEvidenceFiles;
   refundRelayReconciler?: boolean;
+  /** Core V2 S6h-B: Payment's reconciliation read (default: the HTTP client on the configured URL). */
+  paymentReconciliationClient?: PaymentReconciliationClient;
 }
 
 /**
@@ -114,6 +118,8 @@ export class AppModule {
         RecoveryModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler }),
         // Core V2 S6g (BIL-32): the L-4 application of verified late assisted settlements; development and simulation only
         LateSettlementModule.register(config, overrides.ownerAuthority),
+        // Core V2 S6h-B (BIL-33, BIL-34, EVT-10): reconciliation cases, late successes, FinancialLoss; development and simulation only
+        ReconciliationModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler, paymentReconciliationClient: overrides.paymentReconciliationClient }),
       ],
     };
   }

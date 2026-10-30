@@ -132,6 +132,10 @@ describe('BILLING_MESSAGES', () => {
       [en('surplusEvidenceUnavailable'), 'The surplus evidence could not be verified; nothing was changed.'], // Core V2 S6f
       [en('recoveryAuthorizationRefused'), 'The authorization of this external repayment record was refused or has expired.'], // Core V2 S6f
       [en('recoveryAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6f
+      [en('invalidReconciliationRequest'), 'The reconciliation request is invalid.'], // Core V2 S6h-B
+      [en('reconciliationCaseNotAcknowledgeable'), 'This reconciliation case is resolved only by its financial evidence, never by an acknowledgement.'], // Core V2 S6h-B
+      [en('reconciliationCaseResolved'), 'This reconciliation case is already resolved.'], // Core V2 S6h-B
+      [en('writeOffNotPermitted'), 'This recovery obligation cannot be written off: it is recovered, already written off, or its outstanding amount changed since the authorization.'], // Core V2 S6h-B
       [en('recoveryAuthorizationUnavailable'), 'The external repayment record is not available; nothing was changed.'], // Core V2 S6f
       [en('invalidLateSettlementRequest'), 'The late settlement request is invalid.'], // Core V2 S6g
       [en('lateSettlementRefused', { reason: 'refund_exists' }), 'This late settlement cannot be applied (refund_exists).'], // Core V2 S6g

@@ -65,7 +65,7 @@ describe('billing-service event catalog (V2 A3M.2)', () => {
 
   it('the consumed payment outcomes (and, Core V2 S6c, Payment\'s refund completion; S6e-D, its verified dispute loss) are exactly the names the consumer binds, each at version 1', () => {
     const names: readonly string[] = CONSUMED_EVENTS.map((c) => c.name);
-    expect([...names].sort()).toEqual(['payment.cancelled', 'payment.dispute.lost', 'payment.expired', 'payment.failed', 'payment.succeeded', 'refund.case_completed']);
+    expect([...names].sort()).toEqual(['payment.cancelled', 'payment.dispute.lost', 'payment.expired', 'payment.failed', 'payment.late_success.recorded', 'payment.succeeded', 'refund.case_completed']); // + Core V2 S6h-B (EVT-10)
     for (const c of CONSUMED_EVENTS) {
       expect(c.source).toBe('payment-service');
       expect(c.version).toBe(1);

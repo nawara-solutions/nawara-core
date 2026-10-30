@@ -20,6 +20,7 @@ import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
 import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
+import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
 import { LateSettlementModule } from '../src/late-settlements/late-settlement.module.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -671,6 +672,22 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
         [app.lateSettlementId, app.assistanceRequestId, app.companyId, app.platformId, app.organizationId, app.beneficiaryUserId, app.attestationId, U.owner, app.settledAt])).rejects.toThrow();
       await expect(admin.query(`DELETE FROM late_settlement_evidence`)).rejects.toThrow();
     });
+  });
+
+  it('Core V2 S6h-B (L-2, R6H-1): an unapplied late settlement is a reconciliation case, found again by every pass; the L-4 application resolves it, once', async () => {
+    const l = await lateFixture({ beneficiary: 'b2' });
+    const reconcile = () => t.app.get(ReconciliationService).drainOnce();
+    const caseOf = () => one(`SELECT c.id, c."companyId", c."organizationId", r.kind FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+      WHERE c."caseType" = 'late_assisted_settlement' AND c."evidenceKey" = $1`, [l.lateId]);
+    await Promise.all([reconcile(), reconcile()]);
+    await reconcile();
+    expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "evidenceKey" = $1`, [l.lateId])).toBe(1);
+    expect(await caseOf()).toMatchObject({ companyId: COMPANY, organizationId: ORG, kind: null });
+    await attest(l.lateId, 'cash_not_returned', 'b2').expect(201);
+    expect((await applyLate(l.lateId, attested(l))).status).toBe(201);
+    await reconcile();
+    expect(await caseOf()).toMatchObject({ kind: 'late_settlement_applied' });
+    expect(await count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.reconciliation_case.resolved' AND payload->'resource'->>'id' = $1`, [(await caseOf()).id])).toBe(1);
   });
 
   it('production mounts no late-settlement route', () => {

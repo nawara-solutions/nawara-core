@@ -230,6 +230,41 @@
     },
     {
       "source": "payment-service",
+      "name": "payment.late_success.recorded",
+      "version": 1,
+      "requires": {
+        "amount": {
+          "type": "integer"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "factId": {
+          "type": "uuid",
+          "nullable": true
+        },
+        "lateSuccessId": {
+          "type": "uuid"
+        },
+        "liveMode": {
+          "type": "boolean"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentStatus": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "recordedAt": {
+          "type": "datetime"
+        }
+      }
+    },
+    {
+      "source": "payment-service",
       "name": "payment.succeeded",
       "version": 1,
       "requires": {

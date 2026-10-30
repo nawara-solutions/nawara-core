@@ -76,7 +76,9 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     AND NOT (table_name = 'fraud_hold_compensation' AND column_name = 'deniedMs') -- S6e-H: a duration (ms), not money
     -- S6f: the recovery base, a channel's outstanding amount at issue, a verified recovery payment and its split, a surplus (checked below)
     AND NOT (table_name = 'recovery_obligation' AND column_name = 'baseAmount') AND NOT (table_name = 'recovery_settlement_channel' AND column_name = 'amount')
-    AND NOT (table_name = 'recovery_payment' AND column_name IN ('amount', 'principalAmount', 'surplusAmount')) AND NOT (table_name = 'recovery_surplus' AND column_name = 'amount')), '8'); -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
+    AND NOT (table_name = 'recovery_payment' AND column_name IN ('amount', 'principalAmount', 'surplusAmount')) AND NOT (table_name = 'recovery_surplus' AND column_name = 'amount')
+    -- S6h-B: Payment's verified late success, a case's evidence amount, a FinancialLoss and its signed adjustment (CHECKed, guarded)
+    AND NOT (table_name IN ('payment_late_success', 'reconciliation_case', 'financial_loss', 'financial_loss_adjustment') AND column_name = 'amount')), '8'); -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -1209,10 +1211,10 @@ SELECT pg_temp.assert_eq('S6e-D', 'V-1: every cause (refund case or dispute) rec
   (SELECT (pg_get_constraintdef(oid) LIKE '%disputeId%' AND pg_get_constraintdef(oid) LIKE '%refundCaseId%')::text FROM pg_constraint WHERE conname = 'subscription_purchase_reversal_cause_once'), 'true');
 SELECT pg_temp.assert_eq('S6e-D', 'no S6f: a dispute loss opens no obligation and no restriction (T2/T3 unchanged)',
   (SELECT (prosrc NOT LIKE '%dispute%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
-SELECT pg_temp.assert_eq('S6e-D', 'no S6h: no financial loss table exists',
-  (SELECT count(*)::text FROM pg_tables WHERE schemaname = 'public' AND tablename ~ 'financial_loss'), '0');
-SELECT pg_temp.assert_eq('S6e-D', 'the verified-origin record admits payment.dispute.lost (and no other dispute event)',
-  (SELECT (pg_get_constraintdef(oid) LIKE '%payment.dispute.lost%' AND pg_get_constraintdef(oid) NOT LIKE '%payment.dispute.opened%')::text FROM pg_constraint WHERE conname = 'payment_event_origin_name'), 'true');
+SELECT pg_temp.assert_eq('S6e-D', 'FC-6: the only financial-loss tables are S6h-B''s loss and its append-only adjustments',
+  (SELECT string_agg(tablename, ',' ORDER BY tablename) FROM pg_tables WHERE schemaname = 'public' AND tablename ~ 'financial_loss'), 'financial_loss,financial_loss_adjustment');
+SELECT pg_temp.assert_eq('S6e-D', 'the verified-origin record admits payment.dispute.lost (and no other dispute event; S6h-B: and the late success)',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%payment.dispute.lost%' AND pg_get_constraintdef(oid) NOT LIKE '%payment.dispute.opened%' AND pg_get_constraintdef(oid) LIKE '%payment.late_success.recorded%')::text FROM pg_constraint WHERE conname = 'payment_event_origin_name'), 'true');
 
 -- ------------------------------------------------------------------------------------------------------------- S6e-H fraud holds (0038)
 -- The lifecycle and C-1 compensation run end to end in test/refund-cases.e2e-spec.ts (Core V2 S6e-H block); here, the schema's own rules.
@@ -1239,8 +1241,10 @@ SELECT pg_temp.assert_eq('S6e-H', 'every fraud-hold table is append-only (an upd
 -- Obligations, settlement, recovery payments, surplus and both resolution paths run end to end in test/recovery.e2e-spec.ts; here, the schema's own rules.
 SELECT pg_temp.expect_error('S6f', 'R6F-3 / R6F-8: an obligation needs the verified loss of an assisted purchase', $$INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
   VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'TND')$$, '23514', 'recovery_obligation_basis');
-SELECT pg_temp.assert_eq('S6f', 'R6F-8: one obligation per verified loss; one review per loss; one recovery per payment request and per receipt',
-  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('recovery_obligation_disputeId_key', 'recovery_review_pkey', 'recovery_payment_paymentRequestId_key', 'recovery_payment_receiptId_key')), '4');
+SELECT pg_temp.assert_eq('S6f', 'R6F-8: one obligation per verified loss; one review per loss; one recovery per payment request and per receipt (S6h-B: and per late success)',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('recovery_obligation_disputeId_key', 'recovery_review_pkey', 'recovery_payment_receiptId_key', 'recovery_payment_lateSuccessId_key')), '4');
+SELECT pg_temp.assert_eq('S6f', 'R6F-8 (S6h-B): one recovery payment per payment request''s APPLIED success (a late success is its own)',
+  (SELECT (indexdef LIKE '%UNIQUE%' AND indexdef LIKE '%receiptId%')::text FROM pg_indexes WHERE indexname = 'recovery_payment_request_success'), 'true');
 SELECT pg_temp.assert_eq('S6f', 'R6F-3 Option A / R6F-4: review reasons are the two approved exclusions only',
   (SELECT (pg_get_constraintdef(oid) LIKE '%partial_chargeback%' AND pg_get_constraintdef(oid) LIKE '%refund_completed%')::text FROM pg_constraint WHERE conname = 'recovery_review_reason'), 'true');
 SELECT pg_temp.assert_eq('S6f', 'B8: the database splits a recovery payment into principal (never above the outstanding) and surplus',
@@ -1259,7 +1263,7 @@ SELECT pg_temp.assert_eq('S6f', 'R6F-5: one external record and one confirmation
 SELECT pg_temp.assert_eq('S6f', 'R-3b: a confirmation needs the external record (FK); the recorder never confirms (guard)',
   (SELECT (contype = 'f')::text FROM pg_constraint WHERE conrelid = 'recovery_surplus_confirmation'::regclass AND contype = 'f' LIMIT 1), 'true');
 SELECT pg_temp.assert_eq('S6f', 'R6F-7 / FC: no recovery or FinancialLoss table beyond the approved eight',
-  (SELECT count(*)::text FROM information_schema.tables WHERE table_schema = 'public' AND (table_name ~ '^recovery_' OR table_name ~* 'financial_loss|write_?off')), '8');
+  (SELECT count(*)::text FROM information_schema.tables WHERE table_schema = 'public' AND (table_name ~ '^recovery_' OR table_name ~* 'financial_loss|write_?off')), '10'); -- + S6h-B: financial_loss, financial_loss_adjustment
 SELECT pg_temp.assert_eq('S6f', 'every recovery ledger table is append-only (an update/delete guard on each)',
   (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_10_append_only' AND tgrelid::regclass::text IN ('recovery_review', 'recovery_payment', 'recovery_surplus',
     'recovery_surplus_external', 'recovery_surplus_confirmation', 'recovery_surplus_refund')), '6');
@@ -1309,6 +1313,42 @@ SELECT pg_temp.assert_eq('R6H-5', 'a capture-specific case names one capture and
   (SELECT (pg_get_constraintdef(oid) LIKE '%captureFactId%' AND pg_get_constraintdef(oid) LIKE '%unrouted_capture%')::text FROM pg_constraint WHERE conname = 'refund_case_capture_shape'), 'true');
 SELECT pg_temp.assert_eq('R6H-5', 'its only commercial effect is none / capture_refunded',
   (SELECT count(*)::text FROM pg_trigger WHERE tgname = 'refund_case_effect_06_capture_basis'), '1');
+
+-- ======================================================= Core V2 S6h-B: reconciliation cases, late successes, FinancialLoss (0042) ----
+-- The financial paths are exercised end to end by test/recovery.e2e-spec.ts and test/late-settlements.e2e-spec.ts; here, the guards alone.
+\o /dev/null
+INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", detail) VALUES ('refund_discrepancy', '00000000-0000-4000-8000-0000000b6a01', gen_random_uuid(), 'x') RETURNING id AS rc1 \gset
+INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId") VALUES ('late_success', '00000000-0000-4000-8000-0000000b6a02', gen_random_uuid()) RETURNING id AS rc2 \gset
+\o
+SELECT pg_temp.expect_error('S6h-B', 'R6H-1: one case per (type, evidence)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId") VALUES ('refund_discrepancy', '00000000-0000-4000-8000-0000000b6a01', gen_random_uuid())$$, '23505');
+SELECT pg_temp.expect_error('S6h-B', 'a case is append-only (no edit)', format($$UPDATE reconciliation_case SET detail = 'y' WHERE id = %L$$, :'rc1'), '23514');
+SELECT pg_temp.expect_error('S6h-B', 'a case is never deleted', format($$DELETE FROM reconciliation_case WHERE id = %L$$, :'rc1'), '23514');
+SELECT pg_temp.expect_error('S6h-B', 'R6H-2: a financial case is never acknowledged away', format($$INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason)
+  VALUES (%L, 'acknowledged', gen_random_uuid(), 'reviewed_no_financial_effect')$$, :'rc2'), '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('S6h-B', 'R6H-2: a resolution needs the evidence its kind names', format($$INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId")
+  VALUES (%L, 'refund_completed', gen_random_uuid())$$, :'rc2'), '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('S6h-B', 'R6H-2: an acknowledgement is the Owner''s, with a bounded reason', format($$INSERT INTO reconciliation_case_resolution ("caseId", kind)
+  VALUES (%L, 'acknowledged')$$, :'rc1'), '23514', 'reconciliation_case_resolution_acknowledged');
+SELECT pg_temp.expect_ok('S6h-B', 'R6H-2: a review-only case acknowledged by the Owner', format($$INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason)
+  VALUES (%L, 'acknowledged', gen_random_uuid(), 'provider_statement_reviewed')$$, :'rc1'));
+SELECT pg_temp.expect_error('S6h-B', 'resolved once', format($$INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason)
+  VALUES (%L, 'acknowledged', gen_random_uuid(), 'provider_statement_reviewed')$$, :'rc1'), '23505');
+SELECT pg_temp.expect_error('S6h-B', 'a resolution is append-only', format($$UPDATE reconciliation_case_resolution SET reason = 'duplicate_evidence_reviewed' WHERE "caseId" = %L$$, :'rc1'), '23514');
+SELECT pg_temp.expect_error('S6h-B', 'R6H-4: a late success only of a payment Billing requested', $$INSERT INTO payment_late_success ("lateSuccessId", "paymentId", "paymentRequestId", amount, currency, "paymentStatus", "recordedAt", source)
+  SELECT gen_random_uuid(), gen_random_uuid(), id, 100, 'TND', 'failed', now(), 'reconciliation' FROM payment_request LIMIT 1$$, '23514', 'payment_late_success_payment');
+SELECT pg_temp.expect_error('S6h-B', 'FC-6: a write-off only of an open obligation''s outstanding principal', $$INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "obligationId", amount, currency, "recordedByUserId", "receiptId", "consumeRef")
+  SELECT 'recovery_write_off', gen_random_uuid(), gen_random_uuid(), NULL, 1, 'TND', gen_random_uuid(), gen_random_uuid(), gen_random_uuid()$$, '23514', 'financial_loss_write_off');
+SELECT pg_temp.expect_error('S6h-B', 'FC-6: a direct chargeback loss needs its verified loss', $$INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "paymentId", "disputeId", amount, currency)
+  VALUES ('direct_chargeback_write_off', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), NULL, 1, 'TND')$$, '23514', 'financial_loss_evidence');
+SELECT pg_temp.expect_error('S6h-B', 'FC-6: an over-return only of this Company''s payment', $$INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "paymentId", amount, currency)
+  VALUES ('over_return', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'TND')$$, '23514', 'financial_loss_evidence');
+SELECT pg_temp.assert_eq('S6h-B', 'a recovery payment is evidenced by exactly one of: the applied success, a late success',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%receiptId%' AND pg_get_constraintdef(oid) LIKE '%lateSuccessId%')::text FROM pg_constraint WHERE conname = 'recovery_payment_evidence'), 'true');
+SELECT pg_temp.assert_eq('S6h-B', 'one ordinary recovery payment per request; one per late success (so per provider fact)',
+  (SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes WHERE tablename = 'recovery_payment' AND indexdef LIKE '%UNIQUE%' AND indexname IN ('recovery_payment_request_success', 'recovery_payment_lateSuccessId_key')),
+  'recovery_payment_lateSuccessId_key,recovery_payment_request_success');
+SELECT pg_temp.assert_eq('S6h-B', 'losses and adjustments are append-only',
+  (SELECT count(*)::text FROM pg_trigger WHERE tgname IN ('financial_loss_10_append_only', 'financial_loss_adjustment_10_append_only', 'payment_late_success_10_append_only')), '3');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

@@ -94,6 +94,14 @@ export const CONSUMED_EVENTS = [
       lostAt: { type: 'datetime' }, chargeback: { type: 'object', nullable: true }, liveMode: { type: 'boolean' },
     },
   },
+  // Core V2 S6h-B (register EVT-10; the Owner's R6H-4): what `LateSuccessService` requires of Payment's verified late success
+  {
+    source: 'payment-service', name: 'payment.late_success.recorded', version: 1,
+    requires: {
+      lateSuccessId: { type: 'uuid' }, paymentId: { type: 'uuid' }, producer: { type: 'string' }, factId: { type: 'uuid', nullable: true }, amount: { type: 'integer' },
+      currency: { type: 'string' }, paymentStatus: { type: 'string' }, recordedAt: { type: 'datetime' }, liveMode: { type: 'boolean' },
+    },
+  },
 ] as const satisfies readonly ConsumedEvent[];
 
 export type BillingEventName = keyof typeof PRODUCED_EVENTS;

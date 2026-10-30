@@ -570,6 +570,26 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "L'autorisation de cet enregistrement de remboursement externe a été refusée ou a expiré.",
     ar: 'رُفض تفويض تسجيل هذا السداد الخارجي أو انتهت صلاحيته.',
   },
+  invalidReconciliationRequest: { // Core V2 S6h-B
+    en: 'The reconciliation request is invalid.',
+    fr: 'La requête de rapprochement est invalide.',
+    ar: 'طلب التسوية غير صالح.',
+  },
+  reconciliationCaseNotAcknowledgeable: { // Core V2 S6h-B
+    en: 'This reconciliation case is resolved only by its financial evidence, never by an acknowledgement.',
+    fr: "Ce dossier de rapprochement n'est résolu que par sa preuve financière, jamais par un accusé de réception.",
+    ar: 'لا يُحل ملف التسوية هذا إلا بدليله المالي، وليس بإقرار.',
+  },
+  reconciliationCaseResolved: { // Core V2 S6h-B
+    en: 'This reconciliation case is already resolved.',
+    fr: 'Ce dossier de rapprochement est déjà résolu.',
+    ar: 'ملف التسوية هذا محلول بالفعل.',
+  },
+  writeOffNotPermitted: { // Core V2 S6h-B
+    en: 'This recovery obligation cannot be written off: it is recovered, already written off, or its outstanding amount changed since the authorization.',
+    fr: "Cette obligation de recouvrement ne peut pas être passée en perte : elle est recouvrée, déjà passée en perte, ou son montant restant a changé depuis l'autorisation.",
+    ar: 'لا يمكن شطب التزام الاسترداد هذا: إنه مسترد، أو مشطوب بالفعل، أو تغيّر المبلغ المتبقي منذ التفويض.',
+  },
   recoveryAuthorizationUnresolved: { // Core V2 S6f
     en: 'The authorization could not be confirmed; repeat the same request.',
     fr: "L'autorisation n'a pas pu être confirmée ; répétez la même requête.",

@@ -156,8 +156,11 @@ append-only row the Owner authorizes with a consumed Auth receipt (the fact neve
 (`netRetained = captured − refundedNet − chargebackNet`, never clamped) come only from verified facts. A refund of one specific capture is
 resolved by the Owner (R6H-5): a capture-specific refund case and attempt return, in full, exactly one verified capture (a late capture,
 a distinct duplicate, an associated or an unrouted settling capture) under an Owner receipt that names it; uniqueness is per capture fact,
-the ordinary per-payment rules are unchanged, and the completion has no commercial effect (register BIL-23 G, PAY-07 H). **Still FROZEN, not implemented**: reconciliation cases and `FinancialLoss` only from evidence
-(FC-6) (S6h-B). Payment has no
+the ordinary per-payment rules are unchanged, and the completion has no commercial effect (register BIL-23 G, PAY-07 H). Reconciliation cases and `FinancialLoss` only from evidence
+(FC-6) — **implemented by S6h-B (simulation only; register BIL-33 F, BIL-34 F)**: durable, append-only reconciliation cases resolved
+only by their evidence; Payment's late successes counted once (a late recovery success becomes principal, then surplus owed to the
+Organization); losses only from recorded evidence (over-return excess, a full direct final-lost chargeback, the Owner's recovery write-off,
+which never forgives the debt) with append-only adjustments. Payment has no
 dispute records before S6e-D; S6a's dispute check (R6A-3) and S6b's now read Payment's authoritative exposure.
 
 ### 0.10 Open items that block production
