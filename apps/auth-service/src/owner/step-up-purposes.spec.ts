@@ -43,6 +43,8 @@ const FRAUD_HOLD = ['billing.fraud_hold.place', 'billing.fraud_hold.release'] as
 const SURPLUS = 'billing.recovery_surplus.record_external';
 /** S6g prerequisite (the Owner's R6G-1): Auth-local; only the issuance of a late-settlement application receipt consumes it. */
 const LATE = 'billing.late_settlement.apply';
+/** S6h prerequisite (the Owner's R6H-3, R6H-8): Auth-local; only the issuance of its own receipt consumes each. */
+const RECONCILIATION = ['payment.provider_fact.associate', 'billing.recovery.write_off'] as const;
 
 describe('step-up purposes (A5.4-A1)', () => {
   it('the 19 earlier purposes keep exactly their methods', () => {
@@ -51,7 +53,7 @@ describe('step-up purposes (A5.4-A1)', () => {
   });
 
   it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key); S2-Auth.1 then adds refund.authorize', () => {
-    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE, DISPUTE, ...FRAUD_HOLD, SURPLUS, LATE]);
+    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD, ...ASSISTANCE, DISPUTE, ...FRAUD_HOLD, SURPLUS, LATE, ...RECONCILIATION]);
     expect([...STEP_UP_METHODS[PURPOSE]]).toEqual(['totp', 'webauthn']);
   });
 
@@ -83,6 +85,10 @@ describe('step-up purposes (A5.4-A1)', () => {
     expect([...STEP_UP_METHODS[LATE]]).toEqual(['totp', 'webauthn']);
   });
 
+  it('S6h prerequisite (the Owner\'s R6H-3, R6H-8): the association and write-off purposes are factor-only, never the secret key', () => {
+    for (const p of RECONCILIATION) expect([...STEP_UP_METHODS[p]], p).toEqual(['totp', 'webauthn']);
+  });
+
   it('no application source outside the allow-list names an Auth-local purpose literally (each has one Auth-local consumer)', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const apps = resolve(here, '../../..');
@@ -94,7 +100,7 @@ describe('step-up purposes (A5.4-A1)', () => {
         const path = join(dir, name);
         if (statSync(path).isDirectory()) walk(path);
         else if (/\.(ts|tsx|mts|cts|js|mjs|cjs)$/.test(name) && !/\.spec\.ts$/.test(name) && path !== allowList
-          && /hierarchy\.reference\.repair|refund\.authorize|payment\.dispute\.decide|billing\.fraud_hold\.(place|release)|billing\.recovery_surplus\.record_external|billing\.late_settlement\.apply/.test(readFileSync(path, 'utf8'))) hits.push(path);
+          && /hierarchy\.reference\.repair|refund\.authorize|payment\.dispute\.decide|billing\.fraud_hold\.(place|release)|billing\.recovery_surplus\.record_external|billing\.late_settlement\.apply|payment\.provider_fact\.associate|billing\.recovery\.write_off/.test(readFileSync(path, 'utf8'))) hits.push(path);
       }
     };
     walk(apps);

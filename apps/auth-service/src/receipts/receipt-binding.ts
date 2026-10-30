@@ -1,6 +1,7 @@
 import { hmacHex } from '../crypto/hmac.js';
 import { canonicalJson } from '../hierarchy/snapshot.js';
-import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE } from '../owner/step-up.service.js';
+import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE, PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE,
+} from '../owner/step-up.service.js';
 import { receiptError } from './receipt-errors.js';
 
 /**
@@ -97,8 +98,45 @@ export interface LateSettlementApplyBinding {
   reasonCode: (typeof LATE_SETTLEMENT_REASONS)[number];
 }
 
+/** Core V2 S6h (the Owner's R6H-3): the destinations an unmatched provider fact may be associated with (PAY-13). */
+export const FACT_ASSOCIATION_TARGETS = ['payment', 'refund_authorization'] as const;
+export const FACT_KINDS = ['capture', 'refund', 'chargeback'] as const;
+
+/**
+ * Core V2 S6h Auth prerequisite (the Owner's R6H-3, 2026-10-30): an Owner's association of ONE unmatched verified provider money fact with
+ * ONE exact destination: the Company, the fact and its immutable kind, amount (minor units) and currency, and the destination. Only
+ * `payment-service` consumes it, after the dedicated factor-only step-up. It moves no money; Payment re-validates every condition.
+ */
+export interface ProviderFactAssociateBinding {
+  operation: 'provider_fact_associate';
+  audience: 'payment-service';
+  companyId: string;
+  factId: string;
+  kind: (typeof FACT_KINDS)[number];
+  amount: number;
+  currency: string;
+  targetType: (typeof FACT_ASSOCIATION_TARGETS)[number];
+  targetId: string;
+}
+
+/**
+ * Core V2 S6h Auth prerequisite (the Owner's R6H-8, 2026-10-30): an Owner's recognition of ONE recovery obligation's outstanding amount
+ * as a loss: the Company, the obligation, its Organization, the amount (minor units) and currency. Only `billing-service` consumes it.
+ * Accounting only: it never forgives, extinguishes or recovers the obligation.
+ */
+export interface RecoveryWriteOffBinding {
+  operation: 'recovery_write_off';
+  audience: 'billing-service';
+  companyId: string;
+  obligationId: string;
+  organizationId: string;
+  amount: number;
+  currency: string;
+}
+
 /** Every receipt binding. `operation` selects the exact field set; the canonical form (and so every digest) includes it. */
-export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding | SurplusExternalBinding | LateSettlementApplyBinding;
+export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding | SurplusExternalBinding | LateSettlementApplyBinding
+  | ProviderFactAssociateBinding | RecoveryWriteOffBinding;
 export type ReceiptOperation = ReceiptBinding['operation'];
 
 export const RECEIPT_AUDIENCE = 'payment-service';
@@ -106,13 +144,14 @@ export const RECEIPT_AUDIENCE = 'payment-service';
 /** The one audience each operation names (and so the only service that may consume it, F-7). */
 export const RECEIPT_AUDIENCES = {
   refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service',
-  recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service',
+  recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service', provider_fact_associate: 'payment-service', recovery_write_off: 'billing-service',
 } as const satisfies Record<ReceiptOperation, string>;
 
 /** The one step-up purpose each operation's issuance consumes (Auth-local purposes, `step-up.service.ts`). */
 export const RECEIPT_PURPOSES = {
   refund: REFUND_AUTHORIZE_PURPOSE, dispute_decision: DISPUTE_DECIDE_PURPOSE, fraud_hold_place: FRAUD_HOLD_PLACE_PURPOSE, fraud_hold_release: FRAUD_HOLD_RELEASE_PURPOSE,
   recovery_surplus_external: SURPLUS_EXTERNAL_PURPOSE, late_settlement_apply: LATE_SETTLEMENT_APPLY_PURPOSE,
+  provider_fact_associate: PROVIDER_FACT_ASSOCIATE_PURPOSE, recovery_write_off: RECOVERY_WRITE_OFF_PURPOSE,
 } as const satisfies Record<ReceiptOperation, string>;
 
 const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride'] as const;
@@ -123,6 +162,8 @@ const HOLD_PLACE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'bene
 const HOLD_RELEASE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId'] as const;
 const SURPLUS_FIELDS = ['operation', 'audience', 'companyId', 'surplusId', 'organizationId', 'amount', 'currency'] as const;
 const LATE_FIELDS = ['operation', 'audience', 'companyId', 'lateSettlementId', 'assistanceRequestId', 'beneficiaryUserId', 'reasonCode'] as const;
+const ASSOCIATE_FIELDS = ['operation', 'audience', 'companyId', 'factId', 'kind', 'amount', 'currency', 'targetType', 'targetId'] as const;
+const WRITE_OFF_FIELDS = ['operation', 'audience', 'companyId', 'obligationId', 'organizationId', 'amount', 'currency'] as const;
 /** Canonical lower-case UUIDs only: two spellings of one id must never yield two digests. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURRENCY = /^[A-Z]{3}$/;
@@ -147,6 +188,8 @@ export function parseBinding(value: unknown): ReceiptBinding {
   if (v.operation === 'fraud_hold_place' || v.operation === 'fraud_hold_release') return parseFraudHold(v);
   if (v.operation === 'recovery_surplus_external') return parseSurplusExternal(v);
   if (v.operation === 'late_settlement_apply') return parseLateSettlementApply(v);
+  if (v.operation === 'provider_fact_associate') return parseProviderFactAssociate(v);
+  if (v.operation === 'recovery_write_off') return parseRecoveryWriteOff(v);
   for (const k of Object.keys(v)) if (!(FIELDS as readonly string[]).includes(k)) throw invalid();
   for (const k of FIELDS) if (!OPTIONAL.has(k) && !(k in v)) throw invalid();
   const legalOverride = v.legalOverride === undefined ? false : v.legalOverride;
@@ -213,6 +256,39 @@ function parseLateSettlementApply(v: Record<string, unknown>): LateSettlementApp
   return {
     operation: 'late_settlement_apply', audience: 'billing-service', companyId: v.companyId as string, lateSettlementId: v.lateSettlementId as string,
     assistanceRequestId: v.assistanceRequestId as string, beneficiaryUserId: v.beneficiaryUserId as string, reasonCode: v.reasonCode as LateSettlementApplyBinding['reasonCode'],
+  };
+}
+
+function exactFields(v: Record<string, unknown>, fields: readonly string[]): void {
+  for (const k of Object.keys(v)) if (!fields.includes(k)) throw receiptError('receipt_binding_invalid');
+  for (const k of fields) if (!(k in v)) throw receiptError('receipt_binding_invalid');
+}
+
+const positiveMinor = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n > 0;
+
+function parseProviderFactAssociate(v: Record<string, unknown>): ProviderFactAssociateBinding {
+  const invalid = () => receiptError('receipt_binding_invalid');
+  exactFields(v, ASSOCIATE_FIELDS);
+  if (v.audience !== 'payment-service') throw invalid();
+  for (const k of ['companyId', 'factId', 'targetId'] as const) if (typeof v[k] !== 'string' || !UUID.test(v[k] as string)) throw invalid();
+  if (!(FACT_KINDS as readonly unknown[]).includes(v.kind) || !(FACT_ASSOCIATION_TARGETS as readonly unknown[]).includes(v.targetType)) throw invalid();
+  if (!positiveMinor(v.amount) || typeof v.currency !== 'string' || !CURRENCY.test(v.currency)) throw invalid();
+  return {
+    operation: 'provider_fact_associate', audience: 'payment-service', companyId: v.companyId as string, factId: v.factId as string,
+    kind: v.kind as ProviderFactAssociateBinding['kind'], amount: v.amount, currency: v.currency, targetType: v.targetType as ProviderFactAssociateBinding['targetType'],
+    targetId: v.targetId as string,
+  };
+}
+
+function parseRecoveryWriteOff(v: Record<string, unknown>): RecoveryWriteOffBinding {
+  const invalid = () => receiptError('receipt_binding_invalid');
+  exactFields(v, WRITE_OFF_FIELDS);
+  if (v.audience !== 'billing-service') throw invalid();
+  for (const k of ['companyId', 'obligationId', 'organizationId'] as const) if (typeof v[k] !== 'string' || !UUID.test(v[k] as string)) throw invalid();
+  if (!positiveMinor(v.amount) || typeof v.currency !== 'string' || !CURRENCY.test(v.currency)) throw invalid();
+  return {
+    operation: 'recovery_write_off', audience: 'billing-service', companyId: v.companyId as string, obligationId: v.obligationId as string,
+    organizationId: v.organizationId as string, amount: v.amount, currency: v.currency,
   };
 }
 

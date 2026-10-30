@@ -418,6 +418,16 @@ only the binding, the step-up purpose and the audience differ.
 | Separation | the canonical binding separates Company, late settlement, request, beneficiary and reason code; billing-service alone consumes it (F-7 as amended in §17b) |
 | Meaning | S0 §3.4 L-4 condition 1 only: the Owner's authorization to APPLY one verified late assisted settlement as its request's single purchase. It moves no money and proves no evidence: Billing still checks the attestation or evidence, the absence of a purchase, the unconfirmed cash return and every contradiction rule (L-4 conditions 2 to 5, L-6) |
 
+## 17e. S6h amendment: provider-fact association and recovery write-off receipts (the Owner's R6H-3, R6H-8, 2026-10-30; IMPLEMENTED)
+
+| Item | Contract |
+|---|---|
+| `Binding` | `provider_fact_associate`: `audience: 'payment-service'`, `companyId`, `factId`, `kind` ∈ `capture` \| `refund` \| `chargeback`, `amount` (minor units, > 0), `currency`, `targetType` ∈ `payment` \| `refund_authorization`, `targetId`. `recovery_write_off`: `audience: 'billing-service'`, `companyId`, `obligationId`, `organizationId`, `amount` (> 0), `currency`. Exactly these fields |
+| Step-up | `payment.provider_fact.associate` and `billing.recovery.write_off`, factor-only, Auth-local, each consumed only by its own operation's issuance |
+| Separation | each canonical binding separates every field; an association receipt is consumed only by payment-service, a write-off receipt only by billing-service (F-7 as amended in §17b) |
+| Meaning | the Owner's authorization of ONE association of an unmatched verified provider fact with ONE destination (Payment re-validates the fact, the destination, the Company, the amount, the currency and the kind under its locks; it moves no money), and of ONE recognition of a recovery obligation's outstanding amount as a loss (accounting only: never forgiveness, never a recovery, T3 unchanged) |
+| Not added | AUTH-03b (a definitive proof of NON-consumption): Q8 stays fail-closed (the Owner's R6H-9, Option B) |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)

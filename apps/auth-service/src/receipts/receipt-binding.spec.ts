@@ -98,7 +98,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     });
 
     it('each operation consumes its own step-up purpose, never the other one', () => {
-      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external', late_settlement_apply: 'billing.late_settlement.apply' });
+      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external', late_settlement_apply: 'billing.late_settlement.apply', provider_fact_associate: 'payment.provider_fact.associate', recovery_write_off: 'billing.recovery.write_off' });
     });
   });
 
@@ -112,7 +112,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     it('parses exactly their own fields, for billing-service only', () => {
       expect(parseBinding(place())).toEqual(place());
       expect(parseBinding(release())).toEqual(release());
-      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service' });
+      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service', provider_fact_associate: 'payment-service', recovery_write_off: 'billing-service' });
     });
 
     it('refuses anything unknown, missing, mistyped or for another audience', () => {
@@ -181,6 +181,39 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
       const c = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...late(), ...o }));
       const other = '44444444-4444-4444-8444-444444444444';
       const all = [c(), c({ lateSettlementId: other }), c({ assistanceRequestId: other }), c({ beneficiaryUserId: other }), c({ reasonCode: 'cash_not_returned_evidenced' }), c({ companyId: other })];
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  describe('provider-fact association and recovery write-off (S6h Auth prerequisite, R6H-3, R6H-8)', () => {
+    const other = '44444444-4444-4444-8444-444444444444';
+    const assoc = () => ({
+      operation: 'provider_fact_associate', audience: 'payment-service', companyId: '11111111-1111-4111-8111-111111111111', factId: '22222222-2222-4222-8222-222222222222',
+      kind: 'capture', amount: 9000, currency: 'TND', targetType: 'payment', targetId: '33333333-3333-4333-8333-333333333333',
+    });
+    const writeOff = () => ({
+      operation: 'recovery_write_off', audience: 'billing-service', companyId: '11111111-1111-4111-8111-111111111111', obligationId: '22222222-2222-4222-8222-222222222222',
+      organizationId: '33333333-3333-4333-8333-333333333333', amount: 6100, currency: 'TND',
+    });
+    it('each parses exactly its fields, for its one audience', () => {
+      expect(parseBinding(assoc())).toEqual(assoc());
+      expect(parseBinding({ ...assoc(), kind: 'refund', targetType: 'refund_authorization' })).toEqual({ ...assoc(), kind: 'refund', targetType: 'refund_authorization' });
+      expect(parseBinding(writeOff())).toEqual(writeOff());
+    });
+    it('refuses anything unknown, missing, mistyped or for another audience', () => {
+      const bad: Array<[string, unknown]> = [
+        ['association for billing', { ...assoc(), audience: 'billing-service' }], ['an unknown kind', { ...assoc(), kind: 'fee' }], ['an unknown target', { ...assoc(), targetType: 'invoice' }],
+        ['a zero amount', { ...assoc(), amount: 0 }], ['a lower-case currency', { ...assoc(), currency: 'tnd' }], ['a missing target', (({ targetId: _t, ...o }) => o)(assoc())],
+        ['an extra field', { ...assoc(), providerTxnId: 'x' }], ['write-off for payment', { ...writeOff(), audience: 'payment-service' }],
+        ['a fractional write-off', { ...writeOff(), amount: 1.5 }], ['a forgiveness flag', { ...writeOff(), forgive: true }], ['a non-uuid obligation', { ...writeOff(), obligationId: 'o' }],
+      ];
+      for (const [what, b] of bad) expect(code(() => parseBinding(b)), what).toBe('receipt_binding_invalid');
+    });
+    it('the canonical forms separate every field', () => {
+      const a = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...assoc(), ...o }));
+      const w = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...writeOff(), ...o }));
+      const all = [a(), a({ factId: other }), a({ kind: 'refund' }), a({ amount: 9001 }), a({ currency: 'EUR' }), a({ targetType: 'refund_authorization' }), a({ targetId: other }), a({ companyId: other }),
+        w(), w({ obligationId: other }), w({ organizationId: other }), w({ amount: 6101 }), w({ currency: 'EUR' }), w({ companyId: other })];
       expect(new Set(all).size).toBe(all.length);
     });
   });
