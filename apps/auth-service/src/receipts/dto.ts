@@ -60,13 +60,24 @@ export class SurplusExternalBindingDto {
   @ApiProperty({ pattern: '^[A-Z]{3}$' }) currency!: string;
 }
 
-/** A refund, dispute-decision, fraud-hold or external-surplus binding, by `operation` (parsed strictly by `parseBinding`). */
-const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+/** Core V2 S6g Auth prerequisite (the Owner's R6G-1): an Owner's L-4 application of one late assisted settlement (billing-service only). */
+export class LateSettlementApplyBindingDto {
+  @ApiProperty({ enum: ['late_settlement_apply'] }) operation!: 'late_settlement_apply';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid' }) lateSettlementId!: string;
+  @ApiProperty({ format: 'uuid' }) assistanceRequestId!: string;
+  @ApiProperty({ format: 'uuid' }) beneficiaryUserId!: string;
+  @ApiProperty({ enum: ['cash_not_returned_attested', 'cash_not_returned_evidenced'] }) reasonCode!: string;
+}
 
-@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto)
+/** A refund, dispute-decision, fraud-hold, external-surplus or late-settlement binding, by `operation` (parsed strictly by `parseBinding`). */
+const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+
+@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto)
 /** AUTH-01 body. The step-up proof is never stored with the receipt, logged, audited or part of the replay hash (D-A2 §12). */
 export class IssueReceiptDto {
-  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external)." })
+  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external, late_settlement_apply)." })
   @IsString() @MaxLength(64) stepUpToken!: string;
 
   @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;

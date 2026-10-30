@@ -98,7 +98,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     });
 
     it('each operation consumes its own step-up purpose, never the other one', () => {
-      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external' });
+      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external', late_settlement_apply: 'billing.late_settlement.apply' });
     });
   });
 
@@ -112,7 +112,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     it('parses exactly their own fields, for billing-service only', () => {
       expect(parseBinding(place())).toEqual(place());
       expect(parseBinding(release())).toEqual(release());
-      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service' });
+      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service' });
     });
 
     it('refuses anything unknown, missing, mistyped or for another audience', () => {
@@ -154,6 +154,33 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
       const c = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...ext(), ...o }));
       const all = [c(), c({ surplusId: '44444444-4444-4444-8444-444444444444' }), c({ organizationId: '44444444-4444-4444-8444-444444444444' }), c({ amount: 1201 }),
         c({ currency: 'EUR' }), c({ companyId: '44444444-4444-4444-8444-444444444444' })];
+      expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  describe('late-settlement application (S6g Auth prerequisite, R6G-1, R6G-3)', () => {
+    const late = () => ({
+      operation: 'late_settlement_apply', audience: 'billing-service', companyId: '11111111-1111-4111-8111-111111111111',
+      lateSettlementId: '22222222-2222-4222-8222-222222222222', assistanceRequestId: '33333333-3333-4333-8333-333333333333',
+      beneficiaryUserId: '55555555-5555-4555-8555-555555555555', reasonCode: 'cash_not_returned_attested',
+    });
+    it('parses exactly its fields with either closed reason code, billing-service only', () => {
+      expect(parseBinding(late())).toEqual(late());
+      expect(parseBinding({ ...late(), reasonCode: 'cash_not_returned_evidenced' })).toEqual({ ...late(), reasonCode: 'cash_not_returned_evidenced' });
+    });
+    it('refuses anything unknown, missing, mistyped, an open reason or another audience', () => {
+      const bad: Array<[string, unknown]> = [
+        ['payment audience', { ...late(), audience: 'payment-service' }], ['a free-text reason', { ...late(), reasonCode: 'owner_override' }],
+        ['a legal override', { ...late(), legalOverride: true }], ['an extra field', { ...late(), evidenceFileIds: [] }],
+        ['a missing beneficiary', (({ beneficiaryUserId: _b, ...o }) => o)(late())], ['a non-uuid late settlement', { ...late(), lateSettlementId: 'x' }],
+        ['an upper-case uuid', { ...late(), assistanceRequestId: '33333333-3333-4333-8333-33333333333A' }],
+      ];
+      for (const [what, b] of bad) expect(code(() => parseBinding(b)), what).toBe('receipt_binding_invalid');
+    });
+    it('the canonical form separates late settlements, requests, beneficiaries, reasons and Companies', () => {
+      const c = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...late(), ...o }));
+      const other = '44444444-4444-4444-8444-444444444444';
+      const all = [c(), c({ lateSettlementId: other }), c({ assistanceRequestId: other }), c({ beneficiaryUserId: other }), c({ reasonCode: 'cash_not_returned_evidenced' }), c({ companyId: other })];
       expect(new Set(all).size).toBe(all.length);
     });
   });

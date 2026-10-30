@@ -614,6 +614,73 @@ describe('authorization receipts (S2-Auth.1)', () => {
     });
   });
 
+  /**
+   * Core V2 S6g Auth prerequisite (the Owner's R6G-1, 2026-10-30): an Owner's L-4 application of one late assisted settlement is a receipt
+   * bound to the exact Company, late settlement, request, beneficiary and closed reason code, issued only after its own factor-only
+   * step-up and consumed only by billing-service. Every receipt rule above applies unchanged.
+   */
+  describe('late-settlement application receipts (S6g prerequisite, R6G-1)', () => {
+    const LATE = 'billing.late_settlement.apply';
+    const BILLING = 'billing-service';
+    const late = (companyId: string, over: Record<string, unknown> = {}) => ({
+      operation: 'late_settlement_apply', audience: BILLING, companyId, lateSettlementId: randomUUID(), assistanceRequestId: randomUUID(),
+      beneficiaryUserId: randomUUID(), reasonCode: 'cash_not_returned_attested', ...over,
+    });
+    const issueLate = async (o: Ready, b = late(o.companyId), k = key()) => {
+      const stepUpToken = await t.stepUpToken(o.tokens as Tokens, LATE, o.totpSecret);
+      return { ...(await svc.issue(o.owner, { stepUpToken, idempotencyKey: k, binding: b })), binding: b, key: k, stepUpToken };
+    };
+
+    it('issued after its own factor-only step-up and consumed once by billing-service for exactly that binding; a replay of the key re-answers it', async () => {
+      const o = await ready();
+      const r = await issueLate(o);
+      expect(await stepUpConsumed(r.stepUpToken)).toBe(true);
+      const ref = randomUUID();
+      const c = await svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: ref });
+      expect(c).toMatchObject({ receiptId: r.receiptId, consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
+      expect(await svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: ref })).toEqual(c);
+      expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('consume_ref_conflict');
+      expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('receipt_binding_invalid');
+    });
+
+    it('purpose separation both ways; refused proofs are not burned; the secret key never qualifies', async () => {
+      const o = await ready();
+      const b = late(o.companyId);
+      for (const purpose of ['billing.recovery_surplus.record_external', 'billing.fraud_hold.place', PURPOSE, 'payment.dispute.decide']) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: b })), purpose).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+      const su = await t.stepUpToken(o.tokens as Tokens, LATE, o.totpSecret);
+      expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: binding(o.companyId) }))).toBe(403);
+      expect(await stepUpConsumed(su)).toBe(false);
+      const sk = await t.stepUp(o.tokens as Tokens, LATE, o.totpSecret, { method: 'secret_key', secretKey: 'x'.repeat(43), code: undefined });
+      expect([sk.status, sk.body.code]).toEqual([400, 'step_up_unsupported']);
+    });
+
+    it('never authorizes another late settlement, request, beneficiary, reason or Company; an open reason is refused; revoked authority consumes nothing; verify refuses the proof', async () => {
+      const o = await ready();
+      const r = await issueLate(o);
+      for (const change of [{ lateSettlementId: randomUUID() }, { assistanceRequestId: randomUUID() }, { beneficiaryUserId: randomUUID() },
+        { reasonCode: 'cash_not_returned_evidenced' }, { companyId: await t.newCompany() }]) {
+        expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: { ...r.binding, ...change }, consumeRef: randomUUID() })), JSON.stringify(change)).toBe('receipt_invalid');
+      }
+      expect((await row(r.receiptId)).status).toBe('issued');
+      const su = await t.stepUpToken(o.tokens as Tokens, LATE, o.totpSecret);
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: late(await t.newCompany()) }))).toBe('receipt_binding_invalid');
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: late(o.companyId, { reasonCode: 'owner_override' }) }))).toBe('receipt_binding_invalid');
+      expect(await stepUpConsumed(su)).toBe(false);
+      expect(await httpStatusOf(t.app.get(StepUpService).verifyForService(t.dbs, { ownerId: o.id, sid: o.owner.sid, purpose: LATE, token: su }))).toBe(403);
+      expect(await stepUpConsumed(su)).toBe(false);
+      await t.db.query(`UPDATE "user" SET "isActive"=false WHERE id=$1`, [o.id]);
+      try {
+        expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+      } finally {
+        await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [o.id]);
+      }
+    });
+  });
+
   describe('secret handling', () => {
     it('no plaintext secret, canonical binding or pepper in the database, the audit records or the logs', async () => {
       const o = await ready();

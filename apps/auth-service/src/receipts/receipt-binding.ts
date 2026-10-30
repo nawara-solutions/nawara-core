@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto/hmac.js';
 import { canonicalJson } from '../hierarchy/snapshot.js';
-import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE } from '../owner/step-up.service.js';
+import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE } from '../owner/step-up.service.js';
 import { receiptError } from './receipt-errors.js';
 
 /**
@@ -78,8 +78,27 @@ export interface SurplusExternalBinding {
   currency: string;
 }
 
+/** Core V2 S6g (the Owner's R6G-3, 2026-10-30): the closed L-4 reason codes, each requiring its own evidence path in Billing. */
+export const LATE_SETTLEMENT_REASONS = ['cash_not_returned_attested', 'cash_not_returned_evidenced'] as const;
+
+/**
+ * Core V2 S6g Auth prerequisite (the Owner's R6G-1, 2026-10-30): an Owner's exceptional application (S0 §3.4 L-4) of ONE verified late
+ * assisted settlement as its assistance request's single purchase: the Company, the late settlement, the request, its beneficiary and the
+ * closed reason code. Only `billing-service` consumes it, after the dedicated factor-only step-up. It moves no money and proves no
+ * evidence: Billing still checks every L-4 / L-6 condition.
+ */
+export interface LateSettlementApplyBinding {
+  operation: 'late_settlement_apply';
+  audience: 'billing-service';
+  companyId: string;
+  lateSettlementId: string;
+  assistanceRequestId: string;
+  beneficiaryUserId: string;
+  reasonCode: (typeof LATE_SETTLEMENT_REASONS)[number];
+}
+
 /** Every receipt binding. `operation` selects the exact field set; the canonical form (and so every digest) includes it. */
-export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding | SurplusExternalBinding;
+export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding | SurplusExternalBinding | LateSettlementApplyBinding;
 export type ReceiptOperation = ReceiptBinding['operation'];
 
 export const RECEIPT_AUDIENCE = 'payment-service';
@@ -87,13 +106,13 @@ export const RECEIPT_AUDIENCE = 'payment-service';
 /** The one audience each operation names (and so the only service that may consume it, F-7). */
 export const RECEIPT_AUDIENCES = {
   refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service',
-  recovery_surplus_external: 'billing-service',
+  recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service',
 } as const satisfies Record<ReceiptOperation, string>;
 
 /** The one step-up purpose each operation's issuance consumes (Auth-local purposes, `step-up.service.ts`). */
 export const RECEIPT_PURPOSES = {
   refund: REFUND_AUTHORIZE_PURPOSE, dispute_decision: DISPUTE_DECIDE_PURPOSE, fraud_hold_place: FRAUD_HOLD_PLACE_PURPOSE, fraud_hold_release: FRAUD_HOLD_RELEASE_PURPOSE,
-  recovery_surplus_external: SURPLUS_EXTERNAL_PURPOSE,
+  recovery_surplus_external: SURPLUS_EXTERNAL_PURPOSE, late_settlement_apply: LATE_SETTLEMENT_APPLY_PURPOSE,
 } as const satisfies Record<ReceiptOperation, string>;
 
 const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride'] as const;
@@ -103,6 +122,7 @@ const DECISIONS: readonly string[] = ['contest', 'accept'];
 const HOLD_PLACE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId', 'reason'] as const;
 const HOLD_RELEASE_FIELDS = ['operation', 'audience', 'companyId', 'holdId', 'beneficiaryUserId', 'productId'] as const;
 const SURPLUS_FIELDS = ['operation', 'audience', 'companyId', 'surplusId', 'organizationId', 'amount', 'currency'] as const;
+const LATE_FIELDS = ['operation', 'audience', 'companyId', 'lateSettlementId', 'assistanceRequestId', 'beneficiaryUserId', 'reasonCode'] as const;
 /** Canonical lower-case UUIDs only: two spellings of one id must never yield two digests. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURRENCY = /^[A-Z]{3}$/;
@@ -126,6 +146,7 @@ export function parseBinding(value: unknown): ReceiptBinding {
   if (v.operation === 'dispute_decision') return parseDisputeDecision(v);
   if (v.operation === 'fraud_hold_place' || v.operation === 'fraud_hold_release') return parseFraudHold(v);
   if (v.operation === 'recovery_surplus_external') return parseSurplusExternal(v);
+  if (v.operation === 'late_settlement_apply') return parseLateSettlementApply(v);
   for (const k of Object.keys(v)) if (!(FIELDS as readonly string[]).includes(k)) throw invalid();
   for (const k of FIELDS) if (!OPTIONAL.has(k) && !(k in v)) throw invalid();
   const legalOverride = v.legalOverride === undefined ? false : v.legalOverride;
@@ -179,6 +200,19 @@ function parseSurplusExternal(v: Record<string, unknown>): SurplusExternalBindin
   return {
     operation: 'recovery_surplus_external', audience: 'billing-service', companyId: v.companyId as string, surplusId: v.surplusId as string,
     organizationId: v.organizationId as string, amount: v.amount, currency: v.currency,
+  };
+}
+
+function parseLateSettlementApply(v: Record<string, unknown>): LateSettlementApplyBinding {
+  const invalid = () => receiptError('receipt_binding_invalid');
+  for (const k of Object.keys(v)) if (!(LATE_FIELDS as readonly string[]).includes(k)) throw invalid();
+  for (const k of LATE_FIELDS) if (!(k in v)) throw invalid();
+  if (v.audience !== 'billing-service') throw invalid();
+  for (const k of ['companyId', 'lateSettlementId', 'assistanceRequestId', 'beneficiaryUserId'] as const) if (typeof v[k] !== 'string' || !UUID.test(v[k] as string)) throw invalid();
+  if (!(LATE_SETTLEMENT_REASONS as readonly unknown[]).includes(v.reasonCode)) throw invalid();
+  return {
+    operation: 'late_settlement_apply', audience: 'billing-service', companyId: v.companyId as string, lateSettlementId: v.lateSettlementId as string,
+    assistanceRequestId: v.assistanceRequestId as string, beneficiaryUserId: v.beneficiaryUserId as string, reasonCode: v.reasonCode as LateSettlementApplyBinding['reasonCode'],
   };
 }
 
