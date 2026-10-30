@@ -499,8 +499,9 @@ export class PaymentRequestRepository {
             : null;
     if (reason) {
       await q.query(
-        `INSERT INTO assistance_late_settlement ("assistanceRequestId", "invoiceId", "paymentRequestId", "receiptId", reason) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-        [routing.assistanceRequestId, invoiceId, paymentRequestId, receiptId, reason],
+        // Core V2 S6g: with Payment's trusted original settlement instant (an L-4 application keeps it; it is never the recording time)
+        `INSERT INTO assistance_late_settlement ("assistanceRequestId", "invoiceId", "paymentRequestId", "receiptId", reason, "settledAt") VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+        [routing.assistanceRequestId, invoiceId, paymentRequestId, receiptId, reason, settledAt],
       );
       return 'late';
     }

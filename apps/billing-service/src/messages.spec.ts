@@ -133,6 +133,14 @@ describe('BILLING_MESSAGES', () => {
       [en('recoveryAuthorizationRefused'), 'The authorization of this external repayment record was refused or has expired.'], // Core V2 S6f
       [en('recoveryAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6f
       [en('recoveryAuthorizationUnavailable'), 'The external repayment record is not available; nothing was changed.'], // Core V2 S6f
+      [en('invalidLateSettlementRequest'), 'The late settlement request is invalid.'], // Core V2 S6g
+      [en('lateSettlementRefused', { reason: 'refund_exists' }), 'This late settlement cannot be applied (refund_exists).'], // Core V2 S6g
+      [en('lateSettlementAlreadyAttested'), 'A statement about this late settlement was already recorded.'], // Core V2 S6g
+      [en('lateSettlementEvidenceInvalid'), 'The evidence is not a settlement_evidence grant to Billing for exactly this late settlement.'], // Core V2 S6g
+      [en('lateSettlementEvidenceUnavailable'), 'The evidence could not be verified; nothing was changed.'], // Core V2 S6g
+      [en('lateSettlementAuthorizationRefused'), 'The authorization of this late settlement application was refused or has expired.'], // Core V2 S6g
+      [en('lateSettlementAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6g
+      [en('lateSettlementAuthorizationUnavailable'), 'The late settlement application is not available; nothing was changed.'], // Core V2 S6g
       [en('refundDisputeUnavailable'), 'The dispute status of this payment could not be verified; nothing was changed.'], // Core V2 S6e-D
       [en('refundCaseNotOpen'), 'The refund case is not open.'],
       [en('refundCaseCompleted'), 'The refund case is completed: it accepts no new refund attempt.'], // Core V2 S6b

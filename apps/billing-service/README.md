@@ -194,6 +194,14 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     `surplus_evidence` and an Auth `recovery_surplus_external` receipt) confirmed by the Organization's administrator
     (`POST /billing/recovery-surpluses/:id/recipient-confirmation`). The Owner reads (`GET /billing/admin/recovery-obligations/:id`) but
     never settles or confirms. Six audit actions; no `billing.*` event (EVT-06); no FinancialLoss.
+  - Core V2 S6g (`db/migrations/0040`, `src/late-settlements/`; BIL-32; the Owner's R6G-1 to R6G-9 and Option A): a verified late assisted
+    settlement (S5b) keeps Payment's original instant and is never applied automatically. The beneficiary may attest, once, that the cash was
+    (not) returned (`POST /billing/assistance-late-settlements/:id/attestation`); the Owner may apply it as the request's single purchase
+    (`POST /billing/admin/late-settlements/:id/application`, class K) with Auth's `late_settlement_apply` receipt and either that attestation
+    or File `settlement_evidence` grants plus an explicit determination; refused (`409 late_settlement_refused`, closed `reason`) with a
+    purchase, a confirmed or reported return, an open dispute, another settlement in progress, any refund case, contrary evidence or an
+    unknown instant. One transaction supersedes the open deadline obligation (kept), records the purchase (period from the application) and
+    settles the request; T1 / T2 end for that request only. A request keeps its obligation history; at most one obligation is live.
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

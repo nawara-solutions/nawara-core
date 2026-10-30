@@ -665,6 +665,40 @@ const SPEC = {
     purpose: "The receiving Organization's administrator confirmed an external surplus repayment: the surplus is resolved.",
   },
 
+  // Core V2 S6g (register BIL-32; S0 §3.4 L-4, L-6; ADR-0044 B14; the Owner's R6G-1 to R6G-9): the exceptional application of a verified late
+  // assisted settlement. Version 1, no trusted scope. The beneficiary attests; the Owner (Auth `late_settlement_apply` receipt) applies, which
+  // supersedes the request's open deadline obligation in the same transaction. No money moves; Payment's original instant is never rewritten.
+  'assistance_late_settlement.attested': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',
+    resource: ['assistance_late_settlement'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      assistance_request_id: { type: 'uuid', shape: 'value', required: true },
+      statement: { type: 'code', shape: 'value', required: true, values: ['cash_not_returned', 'cash_returned'] },
+    },
+    purpose: "The beneficiary's own statement about the cash of a late assisted settlement's request: a statement, never a financial fact.",
+  },
+  'assistance_late_settlement.applied': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['assistance_late_settlement'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      assistance_request_id: { type: 'uuid', shape: 'value', required: true },
+      reason_code: { type: 'code', shape: 'value', required: true, values: ['cash_not_returned_attested', 'cash_not_returned_evidenced'] },
+      purchase_id: { type: 'uuid', shape: 'value', required: true },
+      superseded_obligation_id: { type: 'uuid', shape: 'value', required: false },
+      evidence_count: { type: 'integer', shape: 'value', required: true, min: 0, max: 5 },
+    },
+    purpose: "The Owner applied a verified late assisted settlement as its request's single purchase (L-4), with the beneficiary's attestation or evidence that the cash was not returned.",
+  },
+  'cash_return_obligation.superseded': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['cash_return_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      assistance_request_id: { type: 'uuid', shape: 'value', required: true },
+      late_settlement_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: "An open deadline cash-return obligation closed as superseded_by_settlement by the Owner's L-4 application; it is kept as history.",
+  },
+
   // ---------------------------------------------------------------------------------------------------------------------------- payment-service
   'payment.created': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true }, organization: 'optional',

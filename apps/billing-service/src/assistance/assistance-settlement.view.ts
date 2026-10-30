@@ -8,7 +8,7 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
  */
 export function representCashReturnObligation(o: {
   id: string; assistanceRequestId: string; status: string; amount: string; currency: string; origin?: string; openedAt: Date; returnedAt: Date | null; returnReportedAt: Date | null;
-  confirmedAt: Date | null; effectiveReturnedAt: Date | null;
+  confirmedAt: Date | null; effectiveReturnedAt: Date | null; supersededAt?: Date | null;
 }) {
   return {
     id: o.id,
@@ -22,11 +22,13 @@ export function representCashReturnObligation(o: {
     returnReportedAt: iso(o.returnReportedAt),
     effectiveReturnedAt: iso(o.effectiveReturnedAt), // Core V2 S5c
     confirmedAt: iso(o.confirmedAt), // Core V2 S5c (H-3): the beneficiary's confirmation, the database's time
+    supersededAt: iso(o.supersededAt ?? null), // Core V2 S6g (L-4): superseded by a late-settlement application (terminal, history)
   };
 }
 
-export const OBLIGATION_COLUMNS = `id, "assistanceRequestId", status, amount, currency, origin, "openedAt", "returnedAt", "returnReportedAt", "confirmedAt",
-  billing_assistance_effective_time("assistanceRequestId", 'returnedAt') AS "effectiveReturnedAt"`;
+// Core V2 S6g: the Owner's corrections apply to the request's CURRENT obligation only; a history row shows its own recorded time
+export const OBLIGATION_COLUMNS = `id, "assistanceRequestId", status, amount, currency, origin, "openedAt", "returnedAt", "returnReportedAt", "confirmedAt", "supersededAt",
+  CASE WHEN id = billing_assistance_current_obligation("assistanceRequestId") THEN billing_assistance_effective_time("assistanceRequestId", 'returnedAt') ELSE "returnedAt" END AS "effectiveReturnedAt"`;
 
 /**
  * Core V2 S5c (H-4, H-5, J-2): a dispute with the Organization's answer and the nonfinancial resolution, if any. `escalationDue` is derived
@@ -81,8 +83,12 @@ export async function loadSettlementView(q: Queryable, assistanceRequestId: stri
     `SELECT c.id, c.status, c."invoiceId", c."paymentRequestId", pr."paymentId", pr.status AS "paymentRequestStatus", c."createdAt", c."closedAt"
        FROM assistance_settlement_channel c LEFT JOIN payment_request pr ON pr.id = c."paymentRequestId"
       WHERE c."assistanceRequestId" = $1 ORDER BY c."createdAt", c.id`, [assistanceRequestId])).rows;
+  // Core V2 S6g (Option A): the CURRENT obligation (the most recent one not superseded by a late-settlement application), and the full
+  // history, oldest first (a superseded deadline obligation stays identifiable next to a later refund-origin one)
   const obligation = (await q.query<Parameters<typeof representCashReturnObligation>[0]>(
-    `SELECT ${OBLIGATION_COLUMNS} FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [assistanceRequestId])).rows[0];
+    `SELECT ${OBLIGATION_COLUMNS} FROM cash_return_obligation WHERE id = billing_assistance_current_obligation($1)`, [assistanceRequestId])).rows[0];
+  const history = (await q.query<Parameters<typeof representCashReturnObligation>[0]>(
+    `SELECT ${OBLIGATION_COLUMNS} FROM cash_return_obligation WHERE "assistanceRequestId" = $1 ORDER BY "openedAt", id`, [assistanceRequestId])).rows;
   // Core V2 S5c: the disputes (oldest first) and the Owner's corrections (in the order they apply), and the effective collection time
   const disputes = (await q.query<Parameters<typeof representDispute>[0]>(
     `SELECT ${DISPUTE_COLUMNS} FROM assistance_dispute d LEFT JOIN assistance_dispute_response p ON p."disputeId" = d.id
@@ -93,6 +99,7 @@ export async function loadSettlementView(q: Queryable, assistanceRequestId: stri
   return {
     settlementChannels: channels.map((c) => ({ ...c, createdAt: iso(c.createdAt), closedAt: iso(c.closedAt) })),
     cashReturnObligation: obligation ? representCashReturnObligation(obligation) : null,
+    cashReturnObligations: history.map(representCashReturnObligation),
     effectiveCashCollectedAt: iso(collected),
     disputes: disputes.map(representDispute),
     corrections: corrections.map(representCorrection),

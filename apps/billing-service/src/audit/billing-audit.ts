@@ -26,7 +26,8 @@ export type BillingAuditAction =
   | 'subscription_purchase.reversed' // Core V2 S6d (R6D-5): the refund effect worker
   | 'fraud_hold.placed' | 'fraud_hold.released' | 'fraud_hold.expired' // Core V2 S6e-H (H-7): the Owner; the expiry by the sweep
   | 'recovery_obligation.opened' | 'recovery_payment.recorded' | 'recovery_obligation.recovered' // Core V2 S6f (R6F-6)
-  | 'recovery_surplus.recorded' | 'recovery_surplus.resolved' | 'recovery_surplus.recipient_confirmed';
+  | 'recovery_surplus.recorded' | 'recovery_surplus.resolved' | 'recovery_surplus.recipient_confirmed'
+  | 'assistance_late_settlement.attested' | 'assistance_late_settlement.applied' | 'cash_return_obligation.superseded'; // Core V2 S6g (R6G-9)
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in

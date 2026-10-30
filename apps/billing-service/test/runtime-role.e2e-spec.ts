@@ -138,6 +138,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         recovery_obligation: ['INSERT', 'SELECT', 'UPDATE'], recovery_review: ['INSERT', 'SELECT'], recovery_settlement_channel: ['INSERT', 'SELECT', 'UPDATE'], // S6f (0039)
         recovery_payment: ['INSERT', 'SELECT'], recovery_surplus: ['INSERT', 'SELECT'], recovery_surplus_external: ['INSERT', 'SELECT'],
         recovery_surplus_confirmation: ['INSERT', 'SELECT'], recovery_surplus_refund: ['INSERT', 'SELECT'],
+        late_settlement_attestation: ['INSERT', 'SELECT'], late_settlement_application: ['INSERT', 'SELECT'], late_settlement_evidence: ['INSERT', 'SELECT'], // S6g (0040)
       };
       for (const [table, privileges] of Object.entries(expected)) {
         const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);

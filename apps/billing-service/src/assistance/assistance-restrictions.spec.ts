@@ -27,6 +27,8 @@ describe('BillingExceptionFilter', () => {
 
   it('passes through only the documented restriction fields, verbatim', () => {
     expect(extra({ message: 'm', code: 'assistance_restricted', restriction: 'T1', restrictions: ['T1'], sourceId: 'x', amount: 1 })).toEqual({ restriction: 'T1', restrictions: ['T1'] });
+    // Core V2 S6g (BIL-32): the closed refusal of late_settlement_refused
+    expect(extra({ message: 'm', code: 'late_settlement_refused', reason: 'refund_exists', lateSettlementId: 'x' })).toEqual({ reason: 'refund_exists' });
     expect(extra(new HttpException({ message: 'm' }, 400).getResponse())).toEqual({});
     expect(extra('text')).toEqual({});
     expect(extra(null)).toEqual({});

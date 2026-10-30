@@ -11,7 +11,9 @@ export type AssistanceOperation =
   // Core V2 S5c (H-7): class K, permanent
   | 'cash_return_obligation.confirm' | 'assistance_request.dispute' | 'assistance_dispute.respond' | 'assistance_request.correct' | 'assistance_dispute.resolve'
   // Core V2 S6f (BIL-29 class M; BIL-31 class K): permanent
-  | 'recovery_obligation.settlement' | 'recovery_surplus.confirm';
+  | 'recovery_obligation.settlement' | 'recovery_surplus.confirm'
+  // Core V2 S6g (BIL-32, class K): permanent
+  | 'assistance_late_settlement.attest' | 'assistance_late_settlement.apply';
 
 export interface AssistanceCommandResult {
   status: number;

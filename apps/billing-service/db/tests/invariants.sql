@@ -1266,6 +1266,35 @@ SELECT pg_temp.assert_eq('S6f', 'every recovery ledger table is append-only (an 
 SELECT pg_temp.assert_eq('S6f', 'obligations and channels are never deleted (no-delete guards)',
   (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_90_no_delete' AND tgrelid::regclass::text IN ('recovery_obligation', 'recovery_settlement_channel')), '2');
 
+-- ------------------------------------------------------------------------------------------------------------- S6g late settlement application (0040)
+-- Attestation, application (both evidence paths), refusals, the refund after an application and the obligation history run end to end in
+-- test/late-settlements.e2e-spec.ts; here, the schema's own rules.
+SELECT pg_temp.assert_eq('S6g', 'Option A: the absolute one-obligation-per-request rule is gone; one LIVE obligation per request remains (partial unique index)',
+  (SELECT (NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cash_return_obligation_assistanceRequestId_key')
+           AND pg_get_indexdef('cash_return_obligation_live_unique'::regclass) LIKE '%UNIQUE%WHERE%open%return_reported%')::text), 'true');
+SELECT pg_temp.assert_eq('S6g', 'L-4: superseded_by_settlement is a terminal state reached only from open, only by an application (the transition guard)',
+  (SELECT (prosrc LIKE '%superseded_by_settlement%' AND prosrc LIKE '%late_settlement_application%' AND prosrc LIKE '%OLD.status <> ''open''%')::text
+     FROM pg_proc WHERE proname = 'billing_cash_return_obligation_transition_guard'), 'true');
+SELECT pg_temp.assert_eq('S6g', 'L-5: one application per late settlement and per request; one per Auth receipt; one per superseded obligation and attestation',
+  (SELECT count(*)::text FROM pg_constraint WHERE conname IN ('late_settlement_application_lateSettlementId_key', 'late_settlement_application_assistanceRequestId_key',
+    'late_settlement_application_receiptId_key', 'late_settlement_application_obligationId_key', 'late_settlement_application_attestationId_key')), '5');
+SELECT pg_temp.assert_eq('S6g', 'R6G-3: the closed reason codes; the attested one needs its attestation',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%cash_not_returned_attested%' AND pg_get_constraintdef(oid) LIKE '%cash_not_returned_evidenced%')::text
+     FROM pg_constraint WHERE conname = 'late_settlement_application_reason'), 'true');
+SELECT pg_temp.assert_eq('S6g', 'L-4 / L-6 / R6G-2 / R6G-7: the application guard refuses a purchase, a confirmed or reported return, a dispute, a refund, a contrary attestation and an unknown instant',
+  (SELECT (prosrc LIKE '%late_settlement_purchase_exists%' AND prosrc LIKE '%late_settlement_cash_return_confirmed%' AND prosrc LIKE '%late_settlement_cash_return_reported%'
+       AND prosrc LIKE '%late_settlement_dispute_open%' AND prosrc LIKE '%late_settlement_refund_exists%' AND prosrc LIKE '%late_settlement_evidence_contradictory%'
+       AND prosrc LIKE '%late_settlement_time_unavailable%')::text FROM pg_proc WHERE proname = 'billing_late_settlement_application_guard'), 'true');
+SELECT pg_temp.assert_eq('S6g', 'an application commits only with its purchase, settled request and superseded obligation (deferred)',
+  (SELECT (tgdeferrable AND tginitdeferred)::text FROM pg_trigger WHERE tgname = 'late_settlement_application_95_commit'), 'true');
+SELECT pg_temp.assert_eq('S6g', 'R6G-5: only an assisted purchase carries an application instant, never before Payment''s instant; the K-3 fold anchors it there',
+  (SELECT ((SELECT pg_get_constraintdef(oid) LIKE '%assisted_settlement%' FROM pg_constraint WHERE conname = 'subscription_purchase_applied')
+       AND (SELECT prosrc LIKE '%coalesce(sp."appliedAt", sp."settledAt")%' FROM pg_proc WHERE proname = 'billing_personal_spans'))::text), 'true');
+SELECT pg_temp.assert_eq('S6g', 'every S6g evidence table is append-only (an update/delete guard on each)',
+  (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_10_append_only' AND tgrelid::regclass::text IN ('late_settlement_attestation', 'late_settlement_application', 'late_settlement_evidence')), '3');
+SELECT pg_temp.assert_eq('S6g', 'new late settlements keep Payment''s original instant (insert guard)',
+  (SELECT (prosrc LIKE '%assistance_late_settlement_settled_at%')::text FROM pg_proc WHERE proname = 'billing_assistance_late_settlement_guard'), 'true');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

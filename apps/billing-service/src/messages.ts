@@ -580,6 +580,46 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "L'enregistrement du remboursement externe n'est pas disponible ; rien n'a été modifié.",
     ar: 'تسجيل السداد الخارجي غير متاح؛ لم يتغيّر شيء.',
   },
+  invalidLateSettlementRequest: { // Core V2 S6g
+    en: 'The late settlement request is invalid.',
+    fr: "La demande concernant le règlement tardif n'est pas valide.",
+    ar: 'طلب التسوية المتأخرة غير صالح.',
+  },
+  lateSettlementRefused: { // Core V2 S6g
+    en: 'This late settlement cannot be applied ({reason}).',
+    fr: 'Ce règlement tardif ne peut pas être appliqué ({reason}).',
+    ar: 'لا يمكن تطبيق هذه التسوية المتأخرة ({reason}).',
+  },
+  lateSettlementAlreadyAttested: { // Core V2 S6g
+    en: 'A statement about this late settlement was already recorded.',
+    fr: 'Une déclaration concernant ce règlement tardif a déjà été enregistrée.',
+    ar: 'سُجّل بالفعل بيان بشأن هذه التسوية المتأخرة.',
+  },
+  lateSettlementEvidenceInvalid: { // Core V2 S6g
+    en: 'The evidence is not a settlement_evidence grant to Billing for exactly this late settlement.',
+    fr: "La preuve n'est pas une autorisation settlement_evidence accordée à la facturation pour exactement ce règlement tardif.",
+    ar: 'الدليل ليس منحًا من نوع settlement_evidence للفوترة يخص هذه التسوية المتأخرة تحديدًا.',
+  },
+  lateSettlementEvidenceUnavailable: { // Core V2 S6g
+    en: 'The evidence could not be verified; nothing was changed.',
+    fr: "La preuve n'a pas pu être vérifiée ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من الدليل؛ لم يتغيّر شيء.',
+  },
+  lateSettlementAuthorizationRefused: { // Core V2 S6g
+    en: 'The authorization of this late settlement application was refused or has expired.',
+    fr: "L'autorisation de cette application de règlement tardif a été refusée ou a expiré.",
+    ar: 'رُفض تفويض تطبيق هذه التسوية المتأخرة أو انتهت صلاحيته.',
+  },
+  lateSettlementAuthorizationUnresolved: { // Core V2 S6g
+    en: 'The authorization could not be confirmed; repeat the same request.',
+    fr: "L'autorisation n'a pas pu être confirmée ; répétez la même requête.",
+    ar: 'تعذّر تأكيد التفويض؛ أعد إرسال الطلب نفسه.',
+  },
+  lateSettlementAuthorizationUnavailable: { // Core V2 S6g
+    en: 'The late settlement application is not available; nothing was changed.',
+    fr: "L'application du règlement tardif n'est pas disponible ; rien n'a été modifié.",
+    ar: 'تطبيق التسوية المتأخرة غير متاح؛ لم يتغيّر شيء.',
+  },
   refundCaseNotOpen: {
     en: 'The refund case is not open.',
     fr: "Le dossier de remboursement n'est pas ouvert.",

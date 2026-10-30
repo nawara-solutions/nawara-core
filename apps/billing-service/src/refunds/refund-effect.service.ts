@@ -187,7 +187,9 @@ export class RefundEffectService {
       [p.assistanceRequestId])).rows[0]!;
     if (r.organizationId !== c.organizationId || r.beneficiaryUserId !== p.beneficiaryUserId) throw new Contradiction('request_mismatch');
     if (r.status !== 'settled') throw new Contradiction('request_not_settled');
-    if ((await q.query(`SELECT 1 FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [r.id])).rows.length > 0) throw new Contradiction('obligation_exists');
+    // Core V2 S6g (Option A): a deadline obligation SUPERSEDED by the late-settlement application that created this purchase is history, kept
+    // as it is; any other obligation of the request (live or confirmed) is a contradiction
+    if ((await q.query(`SELECT 1 FROM cash_return_obligation WHERE "assistanceRequestId" = $1 AND status <> 'superseded_by_settlement'`, [r.id])).rows.length > 0) throw new Contradiction('obligation_exists');
     await q.query(`SELECT pg_advisory_xact_lock(hashtextextended('billing.personal_subscription:' || $1 || ':' || $2, 0))`, [p.beneficiaryUserId, p.productId]);
     if ((await q.query(`SELECT 1 FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [p.id])).rows.length > 0) throw new Contradiction('assisted_purchase_already_reversed');
     await q.query(`INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "refundCaseId") VALUES ($1, 'refund_completion', $2)`, [p.id, c.id]);
