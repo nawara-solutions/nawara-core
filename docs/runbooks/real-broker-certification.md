@@ -35,7 +35,9 @@ runners; each suite names its resources after its own process id, so nothing is 
    the containment suite needs `unshare -r`). This changes only the runner VM, which is discarded after the job.
 4. Runs the suites (builds the kit, the audit contract and the four services first). Each suite provisions its own disposable
    RabbitMQ and PostgreSQL containers with generated credentials and removes them by recorded id.
-5. Writes the `ℹ tests / pass / fail` summary to the run page.
+5. Writes a summary to the run page. **Known defect:** on the runner node prints TAP (`# tests 61`, `# fail 0`), which this step does
+   not match, so the page reads "no test summary (the run stopped before the suites finished)" even when every suite passed. Read the
+   totals from the "real-broker deploy suites" step log until the step is corrected (a separate CI change).
 6. On failure or cancellation: uploads `real-broker-diagnostics-<run>-<attempt>` (the full output, the container and network inventory,
    the last 500 log lines of each left-over suite container), kept 7 days. These hold only disposable test data.
 7. Always: removes any left-over container, network or volume with a suite prefix (`rbreal-`, `rbtopic-`, `rbnotif-`, `rbcontain-`,
@@ -46,13 +48,15 @@ Bounds: the job 120 minutes, the suites step 100 minutes, each suite 30 minutes 
 
 Nothing reaches production: no secret, no SSH, no environment, no deployed broker, no Nawara Lab host.
 
-## 3. First verification after merge
+## 3. Verifying a run
 
-GitHub offers `workflow_dispatch` only for a workflow that exists on the default branch, so the first real run happens after the merge:
+GitHub offers `workflow_dispatch` only for a workflow that exists on the default branch. The first run was 41115166440 on `main` at
+`18b0089` (2026-10-30): SUCCESS, 61 / 61 tests, cleanup clean ([S6 report §11.2](../architecture/core-v2-s6-financial-certification.md#112-real-broker-deploy-suites-on-github-actions)).
 
 1. `gh workflow run real-broker-certification.yml --ref main`
 2. `gh run watch <run-id> --exit-status`: expect success.
-3. The run summary shows `ℹ fail 0`, and the suites step log shows all five files.
+3. The suites step log ends with `# tests 61`, `# pass 61`, `# fail 0`, and the guard step lists all five files (the run page summary is
+   not reliable yet, §2 step 5).
 4. The cleanup step reports `no disposable container remains`.
 5. On failure: download the diagnostics artifact (`gh run download <run-id>`), then report it; do not weaken an assertion to pass.
 

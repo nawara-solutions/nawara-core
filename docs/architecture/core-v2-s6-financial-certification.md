@@ -208,3 +208,71 @@ surpluses) once. Every migration applies on the full chain from an empty databas
 **S6 CONDITIONAL PASS (simulation).** Every critical financial invariant is tested at the database, per-service and, for the newest contracts,
 cross-process level; the one code defect found is corrected (merge required); the conditions are the open contracts and operational gates of §8,
 which this certification documents and does not resolve. Production remains last.
+
+## 11. Addendum (2026-10-30): CI stability and on-demand real-broker evidence
+
+Added by Phase 4 of the Owner's post-S6 plan (documentation and evidence only). **The S6 verdict is unchanged: CONDITIONAL PASS
+(simulation).** Nothing below is new financial evidence; it records the test-infrastructure findings since this report and their
+resolution.
+
+### 11.1 Auth fault-injection instability (seen on this report's own PR)
+
+- **Symptom.** PR #405's first `auth-service` CI attempt failed seven tests in `apps/auth-service/test/authorization-receipt-routes.e2e-spec.ts`
+  (run 41088721448, job 124176634734): the first, "committed and even the recovery read fails", answered `200` where `503
+  receipt_outcome_unknown` was expected; the six that followed failed in 8 to 14 ms with `expected 200, got 500` from their fixture.
+  The failed job was re-run and passed; the cause was then investigated rather than accepted as harmless.
+- **Root cause (reproduced deterministically before any change).** The suite injected a fault by replacing the SHARED `DbService.tx`
+  with a one-shot fault armed for "the next transaction". Auth's outbox relay uses that same `DbService` and runs a `tx` every second:
+  a relay pass could take the fault, and the request then ran unfaulted (`200`). In the `commit_then_lose` mode with a broken lookup,
+  the relay's late-finishing transaction also installed the broken `query` after the helper had restored it, failing every later test
+  of the file (the cascade). The code-event purge, the member-security reporter and the hierarchy check cannot take a `tx` fault.
+- **Resolution: PR #407 (`2029fd6`), test-only.** The fault fires only at the receipt write (`INSERT` / `UPDATE authorization_receipt`)
+  inside a real transaction that really rolls back (issuance's step-up consumption included, which strengthens the rollback evidence);
+  only receipt reads are broken for the lookup case; nothing is installed after the helper returns; an injection nothing received fails
+  the test. Two regression tests fail against the former helper and pass with the new one. No production code, assertion, sleep, retry
+  or disabled worker. Validation: 13 sequential runs and 3 × 8 parallel copies of the suite, Auth unit 363 / e2e 679, Payment and Billing
+  receipt suites.
+- **Bootstrap port collision, found by #407's own first CI run (job 124220721933).** `apps/auth-service/test/bootstrap.e2e-spec.ts`
+  gave a spawned Auth a port released by a port-0 probe; a parallel worker's in-process Auth app (also port 0) could be handed it first,
+  and the readiness poll accepted that server (`/auth/docs` answered `404` with `SWAGGER_PASSWORD` set). Corrected in the same PR: a
+  spawned process's port is drawn below the OS ephemeral range and checked by binding.
+- **Residual, OPEN.** During that investigation one full run of the receipt suite failed once in "sequential replays" with `401` where
+  `200` was expected, before any fault-injection code ran. It did not recur in 47 later full runs; its log was not kept; the guard,
+  session, step-up and TOTP paths all use the suite's fake clock and no timing path to it was found. Not explained, not dismissed.
+- **Same pattern elsewhere, not assessed.** Notification's `send-api.e2e-spec.ts` and `delivery-engine.e2e-spec.ts` use one-shot
+  `DbService` fault injection; whether a Notification background worker can take those faults is a separate decision.
+
+### 11.2 Real-broker deploy suites on GitHub Actions
+
+§8 and §9 recorded that the real-broker deployment tests ran on demand only, so they could go stale. Since PR #408 (`18b0089`) the five
+suites (`npm run test:deploy:real-broker`) also run in the manual, `workflow_dispatch`-only
+[`real-broker-certification.yml`](../runbooks/real-broker-certification.md) on a disposable GitHub-hosted runner: no schedule, not part
+of `core-ci-passed`, read-only token, no secret, no environment, no SSH.
+
+**First run (Owner-authorized, Phase 4): run 41115166440, `main` at `18b0089`, `workflow_dispatch`, conclusion SUCCESS.**
+
+| Evidence | Result |
+|---|---|
+| Runner | GitHub-hosted `ubuntu-24.04`, Docker 28.0.4; `kernel.apparmor_restrict_unprivileged_userns = 0` set on the disposable runner; `unshare -r` available |
+| Suites executed | all five, verified by the workflow's guard: `real-broker.mjs`, `real-broker-topic-grants.mjs`, `real-broker-notification-topology.mjs`, `real-broker-topology-containment.mjs`, `real-broker-consumers.mjs` |
+| Totals (node test runner) | `# tests 61`, `# pass 61`, `# fail 0`, `# cancelled 0`, `# skipped 0`, duration 1 861 s (job 19:25:45 → 19:57:28 UTC) |
+| Cleanup | "no disposable container remains"; no failure diagnostics collected (none needed) |
+| Assertions | the suites' own, unchanged (provenance, authentication, topic grants, dead-lettering, replay, containment) |
+| Production, Lab 01, deployed infrastructure | not used |
+
+**Finding (LOW, workflow presentation only).** On the runner, node's test runner prints TAP (`# tests 61`), not the `ℹ tests 61` lines
+the workflow's "summary" step greps for, so that run page summary reads "no test summary (the run stopped before the suites finished)",
+which is **wrong**: every suite ran and passed, as the step log shows. The test result and the job conclusion are correct. The
+[runbook](../runbooks/real-broker-certification.md) now says to read the totals from the suites step log; the one-line correction of
+the summary step (match both reporter formats) is a separate CI change, not made in this documentation PR.
+
+The real-systemd half of OD-BRK-2b-L stays **BLOCKED — HARDWARE MAINTENANCE** (Nawara Lab 01): this workflow covers only its real-broker
+half.
+
+### 11.3 Effect on §8 and §9
+
+- §8 "Real-broker deployment tests run on demand, not in CI": still not in CI (a recurring or required run is a separate Owner
+  decision); they are now repeatable on demand on a disposable GitHub runner, and the first run passed.
+- §9 "On-demand real-broker suites can go stale": reduced, not removed; a scheduled run still needs its own Owner decision.
+- Every other §8 item (Q8, partial chargebacks, V-4, V-5, OD-R6a, EVT-05 / EVT-06, production activation and its operational gates) is
+  unchanged.

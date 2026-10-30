@@ -444,7 +444,7 @@ part of an S-stage, a work package or S-INT.
 | Gate | Question | Blocks |
 |---|---|---|
 | G-1 | Stage authorization names each Proposed ADR it implements and the timing of its acceptance; ADR status changes and reciprocal notes approved separately (§1.2) | every stage start |
-| G-2 | DOC-3 reconciliation of A10 (DG-4), A11 (MOVE V3) and Release / Payment production (MOVE V3) with the S3–S6 development scope (§1.3) | S3, S4 |
+| G-2 | DOC-3 reconciliation of A10 (DG-4), A11 (MOVE V3) and Release / Payment production (MOVE V3) with the S3–S6 development scope (§1.3). **Documentation reconciled 2026-10-30 (DOC-3)**, after S3 to S6 had started under their own Owner authorizations (the planned order was not followed); the production dispositions are unchanged | S3, S4 |
 | G-3 | R-6a specification (DOC-1) and AR-04.6 contract register (DOC-2) in the repository (§1.4) | S2-Auth R-6a; route-changing packages of S2 to S6 |
 | C-4 | historical Auth → Audit dead letters: inventory and disposition, separately authorized | S1-R enforcement |
 | V-4 | effective-state contract to Billing; the ADR-0060 lifecycle runtime is MOVE V3 in the current roadmap, so D6 has no inactive scope to enforce until it exists (DN-1.4, S-9) | S5 D6 enforcement; first lifecycle release |
@@ -469,7 +469,7 @@ Separate from implementation; each item needs its own documentation authorizatio
 |---|---|---|---|
 | DOC-1 | new record (location decided at authorization) | the R-6a specification (G-3) | S2-Auth R-6a |
 | DOC-2 | new record (location decided at authorization) | the AR-04.6 contract register: routes, DTOs, errors, idempotency classes (G-3) | route-changing packages of S2 to S6 |
-| DOC-3 | [`CORE-ROADMAP.md`](../CORE-ROADMAP.md), [`CORE-V3-ROADMAP.md`](../CORE-V3-ROADMAP.md) | an S-track entry in the current checkpoint; reconciliation of A10, A11 and Release / Payment dispositions with S3–S6 development (G-2), preserving the historical decisions | S3, S4 |
+| DOC-3 | [`CORE-ROADMAP.md`](../CORE-ROADMAP.md), [`CORE-V3-ROADMAP.md`](../CORE-V3-ROADMAP.md) | an S-track entry in the current checkpoint; reconciliation of A10, A11 and Release / Payment dispositions with S3–S6 development (G-2), preserving the historical decisions. **Written 2026-10-30** (Phase 4 of the post-S6 plan), after S3 to S6, with the S1 to S5 stage records | S3, S4 |
 | DOC-4 | [`financial-architecture.md`](./financial-architecture.md) | remove Nawara cash settlement; explicit routing (S0 §6.1). **Written 2026-10-28: its §0 (Core V2, with implementation status)** | S6 review (and S4 for cash) |
 | DOC-5 | [Billing SDD](../sdd/billing-service.md) | fixed Core V2 grace versus `SUBSCRIPTION_GRACE_DAYS` (S0 §6.1) | S3e |
 | DOC-6 | [Payment SDD](../sdd/payment-service.md), [Payment ADD](../add/payment-service.md) | no trust-based cash confirmation; payer and purpose (S0 §6.1) | S4 review |
