@@ -70,3 +70,10 @@ The existing mechanisms do not provide that proof:
 - The 10-minute lifetime covers only the synchronous chain; asynchronous work runs on the consumed authorization.
 - Follow-up: implementation and certification under separate authorization (S0 record, stage S2 for Auth and S6 for refunds); the
   financial architecture document needs the matching update.
+
+## Amendment (Core V2 S6h R6H-5, the Owner's decision, 2026-10-30)
+
+The decision 1 binding gains one optional field, `captureFactId`: the verified capture fact a capture-specific FULL refund returns. It is
+absent (never null) for an ordinary refund, so every ordinary receipt's canonical form and digests are unchanged; when present it is part
+of the canonical binding, so a receipt for one capture can never authorize an ordinary refund or another capture, nor the reverse. Purpose,
+lifetime, consumption and recovery are unchanged. Contract: `docs/architecture/core-v2-d-a2-auth-authorization-receipts.md` §17f.
