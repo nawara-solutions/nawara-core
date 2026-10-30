@@ -207,6 +207,9 @@ certification gate; production boundary; migration and recovery; Owner approvals
   | OD-BRK | dead-letter privacy and isolation (ADR-0057 §8 "OD-BRK-0", owner-approved D1 to D3, 2026-10-23). **D1:** Notification has no broker dead-letter exchange, no `.dead` binding to the shared `nawara.events.dlx` and no permission on it; its application-redacted dead letters stay required. Billing follows before its first deployment, Audit's live queue only through a separate migration, and the fanout stays while anything depends on it. **D2:** no dead-letter argument, plus verification of the effective configuration (arguments, regular and operator policies, effective dead-letter settings, shared bindings, permissions). Notification fails readiness or startup on an unapproved route; the mechanism is proven on a disposable broker. **D3:** a privileged broker rejection or expiry may discard a Notification message: never a delivery, never an intake record. Slices: **OD-BRK-0** the clarification (documentation); **OD-BRK-1** the kit opt-in topology and its fail-closed verification; **OD-BRK-2** Notification; **OD-BRK-3** Billing (before its first deployment); **OD-BRK-4** Audit's production migration (S1-R, C-4); **OD-BRK-5** retirement of the shared fanout. Each is separately authorized. OD-BRK-0, OD-BRK-1 and OD-BRK-2a (#345) are merged; OD-BRK-2b-1 (scheduled verification and containment) is implemented but not installed; OD-BRK-2b-2 and OD-BRK-3 to OD-BRK-5 are not started. **Open** until OD-BRK-4 and OD-BRK-5 | 🟢 |
   | S1-R | production rollout in the §13.10 order: publisher identity → observe-only provenance → narrowed permissions (§12 production action) → retry queues drained and **C-4** dead letters inventoried → enforcement per consumer. S0-C5: narrowing needs the generated expected grants, a pre-provisioning inventory, a review of added and removed rights, a verified activation state, the protected production approval, post-provisioning verification and monitoring (outbox lag, Audit delivery, retry and dead-letter depth); restoring a broader grant is a separately authorized security exception, never a default rollback. S0-C6: Billing and Notification enter production with strict enforcement certified (Notification with its NP-K keys); Audit leaves its compatibility phase only after verified publisher identity, C-4, its gates, strict testing and Owner approval, and a return to compatibility is a separately approved exception | 🟡 |
 
+- **S1c-3 R2b (the Owner's decision D-5 (a), 2026-10-30).** S1c-3 R2b is required before S1-R enforcement and before any production
+  re-emission (R4), not before S-INT, because S-INT exercises no re-emission and S0-C4 is architecture only. S0-C4 and every operational
+  safety gate of re-emission are unchanged.
 - **Prerequisites.** Stage authorization (G-1, naming ADR-0057 §13 and ADR-0069); the stage record is created at authorization.
   C-4 before any enforcement in production.
 - **Invariants.** Broker users have no impersonation tag; no historical event is labelled verified and provenance is never backfilled
@@ -248,6 +251,12 @@ Four tracks with no dependency on each other except S2-Audit on S1b. Each track 
   or passkey, never the secret key) and the other new factor-only purposes of the contract register; **R-6a** (G-3).
 - Prerequisites: DOC-1 (R-6a) for R-6a; DOC-2 for routes and errors; payment-service's admission as a caller recorded with the
   service-token admissions ([ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md)).
+- **OD-R6a disposition (the Owner's decision D-2, 2026-10-30).** R-6a (AUTH-08, the correction of the organization-administrator grant
+  facts) is not a dependency of the S1 to S6 pre-lifecycle certification scope. Its only current consumer, organization-service's
+  `org_admin` metadata authority, is unreachable while organization-service is not authoritative. R-6a's specification (DOC-1) and
+  certification are required no later than the **earlier** of (a) Organization authority activation (F6/F7) and (b) the first
+  lifecycle-enabled release (V5-2). S2 may be certified for development without it; the R-6a work package stays OPEN and is not deferred to
+  V3. Nothing about R-6a's content is decided here.
 - Invariants: only digests of the secret and the canonical binding are stored, and the plaintext is returned once; lifetime 10
   minutes; a lost-response replay voids only an `issued` receipt; consumption is one conditional update that requires matching
   digests, `issued`, unexpired, and an issuer still active and still Owner of `companyId`; consumption is the commit point;
@@ -268,6 +277,11 @@ Four tracks with no dependency on each other except S2-Audit on S1b. Each track 
   never widen scope; ownership never inferred; every human read recorded, `503` when it cannot be; the retention role skips held
   records and no normal role deletes.
 - Certification: scope-widening negative tests; contract-version tests; append-only controls on `audit_record` unchanged.
+- **Audit Organization-reference scope rows (the Owner's decision D-4, 2026-10-30).** They depend on the Organization reference, which
+  is not authoritative before F7 ([ADR-0069](../adr/0069-verified-audit-producers-and-audit-contract-v2.md) decision 4; the kit reference
+  contract). They are bound to Organization authority activation, not deferred to V3. Until then the Owner Organization read shows only
+  broker-verified records (AUD-07). This is not an S2 certification-gate criterion and does not block S2 development certification. It is
+  not an S0 §5 human hierarchy-read deferral.
 - Label 🟢 / 🟡. Production Audit still needs the deployment that applies migration 0004 (M9); S2-Audit migrations stack after it.
 
 **S2-File** (file-service)
@@ -367,6 +381,9 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
   restrictions never block discharge; lifecycle never changes, cancels or derives from commercial state (DN-1.5).
 - **Certification gate.** Inactive scopes refuse new requests while every discharge action works for its authorized actors; an Auth
   outage gives `503` with no mutation; FC-8 time-order negative tests; restriction clearing rules.
+- **Certification gate under S0-C7 ([S0 record](./core-v2-s0-architecture-freeze.md) §1.5, 2026-10-30).** Under S0-C7, Core V2
+  evidences this criterion by the pre-lifecycle invariant (T-A1 to T-A4); the criterion itself is certified with the first
+  lifecycle-enabled release.
 - **Production boundary.** None in scope. The effective lifecycle state must reach Billing in the release that first allows a scope to
   become inactive (S-9); until then no scope can be inactive (DN-1.4).
 - **Migration and recovery.** As S3; corrections are append-only, so recovery never rewrites an obligation.
@@ -426,10 +443,25 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
 ## 5. S-INT: Core V2 integration certification
 
 - **When.** After S1 to S6 are individually certified, and after S7 and S8 if they are in scope.
+- **S-INT entry: individual certification (the Owner's decision D-3, 2026-10-30).** A stage S1 to S6 is individually certified for
+  S-INT entry when, and only when:
+  1. its stage record is merged;
+  2. every certification-gate criterion of §4 for that stage, as amended only by Owner-approved S0 clarifications, is PASS with
+     development-level evidence (L or I);
+  3. every remaining condition in the record is one of: (a) a production or operational gate; (b) a Lab-only verification; (c) a
+     deferral approved in S0 §5, an S0-C clarification, an Owner-recorded disposition, or the Core roadmap dispositions; (d) an open
+     decision whose implemented behaviour is fail-closed and tested, recorded with its decision id.
+
+  A gate criterion, invariant test or work package of the stage that is OPEN, BLOCKED or NOT STARTED at development level is never a
+  condition under (a) to (d), and keeps the stage uncertified, unless an Owner-approved clarification or disposition assigns it to another
+  release or gate. No verdict is promoted by this rule. The S-INT readiness record lists each stage's conditions with their category, and
+  the Owner approves that record.
 - **What.** The cross-service paths certified together in a disposable environment, on simulation: direct purchase; assisted
   purchase with cash collection, settlement, failure and cash return; refund with an Owner receipt; dispute and chargeback (direct and
   assisted); recovery and surplus; late settlement; inactive scope; Auth outage; broker forgery and replay across every family;
   production-configuration refusal of simulation.
+- **Inactive scope (S0-C7).** In Core V2: the pre-lifecycle invariant (S0-C7 item 1); the full path belongs to the first
+  lifecycle-enabled release (item 2).
 - **Not.** A production certification, a replacement for any stage's own certification, or Final Core Validation.
 - **Approval.** Its own Owner authorization and its own record.
 
@@ -447,7 +479,7 @@ part of an S-stage, a work package or S-INT.
 | G-2 | DOC-3 reconciliation of A10 (DG-4), A11 (MOVE V3) and Release / Payment production (MOVE V3) with the S3–S6 development scope (§1.3). **Documentation reconciled 2026-10-30 (DOC-3)**, after S3 to S6 had started under their own Owner authorizations (the planned order was not followed); the production dispositions are unchanged | S3, S4 |
 | G-3 | R-6a specification (DOC-1) and AR-04.6 contract register (DOC-2) in the repository (§1.4) | S2-Auth R-6a; route-changing packages of S2 to S6 |
 | C-4 | historical Auth → Audit dead letters: inventory and disposition, separately authorized | S1-R enforcement |
-| V-4 | effective-state contract to Billing; the ADR-0060 lifecycle runtime is MOVE V3 in the current roadmap, so D6 has no inactive scope to enforce until it exists (DN-1.4, S-9) | S5 D6 enforcement; first lifecycle release |
+| V-4 | effective-state contract to Billing; the ADR-0060 lifecycle runtime is MOVE V3 in the current roadmap, so D6 has no inactive scope to enforce until it exists (DN-1.4, S-9); see S0-C7 (S5 is certified pre-lifecycle; the S0 §8 inactive-scope criterion is a blocking criterion of the first lifecycle-enabled release) | S5 D6 enforcement; first lifecycle release |
 | V-5 | school actor set for discharge in inactive Organizations. **Policy Owner-approved (V5-1 to V5-9, 2026-10-28; register §7.1); S5e runtime deferred** | S5e |
 | Catalog | Premium catalog products, plan durations and prices | S3g and any catalog configuration |
 | Simulation adapter | whether the simulation adapter is new beside the existing `test` provider or replaces it; both are refused in production (FC-10) | S4f |
