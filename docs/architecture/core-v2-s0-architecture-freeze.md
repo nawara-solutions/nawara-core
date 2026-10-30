@@ -142,6 +142,24 @@ status change still needs its own explicit owner authorization.
   gates, strict testing and Owner approval. Notification is verified-only from its first deployment; a missing key holds, a retired key
   refuses (`replay_unverifiable`), and refused code-bearing events never keep their code. Documentation only: nothing implemented or
   enabled, no production change.
+- **S0-C7 Pre-lifecycle certification of S5 (2026-10-30, owner-approved clarification; DN-1, S0 §6 V-4, S0 §8).** DN-1, V-5 (V5-1 to
+  V5-9) and ADR-0060 are unchanged. DN-1.4 governs Core V2: no Company, Platform or Organization can be inactive until the release that
+  first allows a scope to become inactive (the *first lifecycle-enabled release*: ADR-0060 §11 L2 and L3 with gate V-4).
+  1. Core V2 S5 is certified on its S5a to S5d criteria and on evidence that no Core V2 path can produce, store, read or act on an
+     inactive Company, Platform or Organization: tests T-A1 to T-A4 and the repository check of T-A3.
+  2. The S0 §8 criterion **"inactive scopes refuse new requests while every discharge action works for its authorized actors"** is
+     retained verbatim. The evidence of item 1 does not satisfy it. It is a blocking certification criterion of the first
+     lifecycle-enabled release, including its integration (S-INT-equivalent) path.
+  3. The first lifecycle-enabled release is not authorized for production, and no scope may become inactive in production, until that
+     release certifies together: V-4 (V5-8); S5e and D6 (V5-1 to V5-7); V5-2 activation with the applicable OD-R6a certification;
+     ADR-0060 §11 L5 consumer adoption by Billing and Payment; and the criterion of item 2.
+  4. V5-9 is unchanged: no lifecycle-aware S5e runtime, temporary always-active adapter, unbound lifecycle port or speculative operation
+     registry before V-4.
+  5. This clarification takes effect when T-A1 to T-A4 are merged. It implements and activates nothing and changes no ADR status.
+
+  *Evidence of item 5 (recorded 2026-10-31):* T-A1 Auth (#411, `7cc86d1`), T-A2 Organization Service (#412, `6b0150b`), T-A4 Billing
+  (#414, `31eebe1`) and T-A3 kit contract and `check:repo` `checkPreLifecycleInvariant` (#415, `abb39f4`) are merged. Item 1 certifies
+  pre-lifecycle Core V2 behaviour only; it does not certify lifecycle-enabled behaviour. No stage verdict is changed by this record.
 
 ## 2. ADR disposition
 

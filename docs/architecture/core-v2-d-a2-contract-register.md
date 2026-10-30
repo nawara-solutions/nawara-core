@@ -282,6 +282,7 @@ is preserved as evidence even when its commercial processing fails.
 | C. Errors, idempotency | class R; unchanged |
 | D. Existing | `apps/auth-service/src/auth/grants.service.ts`: `organizationAdminMemberships` lists the member's `active`, admin-flagged memberships and does not consult Organization, Platform or Company lifecycle state. This observation is evidence only; it is **not** authority to define the correction |
 | E. Open, gates | **OD-R6a**. Blocks the R-6a work package of S2-Auth only. Confidence L |
+| F. Owner disposition D-2 (2026-10-30) | R-6a is not a dependency of the S1 to S6 pre-lifecycle certification scope. Its only current consumer, organization-service's `org_admin` metadata authority, is unreachable while organization-service is not authoritative. R-6a's specification (DOC-1) and certification are required no later than the **earlier** of (a) Organization authority activation (F6/F7) and (b) the first lifecycle-enabled release (V5-2). S2 may be certified for development without it; the R-6a work package stays **OPEN** and is not deferred to V3. Nothing about R-6a's content is decided here (DOC-1 is still not in the repository) |
 
 #### AUTH-09 Administrator tenure during suspension
 
@@ -972,6 +973,7 @@ these contracts is therefore **OPEN (OD-FILE)** and no route or DTO is proposed 
 | C. Errors, idempotency | unchanged; class R |
 | D. Existing | `apps/audit-service/src/owner/owner-query.controller.ts` |
 | E. Open, gates | none. Stage S2-Audit (scope rows). Confidence H |
+| F. Owner disposition D-4 (2026-10-30) | Audit Organization-reference scope rows depend on the Organization reference, which is not authoritative before F7 ([ADR-0069](../adr/0069-verified-audit-producers-and-audit-contract-v2.md) decision 4; the kit reference contract). They are bound to Organization authority activation, not deferred to V3. Until then the Owner Organization read shows only broker-verified records (this entry). Not an S2 certification-gate criterion; not an S0 §5 human hierarchy-read deferral |
 
 ### 5.8 Release
 
