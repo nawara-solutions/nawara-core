@@ -4107,3 +4107,120 @@ export function checkOnDemandWorkflow(fileName, text) {
   }
   return problems;
 }
+
+// ================================================================================ Core V2 T-A3: the pre-lifecycle invariant (S0-C7)
+
+export const KIT_ORGANIZATION_REFERENCE = 'libs/service-kit/src/service-auth/organization-reference.ts';
+export const BILLING_RESTRICTIONS = 'apps/billing-service/src/assistance/assistance-restrictions.ts';
+/** The services whose code may not hold a lifecycle port or consume an effective lifecycle state before V-4 (the kit is checked too). */
+export const PRE_LIFECYCLE_SERVICES = ['auth-service', 'organization-service', 'billing-service', 'payment-service'];
+/** The services that own a Company / Platform / Organization schema (Auth today; Organization Service after F7). */
+export const HIERARCHY_SCHEMA_SERVICES = ['auth-service', 'organization-service'];
+
+const HIERARCHY_TABLE = '(company|platform|organization)';
+/** A column a lifecycle state would need (ADR-0060 §3: local and effective state, transitions and their instants). Hierarchy tables only. */
+const LIFECYCLE_COLUMN = /^"?(status|state|lifecycle\w*|\w*suspend\w*|\w*archiv\w*|effective\w*|active|is_?active|inactive|deleted\w*|disabled\w*|closed\w*|reactivat\w*|restor\w*)"?$/i;
+const LIFECYCLE_ROUTE = /\/(companies|platforms|organizations)\/:[^/]+\/(suspend|suspension|reactivate|activate|deactivate|archive|unarchive|restore|lifecycle|status|state)$/;
+const LIFECYCLE_BODY_FIELD = /'(status|state|effectiveStatus|effectiveSince|suspendedAt|archivedAt|lifecycle\w*)'/;
+/** A declared lifecycle port, adapter, client or state source (an identifier, never a log name or a comment). */
+const LIFECYCLE_DECLARATION = /\b(class|interface|type|enum|function|const|let|var)\s+[\w$]*(Lifecycle|LIFECYCLE|EffectiveStatus|EffectiveState|OrganizationStatus|ScopeState)[\w$]*/;
+const LIFECYCLE_TOKEN = /Symbol\(\s*['"][^'"]*(lifecycle|effective_?status)[^'"]*['"]\s*\)/i;
+/** Effective-state consumption (ADR-0060 §8 field names; the two inactive values). */
+const EFFECTIVE_STATE_USE = /\beffectiveStatus\b|\beffectiveSince\b|['"`](SUSPENDED|ARCHIVED)['"`]/;
+
+/** Source text without comments: block comments, whole-line `//` comments and trailing ` // ` comments. */
+function codeOnly(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/\s\/\/\s.*$/gm, '');
+}
+
+/** The column names of `CREATE TABLE <hierarchy> (…)` blocks and of `ALTER TABLE <hierarchy> ADD [COLUMN]` statements. */
+function hierarchyColumns(sql) {
+  const out = [];
+  const create = new RegExp(`CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?${HIERARCHY_TABLE}\\s*\\(([\\s\\S]*?)\\n\\);`, 'gi');
+  for (const m of sql.matchAll(create)) {
+    for (const line of m[2].split('\n')) {
+      const l = line.replace(/--.*$/, '').trim();
+      if (!l || /^(CONSTRAINT|PRIMARY|UNIQUE|CHECK|FOREIGN|EXCLUDE)\b/i.test(l)) continue;
+      out.push({ table: m[1].toLowerCase(), column: l.split(/\s+/)[0] });
+    }
+  }
+  const alter = new RegExp(`ALTER TABLE\\s+(?:IF EXISTS\\s+)?(?:ONLY\\s+)?${HIERARCHY_TABLE}\\s+ADD\\s+(?:COLUMN\\s+)?(?:IF NOT EXISTS\\s+)?("?[A-Za-z_][\\w]*"?)`, 'gi');
+  for (const m of sql.matchAll(alter)) if (!/^(CONSTRAINT|PRIMARY|UNIQUE|CHECK|FOREIGN|EXCLUDE)$/i.test(m[2])) out.push({ table: m[1].toLowerCase(), column: m[2] });
+  return out;
+}
+
+/** The full paths of the write routes of a controller file (`@Controller` base + method path; a file may hold several controllers). */
+function writeRoutes(text) {
+  const out = [];
+  let base = '';
+  for (const line of text.split('\n')) {
+    const c = line.match(/^\s*@Controller\(\s*['"`]([^'"`]*)['"`]/);
+    if (c) base = c[1];
+    const m = line.match(/^\s*@(Post|Put|Patch|Delete)\(\s*(?:['"`]([^'"`]*)['"`])?/);
+    if (m) out.push({ method: m[1].toUpperCase(), path: `/${[base, m[2] ?? ''].filter(Boolean).join('/')}`.replace(/\/+/g, '/').replace(/(.)\/$/, '$1') });
+  }
+  return out;
+}
+
+/**
+ * Core V2 T-A3 (the Owner's D-1: S0-C7 items 1 and 3; DN-1.4; V5-9; ADR-0060 §8 and §11 not yet implemented): no Core V2 path may produce,
+ * store, read or act on an inactive Company, Platform or Organization before the first lifecycle-enabled release. Structural, bounded checks:
+ *   - schema: no lifecycle column on Auth's or Organization Service's company / platform / organization (other tables, user activation,
+ *     membership status and the ownership phase are out of scope), no lifecycle side table, no SUSPENDED / ARCHIVED literal in their migrations;
+ *   - routes: no Auth or Organization Service write route performs a lifecycle action on a hierarchy entity; Organization Service's
+ *     request allow-lists accept no lifecycle field;
+ *   - ports: no declared lifecycle port, adapter, client, token or state source in Auth, Organization Service, Billing, Payment or the kit;
+ *   - the shared reference contract stays exactly {organizationId, platformId, companyId}, and its HTTP client returns exactly those;
+ *   - Billing's reserved `inactive` restriction stays reserved: never a produced kind, never in a Billing migration;
+ *   - no effective-state consumption (`effectiveStatus`, `effectiveSince`, a SUSPENDED / ARCHIVED value) in Billing, Payment or the kit.
+ * The lifecycle release changes this check together with its V-4, S5e, D6, V5-2 / OD-R6a and ADR-0060 L5 certification (S0-C7 item 3).
+ */
+export function checkPreLifecycleInvariant({ sources = {}, kit = {}, migrations = {}, reference, restrictions }) {
+  const problems = [];
+  const why = 'no lifecycle state before the first lifecycle-enabled release (S0-C7, DN-1.4, V5-9; it lands only with V-4, S5e, D6 and ADR-0060 L5)';
+  for (const app of HIERARCHY_SCHEMA_SERVICES) {
+    for (const [rel, sql] of Object.entries(migrations[app] ?? {})) {
+      for (const { table, column } of hierarchyColumns(sql)) {
+        if (LIFECYCLE_COLUMN.test(column)) problems.push(`${rel}: ${table}.${column.replace(/"/g, '')} is a lifecycle column; ${why}`);
+      }
+      if (new RegExp(`CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?${HIERARCHY_TABLE}_?(lifecycle|status|state|suspension|archive)`, 'i').test(sql)) problems.push(`${rel}: a hierarchy lifecycle table; ${why}`);
+      if (/'(SUSPENDED|ARCHIVED)'/.test(sql.replace(/--.*$/gm, ''))) problems.push(`${rel}: a SUSPENDED / ARCHIVED lifecycle value; ${why}`);
+    }
+    for (const [rel, text] of Object.entries(sources[app] ?? {})) {
+      if (rel.endsWith('.controller.ts')) {
+        for (const r of writeRoutes(text)) if (LIFECYCLE_ROUTE.test(r.path)) problems.push(`${rel}: ${r.method} ${r.path} is a lifecycle action; ${why}`);
+      }
+      if (app === 'organization-service' && /\/src\/domain\/[\w-]+-input\.ts$/.test(rel) && LIFECYCLE_BODY_FIELD.test(codeOnly(text))) {
+        problems.push(`${rel}: a request accepts a lifecycle field; ${why}`);
+      }
+    }
+  }
+  const scanned = [...PRE_LIFECYCLE_SERVICES.map((app) => [app, sources[app] ?? {}]), ['service-kit', kit]];
+  for (const [app, files] of scanned) {
+    for (const [rel, text] of Object.entries(files)) {
+      const code = codeOnly(text);
+      if (LIFECYCLE_DECLARATION.test(code) || LIFECYCLE_TOKEN.test(code)) problems.push(`${rel}: declares a lifecycle port, adapter or state source; ${why}`);
+      if (app !== 'auth-service' && app !== 'organization-service' && EFFECTIVE_STATE_USE.test(code)) problems.push(`${rel}: consumes an effective lifecycle state; ${why}`);
+    }
+  }
+  if (reference === undefined) problems.push(`${KIT_ORGANIZATION_REFERENCE}: not found; ${why}`);
+  else {
+    const iface = reference.match(/export interface OrganizationReference \{([^}]*)\}/);
+    const fields = iface ? [...iface[1].matchAll(/^\s*([A-Za-z_$][\w$]*)\??\s*:/gm)].map((m) => m[1]).sort() : [];
+    if (fields.join(',') !== 'companyId,organizationId,platformId') problems.push(`${KIT_ORGANIZATION_REFERENCE}: OrganizationReference must be exactly {organizationId, platformId, companyId} (found: ${fields.join(', ') || 'nothing'}); ${why}`);
+    if (!/return \{ organizationId: b\.organizationId, platformId: b\.platformId, companyId: b\.companyId \};/.test(reference)) {
+      problems.push(`${KIT_ORGANIZATION_REFERENCE}: the HTTP reference client must return exactly the three anchors; ${why}`);
+    }
+  }
+  if (restrictions === undefined) problems.push(`${BILLING_RESTRICTIONS}: not found; ${why}`);
+  else {
+    const produced = restrictions.match(/export const RESTRICTION_KINDS = \[([^\]]*)\]/);
+    const reserved = restrictions.match(/export const RESERVED_RESTRICTION_KINDS = \[([^\]]*)\]/);
+    if (!produced || /'inactive'/.test(produced[1])) problems.push(`${BILLING_RESTRICTIONS}: \`inactive\` must not be a produced restriction kind; ${why}`);
+    if (!reserved || !/'inactive'/.test(reserved[1])) problems.push(`${BILLING_RESTRICTIONS}: \`inactive\` must stay a RESERVED restriction kind; ${why}`);
+  }
+  for (const [rel, sql] of Object.entries(migrations['billing-service'] ?? {})) {
+    if (/'inactive'/.test(sql.replace(/--.*$/gm, ''))) problems.push(`${rel}: Billing gives the reserved \`inactive\` restriction a source; ${why}`);
+  }
+  return problems;
+}

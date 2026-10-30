@@ -248,3 +248,42 @@ describe('the non-production fixture', () => {
     }
   });
 });
+
+/**
+ * Core V2 T-A3 (the Owner's D-1, S0-C7 item 1; DN-1.4; ADR-0060 §8 not yet implemented): the shared reference contract is the three anchors
+ * ONLY. An answer that carries lifecycle-shaped fields (as a future ADR-0060 L3 contract might) is never exposed or interpreted by the kit:
+ * a lifecycle-aware reference contract arrives only with the first lifecycle-enabled release (S0-C7 item 3), never through this client.
+ */
+describe('pre-lifecycle reference contract (T-A3)', () => {
+  const lifecycleFields = { effectiveStatus: 'SUSPENDED', effectiveSince: '2026-10-01T00:00:00Z', lifecycleSource: 'ancestor', status: 'ARCHIVED', state: 'SUSPENDED' };
+
+  it('the HTTP client returns exactly {organizationId, platformId, companyId}, whatever else the answer carries', async () => {
+    handler = json(200, { ...answer, ...lifecycleFields });
+    const r = await client().resolve(ORG);
+    expect(r).toEqual(answer);
+    expect(Object.keys(r!).sort()).toEqual(['companyId', 'organizationId', 'platformId']);
+    expect(JSON.stringify(r)).not.toMatch(/SUSPENDED|ARCHIVED|effective|lifecycle/);
+  });
+
+  it('a lifecycle field never changes the answer: an "inactive" answer resolves exactly like an ordinary one', async () => {
+    handler = json(200, answer);
+    const plain = await client().resolve(ORG);
+    handler = json(200, { ...answer, ...lifecycleFields });
+    expect(await client().resolve(ORG)).toEqual(plain);
+  });
+
+  it('the memo keeps the three anchors only (ADR-0060 §8: lifecycle status is never memoized)', async () => {
+    handler = json(200, { ...answer, ...lifecycleFields });
+    const memo = new MemoizedOrganizationReference(client());
+    const first = await memo.resolve(ORG);
+    const second = await memo.resolve(ORG); // a memo hit
+    for (const r of [first, second]) expect(Object.keys(r!).sort()).toEqual(['companyId', 'organizationId', 'platformId']);
+  });
+
+  it('the non-production fixture refuses any lifecycle field: entries are exactly the three anchors', () => {
+    for (const [field, value] of Object.entries(lifecycleFields)) {
+      expect(() => parseOrganizationReferenceFixture(JSON.stringify([{ ...answer, [field]: value }]), false), field).toThrow(ConfigError);
+    }
+    expect(parseOrganizationReferenceFixture(JSON.stringify([answer]), false)).toBeDefined();
+  });
+});

@@ -4068,3 +4068,93 @@ test('Phase 3: a schedule, an automatic trigger, a write permission, an environm
   refused(base.replace("      - run: npm ci --ignore-scripts\n", "      - run: npm ci --ignore-scripts\n        env:\n          X: ${{ secrets.DEPLOY_SSH_KEY }}\n"), /no secret/, 'a secret');
   refused(base.replace("      - run: npm ci --ignore-scripts\n", "      - run: npm ci --ignore-scripts\n      - run: ssh deploy@host true\n"), /no SSH/, 'native ssh');
 });
+
+// ================================================================================ Core V2 T-A3: the pre-lifecycle invariant (S0-C7)
+test('T-A3: the pre-lifecycle invariant holds on the repository and fails on each forbidden lifecycle change', async () => {
+  const { checkPreLifecycleInvariant, PRE_LIFECYCLE_SERVICES, HIERARCHY_SCHEMA_SERVICES, KIT_ORGANIZATION_REFERENCE, BILLING_RESTRICTIONS } = await import('./lib/checks.mjs');
+  const repo = new URL('../', import.meta.url);
+  const read = (rel) => readFileSync(new URL(rel, repo), 'utf8');
+  const walkTs = (dir) => readdirSync(new URL(dir, repo), { recursive: true, withFileTypes: true })
+    .filter((d) => d.isFile() && d.name.endsWith('.ts') && !d.name.endsWith('.spec.ts') && !d.name.endsWith('.d.ts'))
+    .map((d) => `${d.parentPath ?? d.path}/${d.name}`.replace(new URL(repo).pathname, ''));
+  const input = () => {
+    const sources = {};
+    for (const app of PRE_LIFECYCLE_SERVICES) sources[app] = Object.fromEntries(walkTs(`apps/${app}/src`).map((rel) => [rel, read(rel)]));
+    const kit = Object.fromEntries(walkTs('libs/service-kit/src').map((rel) => [rel, read(rel)]));
+    const migrations = {};
+    for (const app of [...HIERARCHY_SCHEMA_SERVICES, 'billing-service']) {
+      migrations[app] = Object.fromEntries(readdirSync(new URL(`apps/${app}/db/migrations`, repo)).filter((f) => f.endsWith('.sql')).map((f) => [`apps/${app}/db/migrations/${f}`, read(`apps/${app}/db/migrations/${f}`)]));
+    }
+    return { sources, kit, migrations, reference: read(KIT_ORGANIZATION_REFERENCE), restrictions: read(BILLING_RESTRICTIONS) };
+  };
+  const base = input();
+  assert.deepEqual(checkPreLifecycleInvariant(base), [], 'the repository holds the invariant');
+  for (const app of PRE_LIFECYCLE_SERVICES) assert.ok(Object.keys(base.sources[app]).length > 10, `${app} sources were read`);
+  assert.ok(Object.keys(base.kit).length > 10 && Object.keys(base.migrations['auth-service']).length > 5, 'the kit and the migrations were read');
+
+  /** A copy of the inputs with one file's text replaced (`from` must exist) or added: the repository itself is never touched. */
+  const mutate = (where, rel, from, to) => {
+    const m = structuredClone(base);
+    const files = where === 'reference' || where === 'restrictions' ? null : where === 'kit' ? m.kit : where.startsWith('migrations:') ? m.migrations[where.slice(11)] : m.sources[where];
+    if (files === null) {
+      assert.ok(m[where].includes(from), `fixture drifted: ${from}`);
+      m[where] = m[where].replace(from, to);
+    } else if (from === null) files[rel] = to;
+    else {
+      assert.ok(files[rel]?.includes(from), `fixture drifted: ${rel}: ${from}`);
+      files[rel] = files[rel].replace(from, to);
+    }
+    return checkPreLifecycleInvariant(m).join('\n');
+  };
+  const AUTH_0001 = 'apps/auth-service/db/migrations/0001_identity_tenancy_platform_assignment.sql';
+  const ORG_0001 = 'apps/organization-service/db/migrations/0001_company_platform_organization.sql';
+  const ORG_CTRL = 'apps/organization-service/src/organizations/organizations.controller.ts';
+  const AUTH_PLATFORM_CTRL = 'apps/auth-service/src/platform/platform.controller.ts';
+  const AUTHORITY = 'apps/billing-service/src/assistance/assistance-authority.ts';
+  const ORG_INPUT = 'apps/organization-service/src/domain/organization-input.ts';
+  const NEW_SQL = (app) => `apps/${app}/db/migrations/9999_mutation.sql`;
+
+  const forbidden = [
+    // 1. a lifecycle schema column (CREATE TABLE and ALTER TABLE, both hierarchy owners), a lifecycle table, a lifecycle value
+    ['migrations:organization-service', ORG_0001, '  "platformId" uuid NOT NULL,\n', '  "platformId" uuid NOT NULL,\n  "lifecycleState" text,\n', /organization\.lifecycleState is a lifecycle column/],
+    ['migrations:auth-service', NEW_SQL('auth-service'), null, 'ALTER TABLE organization ADD COLUMN status text;\n', /organization\.status is a lifecycle column/],
+    ['migrations:auth-service', NEW_SQL('auth-service'), null, 'ALTER TABLE company ADD COLUMN IF NOT EXISTS "suspendedAt" timestamptz;\n', /company\.suspendedAt is a lifecycle column/],
+    ['migrations:organization-service', NEW_SQL('organization-service'), null, 'CREATE TABLE organization_lifecycle (id uuid PRIMARY KEY);\n', /a hierarchy lifecycle table/],
+    ['migrations:organization-service', NEW_SQL('organization-service'), null, "ALTER TABLE platform ADD CONSTRAINT p_s CHECK (name <> 'SUSPENDED');\n", /a SUSPENDED \/ ARCHIVED lifecycle value/],
+    // 2. a lifecycle route, a lifecycle request field, a lifecycle port or adapter
+    ['organization-service', ORG_CTRL, "  @Patch(':id')", "  @Post(':id/suspend')\n  async suspend() {}\n  @Patch(':id')", /POST \/organization\/organizations\/:id\/suspend is a lifecycle action/],
+    ['auth-service', AUTH_PLATFORM_CTRL, "@Controller('auth')", "@Controller('auth')\nclass X {\n  @Delete('admin/platforms/:platformId/archive')\n  a() {}\n}\n@Controller('auth')", /DELETE \/auth\/admin\/platforms\/:platformId\/archive is a lifecycle action/],
+    ['organization-service', ORG_INPUT, "readObject(raw, ['name', ...OPTIONAL_FIELDS]", "readObject(raw, ['name', 'status', ...OPTIONAL_FIELDS]", /a request accepts a lifecycle field/],
+    ['billing-service', 'apps/billing-service/src/assistance/lifecycle.ts', null, 'export interface OrganizationLifecyclePort { status(id: string): Promise<string>; }\n', /declares a lifecycle port, adapter or state source/],
+    ['payment-service', 'apps/payment-service/src/authorization/lifecycle.ts', null, 'export class EffectiveStatusAdapter {}\n', /declares a lifecycle port/],
+    ['kit', 'libs/service-kit/src/service-auth/lifecycle.ts', null, "export const ORGANIZATION_STATE = Symbol('ORGANIZATION_LIFECYCLE');\n", /declares a lifecycle port/],
+    ['auth-service', 'apps/auth-service/src/hierarchy/lifecycle.ts', null, 'export type OrganizationStatus = string;\n', /declares a lifecycle port/],
+    // 3. the shared reference contract exposes a lifecycle field
+    ['reference', null, '  companyId: string;\n}', '  companyId: string;\n  effectiveStatus?: string;\n}', /OrganizationReference must be exactly/],
+    ['reference', null, 'return { organizationId: b.organizationId, platformId: b.platformId, companyId: b.companyId };',
+      'return { organizationId: b.organizationId, platformId: b.platformId, companyId: b.companyId, effectiveStatus: (b as never) };', /must return exactly the three anchors/],
+    // 4. Billing (or Payment, or the kit) consumes an effective lifecycle state
+    ['billing-service', AUTHORITY, '    const ref = await this.reference.resolve(organizationId); // throws',
+      "    const ref = await this.reference.resolve(organizationId);\n    if ((ref as never as { effectiveStatus?: string })?.effectiveStatus === 'SUSPENDED') return null; // throws", /consumes an effective lifecycle state/],
+    ['payment-service', 'apps/payment-service/src/authorization/x.ts', null, "export const inactive = (s: string) => s === 'ARCHIVED';\n", /consumes an effective lifecycle state/],
+    ['kit', 'libs/service-kit/src/service-auth/x.ts', null, 'export const since = (r: { effectiveSince: string }) => r.effectiveSince;\n', /consumes an effective lifecycle state/],
+    // 5. the reserved `inactive` restriction becomes active
+    ['restrictions', null, "export const RESTRICTION_KINDS = ['T1', 'T2', 'T3'] as const;", "export const RESTRICTION_KINDS = ['T1', 'T2', 'T3', 'inactive'] as const;", /must not be a produced restriction kind/],
+    ['restrictions', null, "export const RESERVED_RESTRICTION_KINDS = ['inactive'] as const;", 'export const RESERVED_RESTRICTION_KINDS = [] as const;', /must stay a RESERVED restriction kind/],
+    ['migrations:billing-service', NEW_SQL('billing-service'), null, "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SELECT 'inactive' $$;\n", /gives the reserved `inactive` restriction a source/],
+  ];
+  for (const [where, rel, from, to, expected] of forbidden) assert.match(mutate(where, rel, from, to), expected, `${where} ${rel ?? ''}: ${to.split('\n')[0]}`);
+
+  // legitimate, non-lifecycle code is never rejected: account and membership states, the ownership phase, ordinary statuses, metadata,
+  // comments, log names
+  const allowed = [
+    ['migrations:auth-service', NEW_SQL('auth-service'), null, 'ALTER TABLE "user" ADD COLUMN "isActive" boolean NOT NULL DEFAULT true;\nALTER TABLE membership ADD COLUMN status text;\n'],
+    ['migrations:organization-service', NEW_SQL('organization-service'), null, "ALTER TABLE ownership_state ADD CONSTRAINT o CHECK (phase IN ('ACTIVE','RETIRED'));\nALTER TABLE organization ADD COLUMN \"website\" text;\nALTER TABLE organization ADD CONSTRAINT w CHECK (website <> '');\n"],
+    ['migrations:billing-service', NEW_SQL('billing-service'), null, "ALTER TABLE invoice ADD COLUMN status2 text CHECK (status2 IN ('open','paid'));\n-- a comment may say 'inactive'\n"],
+    ['billing-service', 'apps/billing-service/src/x.ts', null, "// effectiveStatus arrives with V-4 (S0-C7)\nconst ok = (m: { status: string; isActive: boolean }) => m.status === 'active' && m.isActive;\n"],
+    ['kit', 'libs/service-kit/src/health/x.ts', null, "const logger = new Logger('Lifecycle');\n"],
+    ['organization-service', ORG_CTRL, "  @Patch(':id')", "  @Post(':id/notes')\n  async note() {}\n  @Patch(':id')"],
+    ['auth-service', 'apps/auth-service/src/auth/x.ts', null, "@Controller('auth')\nclass Y {\n  @Post('admin/members/:id/suspend')\n  s() {}\n}\n"],
+  ];
+  for (const [where, rel, from, to] of allowed) assert.equal(mutate(where, rel, from, to), '', `${where} ${rel}: legitimate code must pass`);
+});
