@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse, parseDocument } from 'yaml';
 import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
+import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow } from './lib/checks.mjs';
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
@@ -854,7 +855,8 @@ test('Stage 21.C.2: only the reference-cache protocol may open Auth\'s hierarchy
 
 // ================================================================================ V2 A14: supply chain and provenance
 const ALL_WORKFLOWS = ['audit-service-deploy.yml', 'audit-service-image.yml', 'auth-db-credential-rotate.yml', 'auth-service-deploy.yml', 'auth-service-docker-build.yml', 'core-backup-scheduled.yml',
-  'core-backup.yml', 'core-ci.yml', 'core-rabbitmq-provision.yml', 'organization-service-deploy.yml', 'organization-service-image.yml'];
+  'core-backup.yml', 'core-ci.yml', 'core-rabbitmq-provision.yml', 'organization-service-deploy.yml', 'organization-service-image.yml',
+  'real-broker-certification.yml'];
 const CHECKOUT_PIN = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1';
 
 test('A14 (D2): every external action in every workflow is pinned to a full SHA with its exact release comment', () => {
@@ -4036,4 +4038,33 @@ test('Core V2 OD-BRK-2b-W: activated means operational, the alert spool has one 
   assert.match(mutate(W, 'ReadWritePaths=/var/lib/nawara-core-topology-monitor', 'ReadWritePaths=/var/lib/nawara-core-topology-monitor/recovery'), w3, 'the inbox writable');
   assert.match(mutate(W, 'TimeoutStartSec=60', 'TimeoutStartSec=60\nExecStart=/usr/local/libexec/nawara-core-topology/recover-notification-topology.sh'), /one command, and no recovery path/, 'the recovery guard as a second command');
   assert.match(mutate(W, 'UMask=0077', 'UMask=0077\nReadOnlyPaths=/var/lib/nawara-core-topology-monitor/recovery'), /one command, and no recovery path/, 'the inbox made readable');
+});
+
+// ================================================================================ Core V2 Phase 3: on-demand real-broker certification
+test('Phase 3: the real-broker certification workflow is on demand only, read-only, with no production material', () => {
+  assert.deepEqual(ON_DEMAND_WORKFLOWS, ['real-broker-certification.yml']);
+  const text = workflow('real-broker-certification.yml');
+  assert.deepEqual(checkOnDemandWorkflow('real-broker-certification.yml', text), []);
+  assert.deepEqual(checkWorkflowSafety('real-broker-certification.yml', text), []);
+  const doc = parse(text);
+  const steps = doc.jobs['real-broker'].steps;
+  assert.ok(steps.some((s) => s.run?.includes('npm run test:deploy:real-broker')), 'it runs the five suites through the npm script');
+  assert.ok(doc.jobs['real-broker']['timeout-minutes'] > 0, 'bounded');
+  assert.equal(doc.concurrency['cancel-in-progress'], false, 'a second dispatch waits instead of cancelling a run mid-cleanup');
+  const cleanup = steps.find((s) => s.name?.startsWith('clean up'));
+  assert.equal(cleanup?.if, 'always()', 'cleanup always runs');
+  assert.equal(doc.jobs['real-broker'].environment, undefined);
+});
+
+test('Phase 3: a schedule, an automatic trigger, a write permission, an environment, a secret or SSH is refused', () => {
+  const base = workflow('real-broker-certification.yml');
+  const refused = (mutated, re, what) => assert.ok(checkOnDemandWorkflow('real-broker-certification.yml', mutated).some((p) => re.test(p)), what);
+  refused(base.replace('on:\n  workflow_dispatch:\n', "on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 3 * * 1'\n"), /workflow_dispatch only/, 'a schedule');
+  refused(base.replace('on:\n  workflow_dispatch:\n', 'on:\n  workflow_dispatch:\n  pull_request:\n'), /workflow_dispatch only/, 'a pull_request trigger');
+  refused(base.replace('on:\n  workflow_dispatch:\n', 'on:\n  push:\n'), /workflow_dispatch only/, 'a push trigger instead');
+  refused(base.replace('permissions:\n  contents: read\n', 'permissions:\n  contents: write\n'), /only contents: read/, 'a write token');
+  refused(base.replace('permissions:\n  contents: read\n', 'permissions:\n  contents: read\n  id-token: write\n'), /only contents: read/, 'an id-token');
+  refused(base.replace("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    environment: production\n"), /no environment/, 'an environment');
+  refused(base.replace("      - run: npm ci --ignore-scripts\n", "      - run: npm ci --ignore-scripts\n        env:\n          X: ${{ secrets.DEPLOY_SSH_KEY }}\n"), /no secret/, 'a secret');
+  refused(base.replace("      - run: npm ci --ignore-scripts\n", "      - run: npm ci --ignore-scripts\n      - run: ssh deploy@host true\n"), /no SSH/, 'native ssh');
 });

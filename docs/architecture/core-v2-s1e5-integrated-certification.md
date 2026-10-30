@@ -10,7 +10,9 @@
 
 ## 1. How it runs
 
-`npm run test:deploy:real-broker` (on demand; local Docker only; not part of `core-ci-passed`). `scripts/deploy-tests/real-broker-consumers.mjs`:
+`npm run test:deploy:real-broker` (on demand; local Docker, or a disposable GitHub-hosted runner through the manual
+`real-broker-certification.yml` workflow, see [the runbook](../runbooks/real-broker-certification.md); not part of `core-ci-passed`).
+`scripts/deploy-tests/real-broker-consumers.mjs`:
 
 - provisions an isolated broker with the authentic `provision.sh`, in a test-only variant that re-renders only the generated block with
   Auth's domain events active (the production activation file is unchanged and asserted unchanged);
