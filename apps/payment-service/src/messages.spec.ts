@@ -43,6 +43,8 @@ describe('PAYMENT_MESSAGES', () => {
       invalidRefundRequest: 'The refund request is malformed.', // Core V2 S6b: new messages
       paymentNotRefundable: 'This payment cannot be refunded.',
       refundCaptureUnverified: 'This payment has no verified capture to refund.',
+      refundCaptureNotEligible: 'This captured payment cannot be refunded on its own: it is the last capture backing the sale.', // Core V2 R6H-5
+      captureNotFound: 'No verified capture of this payment has this identifier.', // Core V2 R6H-5
       refundAmountNotFull: 'Only a full refund of the captured amount, in its currency, is supported.',
       refundDisputeOpen: 'A dispute on this payment blocks a new refund attempt.',
       refundDisputeUnavailable: 'The dispute status of this payment could not be verified; nothing was changed.',

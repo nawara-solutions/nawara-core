@@ -114,7 +114,12 @@ no production traffic can reach any of this (the test provider refuses to start 
   per currency, never clamped) and `POST /payment/admin/provider-facts/:id/associations` `{targetType, targetId, receiptSecret}` +
   `Idempotency-Key` (an Auth `provider_fact_associate` receipt, consumed once; append-only; audit `provider_fact.associated`). Billing:
   `GET /payment/reconciliation/items?kind` (`payment.reconciliation.read`, billing-service only, never in production). Event
-  `payment.late_success.recorded` (v1). A refund of one specific capture is not available (contract gap, register PAY-13 G).
+  `payment.late_success.recorded` (v1).
+- **Capture-specific refunds (Core V2 R6H-5; register PAY-07 H; migration 0022) — DEVELOPMENT AND SIMULATION ONLY:** PAY-07 with
+  `captureFactId` refunds exactly one verified capture (a late, duplicate, other-attempt, associated or unrouted settling capture) in full
+  under an Owner receipt whose binding names it; one potentially effective attempt and one completion per capture fact; the ordinary
+  per-payment rules are unchanged. `GET /payment/payments/:paymentId/captures/:factId` (`payment.read`, the producer) is the evidence
+  Billing binds a capture-specific case to.
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
@@ -141,8 +146,7 @@ no production traffic can reach any of this (the test provider refuses to start 
 - Cash submissions and their confirm/reject flow — **O-4** (who may submit), **O-5** (who may
   confirm/reject).
 - Refunds beyond Core V2 S6b's simulation scope: partial refunds stay deferred (S0 D4); real provider refunds, allocation and completion
-  (S6c), reversal (S6d), disputes (S6e) and reconciliation cases and `FinancialLoss` (S6h-B) are later stages; the refund of one specific
-  capture (R6H-5) waits on a contract decision.
+  (S6c), reversal (S6d), disputes (S6e) and reconciliation cases and `FinancialLoss` (S6h-B) are later stages.
 - Producer service-token scopes and non-test-fixture producers — **O-13**, **O-14**.
 - Organization/platform/company hierarchy validation with no user context — **O-15**.
 - Any currency beyond the configured list, and a default/maximum payment lifetime — **O-10**, **O-16**.

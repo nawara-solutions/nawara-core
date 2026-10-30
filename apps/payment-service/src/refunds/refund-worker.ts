@@ -139,8 +139,10 @@ export class RefundWorker {
       const { rowCount } = await this.db.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1 AND status = 'authorized'`, [a.id]);
       if (rowCount !== 1) return false;
     }
-    const { rows: tx } = await this.db.query<{ providerTransactionId: string | null }>(
-      `SELECT "providerTransactionId" FROM payment_attempt WHERE id = $1`, [a.capturedAttemptId]);
+    // Core V2 R6H-5: a capture-specific refund returns exactly its capture's provider transaction (an associated fact's attempt is only an anchor)
+    const { rows: tx } = a.captureSpecific
+      ? await this.db.query<{ providerTransactionId: string | null }>(`SELECT "providerTxnId" AS "providerTransactionId" FROM provider_transaction_fact WHERE id = $1`, [a.captureFactId])
+      : await this.db.query<{ providerTransactionId: string | null }>(`SELECT "providerTransactionId" FROM payment_attempt WHERE id = $1`, [a.capturedAttemptId]);
     let result: RefundDispatchResult;
     try {
       result = await provider.refund!({

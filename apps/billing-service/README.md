@@ -154,6 +154,10 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   - Eligible: a verified capture (a paid payment request with an applied `payment.succeeded` receipt) of a personal purchase (direct or
     assisted, not reversed), a late assisted settlement held for reconciliation, or a `non_entitlement` invoice. Organization-subscription
     payments are not. Billing computes the full amount; no partial refund.
+  - Core V2 R6H-5 (register BIL-23 G; `db/migrations/0041`): `{paymentId, captureFactId, reason, legalOverride?}` opens a
+    **capture-specific** case for ONE verified capture the ordinary refund cannot return (`late_capture`, `duplicate_capture`,
+    `unrouted_capture`), with the capture's amount and currency read from Payment (`GET /payment/payments/:id/captures/:factId`). One live
+    case per capture; the relay names the capture; completion has no commercial effect (`none / capture_refunded`).
   - One `open` or `completed` case per payment; `cancelled` frees it; `completed` is reserved for S6c. An open dispute blocks a case; the
     dispute boundary has no source before S6e.
   - Opening a case refunds nothing and changes no purchase, entitlement or obligation.

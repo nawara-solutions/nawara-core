@@ -13,6 +13,11 @@ export interface RefundCaseInput {
   reason: RefundReason;
   /** R6A-5 (Q1): recorded in the case and its audit evidence; grants no permission and bypasses nothing. */
   legalOverride: boolean;
+  /**
+   * Core V2 R6H-5: a capture-specific case names the ONE verified capture (Payment's capture fact) it refunds in full; its amount and currency
+   * are the capture's, read from Payment, never a request value.
+   */
+  captureFactId?: string;
 }
 
 const bad = (message: (typeof BILLING_MESSAGES)[keyof typeof BILLING_MESSAGES], params?: Record<string, string>) =>
@@ -25,13 +30,17 @@ const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typ
  */
 export function normaliseRefundCaseInput(raw: unknown): RefundCaseInput {
   if (!isObject(raw)) throw bad(BILLING_MESSAGES.requestMustBeObject);
-  for (const k of Object.keys(raw)) if (!['paymentId', 'reason', 'legalOverride'].includes(k)) throw bad(BILLING_MESSAGES.unknownField, { name: k });
+  for (const k of Object.keys(raw)) if (!['paymentId', 'reason', 'legalOverride', 'captureFactId'].includes(k)) throw bad(BILLING_MESSAGES.unknownField, { name: k });
   if (typeof raw.paymentId !== 'string' || !UUID.test(raw.paymentId)) throw bad(BILLING_MESSAGES.mustBeUuid, { field: 'paymentId' });
   if (typeof raw.reason !== 'string' || !(REFUND_REASONS as readonly string[]).includes(raw.reason)) {
     throw bad(BILLING_MESSAGES.valueOneOf, { field: 'reason', values: REFUND_REASONS.join(', ') });
   }
   if (raw.legalOverride !== undefined && typeof raw.legalOverride !== 'boolean') throw bad(BILLING_MESSAGES.valueOneOf, { field: 'legalOverride', values: 'true, false' });
-  return { paymentId: raw.paymentId.toLowerCase(), reason: raw.reason as RefundReason, legalOverride: raw.legalOverride === true };
+  if (raw.captureFactId !== undefined && (typeof raw.captureFactId !== 'string' || !UUID.test(raw.captureFactId))) throw bad(BILLING_MESSAGES.mustBeUuid, { field: 'captureFactId' });
+  if (raw.captureFactId !== undefined && raw.reason === 'recovery_surplus') throw bad(BILLING_MESSAGES.valueOneOf, { field: 'reason', values: REFUND_REASONS.filter((r) => r !== 'recovery_surplus').join(', ') });
+  const input: RefundCaseInput = { paymentId: raw.paymentId.toLowerCase(), reason: raw.reason as RefundReason, legalOverride: raw.legalOverride === true };
+  if (raw.captureFactId !== undefined) input.captureFactId = (raw.captureFactId as string).toLowerCase();
+  return input;
 }
 
 /** A cancellation carries no body (an empty object, or none). */

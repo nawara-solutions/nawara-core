@@ -52,6 +52,7 @@ const BILLING_MIGRATIONS = [
   '0038_fraud_holds.sql', // Core V2 S6e-H: fraud_hold, its evidence, release, expiry and compensation evidence
   '0039_recovery.sql', // Core V2 S6f: recovery obligations, reviews, settlement channels, recovery payments, surpluses and their resolution
   '0040_late_settlement_application.sql', // Core V2 S6g: L-4 application, attestation, evidence; obligation history (one live per request)
+  '0041_capture_specific_refund_cases.sql', // Core V2 R6H-5: capture-specific refund cases (one live per capture fact), no commercial effect
 ];
 /** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022) and S3d's billing_platform (0023) and S3f's fee tables (0025) and checkout_idempotency (0026) and S5a's assistance tables (0029) and S5b's settlement channel, cash-return obligation and late-settlement record (0030) and S5c's disputes, dispute responses and corrections (0031) and S6a's refund cases and their idempotency (0033) and S6b's authorization relays (0034) and S6c's case completions (0035) and S6d's commercial effects (0036). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [

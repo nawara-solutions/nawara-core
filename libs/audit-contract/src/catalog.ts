@@ -533,8 +533,8 @@ const SPEC = {
       company_id: { type: 'uuid', shape: 'value', required: true },
       platform_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
-      // + Core V2 S6f (R6F-5 Path A): the recovery-surplus basis and its reason
-      eligibility: { type: 'code', shape: 'value', required: true, values: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement', 'recovery_surplus'] },
+      // + Core V2 S6f (R6F-5 Path A): the recovery-surplus basis and its reason; + Core V2 R6H-5: the capture-specific basis (one verified capture)
+      eligibility: { type: 'code', shape: 'value', required: true, values: ['personal_purchase', 'late_assisted_settlement', 'non_entitlement', 'recovery_surplus', 'capture_specific'] },
       reason: { type: 'code', shape: 'value', required: true, values: ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement', 'recovery_surplus'] },
       legal_override: { type: 'boolean', shape: 'value', required: true },
     },

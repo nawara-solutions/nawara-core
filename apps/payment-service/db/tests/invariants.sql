@@ -808,6 +808,43 @@ SELECT pg_temp.expect_ok('S6h-P', 'PAY-13: an unmatched refund to an authorizati
 SELECT pg_temp.expect_constraint('S6h-P', 'FC-2: a pending association never allows an allocation', pg_temp.alloc(:'hu2', 300, 0, 300), 'refund_allocation_binding');
 SELECT pg_temp.expect_constraint('S6h-P', 'FC-2: an unassociated unmatched refund is never allocated', pg_temp.alloc(:'hu3', 100, 0, 100), 'refund_allocation_binding');
 
+-- ======================================================= Core V2 R6H-5: capture-specific refunds (0022) ----
+CREATE FUNCTION pg_temp.r5(id uuid, pid uuid, fact uuid, attempt uuid, amt bigint, specific boolean, company uuid DEFAULT '00000000-0000-4000-8000-00000000c6e0') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId",
+      provider, "liveMode", "receiptDigest", "captureSpecific") VALUES (%L, %L, 'billing-service', gen_random_uuid(), %L, %s, 'TND', 'duplicate_charge', false, %L, %L, 'test', false, repeat('c', 64), %L)$$,
+    id, pid, company, amt, fact, attempt, specific);
+$f$;
+\o /dev/null
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-r6h5', 'user', 'u-r6h5', 'company', '00000000-0000-4000-8000-00000000c6e0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS q1 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'q1', 1, 'test', false) RETURNING id AS q1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'q1';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-r6h5-1', "submittedAt" = now() WHERE id = :'q1a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'q1a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-r6h5-1', 'capture', :'q1', :'q1a', 1000, 'TND', false, 'status_check') RETURNING id AS q1f \gset
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-r6h5-2', 'capture', :'q1', :'q1a', 1000, 'TND', false, 'status_check') RETURNING id AS q1g \gset
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'q1a', "closedAt" = now() WHERE id = :'q1';
+\o
+SELECT pg_temp.expect_constraint('R6H-5', 'a capture-specific refund is the capture in full', pg_temp.r5(gen_random_uuid(), :'q1', :'q1g', :'q1a', 999, true), 'refund_attempt_capture_verified');
+SELECT pg_temp.expect_constraint('R6H-5', 'never another payment''s capture', pg_temp.r5(gen_random_uuid(), :'q1', :'e1f', :'e1a', 1000, true), 'refund_attempt_capture_verified');
+SELECT pg_temp.expect_constraint('R6H-5', 'never for another Company', pg_temp.r5(gen_random_uuid(), :'q1', :'q1g', :'q1a', 1000, true, gen_random_uuid()), 'refund_attempt_payment_refundable');
+SELECT pg_temp.expect_ok('R6H-5', 'a distinct duplicate capture refunded on its own', pg_temp.r5('00000000-0000-4000-8000-0000000005a1', :'q1', :'q1g', :'q1a', 1000, true));
+SELECT pg_temp.expect_error('R6H-5', 'one potentially effective attempt per capture (any kind)', pg_temp.r5(gen_random_uuid(), :'q1', :'q1g', :'q1a', 1000, true), '23505');
+SELECT pg_temp.expect_constraint('R6H-5', 'the last capture backing the sale is never refunded on its own', pg_temp.r5(gen_random_uuid(), :'q1', :'q1f', :'q1a', 1000, true), 'refund_attempt_capture_eligible');
+SELECT pg_temp.expect_constraint('R6H-5', 'the ordinary refund of an ambiguous sale stays refused (two captures of the settling attempt)', pg_temp.r5(gen_random_uuid(), :'q1', :'q1f', :'q1a', 1000, false), 'refund_attempt_capture_verified');
+SELECT pg_temp.expect_error('R6H-5', 'the capture-specific flag never changes', $$UPDATE refund_attempt SET "captureSpecific" = false WHERE id = '00000000-0000-4000-8000-0000000005a1'$$, '23514');
+SELECT pg_temp.expect_constraint('R6H-5', 'an associated capture: only with the payment''s first attempt of its provider as anchor', pg_temp.r5(gen_random_uuid(), :'e1', :'hu1', :'q1a', 1000, true), 'refund_attempt_capture_verified');
+SELECT pg_temp.expect_ok('R6H-5', 'an unmatched capture associated with the payment, refunded on its own', pg_temp.r5(gen_random_uuid(), :'e1', :'hu1', :'e1a', 1000, true));
+SELECT pg_temp.expect_constraint('R6H-5', 'an unmatched capture NOT associated with the payment is never refunded', pg_temp.r5(gen_random_uuid(), :'q1', :'hu1', :'q1a', 1000, true), 'refund_attempt_capture_verified');
+SELECT pg_temp.assert_eq('R6H-5', 'an authorization''s capture is derived from its attempt (existing S6c authorization)',
+  (SELECT (z."captureFactId" = a."captureFactId" AND z."captureSpecific" = a."captureSpecific")::text FROM refund_authorization z JOIN refund_attempt a ON a.id = z."refundAttemptId" WHERE z.id = :'z1'), 'true');
+SELECT pg_temp.assert_eq('R6H-5', 'completion uniqueness: per payment for ordinary authorizations, per capture for every one',
+  (SELECT string_agg(indexname || ':' || (indexdef LIKE '%UNIQUE%')::text, ',' ORDER BY indexname) FROM pg_indexes
+    WHERE indexname IN ('refund_authorization_payment_completed', 'refund_authorization_capture_completed', 'refund_attempt_one_effective', 'refund_attempt_one_effective_capture')),
+  'refund_attempt_one_effective:true,refund_attempt_one_effective_capture:true,refund_authorization_capture_completed:true,refund_authorization_payment_completed:true');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

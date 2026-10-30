@@ -14,7 +14,7 @@ import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
 import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
 import { HttpOwnerAuthority } from '../src/platforms/owner-authority.client.js';
 import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
-import type { PaymentRefundClient, PaymentRefunds, RefundRelayBody, RefundRelayOutcome } from '../src/refunds/payment-refund-client.js';
+import type { CaptureReadOutcome, PaymentRefundClient, PaymentRefunds, RefundRelayBody, RefundRelayOutcome } from '../src/refunds/payment-refund-client.js';
 import { RefundRelayReconciler } from '../src/refunds/refund-relay-reconciler.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -33,6 +33,12 @@ class ScriptedPaymentRefunds implements PaymentRefundClient {
     this.calls.push({ paymentId, key, body });
     return this.next.shift() ?? { kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: OWNER } } };
   }
+  /** Core V2 R6H-5: scripted captures (none unless a test puts one) */
+  captures = new Map<string, CaptureReadOutcome>();
+  async capture(paymentId: string, factId: string): Promise<CaptureReadOutcome> {
+    return this.captures.get(`${paymentId}:${factId}`) ?? { kind: 'not_found' };
+  }
+
   async refunds(paymentId: string): Promise<PaymentRefunds | null> {
     if (this.readDown) throw new Error('payment unavailable');
     return this.records.get(paymentId) ?? { attempts: [], refusals: [], authorizations: [] };

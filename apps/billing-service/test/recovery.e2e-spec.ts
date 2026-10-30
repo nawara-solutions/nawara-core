@@ -53,6 +53,7 @@ class FakePaymentClient implements PaymentClient {
 const refundsAtPayment: PaymentRefundClient = {
   relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+  capture: async () => ({ kind: 'not_found' as const }), // Core V2 R6H-5: no capture-specific case in this suite
 };
 
 /** Core V2 S6e-D: Payment's losses read under test control (a page of verified losses, or Payment unavailable). */

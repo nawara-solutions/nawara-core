@@ -1295,6 +1295,21 @@ SELECT pg_temp.assert_eq('S6g', 'every S6g evidence table is append-only (an upd
 SELECT pg_temp.assert_eq('S6g', 'new late settlements keep Payment''s original instant (insert guard)',
   (SELECT (prosrc LIKE '%assistance_late_settlement_settled_at%')::text FROM pg_proc WHERE proname = 'billing_assistance_late_settlement_guard'), 'true');
 
+-- ======================================================= Core V2 R6H-5: capture-specific refund cases (0041) ----
+-- The eligible capture-specific paths are exercised end to end by test/refund-cases.e2e-spec.ts; here, the guards that need no fixture.
+SELECT pg_temp.expect_error('R6H-5', 'a capture-specific case needs its payment''s own request and a capture basis', $$INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", eligibility,
+    "companyId", "platformId", amount, currency, reason, "openedBy", "captureFactId", "captureBasis")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'capture_specific', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'duplicate_charge', gen_random_uuid(), gen_random_uuid(), 'late_capture')$$, '23514');
+SELECT pg_temp.assert_eq('R6H-5', 'one live ORDINARY case per payment (FC-3, S6a name kept); one live case per capture fact',
+  (SELECT string_agg(indexname || ':' || (indexdef LIKE '%UNIQUE%' AND indexdef LIKE '%open%' AND indexdef LIKE '%completed%')::text
+      || ':' || (indexdef LIKE '%capture_specific%')::text, ',' ORDER BY indexname)
+     FROM pg_indexes WHERE indexname IN ('refund_case_payment_active_unique', 'refund_case_capture_active_unique')),
+  'refund_case_capture_active_unique:true:false,refund_case_payment_active_unique:true:true');
+SELECT pg_temp.assert_eq('R6H-5', 'a capture-specific case names one capture and a basis; an ordinary one never does and keeps its receipt',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%captureFactId%' AND pg_get_constraintdef(oid) LIKE '%unrouted_capture%')::text FROM pg_constraint WHERE conname = 'refund_case_capture_shape'), 'true');
+SELECT pg_temp.assert_eq('R6H-5', 'its only commercial effect is none / capture_refunded',
+  (SELECT count(*)::text FROM pg_trigger WHERE tgname = 'refund_case_effect_06_capture_basis'), '1');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

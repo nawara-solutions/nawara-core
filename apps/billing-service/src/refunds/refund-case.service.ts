@@ -8,6 +8,7 @@ import { billingError, notFound } from '../domain/errors.js';
 import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import { PAYMENT_DISPUTE_EXPOSURE, type DisputeExposure } from './dispute-exposure.js';
+import { PAYMENT_REFUND_CLIENT, type PaymentCapture, type PaymentRefundClient } from './payment-refund-client.js';
 import { RefundCommandIdempotency, type RefundCommandResult } from './refund-idempotency.js';
 import type { RefundCaseInput } from './refund-input.js';
 import type { VerifiedRefundOwner } from './refund-owner.guard.js';
@@ -19,9 +20,13 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
 export interface CaseRow {
   id: string; paymentId: string; companyId: string; platformId: string; organizationId: string | null; amount: string; currency: string;
   status: string; eligibility: string; reason: string; legalOverride: boolean; openedAt: Date; cancelledAt: Date | null; completedAt: Date | null;
+  captureFactId: string | null; captureBasis: string | null;
 }
 const CASE_COLUMNS = `id, "paymentId", "companyId", "platformId", "organizationId", amount, trim(currency) AS currency, status, eligibility, reason,
-  "legalOverride", "openedAt", "cancelledAt", "completedAt"`;
+  "legalOverride", "openedAt", "cancelledAt", "completedAt", "captureFactId", "captureBasis"`;
+/** Core V2 R6H-5: the Billing basis of a capture-specific case, from Payment's evidence of the capture (null: no capture-specific basis). */
+type CaptureCaseBasis = 'late_capture' | 'duplicate_capture' | 'unrouted_capture';
+const TERMINAL_UNPAID = ['failed', 'expired', 'cancelled'];
 
 interface RelayView { id: string; attemptStatus: string | null; refusal: string | null; requestedAt: Date; statusAt: Date | null }
 
@@ -39,6 +44,8 @@ function representCase(c: CaseRow, relays: RelayView[], completion: CompletionVi
     id: c.id, paymentId: c.paymentId, companyId: c.companyId, platformId: c.platformId, organizationId: c.organizationId,
     amount: Number(c.amount), currency: c.currency, status: c.status, eligibility: c.eligibility, reason: c.reason, legalOverride: c.legalOverride,
     openedAt: iso(c.openedAt), cancelledAt: iso(c.cancelledAt), completedAt: iso(c.completedAt),
+    // Core V2 R6H-5: the one verified capture a capture-specific case refunds, and why (null for an ordinary case)
+    capture: c.captureFactId ? { captureFactId: c.captureFactId, basis: c.captureBasis } : null,
     attempts: relays.map((r) => ({ refundAttemptId: r.id, status: r.attemptStatus ?? 'unconfirmed', refusal: r.refusal, requestedAt: iso(r.requestedAt), statusAt: iso(r.statusAt) })),
     // Core V2 S6c (R6C-12): Billing's own record of Payment's financial completion (null until the case is completed)
     completion: completion ? { refundAuthorizationId: completion.refundAuthorizationId, refundAttemptId: completion.refundAttemptId, completedAt: iso(completion.completedAt),
@@ -75,6 +82,7 @@ export class RefundCaseService {
     @Inject(OWNER_AUTHORITY) private readonly owners: OwnerAuthority,
     @Inject(PAYMENT_DISPUTE_EXPOSURE) private readonly disputes: DisputeExposure,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
+    @Inject(PAYMENT_REFUND_CLIENT) private readonly payment: PaymentRefundClient,
   ) {}
 
   private refuseInProduction(): void {
@@ -99,6 +107,7 @@ export class RefundCaseService {
     if (!(await this.owners.platformAllowed(owner.bearer, platformId, this.deadline()))) throw notFound();
     // R6A-3: the dispute boundary, outside any transaction; an implementation that cannot answer throws (fail closed, nothing written)
     if ((await this.disputes.status(input.paymentId, this.deadline())) !== 'none') throw billingError(409, 'refund_dispute_open', BILLING_MESSAGES.refundDisputeOpen);
+    if (input.captureFactId) return this.openCapture(owner, key, input, input.captureFactId, facts, platformId, ctx);
     return this.idempotency.run(owner.userId, key, 'refund_case.open', { ...input }, async (q): Promise<RefundCommandResult> => {
       const pr = (await q.query<{ id: string; status: string; amount: string; currency: string; organizationId: string | null; purpose: string | null }>(
         `SELECT pr.id, pr.status, pr.amount, pr.currency, i."organizationId", e.purpose
@@ -109,7 +118,11 @@ export class RefundCaseService {
       if (!basis) throw notEligible();
       // Core V2 S6f (R6F-5 Path A): the recovery-surplus reason is required for, and only for, the recovery-surplus basis
       if ((input.reason === 'recovery_surplus') !== (basis.eligibility === 'recovery_surplus')) throw notEligible();
-      if ((await q.query(`SELECT 1 FROM refund_case WHERE "paymentId" = $1 AND status IN ('open', 'completed')`, [input.paymentId])).rows.length > 0) throw caseExists();
+      // Core V2 R6H-5: one live ORDINARY case per payment; an open capture-specific case (unresolved exposure) or the settling capture's own
+      // capture-specific case also refuses it (the database guard enforces both)
+      if ((await q.query(`SELECT 1 FROM refund_case WHERE "paymentId" = $1 AND status IN ('open', 'completed') AND eligibility <> 'capture_specific'
+            UNION ALL SELECT 1 FROM refund_case WHERE "paymentId" = $1 AND eligibility = 'capture_specific'
+              AND (status = 'open' OR (status = 'completed' AND "captureBasis" = 'unrouted_capture'))`, [input.paymentId])).rows.length > 0) throw caseExists();
       const { id } = (await q.query<{ id: string }>(
         `INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", "receiptId", eligibility, "purchaseId", "lateSettlementId", "companyId", "platformId",
            "organizationId", amount, currency, reason, "legalOverride", "openedBy", "surplusId")
@@ -124,6 +137,72 @@ export class RefundCaseService {
       }, ctx);
       return { status: 201, body: representCase(c, []) };
     });
+  }
+
+  /**
+   * Core V2 R6H-5 (the Owner's decision, 2026-10-30): `{paymentId, captureFactId, reason, legalOverride?}` opens a CAPTURE-SPECIFIC case for
+   * one verified capture the ordinary refund cannot return. Authority and the dispute boundary are the ordinary case's (checked by the caller).
+   * Then Payment's evidence of the capture, read OUTSIDE any transaction with Billing's own service token: it must be a capture of this
+   * payment, uncontested, with no refund of that money done or in flight. Its basis maps to Billing's: `late_capture` (the payment ended
+   * without success; the request too), `duplicate_capture` (a further capture of a succeeded payment), `unrouted_capture` (the settling capture
+   * of a paid request with no routing record). The amount and currency are the capture's (Payment's), never a request value. Payment
+   * unanswerable is 503, nothing written; the database re-derives Billing's side under the request's row lock (migration 0041).
+   */
+  private async openCapture(owner: VerifiedRefundOwner, key: string, input: RefundCaseInput, factId: string, facts: PaymentFacts, platformId: string,
+    ctx: TransitionContext) {
+    const read = await this.payment.capture(input.paymentId, factId);
+    if (read.kind === 'unknown') throw billingError(503, 'refund_payment_unavailable', BILLING_MESSAGES.refundPaymentUnavailable);
+    if (read.kind === 'not_found') throw notEligible();
+    const capture = read.capture;
+    if (capture.conflicted) throw notEligible();
+    if (capture.refund !== 'none') throw caseExists();
+    return this.idempotency.run(owner.userId, key, 'refund_case.open', { ...input }, async (q): Promise<RefundCommandResult> => {
+      const pr = (await q.query<{ id: string; status: string; organizationId: string | null; purpose: string | null; routed: boolean }>(
+        `SELECT pr.id, pr.status, i."organizationId", e.purpose, e."invoiceId" IS NOT NULL AS routed
+           FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" LEFT JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId"
+          WHERE pr.id = $1 FOR UPDATE OF pr`, [facts.paymentRequestId])).rows[0]!;
+      if (pr.purpose === 'organization_subscription' || pr.purpose === 'recovery_settlement') throw notEligible();
+      const basis = await this.captureBasis(q, capture, pr, facts);
+      if (!basis) throw notEligible();
+      if ((await q.query(`SELECT 1 FROM refund_case WHERE "captureFactId" = $1 AND status IN ('open', 'completed')
+            UNION ALL SELECT 1 FROM refund_case WHERE "paymentId" = $2 AND eligibility <> 'capture_specific'
+              AND (status = 'open' OR (status = 'completed' AND $3::text = 'unrouted_capture'))`, [factId, input.paymentId, basis.basis])).rows.length > 0) throw caseExists();
+      const { id } = (await q.query<{ id: string }>(
+        `INSERT INTO refund_case ("paymentId", "paymentRequestId", "invoiceId", "receiptId", eligibility, "companyId", "platformId", "organizationId", amount, currency,
+           reason, "legalOverride", "openedBy", "captureFactId", "captureBasis")
+         VALUES ($1, $2, $3, $4, 'capture_specific', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+        [input.paymentId, facts.paymentRequestId, facts.invoiceId, basis.receiptId, owner.companyId, platformId, pr.organizationId, capture.amount, capture.currency,
+          input.reason, input.legalOverride, owner.userId, factId, basis.basis])).rows[0]!;
+      const c = await this.load(q, id);
+      await this.audit.record(q, 'refund_case.opened', {
+        organizationId: c.organizationId, resource: { type: 'refund_case', id },
+        changes: { payment_id: c.paymentId, company_id: c.companyId, platform_id: c.platformId, amount: Number(c.amount), eligibility: 'capture_specific', reason: c.reason as never,
+          legal_override: c.legalOverride },
+      }, ctx);
+      return { status: 201, body: representCase(c, []) };
+    });
+  }
+
+  /** R6H-5: Payment's basis of the capture, checked against Billing's own payment request (the database guard re-checks Billing's side). */
+  private async captureBasis(q: Queryable, capture: PaymentCapture, pr: { id: string; status: string; routed: boolean }, facts: PaymentFacts)
+    : Promise<{ basis: CaptureCaseBasis; receiptId: string | null } | null> {
+    if (capture.basis !== 'associated_capture' && capture.basis !== 'late_capture' && TERMINAL_UNPAID.includes(capture.paymentStatus)) return null; // defensive
+    if (TERMINAL_UNPAID.includes(capture.paymentStatus)) {
+      if (!TERMINAL_UNPAID.includes(pr.status)) return null;
+      if ((await q.query(`SELECT 1 FROM subscription_purchase WHERE "paymentRequestId" = $1`, [pr.id])).rows.length > 0) return null;
+      return { basis: 'late_capture', receiptId: null };
+    }
+    if (capture.paymentStatus !== 'succeeded' || pr.status !== 'paid') return null;
+    if (capture.basis === 'duplicate_capture' || capture.basis === 'other_attempt_capture' || capture.basis === 'associated_capture') {
+      return { basis: 'duplicate_capture', receiptId: null };
+    }
+    if (capture.basis !== 'settling_capture' || pr.routed) return null; // the ordinary refund returns a routed sale's own capture
+    if ((await q.query(`SELECT 1 FROM subscription_purchase WHERE "invoiceId" = $1 UNION ALL SELECT 1 FROM assistance_late_settlement WHERE "paymentRequestId" = $2`,
+      [facts.invoiceId, pr.id])).rows.length > 0) return null;
+    const receipt = (await q.query<{ id: string }>(
+      `SELECT id FROM payment_event_receipt WHERE "paymentRequestId" = $1 AND "eventName" = 'payment.succeeded' AND outcome = 'applied' ORDER BY "receivedAt", id LIMIT 1`,
+      [pr.id])).rows[0];
+    return receipt ? { basis: 'unrouted_capture', receiptId: receipt.id } : null;
   }
 
   /**

@@ -26,6 +26,8 @@ export interface RefundAttemptRow {
   reason: RefundReason;
   legalOverride: boolean;
   captureFactId: string;
+  /** Core V2 R6H-5: the attempt refunds exactly `captureFactId` under a capture-specific receipt (migration 0022) */
+  captureSpecific: boolean;
   capturedAttemptId: string;
   provider: string;
   liveMode: boolean;
@@ -59,6 +61,8 @@ export interface RefundBinding {
   currency: string;
   reason: string;
   legalOverride: boolean;
+  /** Core V2 R6H-5 (Auth receipt contract §17f): present exactly for a capture-specific refund; absent, never null, for an ordinary one */
+  captureFactId?: string;
 }
 
 /**
@@ -90,11 +94,14 @@ export interface ProviderFactAssociateBinding {
 
 export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | ProviderFactAssociateBinding;
 
-export function bindingOf(a: Pick<RefundAttemptRow, 'companyId' | 'refundCaseId' | 'paymentId' | 'amount' | 'currency' | 'reason' | 'legalOverride'>): RefundBinding {
-  return {
+export function bindingOf(a: Pick<RefundAttemptRow, 'companyId' | 'refundCaseId' | 'paymentId' | 'amount' | 'currency' | 'reason' | 'legalOverride' | 'captureFactId' | 'captureSpecific'>): RefundBinding {
+  const b: RefundBinding = {
     operation: 'refund', audience: 'payment-service', companyId: a.companyId, refundCaseId: a.refundCaseId, paymentId: a.paymentId,
     amount: Number(a.amount), currency: a.currency.trim(), reason: a.reason, legalOverride: a.legalOverride,
   };
+  // R6H-5: only a capture-specific attempt names its capture, so an ordinary attempt's binding (and Auth's digest of it) is exactly the S6b one
+  if (a.captureSpecific) b.captureFactId = a.captureFactId;
+  return b;
 }
 
 /**

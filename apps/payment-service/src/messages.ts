@@ -166,6 +166,16 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "Ce paiement n'a pas de capture vérifiée à rembourser.",
     ar: 'لا توجد لعملية الدفع هذه عملية تحصيل موثّقة يمكن استردادها.',
   },
+  refundCaptureNotEligible: {
+    en: 'This captured payment cannot be refunded on its own: it is the last capture backing the sale.',
+    fr: "Cette capture ne peut pas être remboursée seule : c'est la dernière capture qui couvre la vente.",
+    ar: 'لا يمكن استرداد عملية التحصيل هذه بمفردها: إنها آخر عملية تحصيل تغطي عملية البيع.',
+  },
+  captureNotFound: {
+    en: 'No verified capture of this payment has this identifier.',
+    fr: "Aucune capture vérifiée de ce paiement ne porte cet identifiant.",
+    ar: 'لا توجد عملية تحصيل موثّقة لعملية الدفع هذه بهذا المعرّف.',
+  },
   refundAmountNotFull: {
     en: 'Only a full refund of the captured amount, in its currency, is supported.',
     fr: 'Seul un remboursement intégral du montant capturé, dans sa devise, est pris en charge.',

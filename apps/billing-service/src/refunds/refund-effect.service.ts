@@ -124,6 +124,11 @@ export class RefundEffectService {
           }, ctx);
           return this.record(q, c.id, 'none', null, null, 'recovery_surplus_refunded');
         }
+        // Core V2 R6H-5: a capture-specific refund returned money that backs no sale: no purchase, no entitlement, no obligation, no recovery debt
+        if (c.eligibility === 'capture_specific') {
+          if (c.purchaseId || c.lateSettlementId) throw new Contradiction('basis_mismatch');
+          return this.record(q, c.id, 'none', null, null, 'capture_refunded');
+        }
         if (c.eligibility === 'non_entitlement') {
           if (c.purchaseId || c.lateSettlementId) throw new Contradiction('basis_mismatch');
           return this.record(q, c.id, 'none', null, null, 'no_entitlement_basis');
