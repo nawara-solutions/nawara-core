@@ -119,6 +119,9 @@ Core V2 S6f (the Owner's R6F-5): `recovery_surplus_external` (`companyId`, `surp
 Core V2 S6g (the Owner's R6G-1, R6G-3): `late_settlement_apply` (`companyId`, `lateSettlementId`, `assistanceRequestId`, `beneficiaryUserId`,
 `reasonCode` ∈ `cash_not_returned_attested` / `cash_not_returned_evidenced`), audience `billing-service`, after the dedicated
 `billing.late_settlement.apply` step-up.
+Core V2 S6h (the Owner's R6H-3, R6H-8): `provider_fact_associate` (`companyId`, `factId`, `kind`, `amount`, `currency`, `targetType` ∈
+`payment` / `refund_authorization`, `targetId`), audience `payment-service`, after `payment.provider_fact.associate`; and `recovery_write_off`
+(`companyId`, `obligationId`, `organizationId`, `amount`, `currency`), audience `billing-service`, after `billing.recovery.write_off`.
 
 | Route | Caller | Purpose |
 |---|---|---|

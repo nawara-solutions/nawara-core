@@ -71,13 +71,38 @@ export class LateSettlementApplyBindingDto {
   @ApiProperty({ enum: ['cash_not_returned_attested', 'cash_not_returned_evidenced'] }) reasonCode!: string;
 }
 
-/** A refund, dispute-decision, fraud-hold, external-surplus or late-settlement binding, by `operation` (parsed strictly by `parseBinding`). */
-const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+/** Core V2 S6h Auth prerequisite (the Owner's R6H-3): an Owner's association of one unmatched provider fact (payment-service only). */
+export class ProviderFactAssociateBindingDto {
+  @ApiProperty({ enum: ['provider_fact_associate'] }) operation!: 'provider_fact_associate';
+  @ApiProperty({ enum: ['payment-service'] }) audience!: 'payment-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid' }) factId!: string;
+  @ApiProperty({ enum: ['capture', 'refund', 'chargeback'] }) kind!: string;
+  @ApiProperty({ type: 'integer', minimum: 1, description: 'Minor units: the fact\'s own amount.' }) amount!: number;
+  @ApiProperty({ pattern: '^[A-Z]{3}$' }) currency!: string;
+  @ApiProperty({ enum: ['payment', 'refund_authorization'] }) targetType!: string;
+  @ApiProperty({ format: 'uuid' }) targetId!: string;
+}
 
-@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto)
+/** Core V2 S6h Auth prerequisite (the Owner's R6H-8): an Owner's recovery write-off, loss recognition only (billing-service only). */
+export class RecoveryWriteOffBindingDto {
+  @ApiProperty({ enum: ['recovery_write_off'] }) operation!: 'recovery_write_off';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid' }) obligationId!: string;
+  @ApiProperty({ format: 'uuid' }) organizationId!: string;
+  @ApiProperty({ type: 'integer', minimum: 1, description: 'Minor units: the outstanding amount written off.' }) amount!: number;
+  @ApiProperty({ pattern: '^[A-Z]{3}$' }) currency!: string;
+}
+
+/** A refund, dispute-decision, fraud-hold, external-surplus, late-settlement, provider-fact association or recovery write-off binding, by `operation` (parsed strictly by `parseBinding`). */
+const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto,
+  ProviderFactAssociateBindingDto, RecoveryWriteOffBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+
+@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto, ProviderFactAssociateBindingDto, RecoveryWriteOffBindingDto)
 /** AUTH-01 body. The step-up proof is never stored with the receipt, logged, audited or part of the replay hash (D-A2 §12). */
 export class IssueReceiptDto {
-  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external, late_settlement_apply)." })
+  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external, late_settlement_apply, provider_fact_associate, recovery_write_off)." })
   @IsString() @MaxLength(64) stepUpToken!: string;
 
   @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;

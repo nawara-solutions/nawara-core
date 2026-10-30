@@ -89,6 +89,13 @@ export const STEP_UP_METHODS = {
   // by the issuance of a `late_settlement_apply` receipt bound to the exact Company, late settlement, request, beneficiary and reason code
   // (receipt-binding.ts); POST /auth/step-up/verify refuses it without consuming it. Declaring it activates no Billing operation.
   'billing.late_settlement.apply': ['totp', 'webauthn'],
+  // Core V2 S6h prerequisite (the Owner's R6H-3, R6H-8, 2026-10-30), each with a fresh, factor-only proof, never the bare key, and each
+  // Auth-local: consumed only by the issuance of its own receipt (receipt-binding.ts); POST /auth/step-up/verify refuses them without
+  // consuming them. `payment.provider_fact.associate`: an Owner's association of one unmatched verified provider money fact with one exact
+  // destination (payment-service consumes it). `billing.recovery.write_off`: an Owner's recognition of one recovery obligation's outstanding
+  // amount as a loss (billing-service consumes it; accounting only, never forgiveness). Declaring them activates no Payment or Billing operation.
+  'payment.provider_fact.associate': ['totp', 'webauthn'],
+  'billing.recovery.write_off': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
@@ -113,8 +120,13 @@ export const SURPLUS_EXTERNAL_PURPOSE = 'billing.recovery_surplus.record_externa
 /** The purpose of an Owner's L-4 application of a late assisted settlement (S6g, R6G-1). Only receipt issuance consumes it. */
 export const LATE_SETTLEMENT_APPLY_PURPOSE = 'billing.late_settlement.apply' satisfies StepUpPurpose;
 
+/** The purposes of an Owner's provider-fact association (S6h, R6H-3) and recovery write-off (S6h, R6H-8). Only receipt issuance consumes them. */
+export const PROVIDER_FACT_ASSOCIATE_PURPOSE = 'payment.provider_fact.associate' satisfies StepUpPurpose;
+export const RECOVERY_WRITE_OFF_PURPOSE = 'billing.recovery.write_off' satisfies StepUpPurpose;
+
 /** Purposes no calling service may verify or consume through POST /auth/step-up/verify: each has its one Auth-local consumer. */
-const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE, DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE]);
+const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE, DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE,
+  PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE]);
 
 /**
  * What `consumeForReferenceRepair` knows after its one statement (ADR-0065 §5; A5.4-A3 O8):
@@ -230,7 +242,7 @@ export class StepUpService {
 
   /**
    * The generic, service-facing verification (POST /auth/step-up/verify; ADR-0042 Amendment 1 A.1, as clarified by ADR-0065 §4, S1).
-   * A reference-repair proof, a refund-authorization proof (ADR-0067), a dispute-decision proof (S6e, R6E-3) , a fraud-hold proof (S6e-H, H-2), an external-surplus proof (S6f, R6F-5) and a late-settlement application proof (S6g, R6G-1) are Auth-local: each is refused here BEFORE any consuming
+   * A reference-repair proof, a refund-authorization proof (ADR-0067), a dispute-decision proof (S6e, R6E-3) , a fraud-hold proof (S6e-H, H-2), an external-surplus proof (S6f, R6F-5), a late-settlement application proof (S6g, R6G-1), a provider-fact association proof and a recovery write-off proof (S6h, R6H-3, R6H-8) are Auth-local: each is refused here BEFORE any consuming
    * statement, with the endpoint's existing answer (`403 step_up_required`) and the same local denial record `consume` writes for its own
    * refusals, so it stays usable by its one Auth-local consumer. Every other purpose goes through `consume`, unchanged.
    */

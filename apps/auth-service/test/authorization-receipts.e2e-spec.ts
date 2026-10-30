@@ -681,6 +681,82 @@ describe('authorization receipts (S2-Auth.1)', () => {
     });
   });
 
+  /**
+   * Core V2 S6h Auth prerequisite (the Owner's R6H-3, R6H-8, 2026-10-30): an Owner's provider-fact association (consumed by payment-service)
+   * and an Owner's recovery write-off (consumed by billing-service), each a receipt bound to its exact resource, issued only after its own
+   * factor-only step-up. Every receipt rule above applies unchanged.
+   */
+  describe('provider-fact association and recovery write-off receipts (S6h prerequisite, R6H-3, R6H-8)', () => {
+    const ASSOC = 'payment.provider_fact.associate';
+    const WRITE_OFF = 'billing.recovery.write_off';
+    const BILLING = 'billing-service';
+    const assoc = (companyId: string, over: Record<string, unknown> = {}) => ({
+      operation: 'provider_fact_associate', audience: CALLER, companyId, factId: randomUUID(), kind: 'capture', amount: 9000, currency: 'TND', targetType: 'payment', targetId: randomUUID(), ...over,
+    });
+    const writeOff = (companyId: string, over: Record<string, unknown> = {}) => ({
+      operation: 'recovery_write_off', audience: BILLING, companyId, obligationId: randomUUID(), organizationId: randomUUID(), amount: 6100, currency: 'TND', ...over,
+    });
+    const issueWith = async (o: Ready, purpose: string, b: Record<string, unknown>) => {
+      const stepUpToken = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+      return { ...(await svc.issue(o.owner, { stepUpToken, idempotencyKey: key(), binding: b })), binding: b, stepUpToken };
+    };
+
+    it('each is issued after its own factor-only step-up and consumed once, only by its own audience, for exactly that binding', async () => {
+      const o = await ready();
+      const a = await issueWith(o, ASSOC, assoc(o.companyId));
+      expect(await stepUpConsumed(a.stepUpToken)).toBe(true);
+      expect(await codeOf(svc.consume(BILLING, { secret: a.secret, binding: a.binding, consumeRef: randomUUID() }))).toBe('receipt_binding_invalid');
+      const ref = randomUUID();
+      const c = await svc.consume(CALLER, { secret: a.secret, binding: a.binding, consumeRef: ref });
+      expect(c).toMatchObject({ receiptId: a.receiptId, consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
+      expect(await svc.consume(CALLER, { secret: a.secret, binding: a.binding, consumeRef: ref })).toEqual(c);
+      expect(await codeOf(svc.consume(CALLER, { secret: a.secret, binding: a.binding, consumeRef: randomUUID() }))).toBe('consume_ref_conflict');
+      const w = await issueWith(o, WRITE_OFF, writeOff(o.companyId));
+      expect(await codeOf(svc.consume(CALLER, { secret: w.secret, binding: w.binding, consumeRef: randomUUID() }))).toBe('receipt_binding_invalid');
+      expect(await svc.consume(BILLING, { secret: w.secret, binding: w.binding, consumeRef: randomUUID() })).toMatchObject({ receiptId: w.receiptId, approvedBy: { userId: o.id } });
+    });
+
+    it('purpose separation both ways; refused proofs are not burned; the secret key never qualifies', async () => {
+      const o = await ready();
+      for (const [purpose, b] of [[ASSOC, writeOff(o.companyId)], [WRITE_OFF, assoc(o.companyId)], ['billing.late_settlement.apply', assoc(o.companyId)], [PURPOSE, writeOff(o.companyId)]] as const) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: b })), purpose).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+      for (const purpose of [ASSOC, WRITE_OFF]) {
+        const sk = await t.stepUp(o.tokens as Tokens, purpose, o.totpSecret, { method: 'secret_key', secretKey: 'x'.repeat(43), code: undefined });
+        expect([sk.status, sk.body.code], purpose).toEqual([400, 'step_up_unsupported']);
+      }
+    });
+
+    it('never authorizes another fact, kind, amount, currency, destination, obligation, Organization or Company; revoked authority consumes nothing; verify refuses both proofs', async () => {
+      const o = await ready();
+      const a = await issueWith(o, ASSOC, assoc(o.companyId));
+      for (const change of [{ factId: randomUUID() }, { kind: 'refund' }, { amount: 9001 }, { currency: 'EUR' }, { targetType: 'refund_authorization' }, { targetId: randomUUID() }, { companyId: await t.newCompany() }]) {
+        expect(await codeOf(svc.consume(CALLER, { secret: a.secret, binding: { ...a.binding, ...change }, consumeRef: randomUUID() })), JSON.stringify(change)).toBe('receipt_invalid');
+      }
+      const w = await issueWith(o, WRITE_OFF, writeOff(o.companyId));
+      for (const change of [{ obligationId: randomUUID() }, { organizationId: randomUUID() }, { amount: 6000 }, { currency: 'EUR' }]) {
+        expect(await codeOf(svc.consume(BILLING, { secret: w.secret, binding: { ...w.binding, ...change }, consumeRef: randomUUID() })), JSON.stringify(change)).toBe('receipt_invalid');
+      }
+      expect((await row(a.receiptId)).status).toBe('issued');
+      expect((await row(w.receiptId)).status).toBe('issued');
+      for (const [purpose, b] of [[ASSOC, assoc(await t.newCompany())], [WRITE_OFF, writeOff(await t.newCompany())]] as const) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: b })), purpose).toBe('receipt_binding_invalid');
+        expect(await httpStatusOf(t.app.get(StepUpService).verifyForService(t.dbs, { ownerId: o.id, sid: o.owner.sid, purpose, token: su })), purpose).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+      await t.db.query(`UPDATE "user" SET "isActive"=false WHERE id=$1`, [o.id]);
+      try {
+        expect(await codeOf(svc.consume(CALLER, { secret: a.secret, binding: a.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+        expect(await codeOf(svc.consume(BILLING, { secret: w.secret, binding: w.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+      } finally {
+        await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [o.id]);
+      }
+    });
+  });
+
   describe('secret handling', () => {
     it('no plaintext secret, canonical binding or pepper in the database, the audit records or the logs', async () => {
       const o = await ready();
