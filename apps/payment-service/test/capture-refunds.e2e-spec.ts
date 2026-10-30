@@ -197,13 +197,16 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
     const { payment, attempt, capture } = await captured();
     const dup = await duplicate(attempt.id);
     expect(dup).toMatchObject({ paymentId: payment.id, attemptId: attempt.id, kind: 'capture' });
-    expect((await captureRead(payment.id, dup.id).expect(200)).body.basis).toBe('duplicate_capture');
+    expect((await captureRead(payment.id, dup.id).expect(200)).body).toMatchObject({ basis: 'duplicate_capture', refundableOnItsOwn: true });
     expect((await refund(payment.id)).body.code).toBe('refund_capture_unverified'); // ambiguous: the ordinary path never picks one
     const res = await refund(payment.id, { captureFactId: dup.id });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     await complete(res.body.refundAttemptId);
     expect(dispatches.find((d) => d.refundAttemptId === res.body.refundAttemptId)!.capturedTransactionId).toBe(dup.providerTxnId); // exactly that movement
     expect((await refund(payment.id, { captureFactId: capture.id })).body.code).toBe('refund_capture_not_eligible');
+    // S6 certification (regression): Payment's capture read states that rule, so Billing never opens a case Payment would refuse
+    expect((await captureRead(payment.id, capture.id).expect(200)).body).toMatchObject({ basis: 'duplicate_capture', refund: 'none', refundableOnItsOwn: false });
+    expect((await captureRead(payment.id, dup.id).expect(200)).body).toMatchObject({ refund: 'refunded' });
     expect(await count(`SELECT count(*) AS n FROM refund_attempt_refusal WHERE "paymentId" = $1 AND code = 'refund_capture_not_eligible'`, [payment.id])).toBe(1);
     const bal = (await request(server()).get(`/payment/admin/payments/${payment.id}/balance`).set('authorization', 'Bearer owner-jwt').expect(200)).body;
     expect(bal.currencies).toEqual([{ currency: 'TND', captured: 18000, refundedNet: 9000, chargebackNet: 0, netRetained: 9000 }]);

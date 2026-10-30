@@ -1211,7 +1211,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     /** Payment's evidence of one capture of `paymentId` (what GET /payment/payments/:id/captures/:factId would answer). */
     const atPayment = (paymentId: string, over: Partial<PaymentCapture> = {}) => {
       const capture: PaymentCapture = { factId: randomUUID(), paymentId, amount: 2500, currency: 'TND', paymentStatus: 'succeeded', basis: 'duplicate_capture',
-        conflicted: false, refund: 'none', ...over };
+        conflicted: false, refund: 'none', refundableOnItsOwn: true, ...over };
       capturesAtPayment.items.set(`${paymentId}:${capture.factId}`, { kind: 'capture', capture });
       return capture;
     };
@@ -1321,6 +1321,8 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { refund: 'refunded' }).factId)).body.code).toBe('refund_case_exists');
       expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { refund: 'in_progress' }).factId)).body.code).toBe('refund_case_exists');
       expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { conflicted: true }).factId)).body.code).toBe('refund_not_eligible');
+      // S6 certification (regression): Payment would refuse the LAST capture backing the sale on its own; Billing never opens that case
+      expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { refundableOnItsOwn: false }).factId)).body.code).toBe('refund_not_eligible');
       expect((await openCapture(paid.paymentId, randomUUID())).body.code).toBe('refund_not_eligible'); // no such capture of this payment
       // a late capture claimed for a PAID request, or the settling capture of a ROUTED sale (the ordinary refund returns it)
       expect((await openCapture(paid.paymentId, atPayment(paid.paymentId, { paymentStatus: 'cancelled', basis: 'late_capture' }).factId)).body.code).toBe('refund_not_eligible');

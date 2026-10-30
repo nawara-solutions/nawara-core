@@ -42,6 +42,11 @@ export interface CaptureEvidence {
   conflicted: boolean;
   /** refund state of THIS captured money: none, in progress (an attempt that may still refund it), or already refunded / evidenced */
   refund: 'none' | 'in_progress' | 'refunded';
+  /**
+   * S6 certification: whether Payment would refund THIS capture on its own, by the R6H-5 rule it enforces: false for the LAST unrefunded
+   * capture of a succeeded payment's settling attempt (the sale's own money). Billing never opens a case Payment would refuse.
+   */
+  refundableOnItsOwn: boolean;
   observedAt: Date;
 }
 
@@ -310,9 +315,10 @@ export class RefundAttemptService {
       `SELECT EXISTS (SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND NOT "captureSpecific" AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed')) AS live,
               EXISTS (SELECT 1 FROM refund_authorization WHERE "paymentId" = $1 AND NOT "captureSpecific" AND "completedAt" IS NOT NULL) AS done`, [p.id])).rows[0]!
       : { live: false, done: false };
+    const refundableOnItsOwn = basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id));
     return {
       factId: f.id, paymentId: p.id, provider: f.provider, providerTxnId: f.providerTxnId, amount: Number(f.amount), currency: f.currency, paymentStatus: p.status,
-      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt,
+      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn,
       refund: refunded || ordinary.done ? 'refunded' : live.length > 0 || ordinary.live ? 'in_progress' : 'none',
     };
   }

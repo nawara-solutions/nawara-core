@@ -156,7 +156,8 @@ export class RefundCaseService {
     if (read.kind === 'unknown') throw billingError(503, 'refund_payment_unavailable', BILLING_MESSAGES.refundPaymentUnavailable);
     if (read.kind === 'not_found') throw notEligible();
     const capture = read.capture;
-    if (capture.conflicted) throw notEligible();
+    // S6 certification: never a case Payment would definitively refuse (the last capture backing the sale, R6H-5)
+    if (capture.conflicted || !capture.refundableOnItsOwn) throw notEligible();
     if (capture.refund !== 'none') throw caseExists();
     return this.idempotency.run(owner.userId, key, 'refund_case.open', { ...input }, async (q): Promise<RefundCommandResult> => {
       const pr = (await q.query<{ id: string; status: string; organizationId: string | null; purpose: string | null; routed: boolean }>(
