@@ -4,8 +4,9 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-15, `main` at `64b5030` (PR #311: G6 record approved by merge, **G6 CERTIFIED**). **Rescoped 2026-10-13:** Core V2
-  is the minimal production-safe Core needed to launch Nawara Drive ([V2 release scope](#core-v2-release-scope-the-nawara-drive-pilot));
+- **Last verified:** 2026-10-30, `main` at `18b0089` (DOC-3: the Core V2 S-track entered in the [current checkpoint](#current-checkpoint)
+  and reconciled with A10, A11 and the Release / Payment dispositions; G6 CERTIFIED by PR #311, `64b5030`, unchanged). **Rescoped
+  2026-10-13:** Core V2 is the minimal production-safe Core needed to launch Nawara Drive ([V2 release scope](#core-v2-release-scope-the-nawara-drive-pilot));
   the deferred work is in the [Core V3 roadmap](CORE-V3-ROADMAP.md).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
@@ -282,6 +283,19 @@ A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (re
     R3 Auth readiness alert carrier            ✅ CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION, 2026-10-11); not installed in production
   A5.5  certification                          not started; acceptance criteria ADOPTED 2026-10-12 (C1–C6 binding, C7 production boundary)
 
+Core V2 S-track (development and simulation only; nothing deployed; ◐ = conditional, its conditions in the stage record)
+  S0    architecture freeze                    ✅ FROZEN (PR #320); execution roadmap and contract register merged
+  S1    event security                         ◐ CONDITIONAL PASS (development); S1-R rollout NOT STARTED (C-4, AP-R, NP-K, G-7);
+                                                  OD-BRK-2b-L real-systemd half ⛔ BLOCKED — HARDWARE MAINTENANCE
+  S2    independent foundations                ◐ CONDITIONAL PASS (development); R-6a OPEN (OD-R6a); Audit Organization scope rows after F7
+  S3    Billing                                ◐ CONDITIONAL PASS (development, simulation); catalog values, BIL-12, EVT-05 open
+  S4    Payment                                ◐ CONDITIONAL PASS (development, simulation); Organization-payer grant inactive
+  S5    assistance and cash obligations        S5a–S5d ◐ CONDITIONAL PASS; S5e runtime and D6 ⏸ DEFERRED (V-4, OD-R6a): stage NOT CERTIFIED
+  S6    refunds, disputes, recovery, losses    ◐ CONDITIONAL PASS (simulation); Q8 and partial chargebacks open
+  S7    Notification inbox, Auth tenure        CONDITIONAL scope, not authorized (C-3, C-6, DG-3)
+  S8    Organization authority changes         CONDITIONAL scope, not authorized (PR #319, C-5; RED items after F7)
+  S-INT integration certification              not started; needs S1–S6 each certified (S5 is not) and its own authorization
+
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
 M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; E2 and E3 prepared, not installed; NOT CERTIFIED
 G7, F6, F7                                     🔒
@@ -377,6 +391,35 @@ and ADR-0024 stay Proposed, deferred to A6; **A5.3's architecture design is comp
 activated): **A5.2 is COMPLETED and A5.3 CLOSED (architecture only) on 2026-10-09** (closure PR #263); A5.4 and A5.5 stay gated; design and ADR reviews proceed now, and every runtime or authority change waits for
 G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup.
 
+**Core V2 S-track (DOC-3, 2026-10-30).** The Owner-approved [S0 architecture freeze](architecture/core-v2-s0-architecture-freeze.md)
+(PR #320) fixes the Core V2 architecture of the eight services, and the [execution roadmap](architecture/core-v2-s-execution-roadmap.md)
+orders it as S1 to S8, S-INT and Final Core Validation. **The frozen S0 contracts govern:** this roadmap records status only and changes
+no acceptance criterion; where they differ, the S0 record governs and the execution roadmap orders it. Each stage is certified on its
+own by the [V2 validation protocol](architecture/core-v2-a-baseline-and-change-safety.md#8-v2-per-capability-validation-protocol)
+and its stage record: [S1](architecture/core-v2-s1-event-security.md) (with the
+[S1e-5 report](architecture/core-v2-s1e5-integrated-certification.md)), [S2](architecture/core-v2-s2-independent-foundations.md),
+[S3](architecture/core-v2-s3-billing.md), [S4](architecture/core-v2-s4-payment.md),
+[S5](architecture/core-v2-s5-assistance-and-cash-obligations.md), [S6](architecture/core-v2-s6-financial-certification.md). Every
+verdict is development (repository, CI, local and disposable real-broker) evidence on simulation, never production evidence and never
+an ADR acceptance; the Proposed ADRs stay Proposed (G-1). S1 and S2 are mapped to A3, A4, A7, A9 and Release; S3 to S6 to A10 and A11;
+S7 to A8; S8 to A5 (execution roadmap §11).
+
+- **G-2, reconciled (A10, A11, Release / Payment).** Billing and Payment **development and simulation** (S3 to S6) are Core V2 work, done
+  under the S0 freeze. Their **production** dispositions are unchanged and still decide production: A10 **DECISION REQUIRED (DG-4)**,
+  A11 **MOVE V3**, Release and Payment production enablement **MOVE V3** (see the dispositions below and the
+  [V3 roadmap](CORE-V3-ROADMAP.md)). No Billing, Payment or Release production deployment, configuration or credential is in scope of
+  any S-stage; their routes are unmounted in production where the stage records say so.
+- **S7 and S8 are conditional:** S7 only if C-3 and C-6 are approved (DG-3 separately decides Notification production); S8 only after
+  PR #319 is reconciled and C-5 is decided, with RED items after F7.
+- **S-INT** certifies the cross-service paths together on simulation, under its own authorization and record, only after S1 to S6 are
+  each certified (and S7 / S8 if in scope). Today S5 is not certified (S5e and D6 DEFERRED behind V-4 and OD-R6a), so S-INT's
+  prerequisite is not met. S-INT is not a production certification.
+- **Production-track gates are unchanged and separate:** S1-R (with C-4, AP-R, NP-K), G-7 (no S-stage Auth, Organization or Audit image
+  in production before M3 or a G6 baseline refresh), M2 → G7 → F6 → F7 → post-F7 backup, the pilot readiness gate M13 / A19 (DG-7).
+  No S-stage shortens or reorders them.
+- **Final Core Validation (Stage 22)** stays the absolute last full validation: after S-INT, the production track and the pilot or A19
+  certification; never part of an S-stage or of S-INT.
+
 ### Compatibility and safety rules for V1 work
 
 - Existing public contracts are preserved: HTTP status, `code`, response shape, event payloads, success bodies. Existing code-less
@@ -403,7 +446,8 @@ negative controls, risk-based regression and CI (the [V2 validation protocol](ar
 ## Core V2: future / planned
 
 > **PLANNED. NOT YET IMPLEMENTED.** Nothing in this section exists in the code unless a V1 section above says so. A Core V2 stage
-> starts only when the owner authorizes it. No completion percentages are tracked here.
+> starts only when the owner authorizes it. No completion percentages are tracked here. (The Core V2 S-track's development and
+> simulation work is in the [current checkpoint](#current-checkpoint) and its stage records; it is not production.)
 
 Core V2 is the next platform architecture. It may redesign contracts deliberately, but only through explicit design documents
 (ADR/ADD/SDD/TDD) and a migration plan, never by drift.
@@ -556,8 +600,8 @@ client data enters any environment before the pilot readiness gate passes.
 | A7 | basic Audit **KEEP V2 — BLOCKING** (M9); retention, querying and cross-service coverage **MOVE V3** | accountability now, extensions later |
 | A8 | **DECISION REQUIRED** (DG-3); **MOVE V3** if not needed | depends on the pilot's channels |
 | A9 | production enablement **KEEP V2 — BLOCKING** (M8); default tuning (P9) and later features **MOVE V3** | client files |
-| A10 | **DECISION REQUIRED** (DG-4); **MOVE V3** if billing is manual | — |
-| A11 | **MOVE V3** | no real gateway exists; the client pays outside Core |
+| A10 | **DECISION REQUIRED** (DG-4); **MOVE V3** if billing is manual. Development and simulation: Core V2 S3, S5, S6 (G-2, DOC-3); this production disposition is unchanged | — |
+| A11 | **MOVE V3**. Development and simulation (simulation provider only): Core V2 S4 to S6 (G-2, DOC-3); this production disposition is unchanged | no real gateway exists; the client pays outside Core |
 | A12 | A12.2–A12.6 done; minimal A12.10 **KEEP V2 — BLOCKING** (M10); A12.7–A12.9 and the rest of A12.10 **MOVE V3** | detection of failures that endanger data |
 | A13 | Auth + Organization schedule and backups **KEEP V2 — BLOCKING** (M2, M3); File and Audit backups (M8, M9); restore automation beyond that **MOVE V3** | recovery of client data |
 | A14 | done; repository settings **KEEP V2 — NONBLOCKING** | secret leakage prevention |
@@ -566,7 +610,7 @@ client data enters any environment before the pilot readiness gate passes.
 | A18 | **MOVE V3** | pilot scale |
 | A19 | the pilot readiness gate **KEEP V2 — BLOCKING** (M13); the relation of A19 to pilot onboarding **DECISION REQUIRED** (DG-7) | — |
 | Final Core Validation | unchanged: absolute last | — |
-| Release, Payment services | **MOVE V3** (production enablement) | not Drive pilot dependencies |
+| Release, Payment services | **MOVE V3** (production enablement). Development: Release owner reads (S2-Rel), Payment (S4 to S6), not production (G-2, DOC-3) | not Drive pilot dependencies |
 
 ---
 
@@ -754,3 +798,8 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A5 R2: independent source review of the frozen-backup restore-drill change (PR #292; PASS WITH LIMITATIONS for the source only; no code change required; packaged-image capability probe PASSED 2026-10-12 (§5); a real restore drill is not done; R2 not certified) | [`core-v2-a5-r2-restore-drill-review.md`](architecture/core-v2-a5-r2-restore-drill-review.md) |
 | V2 A5.5: acceptance criteria (ADOPTED 2026-10-12: C1–C6 binding, C7 production boundary; A5.5 not started) | [`core-v2-a5-5-acceptance-proposal.md`](architecture/core-v2-a5-5-acceptance-proposal.md) |
 | V2 A3M: messaging (A3M.0 inventory and findings G1–G10, owner decisions OD-A3M-0 to OD-A3M-7, the A3M.0 to A3M.8 phases, the G7 proof, A3M.1 records and policy) | [`core-v2-a3m-messaging.md`](architecture/core-v2-a3m-messaging.md) |
+| Core V2 S0: the frozen architecture of the eight services (owner decisions, invariants FC-n / DB-n, deferral register) | [`core-v2-s0-architecture-freeze.md`](architecture/core-v2-s0-architecture-freeze.md) |
+| Core V2 S1–S8, S-INT and Final Core Validation: execution order, certification gates, gate register, DOC register | [`core-v2-s-execution-roadmap.md`](architecture/core-v2-s-execution-roadmap.md) |
+| Core V2 contracts: D-A2 receipts and the AR-04.6 contract register (routes, errors, idempotency, per-slice implementation status) | [`core-v2-d-a2-auth-authorization-receipts.md`](architecture/core-v2-d-a2-auth-authorization-receipts.md), [`core-v2-d-a2-contract-register.md`](architecture/core-v2-d-a2-contract-register.md) |
+| Core V2 stage records and certification evidence: S1 (and S1e-5), S2, S3, S4, S5, S6 | [`S1`](architecture/core-v2-s1-event-security.md), [`S1e-5`](architecture/core-v2-s1e5-integrated-certification.md), [`S2`](architecture/core-v2-s2-independent-foundations.md), [`S3`](architecture/core-v2-s3-billing.md), [`S4`](architecture/core-v2-s4-payment.md), [`S5`](architecture/core-v2-s5-assistance-and-cash-obligations.md), [`S6`](architecture/core-v2-s6-financial-certification.md) |
+| On-demand real-broker certification in GitHub Actions | [`real-broker-certification.md`](runbooks/real-broker-certification.md) |
