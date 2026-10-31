@@ -276,3 +276,25 @@ half.
 - §9 "On-demand real-broker suites can go stale": reduced, not removed; a scheduled run still needs its own Owner decision.
 - Every other §8 item (Q8, partial chargebacks, V-4, V-5, OD-R6a, EVT-05 / EVT-06, production activation and its operational gates) is
   unchanged.
+
+## 12. Update (2026-10-31): S-INT entry classification
+
+Under the S-INT entry rule ([execution roadmap](./core-v2-s-execution-roadmap.md) §5, the Owner's decision D-3) every S6
+certification-gate criterion is PASS at development level, on simulation (§2, §3). **The verdict is unchanged: CONDITIONAL PASS
+(simulation). No financial production readiness is claimed.** The remaining conditions are classified in the
+[condition matrix](./core-v2-stage-condition-matrix.md):
+
+| Condition | Category | State kept |
+|---|---|---|
+| Q8 proof of receipt non-consumption | (d) | fail-closed: an unanswered authorization stays pending, never released |
+| Partial chargebacks | (d) | review-only: no reversal, no debt, no loss |
+| EVT-05 / EVT-06 | (d) | not in Billing's event contract; the broker refuses any ungranted key |
+| BIL-35 legal remedies | (c) | S0 §5 (execution of legal remedies) |
+| Real payment provider | (c) | S0 §5: only `test` and `simulation`, both refused in production |
+| Production activation of every S6 module; the reconciliation grant in `PAYMENT_SERVICE_POLICY`; late successes in a production Billing | (a) | every S6 module unmounted in production; unchanged |
+| Legal and production decisions (DG-4; invoice legal content; Payment MOVE V3) | (a) / (c) | unresolved; unchanged |
+| Real-broker deployment suites on demand, not in CI | (a) | a recurring or required run is a separate Owner decision |
+
+Test-stability evidence since §11: the S6e-D cross-process scenario asserted which of two authorized paths records a lost dispute (the
+verified event or Payment's losses read, R6E-6). It now checks the business invariants for either order (#413, `f799747`), proven for
+both orders locally and green in CI; no financial rule changed.

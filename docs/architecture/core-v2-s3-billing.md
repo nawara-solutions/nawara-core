@@ -38,7 +38,7 @@ bypassing the application) in `core-ci-passed`; **I** cross-process suites; **O*
 | Grace exactly 24 hours (Organization) and none (Personal) | L | `subscription-grace.e2e-spec.ts`; `personal-subscriptions.e2e-spec.ts` ("no grace: the moment the last kept period ends …") | PASS |
 | K-3 Option D re-lay property tests | L | `personal-subscriptions.e2e-spec.ts` "property: for random ledgers and reversals, kept periods never overlap, keep their order and full duration, and never start before their settlement" | PASS |
 | V1 `invoice.created` compatibility | L, I | `invoices.e2e-spec.ts`; `libs/service-kit/test/rabbitmq-publisher-identity.int-spec.ts` | PASS |
-| S3/S4 joint checkpoint: checkout → attempt → fact → `payment.*` → verified consumption (S1) → purchase → personal entitlement read | L, I | two overlapping segments: `checkout.e2e-spec.ts` "SIMULATION: checkout → invoice → payment request → dispatcher → verified payment.succeeded → purchase ledger → personal entitlement read" (Billing, real PostgreSQL); `test/e2e-real-broker/s4f-simulation-settlement.e2e-spec.ts` (built Billing and Payment, real broker: dispatcher → attempt → simulation provider → signed notification → fact → `payment.*` → verified consumption → one purchase, whatever is redelivered). One uninterrupted cross-process run from the checkout route to the entitlement read is not in the repository: an S-INT item | PASS (segmented) |
+| S3/S4 joint checkpoint: checkout → attempt → fact → `payment.*` → verified consumption (S1) → purchase → personal entitlement read | I | **one continuous cross-process run** (#410, `adb453c`): `test/e2e-real-broker/s3s4-joint-checkpoint.e2e-spec.ts` — the built auth-service, billing-service and payment-service over real HTTP, a real RabbitMQ and real PostgreSQL, on the simulation provider: the Owner's Platform and catalog → a member's checkout → Billing's dispatcher creates the payment → the payer's attempt → the provider's signed notification → one verified capture fact → `payment.succeeded` under Payment's broker identity → Billing's verified-only consumer (`event_provenance.verified`) → exactly one purchase → the Personal Subscription → the entitlement read through its service contract. Negative cases: duplicate provider notification and real broker redelivery (no second effect), a forged unverified `payment.succeeded` (refused `untrusted_unverified_original`), fail-closed checkout, attempt and entitlement read, Auth unavailable (503, nothing written). 6/6, in CI's `e2e-real-broker` job. (The earlier in-service chain `checkout.e2e-spec.ts` remains as per-service evidence) | PASS |
 | Protocol: CI `core-ci-passed`; S3 migrations expand-first, applying on the full chain | L | every PR above; `migrations.e2e-spec.ts` | PASS |
 
 ## 3. Open, blocked and deferred
@@ -64,3 +64,14 @@ bypassing the application) in `core-ci-passed`; **I** cross-process suites; **O*
 
 **S3: CONDITIONAL PASS (development and simulation).** The conditions are the open catalog values, BIL-12, EVT-05 and the production
 legal and disposition decisions of §3. No production claim is made.
+
+## 6. Update (2026-10-31): joint checkpoint and S-INT entry classification
+
+- The S3/S4 joint checkpoint is now evidenced by one continuous cross-process run (#410; §2), replacing the earlier "segmented" status.
+  It is simulation-only evidence: no real provider, no production configuration.
+- Under the S-INT entry rule ([roadmap](./core-v2-s-execution-roadmap.md) §5, D-3) every S3 certification-gate criterion is PASS at
+  development level. Classified conditions ([condition matrix](./core-v2-stage-condition-matrix.md)): OD-05 values, DG-4, OD-BRK-3 (a); invoice legal content (c) / (a); EVT-05 (d).
+- **OPEN at development level: BIL-12** (`GET /billing/me/personal-subscriptions`). Its scope is undecided (register BIL-12 E); it is not
+  built and not tested, so it is not a fail-closed tested decision (d). **S3 does not meet the S-INT entry rule until the Owner records a
+  disposition** (outside Core V2's initial scope, or a work package to implement and test). The verdict is unchanged (CONDITIONAL PASS,
+  development and simulation).
