@@ -24,6 +24,7 @@ import { ReconciliationService } from '../src/reconciliation/reconciliation.serv
 import { LateSettlementModule } from '../src/late-settlements/late-settlement.module.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
+import { anchorOccurrence } from './support/billing-calendar.js';
 import { paymentPurposeOf } from './support/settlement.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -466,7 +467,39 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       const directId = (await one(`SELECT s.id FROM subscription_purchase s JOIN payment_request pr ON pr.id = s."paymentRequestId" WHERE pr."paymentId" = $1`, [direct.paymentId])).id;
       expect(spans.map((x) => x.purchaseId)).toEqual([directId, applied.id]);
       expect(spans[1].effectiveStart).toEqual(spans[0].effectiveEnd); // chained after the paid period: no overlap, nothing lost
-      expect((await one(`SELECT ($1::timestamptz + interval '1 month') AS e`, [spans[1].effectiveStart])).e).toEqual(spans[1].effectiveEnd);
+      // the full duration on the calendar of ADR-0044 B-025 (amendment 2026-09-29): a continuing monthly period keeps the chain's persistent
+      // billing anchor (the first settlement) and ends on the anchor's next occurrence, day clamped. Never "previous end + 1 month": from a
+      // month-end anchor that drifts (Oct 31 -> Nov 30 -> Dec 30) where the anchored calendar recovers (Oct 31 -> Nov 30 -> Dec 31).
+      const anchor = spans[0].effectiveStart as Date;
+      expect(spans[0].effectiveEnd).toEqual(anchorOccurrence(anchor, 1));
+      expect(spans[1].effectiveEnd).toEqual(anchorOccurrence(anchor, 2));
+    });
+
+    it('R6G-5 / B-025 month-end chains, independent of today: each continuing period ends on the ORIGINAL anchor\'s occurrence', async () => {
+      const periodEnd = async (start: Date, anchor: Date, unit: 'month' | 'year') =>
+        (await one(`SELECT billing_subscription_period_end($1, $2, $3, 1) AS e`, [start, anchor, unit])).e as Date;
+      const chains: [string, 'month' | 'year', number][] = [
+        ['2027-01-31T10:00:00Z', 'month', 4], // February (28 days), then March 31, April 30, May 31
+        ['2028-01-31T10:00:00Z', 'month', 2], // a leap February (29 days), then March 31
+        ['2026-10-31T00:03:14.921Z', 'month', 4], // November 30, December 31, January 31, February 28
+        ['2026-12-31T23:59:59.000Z', 'month', 3], // across the year: January 31, February 28, March 31
+        ['2027-08-31T12:00:00Z', 'month', 4], // September 30, October 31, November 30, December 31
+        ['2028-02-29T08:00:00Z', 'year', 4], // a yearly Feb 29 anchor: Feb 28 three times, Feb 29 again in 2032
+      ];
+      for (const [iso, unit, n] of chains) {
+        const anchor = new Date(iso);
+        let start = anchor;
+        for (let k = 1; k <= n; k++) {
+          const end = await periodEnd(start, anchor, unit); // each period starts where the previous one ended
+          expect(end, `${iso} ${unit} #${k}`).toEqual(anchorOccurrence(anchor, k * (unit === 'year' ? 12 : 1)));
+          start = end;
+        }
+      }
+      // the drift the former assertion encoded: from Nov 30 "+ 1 month" is Dec 30; the anchored period from an Oct 31 anchor ends Dec 31
+      const octAnchor = new Date('2026-10-31T00:03:14.921Z');
+      const nov30 = await periodEnd(octAnchor, octAnchor, 'month');
+      expect((await one(`SELECT ($1::timestamptz + interval '1 month') AS e`, [nov30])).e).toEqual(new Date('2026-12-30T00:03:14.921Z'));
+      expect(await periodEnd(nov30, octAnchor, 'month')).toEqual(new Date('2026-12-31T00:03:14.921Z'));
     });
 
     it('evidenced (Path B): live settlement_evidence grants plus the Owner\'s explicit determination; a file reference alone proves nothing', async () => {
