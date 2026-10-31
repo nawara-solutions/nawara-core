@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { correlationHeaders } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
-import { DbService, type Queryable } from '../db/db.service.js';
+import { DbService, pgCode, pgConstraint, type Queryable } from '../db/db.service.js';
 import { authError } from '../errors.js';
 import { withReferenceWrite } from './hierarchy-authority.js';
 import { AUTH_MESSAGES } from '../messages.js';
@@ -38,6 +38,14 @@ interface Fetched {
 
 /** Rows fetched from Organization Service for one `ensure`, in placement order: parents first, the target last. */
 type ReferenceChain = Array<{ kind: HierarchyKind; row: Fetched[HierarchyKind] }>;
+
+/**
+ * The unique keys on which a concurrent first touch of the SAME row surfaces as 23505. `ON CONFLICT (id)` arbitrates only the primary
+ * key: two inserts that pass its check together then meet on the composite (id, anchor) key, which carries the same id. PostgreSQL
+ * raises that error only after the other transaction has committed the row. No other key is retried: a Platform `key` already held by
+ * another id stays a refused write.
+ */
+const CONCURRENT_PLACEMENT_KEYS: ReadonlySet<string> = new Set(['platform_id_company_uk', 'organization_id_platform_uk']);
 
 /** What a repair may target (ADR-0061 §3): a Company is placed only as the parent of a repaired Platform. */
 export type RepairableKind = 'platform' | 'organization';
@@ -246,7 +254,7 @@ export class HierarchyReference implements OnApplicationBootstrap {
   private async placeChain(chain: ReferenceChain): Promise<void> {
     const target = chain[chain.length - 1]!.kind;
     try {
-      await this.db.tx(async (q) => {
+      await this.placementTx(chain, async (q) => {
         await withReferenceWrite(q);
         for (const { kind: k, row } of chain) await this.place(q, k, row);
       });
@@ -254,6 +262,23 @@ export class HierarchyReference implements OnApplicationBootstrap {
       if (e instanceof Error && 'getStatus' in e) throw e;
       this.log.warn(`hierarchy_reference_unavailable reason=reference_write_refused kind=${target}`); // e.g. frozen for the transition
       throw hierarchyUnavailable();
+    }
+  }
+
+  /**
+   * One placement transaction, run again when a concurrent first touch committed a row of the chain first (CONCURRENT_PLACEMENT_KEYS).
+   * The failed attempt rolled back whole; the next one finds that row under its id and the anchor check in `place` decides, so a row
+   * placed under another parent still fails closed. Each such failure commits one more row of the chain, so it is retried at most once
+   * per row. Any other failure is thrown unchanged.
+   */
+  private async placementTx<T>(chain: ReferenceChain, fn: (q: Queryable) => Promise<T>): Promise<T> {
+    for (let retries = 0; ; retries++) {
+      try {
+        return await this.db.tx(fn);
+      } catch (e) {
+        const raced = pgCode(e) === '23505' && CONCURRENT_PLACEMENT_KEYS.has(pgConstraint(e) ?? '');
+        if (!raced || retries >= chain.length) throw e;
+      }
     }
   }
 
@@ -349,7 +374,7 @@ export class HierarchyReference implements OnApplicationBootstrap {
     const rows = chain;
     const RECORD = Symbol('record');
     try {
-      const placed = await this.db.tx(async (q) => {
+      const placed = await this.placementTx(rows, async (q) => {
         await withReferenceWrite(q);
         let target = false;
         for (const { kind: k, row } of rows) target = await this.place(q, k, row); // parents first: the last row is the target
