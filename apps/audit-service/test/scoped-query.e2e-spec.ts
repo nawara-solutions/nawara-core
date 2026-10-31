@@ -246,13 +246,24 @@ describeWithEnv('S2-Audit.3 scoped human reads: Owner Company timeline and opera
     it('altered, foreign, cross-scope, cross-filter, cross-window and expired cursors are all 400 invalid_cursor', async () => {
       const first = await company('owner-a', { limit: '2' });
       const c = first.body.nextCursor as string;
-      const flip = (s: string) => s.slice(0, -1) + (s.endsWith('A') ? 'B' : 'A');
+      // The alteration changes the signature's BYTES: decode it, invert its first byte, encode it again. Replacing its last base64url
+      // character is not enough: the last of 43 characters carries 2 unused bits, so 'A' and 'B' there decode to the same 32 bytes.
+      expect(Buffer.from(`${'A'.repeat(42)}A`, 'base64url').equals(Buffer.from(`${'A'.repeat(42)}B`, 'base64url'))).toBe(true);
+      const signature = (cursor: string) => Buffer.from(cursor.split('.')[2]!, 'base64url');
+      const parts = c.split('.');
+      expect(parts).toHaveLength(3);
+      const mutated = signature(c);
+      mutated[0] = mutated[0]! ^ 0xff;
+      const altered = `${parts[0]}.${parts[1]}.${mutated.toString('base64url')}`;
+      expect(signature(altered)).toHaveLength(32);
+      expect(signature(altered).equals(signature(c))).toBe(false); // the signature really differs
+      expect(altered.split('.').slice(0, 2)).toEqual(parts.slice(0, 2)); // and nothing else does
       const op = await platform(P1, 'op-12', { limit: '1' });
       const opCursor = op.body.nextCursor as string;
       const expired = encodeSignedCursor(keys, { occurredAtUs: '1759363200000000', id: '1' }, fp(`owner:${OWNER_A}`, { kind: 'company', companyId: COMPANY_A }), Date.now() - 3_600_000);
       const otherKey = encodeSignedCursor({ ...keys, keys: new Map([['k1', randomBytes(32)]]) }, { occurredAtUs: '1759363200000000', id: '1' }, fp(`owner:${OWNER_A}`, { kind: 'company', companyId: COMPANY_A }), Date.now());
       const cases: Array<[string, () => request.Test]> = [
-        ['altered', () => company('owner-a', { limit: '2', cursor: flip(c) })],
+        ['altered', () => company('owner-a', { limit: '2', cursor: altered })],
         ['another owner of the same Company', () => company('owner-a2', { limit: '2', cursor: c })],
         ['another Company', () => company('owner-b', { limit: '2', cursor: c })],
         ['another filter', () => company('owner-a', { limit: '2', cursor: c, action: 'authorization_receipt.issued' })],
