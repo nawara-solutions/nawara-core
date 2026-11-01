@@ -212,6 +212,69 @@ status change still needs its own explicit owner authorization.
   12. This clarification implements and activates nothing and changes no stage verdict or ADR status. The register entries BIL-23 H,
       BIL-32 G, BIL-33 G and EVT-10 record its contract. PR-2a, PR-2b, PR-3 and PR-4 (proposal §10) each need a separate Owner
       authorization.
+- **S0-C9 Late-capture dispute attribution (2026-11-01, owner-approved clarification with TWO owner-approved policy additions, items 4
+  and 5; S0 §3.1 FC-1, FC-4, FC-5, §3.4, S0-C8 item 8; ADR-0044 B10 as frozen here; finding F-SINT-2; decisions CB-1 to CB-6).** S0-C8,
+  FC-1, FC-4, FC-5, B10 and every recovery invariant are unchanged and govern. Before this entry a provider dispute was attributable only
+  to the capture of a payment's succeeded attempt (register PAY-09 F, R6E-1), so a dispute of a late capture (S0-C8 item 1 b) was a
+  conflict: no chargeback fact (FC-1), no `payment.dispute.lost`, and Billing could neither refuse L-4 (S0-C8 item 8) nor apply B10 / S6f
+  to an L-4 purchase. Items 1 to 3 and 6 to 10 are clarifications required by that frozen policy; items 4 and 5 are new policy.
+  1. *Attribution (CB-1).* A new verified provider dispute is also attributed to the referenced attempt's capture when ALL hold: the
+     payment is final `failed`, `cancelled` or `expired`; the attempt has exactly ONE capture fact; that fact is uncontested; and Payment
+     recorded a late success naming it. The dispute is bound to that fact (`captureFactId`) in the exposure the provider states, never
+     above the capture. Payment's status, its attempts and every recorded fact are unchanged: no final state is reopened and no
+     `payment.succeeded` is produced. Anything ambiguous (two captures of one attempt, a contested fact, a capture of another payment,
+     an exposure above the capture or in another currency) stays a conflict, as before. A second capture of a SUCCEEDED payment is out of
+     scope and stays a conflict.
+  2. *Capture-bound events and losses (CB-2).* `payment.dispute.opened` and `payment.dispute.lost` version 1 gain two additive fields,
+     always present in new events: `captureFactId` (the disputed capture fact) and `captureBasis` (`settling_capture` | `late_capture`).
+     A version-1 event without them is a legacy event and means `settling_capture` of the payment's succeeded attempt (the only
+     attribution that existed). Billing binds a loss to the captured movement it names, never to an unrelated purchase:
+     `settling_capture` keeps the S6e rules; `late_capture` affects a purchase only when that purchase is the L-4 purchase evidenced by the
+     late success naming that fact (then B10 / FC-4 / S6f: entitlement preserved, base-only recovery obligation, T3); any other late
+     capture has no purchase effect. A late-capture loss received before Billing recorded that late success is held, never applied to a
+     purchase, until the late success is recorded (event or Payment's read).
+  3. *Out-of-order provider facts (CB-5).* A dispute notification whose capture is not yet verified is held for bounded retry by
+     Payment's webhook retrier (its existing bound) and processed once when attribution succeeds. When the bound is exhausted it is
+     recorded as an explicit conflict (`capture_unverified`): no chargeback fact, no event, no purchase effect; the payment's exposure is
+     `unresolved` and the conflict is visible for manual reconciliation. A held notification is not a conflict while it is held.
+  4. **Policy addition (CB-3; Owner-approved; NOT a clarification).** Before consuming the Owner's receipt, the L-4 application reads
+     Payment's authoritative dispute exposure of that payment (the R6A-3 read). `clear` continues; an open dispute or open exposure refuses
+     `409 late_settlement_refused` reason `payment_dispute_open`; a chargeback recorded at Payment refuses reason `chargeback_recorded`
+     (S0-C8 item 8, unchanged, also re-checked by the database from Billing's recorded losses); `unresolved` exposure, an unavailable
+     Payment or a failed verification answers `503 late_settlement_dispute_unavailable`. A refusal or a 503 spends no receipt and changes
+     no financial state. The read is NOT a cross-service lock: item 7 states what happens after it.
+  5. **Policy addition (CB-4; Owner-approved in principle; NOT a clarification).** A `late_assisted_settlement` or `late_success`
+     reconciliation case of an UNSOLD late capture resolves as `chargeback_returned` only when Billing holds a verified loss bound to
+     exactly that capture (`late_capture`) whose chargeback fact equals the capture's full amount, in its currency; no purchase exists
+     from that late success; and no refund case of that capture is live or completed. It creates no refund case, no provider refund, no
+     purchase, no entitlement and no obligation change (the request keeps its cash-return obligation, violations and restrictions, as
+     under L-3). The loss, its chargeback fact and the case are kept; `chargeback_returned` (the provider's reversal) is distinct from
+     `refund_completed` (a refund executed through Payment). A partial chargeback never resolves the case: it stays open with a review
+     case, and no remainder is refunded or sold automatically.
+  6. *Mutual exclusion.* One captured movement has at most one return: a refund case is refused while the payment's exposure is not
+     `clear` (FC-5, R6A-3, unchanged); a chargeback after a completed refund of that capture is `chargeback_refund_overlap` (S6h,
+     unchanged), never `chargeback_returned`; L-4 is refused once a loss is recorded (S0-C8 item 8) and, per item 4, while a dispute is
+     open; a chargeback of an L-4 purchase never reverses it (FC-4) and opens one base-only recovery obligation per loss (S6f).
+  7. *Ordering outcomes (no synchronous guarantee).* Dispute recorded before the exposure read: refused (item 4). Loss already at Billing:
+     refused (`chargeback_recorded`). Dispute recorded at Payment after the read, before the commit: the application commits; a later
+     loss follows item 2 for that L-4 purchase (preserved, base-only recovery, T3), exactly as an assisted purchase charged back after
+     purchase; a later win changes nothing. Loss at Billing before EVT-10: held (item 2); a later L-4 is refused. Refund and dispute:
+     serialized under Payment's payment row lock (FC-5). Duplicate, forged or replayed notifications and events: unchanged safeguards
+     (provider signature, one observation per webhook event, unique `(provider, providerDisputeId)` and chargeback fact identity,
+     deterministic event ids, verified-only consumption S0-C6): never a second effect.
+  8. *Existing evidence (CB-6).* Conflicts recorded before this entry (development and simulation only) are never rewritten or
+     reinterpreted: they keep counting toward `unresolved` exposure and are resolved only by explicit reconciliation. Items 1 to 5 apply
+     to notifications processed after their implementation.
+  9. *Preserved.* Payment finality (S4c); FC-1 (every chargeback a fact); FC-4; FC-5; B10; S6e direct and assisted rules; S6f recovery
+     (base only, Nawara absorbs fees, D5); S0-C8 items 1 to 12; Auth receipts and Owner step-up. ADR-0044 Part B, ADR-0045 and ADR-0069
+     stay Proposed; no Accepted ADR is edited.
+  10. *Acceptance (later implementation; real events across processes, simulation only):* (1) a dispute opened before L-4 refuses it
+      without spending the receipt; (2) a verified loss after L-4 preserves the entitlement and opens the base-only recovery obligation and
+      T3; (3) a full chargeback of an unsold late capture resolves its case as `chargeback_returned` with no refund; (4) a partial one
+      never does; (5) an out-of-order dispute is attributed once or recorded as an explicit conflict; (6) forged, duplicated and replayed
+      dispute notifications and events give no second effect; (7) capture or amount mismatches fail safe; (8) Payment's final state and
+      provider evidence are unchanged. The register entries PAY-09 G, PAY-14 H, EVT-03, BIL-32 H and BIL-33 H record its contract.
+      Implements and activates nothing; each Billing, Payment, harness and certification PR needs a separate Owner authorization.
 
 ## 2. ADR disposition
 
