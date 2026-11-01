@@ -9,6 +9,7 @@ import type { BillingConfig } from '../config/billing-config.js';
 import type { TransitionContext } from '../domain/actors.js';
 import { billingError, notFound, operationNotPermitted } from '../domain/errors.js';
 import { FRAUD_EVIDENCE_FILES, FRAUD_HOLD_RECEIPTS, type FraudEvidenceFiles, type FraudHoldBinding, type FraudHoldReceipts, type ReceiptConsumption } from '../fraud-holds/fraud-hold-clients.js';
+import { recordTransition } from '../domain/transitions.js';
 import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
@@ -28,9 +29,8 @@ export type AttestationStatement = (typeof ATTESTATION_STATEMENTS)[number];
 export const LATE_SETTLEMENT_REFUSALS = [
   'purchase_exists', 'cash_return_confirmed', 'cash_return_reported', 'request_not_settleable', 'dispute_open', 'settlement_in_progress', 'refund_exists',
   'evidence_insufficient', 'evidence_contradictory', 'settlement_time_unavailable', 'already_applied',
-  // Core V2 S0-C8 PR-2a (interim, removed by PR-2b): a late settlement evidenced by Payment's LATE success cannot be applied yet: its purchase
-  // evidence (BIL-32 G) is PR-2b's; answered before the receipt is spent, so the Owner's step-up is never consumed for it
-  'late_success_application_pending',
+  // Core V2 S0-C8 item 8 (LS-7, an Owner-approved policy addition): a verified chargeback of the payment refuses L-4 (both inputs)
+  'chargeback_recorded',
 ] as const;
 export type LateSettlementRefusal = (typeof LATE_SETTLEMENT_REFUSALS)[number];
 
@@ -46,6 +46,7 @@ const CONSTRAINT_REFUSAL: Record<string, LateSettlementRefusal> = {
   late_settlement_evidence_insufficient: 'evidence_insufficient',
   late_settlement_evidence_contradictory: 'evidence_contradictory',
   late_settlement_time_unavailable: 'settlement_time_unavailable',
+  late_settlement_chargeback_recorded: 'chargeback_recorded',
   late_settlement_application_lateSettlementId_key: 'already_applied',
   late_settlement_application_assistanceRequestId_key: 'purchase_exists',
   subscription_purchase_assistance_unique: 'purchase_exists',
@@ -250,6 +251,7 @@ export class LateSettlementService {
               EXISTS (SELECT 1 FROM cash_return_obligation o WHERE o."assistanceRequestId" = a.id AND o.status = 'confirmed_returned') AS confirmed,
               EXISTS (SELECT 1 FROM cash_return_obligation o WHERE o."assistanceRequestId" = a.id AND o.status = 'return_reported') AS reported,
               EXISTS (SELECT 1 FROM assistance_dispute d WHERE d."assistanceRequestId" = a.id AND d.status = 'open') AS disputed,
+              EXISTS (SELECT 1 FROM payment_dispute_loss x WHERE x."paymentRequestId" = $3) AS chargeback,
               EXISTS (SELECT 1 FROM assistance_settlement_channel c WHERE c."assistanceRequestId" = a.id AND c."invoiceId" <> $2 AND c.status IN ('open', 'uncertain')) AS channel,
               EXISTS (SELECT 1 FROM refund_case c WHERE c."paymentRequestId" = $3
                         AND (c.status <> 'cancelled' OR EXISTS (SELECT 1 FROM refund_authorization_relay x WHERE x."refundCaseId" = c.id))) AS refunded,
@@ -257,13 +259,13 @@ export class LateSettlementService {
               billing_late_settlement_settled_at($1) IS NULL AS untimed
          FROM assistance_request a WHERE a.id = $4`, [l.id, l.invoiceId, l.paymentRequestId, l.assistanceRequestId])).rows[0]!;
     if (r.applied) return 'already_applied';
-    if (l.lateSuccessId) return 'late_success_application_pending';
     if (r.purchased) return 'purchase_exists';
     if (r.confirmed) return 'cash_return_confirmed';
     if (r.status !== 'cash_collected') return 'request_not_settleable';
     if (r.reported) return 'cash_return_reported';
     if (r.disputed) return 'dispute_open';
     if (r.channel) return 'settlement_in_progress';
+    if (r.chargeback) return 'chargeback_recorded';
     if (r.refunded) return 'refund_exists';
     if (r.statement === 'cash_returned') return 'evidence_contradictory';
     if (input.reasonCode === 'cash_not_returned_attested' && r.statement !== 'cash_not_returned') return 'evidence_insufficient';
@@ -340,11 +342,19 @@ export class LateSettlementService {
     const line = (await q.query<{ priceId: string }>(
       `SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1 AND "productId" = $2 AND "interval" = 'recurring'`, [l.invoiceId, l.productId])).rows;
     if (line.length !== 1) throw lateSettlementRefused('request_not_settleable');
-    // Core V2 S0-C8 PR-2a: only an E-7 late settlement (an applied `payment.succeeded` receipt) is applied; one from a late success waits for PR-2b
-    if (l.receiptId === null) throw lateSettlementRefused('late_success_application_pending');
+    if (l.lateSuccessId) {
+      // Core V2 S0-C8 item 5 (LS-3): from Payment's late success the invoice becomes paid HERE, at Payment's instant (LS-2), through this
+      // application; the payment request keeps Payment's final state and the channel stays closed (BI-14 as extended by migration 0044)
+      const paid = await q.query<{ revision: number }>(`UPDATE invoice SET status = 'paid', "paidAt" = $2::timestamptz WHERE id = $1 AND status = 'open' RETURNING revision`,
+        [l.invoiceId, app.settledAt]);
+      if (paid.rows.length !== 1) throw lateSettlementRefused('request_not_settleable');
+      // its financial transition is recorded; its accountability is the Owner's `assistance_late_settlement.applied` below (the catalog's
+      // `invoice.paid` is a system action of Payment's settlement path, never an Owner's)
+      await recordTransition(q, { entityType: 'invoice', entityId: l.invoiceId, from: 'open', to: 'paid', revision: paid.rows[0]!.revision, ctx });
+    }
     await this.personal.recordPurchase(q, {
       userId: l.beneficiaryUserId, productId: l.productId, priceId: line[0]!.priceId, invoiceId: l.invoiceId, paymentRequestId: l.paymentRequestId,
-      receiptId: l.receiptId, settledAt: app.settledAt, assistanceRequestId: l.assistanceRequestId, appliedAt: app.appliedAt,
+      receiptId: l.receiptId, lateSuccessId: l.lateSuccessId, settledAt: app.settledAt, assistanceRequestId: l.assistanceRequestId, appliedAt: app.appliedAt,
     });
     const purchase = (await q.query<{ id: string }>(`SELECT id FROM subscription_purchase WHERE "invoiceId" = $1 AND "appliedAt" = $2::timestamptz`, [l.invoiceId, app.appliedAt])).rows[0];
     if (!purchase) throw lateSettlementRefused('purchase_exists');

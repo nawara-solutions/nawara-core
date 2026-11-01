@@ -29,7 +29,10 @@ export interface SettledPurchase {
   priceId: string;
   invoiceId: string;
   paymentRequestId: string;
-  receiptId: string;
+  /** Payment's applied `payment.succeeded` receipt; null only for an L-4 purchase evidenced by Payment's late success (Core V2 S0-C8). */
+  receiptId: string | null;
+  /** Core V2 S0-C8 (PR-2b): the L-4 purchase's evidence when it came from Payment's verified late success (exactly one of the two). */
+  lateSuccessId?: string | null;
   /** A Date, or (Core V2 S6g) the database's exact text of an instant it recorded. */
   settledAt: Date | string;
   /** Core V2 S5b (E-12): an assisted purchase names its routing purpose and assistance request (DB-12); a direct purchase names neither. */
@@ -69,11 +72,11 @@ export class PersonalSubscriptionRepository {
     if (!subscription) throw new Error('personal purchase: the product is not a personal subscription product'); // unreachable: the routing record's FK
     const { rows } = await q.query<{ id: string }>(
       `INSERT INTO subscription_purchase ("personalSubscriptionId", "invoiceId", purpose, "beneficiaryUserId", "productId", "priceId", "paymentRequestId", "receiptId",
-                                          "settledAt", "originalStart", "originalEnd", "transactionId", "assistanceRequestId", "appliedAt")
-       VALUES ($1, $2, $9, $3, $4, $5, $6, $7, $8::timestamptz, $8::timestamptz, $8::timestamptz + interval '1 second', pg_current_xact_id(), $10, $11::timestamptz)
+                                          "settledAt", "originalStart", "originalEnd", "transactionId", "assistanceRequestId", "appliedAt", "lateSuccessId")
+       VALUES ($1, $2, $9, $3, $4, $5, $6, $7, $8::timestamptz, $8::timestamptz, $8::timestamptz + interval '1 second', pg_current_xact_id(), $10, $11::timestamptz, $12)
        ON CONFLICT DO NOTHING RETURNING id`,
       [subscription.id, p.invoiceId, p.userId, p.productId, p.priceId, p.paymentRequestId, p.receiptId, p.settledAt,
-       p.assistanceRequestId ? 'assisted_settlement' : 'direct_purchase', p.assistanceRequestId ?? null, p.appliedAt ?? null],
+       p.assistanceRequestId ? 'assisted_settlement' : 'direct_purchase', p.assistanceRequestId ?? null, p.appliedAt ?? null, p.lateSuccessId ?? null],
     );
     return { subscription, recorded: rows.length === 1 };
   }
