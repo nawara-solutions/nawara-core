@@ -49,7 +49,7 @@ bypassing the application) in `core-ci-passed`; **I** cross-process suites; **O*
 |---|---|---|
 | **OD-05** catalog VALUES (product codes, names, durations, amounts, dates) | OPEN (the capability is built, D-CAT-1) | the catalog gate still holds any real catalog configuration |
 | **BIL-12** `GET /billing/me/platforms/:platformId/personal-subscriptions` | IMPLEMENTED (#424), development and simulation only | none at development level; its production mounting follows DG-4 |
-| **F-INV-1** Billing's invoice list (`GET /billing/invoices`, `InvoiceRepository.listForCaller`, ADR-0034) compares its millisecond cursor with the microsecond `createdAt`, so invoices created within the same millisecond can be skipped across a page boundary | OPEN, independent follow-up (found during BIL-12, 2026-11-01); Owner approval needed for a separate Billing fix | a pre-existing V1 read, not an S3 certification-gate criterion; not fixed here; BIL-12 itself compares at millisecond precision |
+| **F-INV-1** Billing's invoice list (`GET /billing/invoices`, `InvoiceRepository.listForCaller`, ADR-0034) compared its millisecond cursor with the microsecond `createdAt`, so invoices created within the same millisecond could be skipped across a page boundary | **RESOLVED** by #426 (`e3b8133`, 2026-11-01) | an exact-microsecond cursor; order, indexes, response shape and isolation unchanged; `invoice-list-pagination.e2e-spec.ts` |
 | **EVT-05** `billing.subscription.*` events | not approved | Billing produces only `invoice.created` |
 | Invoice legal content for production: legal issuer (B-001), tax (B-006), numbering and content (B-007), who may issue (B-028) | OPEN (Billing SDD) | checkout uses simulation reference snapshots only |
 | **DG-4** manual or automated billing for the pilot | OPEN (Owner decision) | Billing production disposition undecided |
@@ -89,3 +89,4 @@ and disposition decisions of §3 (BIL-12 is implemented, §7). No production cla
   This does not authorize S-INT, which needs the Owner-approved readiness record. The verdict is unchanged (CONDITIONAL PASS,
   development and simulation).
 - Recorded separately: **F-INV-1** (§3), the invoice list's millisecond cursor, an independent follow-up for the Owner's decision.
+  **Resolved by #426** (2026-11-01), as the [S-INT readiness record](./core-v2-s-int-readiness.md) §6 records.
