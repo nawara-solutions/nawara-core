@@ -197,18 +197,23 @@ export class ReconciliationService {
       }
     };
     const fresh = (type: CaseType, key: string) => `NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = '${type}' AND k."evidenceKey" = ${key})`;
-    // late successes recorded but never classified (a crash between the record and its classification)
+    // late successes recorded but never classified (a crash between the record and its classification), or deferred until their assisted
+    // payment request is final (Core V2 S0-C8, LS-5: retried on every pass, never inferred)
     for (const r of (await this.db.query<{ lateSuccessId: string }>(
       `SELECT l."lateSuccessId" FROM payment_late_success l WHERE NOT EXISTS (SELECT 1 FROM recovery_payment p WHERE p."lateSuccessId" = l."lateSuccessId")
+          AND NOT EXISTS (SELECT 1 FROM assistance_late_settlement s WHERE s."lateSuccessId" = l."lateSuccessId")
           AND ${fresh('late_success', 'l."lateSuccessId"')}`)).rows) {
       const ctx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: r.lateSuccessId }, correlationId: `late-success:${r.lateSuccessId}` };
       await this.db.tx(async (q) => {
-        if ((await this.lateSuccesses.classify(q, r.lateSuccessId, ctx)) === 'case') tally.opened++;
+        if (['case', 'late_settlement'].includes(await this.lateSuccesses.classify(q, r.lateSuccessId, ctx))) tally.opened++;
       });
     }
-    await run(`SELECT s.id, s."paymentRequestId", r."paymentId", r.amount, trim(r.currency) AS currency FROM assistance_late_settlement s JOIN payment_request r ON r.id = s."paymentRequestId"
+    // Core V2 S0-C8: a late settlement from Payment's late success names its capture (its refund is exactly that captured movement, BIL-23 H)
+    await run(`SELECT s.id, s."paymentRequestId", r."paymentId", r.amount, trim(r.currency) AS currency, l."factId" FROM assistance_late_settlement s
+        JOIN payment_request r ON r.id = s."paymentRequestId" LEFT JOIN payment_late_success l ON l."lateSuccessId" = s."lateSuccessId"
         WHERE NOT EXISTS (SELECT 1 FROM late_settlement_application a WHERE a."lateSettlementId" = s.id) AND ${fresh('late_assisted_settlement', 's.id')}`,
-      (r) => ({ caseType: 'late_assisted_settlement', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, paymentId: r.paymentId, amount: Number(r.amount), currency: r.currency }));
+      (r) => ({ caseType: 'late_assisted_settlement', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, paymentId: r.paymentId, captureFactId: r.factId,
+        amount: Number(r.amount), currency: r.currency }));
     await run(`SELECT r.id, r."paymentId", r.amount, trim(r.currency) AS currency FROM payment_request r JOIN invoice i ON i.id = r."invoiceId"
         WHERE r.status = 'paid' AND NOT EXISTS (SELECT 1 FROM invoice_entitlement e WHERE e."invoiceId" = r."invoiceId") AND ${fresh('unrouted_settlement', 'r.id')}`,
       (r) => ({ caseType: 'unrouted_settlement', evidenceKey: r.id, paymentRequestId: r.id, paymentId: r.paymentId, amount: Number(r.amount), currency: r.currency }));

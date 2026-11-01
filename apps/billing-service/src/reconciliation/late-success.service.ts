@@ -22,6 +22,9 @@ export type LateSuccessSource = { kind: 'event'; eventId: string } | { kind: 're
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 const STATUSES = ['succeeded', 'failed', 'expired', 'cancelled'];
+const TERMINAL_UNSUCCESSFUL = ['failed', 'expired', 'cancelled'];
+/** Billing's final payment request states (its own record of Payment's outcome). */
+const FINAL_REQUEST = ['paid', 'failed', 'cancelled', 'expired', 'rejected'];
 
 /**
  * Core V2 S6h-B (register EVT-10, BIL-33; S0 §3.4 L-1, L-2, §3.5; the Owner's R6H-4). DEVELOPMENT AND SIMULATION ONLY.
@@ -32,8 +35,16 @@ const STATUSES = ['succeeded', 'failed', 'expired', 'cancelled'];
  * is classified by the request's OWN routing purpose:
  *   - `recovery_settlement`: a `recovery_payment` of the verified captured amount (every distinct verified success counts once), split by the
  *     database into the principal still outstanding and the surplus owed to the Organization; T3 ends only when the principal reaches the base;
- *   - anything else (an assisted settlement, a purchase, a non-entitlement sale): a `late_success` reconciliation case, resolved only by the
- *     completed capture-specific refund of that captured movement (R6H-5); no purchase, no entitlement, no obligation.
+ *   - `assisted_settlement` (Core V2 S0-C8 item 1 b; register BIL-32 G, BIL-33 G; the Owner's LS-4, LS-5, LS-8): while Billing's payment
+ *     request is not final, NOTHING is decided (the record waits; the reconciliation worker retries it: finality is never inferred). Once it
+ *     is final, an ELIGIBLE late success (Payment's payment and Billing's request ended in the same `failed` / `cancelled` / `expired` state,
+ *     the channel is `closed`, the capture fact is named, the amount and currency equal the invoice's total, and the invoice has no late
+ *     settlement yet) is an `assistance_late_settlement` (`channel_closed`, `settledAt` = Payment's `recordedAt`) with its
+ *     `late_assisted_settlement` case: the L-4 input, whose default resolution is the full refund of that capture (L-3). NO purchase, no
+ *     entitlement, no obligation change (L-2). Any other assisted late success, and one already handled as a `late_success` case (LS-8),
+ *     stays refund-only;
+ *   - anything else (a purchase, a non-entitlement sale, an ineligible assisted success): a `late_success` reconciliation case, resolved only
+ *     by the completed capture-specific refund of that captured movement (R6H-5); no purchase, no entitlement, no obligation.
  */
 @Injectable()
 export class LateSuccessService {
@@ -73,23 +84,53 @@ export class LateSuccessService {
   }
 
   /**
-   * The classification of one recorded late success, once: its recovery payment, or its reconciliation case. Idempotent (a crash between the
-   * record and its classification is completed by the reconciliation worker).
+   * The classification of one recorded late success, once: its recovery payment, its late assisted settlement, or its reconciliation case; or
+   * `deferred` while its assisted payment request is not final. Idempotent, under the payment request's row lock (a crash between the record
+   * and its classification, or a deferral, is completed by the reconciliation worker). The database re-checks every condition (0043).
    */
-  async classify(q: Queryable, lateSuccessId: string, ctx: TransitionContext): Promise<'recovery' | 'recovered' | 'case' | 'done'> {
-    if ((await q.query(`SELECT 1 FROM recovery_payment WHERE "lateSuccessId" = $1`, [lateSuccessId])).rows.length > 0) return 'done';
+  async classify(q: Queryable, lateSuccessId: string, ctx: TransitionContext): Promise<'recovery' | 'recovered' | 'case' | 'late_settlement' | 'deferred' | 'done'> {
+    if ((await q.query(`SELECT 1 FROM recovery_payment WHERE "lateSuccessId" = $1 UNION ALL SELECT 1 FROM assistance_late_settlement WHERE "lateSuccessId" = $1`,
+      [lateSuccessId])).rows.length > 0) return 'done';
     const l = (await q.query<{ paymentId: string; paymentRequestId: string; factId: string | null; amount: string; currency: string; invoiceId: string;
-      purpose: string | null; obligationId: string | null }>(
-      `SELECT l."paymentId", l."paymentRequestId", l."factId", l.amount, trim(l.currency) AS currency, pr."invoiceId", e.purpose, e."recoveryObligationId" AS "obligationId"
-         FROM payment_late_success l JOIN payment_request pr ON pr.id = l."paymentRequestId" LEFT JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId"
-        WHERE l."lateSuccessId" = $1`, [lateSuccessId])).rows[0]!;
+      purpose: string | null; obligationId: string | null; assistanceRequestId: string | null; paymentStatus: string; recordedAt: Date; requestStatus: string;
+      invoiceTotal: string; invoiceCurrency: string }>(
+      `SELECT l."paymentId", l."paymentRequestId", l."factId", l.amount, trim(l.currency) AS currency, pr."invoiceId", e.purpose, e."recoveryObligationId" AS "obligationId",
+              e."assistanceRequestId", l."paymentStatus", l."recordedAt", pr.status AS "requestStatus", i.total AS "invoiceTotal", trim(i.currency) AS "invoiceCurrency"
+         FROM payment_late_success l JOIN payment_request pr ON pr.id = l."paymentRequestId" JOIN invoice i ON i.id = pr."invoiceId"
+         LEFT JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId"
+        WHERE l."lateSuccessId" = $1 FOR UPDATE OF pr`, [lateSuccessId])).rows[0]!;
     if (l.purpose === 'recovery_settlement' && l.obligationId) {
       return applyRecoveryPayment(q, this.audit, { obligationId: l.obligationId, invoiceId: l.invoiceId, paymentRequestId: l.paymentRequestId, lateSuccessId,
         amount: l.amount, currency: l.currency }, ctx);
     }
+    if (l.purpose === 'assisted_settlement' && l.assistanceRequestId) {
+      // LS-8: one already handled as a refund-only case stays so
+      if ((await q.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'late_success' AND "evidenceKey" = $1`, [lateSuccessId])).rows.length > 0) return 'done';
+      if (!FINAL_REQUEST.includes(l.requestStatus)) return 'deferred'; // LS-5: never decided before Billing holds Payment's final outcome
+      const lateSettlementId = await this.lateSettlement(q, lateSuccessId, { ...l, assistanceRequestId: l.assistanceRequestId });
+      if (lateSettlementId) {
+        await this.cases.openForPayment(q, { caseType: 'late_assisted_settlement', evidenceKey: lateSettlementId, paymentRequestId: l.paymentRequestId,
+          paymentId: l.paymentId, captureFactId: l.factId, amount: Number(l.amount), currency: l.currency });
+        this.log.log(`late_success_late_settlement lateSuccess=${lateSuccessId} lateSettlement=${lateSettlementId} — no purchase (L-2); refund by default (L-3)`);
+        return 'late_settlement';
+      }
+    }
     const opened = await this.cases.openForPayment(q, { caseType: 'late_success', evidenceKey: lateSuccessId, paymentRequestId: l.paymentRequestId,
       captureFactId: l.factId, amount: Number(l.amount), currency: l.currency, detail: l.purpose ?? 'unrouted' });
     return opened === null ? 'done' : 'case';
+  }
+
+  /** S0-C8 item 1 (b), LS-4: the late assisted settlement of an ELIGIBLE late success (the first of its invoice), or null (refund-only). */
+  private async lateSettlement(q: Queryable, lateSuccessId: string, l: { paymentRequestId: string; factId: string | null; amount: string; currency: string;
+    invoiceId: string; assistanceRequestId: string; paymentStatus: string; recordedAt: Date; requestStatus: string; invoiceTotal: string; invoiceCurrency: string }): Promise<string | null> {
+    if (l.factId === null || !TERMINAL_UNSUCCESSFUL.includes(l.paymentStatus) || l.requestStatus !== l.paymentStatus
+      || Number(l.amount) !== Number(l.invoiceTotal) || l.currency !== l.invoiceCurrency) return null;
+    const closed = (await q.query(`SELECT 1 FROM assistance_settlement_channel WHERE "invoiceId" = $1 AND "assistanceRequestId" = $2 AND "paymentRequestId" = $3 AND status = 'closed'`,
+      [l.invoiceId, l.assistanceRequestId, l.paymentRequestId])).rows.length > 0;
+    if (!closed || (await q.query(`SELECT 1 FROM assistance_late_settlement WHERE "invoiceId" = $1`, [l.invoiceId])).rows.length > 0) return null;
+    return (await q.query<{ id: string }>(
+      `INSERT INTO assistance_late_settlement ("assistanceRequestId", "invoiceId", "paymentRequestId", "lateSuccessId", reason, "settledAt")
+       VALUES ($1, $2, $3, $4, 'channel_closed', $5) RETURNING id`, [l.assistanceRequestId, l.invoiceId, l.paymentRequestId, lateSuccessId, l.recordedAt])).rows[0]!.id;
   }
 
   private refused(o: 'binding_mismatch' | 'conflict', l: PaymentLateSuccess, why: string): LateSuccessOutcome {

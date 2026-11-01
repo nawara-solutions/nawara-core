@@ -28,6 +28,9 @@ export type AttestationStatement = (typeof ATTESTATION_STATEMENTS)[number];
 export const LATE_SETTLEMENT_REFUSALS = [
   'purchase_exists', 'cash_return_confirmed', 'cash_return_reported', 'request_not_settleable', 'dispute_open', 'settlement_in_progress', 'refund_exists',
   'evidence_insufficient', 'evidence_contradictory', 'settlement_time_unavailable', 'already_applied',
+  // Core V2 S0-C8 PR-2a (interim, removed by PR-2b): a late settlement evidenced by Payment's LATE success cannot be applied yet: its purchase
+  // evidence (BIL-32 G) is PR-2b's; answered before the receipt is spent, so the Owner's step-up is never consumed for it
+  'late_success_application_pending',
 ] as const;
 export type LateSettlementRefusal = (typeof LATE_SETTLEMENT_REFUSALS)[number];
 
@@ -103,7 +106,7 @@ export function normaliseApplicationInput(body: unknown): ApplicationInput {
 }
 
 interface LateRow {
-  id: string; assistanceRequestId: string; invoiceId: string; paymentRequestId: string; receiptId: string; reason: string; recordedAt: Date;
+  id: string; assistanceRequestId: string; invoiceId: string; paymentRequestId: string; receiptId: string | null; lateSuccessId: string | null; reason: string; recordedAt: Date;
   organizationId: string; platformId: string; beneficiaryUserId: string; productId: string; companyId: string | null;
 }
 
@@ -140,7 +143,7 @@ export class LateSettlementService {
   private async late(q: Queryable, id: string): Promise<LateRow | undefined> {
     if (!UUID.test(id)) return undefined;
     return (await q.query<LateRow>(
-      `SELECT l.id, l."assistanceRequestId", l."invoiceId", l."paymentRequestId", l."receiptId", l.reason, l."recordedAt",
+      `SELECT l.id, l."assistanceRequestId", l."invoiceId", l."paymentRequestId", l."receiptId", l."lateSuccessId", l.reason, l."recordedAt",
               a."organizationId", a."platformId", a."beneficiaryUserId", a."productId", b."companyId"
          FROM assistance_late_settlement l JOIN assistance_request a ON a.id = l."assistanceRequestId"
          LEFT JOIN billing_platform b ON b."platformId" = a."platformId" WHERE l.id = $1`, [id])).rows[0];
@@ -254,6 +257,7 @@ export class LateSettlementService {
               billing_late_settlement_settled_at($1) IS NULL AS untimed
          FROM assistance_request a WHERE a.id = $4`, [l.id, l.invoiceId, l.paymentRequestId, l.assistanceRequestId])).rows[0]!;
     if (r.applied) return 'already_applied';
+    if (l.lateSuccessId) return 'late_success_application_pending';
     if (r.purchased) return 'purchase_exists';
     if (r.confirmed) return 'cash_return_confirmed';
     if (r.status !== 'cash_collected') return 'request_not_settleable';
@@ -336,6 +340,8 @@ export class LateSettlementService {
     const line = (await q.query<{ priceId: string }>(
       `SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1 AND "productId" = $2 AND "interval" = 'recurring'`, [l.invoiceId, l.productId])).rows;
     if (line.length !== 1) throw lateSettlementRefused('request_not_settleable');
+    // Core V2 S0-C8 PR-2a: only an E-7 late settlement (an applied `payment.succeeded` receipt) is applied; one from a late success waits for PR-2b
+    if (l.receiptId === null) throw lateSettlementRefused('late_success_application_pending');
     await this.personal.recordPurchase(q, {
       userId: l.beneficiaryUserId, productId: l.productId, priceId: line[0]!.priceId, invoiceId: l.invoiceId, paymentRequestId: l.paymentRequestId,
       receiptId: l.receiptId, settledAt: app.settledAt, assistanceRequestId: l.assistanceRequestId, appliedAt: app.appliedAt,

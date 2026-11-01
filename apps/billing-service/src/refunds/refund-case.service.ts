@@ -119,6 +119,10 @@ export class RefundCaseService {
       if (!basis || (pr.status !== 'paid' && !basis.captureFactId)) throw notEligible();
       // Core V2 S6f (R6F-5 Path A): the recovery-surplus reason is required for, and only for, the recovery-surplus basis
       if ((input.reason === 'recovery_surplus') !== (basis.eligibility === 'recovery_surplus')) throw notEligible();
+      // Core V2 S0-C8 (LS-6): one live case per captured movement, whatever its eligibility
+      if (basis.captureFactId && (await q.query(`SELECT 1 FROM refund_case WHERE "captureFactId" = $1 AND status IN ('open', 'completed')`, [basis.captureFactId])).rows.length > 0) {
+        throw caseExists();
+      }
       // Core V2 R6H-5: one live ORDINARY case per payment; an open capture-specific case (unresolved exposure) or the settling capture's own
       // capture-specific case also refuses it (the database guard enforces both)
       if ((await q.query(`SELECT 1 FROM refund_case WHERE "paymentId" = $1 AND status IN ('open', 'completed') AND eligibility <> 'capture_specific'
@@ -167,6 +171,9 @@ export class RefundCaseService {
       if (pr.purpose === 'organization_subscription' || pr.purpose === 'recovery_settlement') throw notEligible();
       const basis = await this.captureBasis(q, capture, pr, facts);
       if (!basis) throw notEligible();
+      // Core V2 S0-C8 (LS-6): the capture that evidences a late assisted settlement is refunded by that settlement's own case (L-3)
+      if ((await q.query(`SELECT 1 FROM assistance_late_settlement l JOIN payment_late_success s ON s."lateSuccessId" = l."lateSuccessId" WHERE s."factId" = $1`,
+        [factId])).rows.length > 0) throw notEligible();
       if ((await q.query(`SELECT 1 FROM refund_case WHERE "captureFactId" = $1 AND status IN ('open', 'completed')
             UNION ALL SELECT 1 FROM refund_case WHERE "paymentId" = $2 AND eligibility <> 'capture_specific'
               AND (status = 'open' OR (status = 'completed' AND $3::text = 'unrouted_capture'))`, [factId, input.paymentId, basis.basis])).rows.length > 0) throw caseExists();
@@ -281,9 +288,14 @@ export class RefundCaseService {
          FROM subscription_purchase s WHERE s."invoiceId" = $1 AND s."paymentRequestId" = $2 AND s.purpose IN ('direct_purchase', 'assisted_settlement')`,
       [invoiceId, paymentRequestId])).rows[0];
     if (purchase) return purchase.reversed ? null : { eligibility: 'personal_purchase', receiptId: purchase.receiptId, purchaseId: purchase.id, lateSettlementId: null };
-    const late = (await q.query<{ id: string; receiptId: string }>(
-      `SELECT id, "receiptId" FROM assistance_late_settlement WHERE "invoiceId" = $1 AND "paymentRequestId" = $2`, [invoiceId, paymentRequestId])).rows[0];
-    if (late) return { eligibility: 'late_assisted_settlement', receiptId: late.receiptId, purchaseId: null, lateSettlementId: late.id };
+    // Core V2 S0-C8 (BIL-23 H): a late settlement from Payment's LATE success names its capture: refunded in full as exactly that movement
+    const late = (await q.query<{ id: string; receiptId: string | null; factId: string | null; amount: string | null }>(
+      `SELECT l.id, l."receiptId", s."factId", s.amount FROM assistance_late_settlement l LEFT JOIN payment_late_success s ON s."lateSuccessId" = l."lateSuccessId"
+        WHERE l."invoiceId" = $1 AND l."paymentRequestId" = $2`, [invoiceId, paymentRequestId])).rows[0];
+    if (late) {
+      return { eligibility: 'late_assisted_settlement', receiptId: late.receiptId, purchaseId: null, lateSettlementId: late.id, captureFactId: late.factId,
+        ...(late.amount !== null ? { amount: late.amount } : {}) };
+    }
     if (purpose !== 'non_entitlement') return null;
     const receipt = (await q.query<{ id: string }>(
       `SELECT id FROM payment_event_receipt WHERE "paymentRequestId" = $1 AND "eventName" = 'payment.succeeded' AND outcome = 'applied' ORDER BY "receivedAt", id LIMIT 1`,
