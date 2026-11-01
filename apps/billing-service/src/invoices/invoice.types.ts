@@ -106,6 +106,8 @@ export interface InvoiceListFilters {
 }
 
 export interface InvoiceListRow extends InvoiceRow {
+  /** F-INV-1: `createdAt` at the database's microsecond precision (UTC text), the list's cursor position; never part of the response. */
+  cursorAt: string;
   activePaymentRequestId: string | null;
   activePaymentRequestStatus: string | null;
   activePaymentRequestPaymentId: string | null;
