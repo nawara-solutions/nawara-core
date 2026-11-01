@@ -2,6 +2,7 @@ import { BillingAudit } from '../audit/billing-audit.js';
 import { ASSISTANCE_PRODUCER, RECOVERY_PRODUCER } from '../config/billing-config.js';
 import { Injectable } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
+import type { PreciseCursorPosition } from '../common/pagination.js';
 import { type Caller, type TransitionContext } from '../domain/actors.js';
 import { requestHash } from '../domain/canonical.js';
 import { billingError, notFound, operationNotPermitted } from '../domain/errors.js';
@@ -193,9 +194,12 @@ export class InvoiceRepository {
    * (organizationId via payer/sourceType, payerId, etc.) that does not match the caller's own scope narrows to an empty
    * page, never to another caller's data, because every filter is ANDed onto the scope clause, never a replacement for
    * it. No `lines` here (a list of up to 100 invoices with up to 100 lines each would be unbounded); `GET .../{id}` has
-   * them. `limit + 1` rows are fetched so `toPage` can tell whether another page follows without a second query.
+   * them. `limit + 1` rows are fetched so `toPrecisePage` can tell whether another page follows without a second query.
+   * F-INV-1: each row also carries `cursorAt`, its `createdAt` at the database's microsecond precision as UTC text, and the cursor is
+   * compared as `timestamptz`, so invoices created within one millisecond are neither skipped nor repeated across a page boundary. The
+   * order (`createdAt DESC, id DESC`) and so the indexes serving it are unchanged.
    */
-  async listForCaller(caller: Caller, filters: InvoiceListFilters, limit: number, cursor: { createdAt: Date; id: string } | null): Promise<InvoiceListRow[]> {
+  async listForCaller(caller: Caller, filters: InvoiceListFilters, limit: number, cursor: PreciseCursorPosition | null): Promise<InvoiceListRow[]> {
     const where: string[] = [];
     const params: unknown[] = [];
     const p = (v: unknown): string => {
@@ -212,10 +216,11 @@ export class InvoiceRepository {
     if (filters.payerType !== undefined) where.push(`i."payerType" = ${p(filters.payerType)}`);
     if (filters.payerId !== undefined) where.push(`i."payerId" = ${p(filters.payerId)}`);
     if (filters.dueBefore !== undefined) where.push(`i."dueAt" IS NOT NULL AND i."dueAt" < ${p(filters.dueBefore)}`);
-    if (cursor) where.push(`(i."createdAt", i.id) < (${p(cursor.createdAt)}, ${p(cursor.id)})`); // keyset pagination, newest first
+    if (cursor) where.push(`(i."createdAt", i.id) < (${p(cursor.at)}::timestamptz, ${p(cursor.id)}::uuid)`); // keyset pagination, newest first
 
     const { rows } = await this.db.query<InvoiceListRow>(
       `SELECT i.*, (i.status = 'open' AND i."dueAt" IS NOT NULL AND i."dueAt" <= now()) AS "isOverdue",
+              to_char(i."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorAt",
               pr.id AS "activePaymentRequestId", pr.status AS "activePaymentRequestStatus", pr."paymentId" AS "activePaymentRequestPaymentId"
          FROM invoice i
          LEFT JOIN LATERAL (

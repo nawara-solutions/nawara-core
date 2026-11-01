@@ -9,7 +9,7 @@ import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { actorOf, requestTransitionContext } from '../domain/actors.js';
 import { normaliseCreateInvoiceInput, normaliseInvoiceListFilters, normaliseIssueInvoiceInput } from '../domain/invoice-input.js';
 import { SYSTEM_TEMPLATE_V1 } from '../domain/snapshots.js';
-import { decodeCursor, parseLimit, toPage } from '../common/pagination.js';
+import { decodePreciseCursor, parseLimit, toPrecisePage } from '../common/pagination.js';
 import { representInvoice, representInvoiceSummary } from './invoice.representation.js';
 import { InvoiceRepository } from './invoice.repository.js';
 import { PaymentRequestRepository } from './payment-request.repository.js';
@@ -98,10 +98,10 @@ export class InvoicesController {
     // req.caller is always set here: ServiceOrUserGuard either sets it or throws 401 before this handler runs.
     const caller = toDomainCaller(req.caller!);
     const limit = parseLimit(query.limit);
-    const cursor = typeof query.cursor === 'string' && query.cursor !== '' ? decodeCursor(query.cursor) : null;
+    const cursor = typeof query.cursor === 'string' && query.cursor !== '' ? decodePreciseCursor(query.cursor) : null;
     const filters = normaliseInvoiceListFilters(query);
     const rows = await this.invoices.listForCaller(caller, filters, limit, cursor);
-    const page = toPage(rows, limit);
+    const page = toPrecisePage(rows, limit);
     return { items: page.items.map(representInvoiceSummary), nextCursor: page.nextCursor };
   }
 
