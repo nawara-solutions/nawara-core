@@ -1,6 +1,9 @@
 # Core V2 F-SINT-1: making the frozen L-4 path reachable (proposal)
 
-- **Status:** PROPOSED, for Owner review. Prepared 2026-11-01 under the Owner's F-SINT-1 decision (Option A, documentation proposal
+- **Decision (2026-11-01):** the Owner approved LS-1 to LS-10. The approved record is **S0-C8** in the
+  [S0 freeze record](./core-v2-s0-architecture-freeze.md) §1.5 with register BIL-23 H, BIL-32 G, BIL-33 G and EVT-10; where this
+  proposal and S0-C8 differ, S0-C8 governs. LS-7 is recorded as a policy addition. Nothing is implemented.
+- **Status (as written):** PROPOSED, for Owner review. Prepared 2026-11-01 under the Owner's F-SINT-1 decision (Option A, documentation proposal
   only), on `main` at `480f94826cd31f00ed8a46865b765f493eae2682` (the PR #431 merge; Core CI push run `41321579398` green).
 - **What it is:** an approval-ready draft of one S0 clarification (S0-C8) and of the contract changes it needs in the
   [contract register](./core-v2-d-a2-contract-register.md) (BIL-23, BIL-32, BIL-33, EVT-10), with the trace, the design, the
