@@ -71,7 +71,7 @@ is not S-INT readiness: entry needs the Owner-approved S-INT readiness record an
 
 | Id | Finding | State | Decision needed |
 |---|---|---|---|
-| F-INV-1 | Billing's invoice list (`GET /billing/invoices`, `InvoiceRepository.listForCaller`, ADR-0034) compares its millisecond cursor with the microsecond `createdAt`: invoices created within the same millisecond can be skipped across a page boundary | OPEN, found during BIL-12 (2026-11-01); not fixed | the Owner approves a separate Billing fix (or records another disposition). It is a pre-existing V1 read, not an S1 to S6 certification-gate criterion, so it is listed here rather than classified under D-3; whether it must close before S-INT is the Owner's decision |
+| F-INV-1 | Billing's invoice list (`GET /billing/invoices`, `InvoiceRepository.listForCaller`, ADR-0034) compared its millisecond cursor with the microsecond `createdAt`: invoices created within the same millisecond could be skipped across a page boundary | **RESOLVED** by #426 (`e3b8133`, 2026-11-01): an exact-microsecond cursor, order and indexes unchanged; `apps/billing-service/test/invoice-list-pagination.e2e-spec.ts` | none |
 
 ## 4. Not changed by this record
 

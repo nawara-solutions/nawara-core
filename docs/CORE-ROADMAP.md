@@ -300,7 +300,8 @@ Core V2 S-track (development and simulation only; nothing deployed; ◐ = condit
   S8    Organization authority changes         EXCLUDED from this S-INT (Owner scope decision 2026-11-01): C-5 and human hierarchy reads
                                                   deferred (F6/F7); PR #319 awaits a read-only A5.4-G1 assessment, no GO
   S-INT integration certification              not started; scope S1 to S6 (final Core V2 S-INT); entry rule D-3; conditions classified
-                                                  (condition matrix); needs the Owner-approved S-INT readiness record and its own authorization
+                                                  (condition matrix); readiness record proposed (core-v2-s-int-readiness.md, Owner approval
+                                                  pending); execution needs its own authorization
 
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
 M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; E2 and E3 prepared, not installed; NOT CERTIFIED
@@ -428,7 +429,7 @@ S7 to A8; S8 to A5 (execution roadmap §11).
   are out of its scope by the Owner's explicit decision of 2026-11-01 (above). Every remaining condition of S1
   to S6 is classified in the [condition matrix](architecture/core-v2-stage-condition-matrix.md); S5 is certified pre-lifecycle under S0-C7;
   no development-level item is OPEN (BIL-12 was implemented, #424; F-INV-1, the invoice list's cursor, was fixed by #426, and its
-  records close in the S-INT readiness record). No verdict is promoted automatically: entry
+  records close in the [S-INT readiness record](architecture/core-v2-s-int-readiness.md)). No verdict is promoted automatically: entry
   needs the Owner-approved S-INT readiness record. S-INT is not a production certification.
 - **Production-track gates are unchanged and separate:** S1-R (with C-4, AP-R, NP-K), G-7 (no S-stage Auth, Organization or Audit image
   in production before M3 or a G6 baseline refresh), M2 → G7 → F6 → F7 → post-F7 backup, the pilot readiness gate M13 / A19 (DG-7).
