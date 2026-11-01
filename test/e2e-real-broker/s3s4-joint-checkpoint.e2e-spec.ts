@@ -119,6 +119,8 @@ describeWithEnv(
     };
     const entitlement = (token: string | null, userId: string, productId: string) =>
       call(BILLING_URL, 'GET', token, `/billing/users/${userId}/platforms/${TEST_PLATFORM}/products/${productId}/entitlement`);
+    /** S-INT G1: BIL-12, the member's own personal subscriptions on this Platform (development and simulation only). */
+    const memberSubscriptions = (token: string | null) => call(BILLING_URL, 'GET', token, `/billing/me/platforms/${TEST_PLATFORM}/personal-subscriptions`);
     const checkoutInvoices = async () => Number((await billingAdmin.query(`SELECT count(*) FROM invoice WHERE producer = 'billing-checkout'`)).rows[0].count);
     const purchases = async (invoiceId: string) =>
       (await billingAdmin.query(`SELECT id, purpose, "beneficiaryUserId", "productId", "priceId", "originalEnd" FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows;
@@ -335,6 +337,15 @@ describeWithEnv(
       expect(new Date(read.json.expiresAt).getTime()).toBeGreaterThan(Date.now());
       expect((await entitlement(entitlementReader.token, OTHER, productId)).json).toEqual({ valid: false, expiresAt: null });
 
+      // S-INT G1 (BIL-12): the buyer's OWN read, by the buyer's bearer verified live by the real Auth, equals B6 for this product; the other
+      // member owns nothing here; an Owner and a service are refused. Informational only: the access decision above is B6's.
+      const own = await memberSubscriptions(buyerToken);
+      expect(own.status, `${JSON.stringify(own.json)}\n${tails()}`).toBe(200);
+      expect(own.json).toEqual({ items: [{ productId, valid: read.json.valid, expiresAt: read.json.expiresAt }], nextCursor: null });
+      expect((await memberSubscriptions(otherToken)).json).toEqual({ items: [], nextCursor: null });
+      expect((await memberSubscriptions(ownerToken)).json?.code).toBe('member_not_eligible');
+      expect((await memberSubscriptions(entitlementReader.token)).status).toBe(401); // a service token is never a member, never forwarded
+
       // duplicates change nothing: the provider's notification again (same command), and a real broker redelivery of Payment's exact message
       const dlqBefore = await deadLettered();
       expect((await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/commands/${commandId}/deliver`)).json?.delivered).toEqual({ status: 200 });
@@ -345,6 +356,7 @@ describeWithEnv(
       expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM payment_event_receipt WHERE "paymentRequestId" = $1`, [paymentRequestId])).rows[0].n).toBe(1);
       expect(await purchases(invoiceId)).toHaveLength(1);
       expect((await entitlement(entitlementReader.token, BUYER, productId)).json).toEqual(read.json);
+      expect((await memberSubscriptions(buyerToken)).json).toEqual(own.json); // S-INT G1: the member's read is unchanged by the duplicates
       expect(await deadLettered()).toBe(dlqBefore);
     }, 120_000);
 
@@ -406,6 +418,10 @@ describeWithEnv(
       const r = await call(BILLING_URL, 'POST', buyerToken, '/billing/checkout/direct', { platformId: TEST_PLATFORM, productId, priceId });
       expect(r.status, JSON.stringify(r.json)).toBe(503);
       expect(await checkoutInvoices()).toBe(before);
+      // S-INT G6: the member's own read (BIL-12) fails closed too: Auth cannot verify the member, so nothing is read
+      const m = await memberSubscriptions(buyerToken);
+      expect(m.status, JSON.stringify(m.json)).toBe(503);
+      expect(m.json?.items).toBeUndefined();
     });
   },
 );
