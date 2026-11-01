@@ -28,12 +28,14 @@ afterAll(() => refStub.close());
  *       1's success: Payment's verified late success over the broker is entirely surplus owed to the Organization (B8), never revenue, never
  *       an entitlement effect, never re-opening T3.
  *   G4: an assisted settlement whose attempt 1 fails and attempt 2 settles it → the provider reports attempt 1's success: Payment's verified
- *       late success is recorded once (S0 §3.4 L-1) as a `late_success` reconciliation case (L-2), with no second purchase (L-5); that
- *       record is never L-4-applicable (finding F-SINT-1 of the S-INT certification record).
- *   G4 (L-4): from ONE labelled fixture — the deadline obligation placed while the channel is in flight, as Billing's own L-4 suite does,
- *       because no real event sequence reaches that state (F-SINT-1) — everything else is real: Payment's verified success over the broker
- *       is an L-1 late settlement, the beneficiary attests, the Owner's TOTP step-up and receipt come from the real Auth, Billing consumes
- *       it there, and the application supersedes the obligation and records the one purchase.
+ *       late success is recorded once (S0 §3.4 L-1) as a refund-only `late_success` reconciliation case (L-2), with no second purchase (L-5).
+ *   G4 (L-4, S0-C8; F-SINT-1 resolved by #432 to #435): REAL EVENTS ONLY, no inserted obligation. The Organization's three attempts fail, so
+ *       Payment's payment ends `failed` (its attempt limit) and Billing's request and channel follow; the provider then reports attempt 1's
+ *       success: Payment's verified late success (EVT-10) over the broker, Payment's final state unchanged → Billing's late assisted
+ *       settlement and its `late_assisted_settlement` case → the beneficiary attests → the Owner's TOTP step-up and receipt at the real Auth
+ *       → the L-4 application: one purchase evidenced by the late success, the invoice paid at Payment's instant, B6 and BIL-12 entitled.
+ *       After `settleBy` only through a LABELLED clock shift once the channel is closed (all of the request's times moved back together),
+ *       then the REAL sweep. Safeguards: duplicate provider reports, mismatched evidence, Owner authority, the refund race, Auth outage (G6).
  *   G6 (part): with Auth down, a new assistance request, the recovery obligation read and the Organization's attempt at Payment all fail
  *       closed (503) and write nothing.
  *
@@ -55,7 +57,9 @@ const BILLING_DEAD_QUEUE = `${BILLING_QUEUE}.dead`;
 const COMPANY = 'aaaaaaaa-0000-4000-8000-00000000c0de'; // the reference stub's Company
 const ORG_A = randomUUID(); // G3
 const ORG_B = randomUUID(); // G4 (T3 of G3 never restricts it)
-const ORG_C = randomUUID(); // G4 L-4 (its deadline obligation, T2, restricts only it)
+const ORG_C = randomUUID(); // G4 L-4 before settleBy (no obligation)
+const ORG_D = randomUUID(); // G4 L-4 after settleBy (its real deadline obligation, T2, restricts only it)
+const ORG_E = randomUUID(); // G4 L-4 safeguards (mismatched evidence, refund race, authority, Auth outage)
 const OWNER = randomUUID(); // the Owner of the seller Company (L-4), with a real TOTP factor at the real Auth
 const OWNER_EMAIL = `owner-${randomUUID().slice(0, 8)}@s-int.e2e.test`;
 const PASSWORD = 's-int assisted certification password';
@@ -81,7 +85,7 @@ const nextTotpStep = () => new Promise((r) => setTimeout(r, 30_000 - (Date.now()
 type Actor = { id: string; email: string; organizationId: string; admin: boolean; token: string };
 
 describeWithEnv(
-  'Core V2 S-INT G3/G4/G6: assisted loss → recovery and surplus; assisted late success; Auth outage (real Auth, Billing, Payment, RabbitMQ; simulation)',
+  'Core V2 S-INT G3/G4/G6: assisted loss → recovery and surplus; assisted late success and real-event L-4; Auth outage (real Auth, Billing, Payment, RabbitMQ; simulation)',
   ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'],
   (env) => {
     let authDb: TestDatabase;
@@ -111,6 +115,13 @@ describeWithEnv(
     const beneficiaryB = actor(ORG_B, false);
     const adminC = actor(ORG_C, true);
     const beneficiaryC = actor(ORG_C, false);
+    const adminD = actor(ORG_D, true);
+    const beneficiaryD = actor(ORG_D, false);
+    const adminE = actor(ORG_E, true);
+    const beneficiaryE = actor(ORG_E, false);
+    const beneficiaryE2 = actor(ORG_E, false); // the G6 outage application's beneficiary (one open request per beneficiary and product)
+    /** G4 (L-4): a late settlement attested and its Owner receipt issued, applied only in G6 while Auth is down. */
+    let outage: { lateId: string; requestId: string; invoiceId: string; secret: string } | undefined;
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -170,7 +181,7 @@ describeWithEnv(
       const hash = await bcrypt.hash(PASSWORD, 4);
       await authAdmin.query(`INSERT INTO company(id, name) VALUES ($1, 'S-INT')`, [COMPANY]);
       await authAdmin.query(`INSERT INTO platform(id, "companyId", name) VALUES ($1, $2, 'S-INT platform')`, [TEST_PLATFORM, COMPANY]);
-      for (const org of [ORG_A, ORG_B, ORG_C]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
+      for (const org of [ORG_A, ORG_B, ORG_C, ORG_D, ORG_E]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
       const oc = await authAdmin.connect();
       try {
         await oc.query('BEGIN');
@@ -180,7 +191,7 @@ describeWithEnv(
       } finally {
         oc.release();
       }
-      for (const a of [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC]) {
+      for (const a of [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC, adminD, beneficiaryD, adminE, beneficiaryE, beneficiaryE2]) {
         const c = await authAdmin.connect();
         try {
           await c.query('BEGIN');
@@ -276,7 +287,7 @@ describeWithEnv(
       const confirm = await call(AUTH_URL, 'POST', null, '/auth/admin/enroll/totp/confirm', { enrollmentToken: start.json.enrollmentToken, factorId: begin.json.factorId, code: totp(totpSecret) }, null);
       expect(confirm.status, JSON.stringify(confirm.json)).toBe(200);
       ownerToken = confirm.json.accessToken;
-      for (const a of [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC]) {
+      for (const a of [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC, adminD, beneficiaryD, adminE, beneficiaryE, beneficiaryE2]) {
         const login = await call(AUTH_URL, 'POST', null, '/auth/login', { email: a.email, password: PASSWORD }, null);
         expect(login.status, JSON.stringify(login.json)).toBe(200);
         a.token = login.json.accessToken;
@@ -340,6 +351,46 @@ describeWithEnv(
       expect((await billingAdmin.query(`SELECT source FROM payment_late_success WHERE "lateSuccessId" = $1`, [late.id])).rows[0].source).toBe('event');
       return late as { id: string; factId: string };
     }
+    /**
+     * S0-C8: an assisted settlement whose payment REALLY ends unsuccessfully: the Organization's attempts all fail at the provider, so Payment's
+     * payment reaches `failed` at its attempt limit (S4c, PAYMENT_MAX_ATTEMPTS, default 3); `payment.failed` over the broker ends Billing's
+     * request, and its channel is definitively closed.
+     */
+    async function failedAtPayment(beneficiary: Actor, admin: Actor) {
+      const s = await settlementAtPayment(beneficiary, admin);
+      const attempts: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const a = await attemptOf(s.paymentId, admin);
+        await outcome(s.paymentId, a.id, { outcome: 'failed', failureCode: 'declined' });
+        attempts.push(a.id);
+      }
+      expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [s.paymentId])).rows[0].status, tails()).toBe('failed');
+      await waitFor(async () => (await billingAdmin.query(`SELECT status FROM payment_request WHERE id = $1`, [s.paymentRequestId])).rows[0].status === 'failed',
+        30_000, `Billing to apply Payment's payment.failed over the broker\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT status FROM assistance_settlement_channel WHERE "invoiceId" = $1`, [s.invoiceId])).rows[0].status).toBe('closed');
+      return { ...s, attempts };
+    }
+    /** Billing's late assisted settlement of one late success (S0-C8 item 1 b), from the verified event. */
+    async function lateSettlementOf(lateSuccessId: string) {
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM assistance_late_settlement WHERE "lateSuccessId" = $1`, [lateSuccessId])).rowCount === 1,
+        30_000, `Billing to classify the late success as a late assisted settlement\n${tails()}`);
+      return (await billingAdmin.query(`SELECT * FROM assistance_late_settlement WHERE "lateSuccessId" = $1`, [lateSuccessId])).rows[0] as Record<string, any>;
+    }
+    const attestOf = (lateId: string, a: Actor) => call(BILLING_URL, 'POST', a.token, `/billing/assistance-late-settlements/${lateId}/attestation`, { statement: 'cash_not_returned' });
+    /** The Owner's factor step-up for `billing.late_settlement.apply` and Auth's receipt bound to exactly this application (real Auth). */
+    async function ownerReceipt(lateId: string, requestId: string, beneficiary: Actor): Promise<{ secret: string; receiptId: string }> {
+      const binding = { operation: 'late_settlement_apply', audience: 'billing-service', companyId: COMPANY, lateSettlementId: lateId, assistanceRequestId: requestId,
+        beneficiaryUserId: beneficiary.id, reasonCode: 'cash_not_returned_attested' };
+      await nextTotpStep();
+      const su = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/step-up', { purpose: 'billing.late_settlement.apply', method: 'totp', code: totp(totpSecret) }, null);
+      expect(su.status, JSON.stringify(su.json)).toBe(200);
+      const r = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/authorization-receipts', { stepUpToken: su.json.stepUpToken, binding });
+      expect(r.status, JSON.stringify(r.json)).toBe(201);
+      return { secret: r.json.secret as string, receiptId: r.json.receiptId as string };
+    }
+    const applyL4 = (lateId: string, secret: string, token: string | null = ownerToken) =>
+      call(BILLING_URL, 'POST', token, `/billing/admin/late-settlements/${lateId}/application`, { reasonCode: 'cash_not_returned_attested', receiptSecret: secret });
+    const settle = () => new Promise((r) => setTimeout(r, 3_000)); // lets any (wrongly) produced effect arrive before an absence is asserted
 
     it('G3: an assisted purchase lost at final chargeback keeps the entitlement; the Organization recovers the base through Payment; a later success of the first attempt is surplus only', async () => {
       // 1. the assisted purchase: the Organization pays the frozen base at Payment; the verified success gives the beneficiary the purchase
@@ -438,81 +489,162 @@ describeWithEnv(
         .toEqual({ detail: 'assisted_settlement', amount: BASE });
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(1); // L-5
       expect(await b6(beneficiaryB.id)).toEqual(before);
-      // F-SINT-1 (recorded, not worked around): the verified late success of a definitively closed assisted channel creates no
-      // `assistance_late_settlement`, so the S0 §3.4 L-4 application has no record to apply here
+      // a capture of a SUCCEEDED payment is never a late assisted settlement (S0-C8 item 1 b): refund-only
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM assistance_late_settlement WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(0);
       // a redelivered genuine late success changes nothing
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId])).toBe(1);
       expect(await deadLettered()).toBe(0);
     }, 180_000);
 
-    it('G4 (L-4): from a labelled deadline-obligation FIXTURE, Payment\'s verified success is an L-1 late settlement; the beneficiary attests and the Owner\'s factor-bound receipt (real Auth) applies it as the one purchase', async () => {
-      const s = await settlementAtPayment(beneficiaryC, adminC);
-      const a = await attemptOf(s.paymentId, adminC); // the channel's attempt is still in flight
-      // FIXTURE (F-SINT-1; the same two statements as Billing's own L-4 suite, `apps/billing-service/test/late-settlements.e2e-spec.ts`): the
-      // deadline passed and the deadline obligation exists while the channel is still in flight. No real event sequence reaches this state
-      // (the sweep opens no obligation while a channel is open or uncertain), so it is placed as a superuser with the triggers bypassed.
-      const asFixture = async (sql: string, params: unknown[]) => {
-        const cl = await billingAdmin.connect();
-        try {
-          await cl.query('SET session_replication_role = replica');
-          await cl.query(sql, params);
-        } finally {
-          await cl.query('SET session_replication_role = origin');
-          cl.release();
-        }
-      };
-      await asFixture(`UPDATE assistance_request SET "consentAt" = date_trunc('milliseconds', now() - interval '100 hours'),
-        "cashCollectedAt" = date_trunc('milliseconds', now() - interval '73 hours'), "reportedAt" = date_trunc('milliseconds', now() - interval '73 hours'),
-        "settleBy" = date_trunc('milliseconds', now() - interval '1 hour') WHERE id = $1`, [s.requestId]);
-      await asFixture(`INSERT INTO cash_return_obligation ("assistanceRequestId", "organizationId", "beneficiaryUserId", amount, currency, "cashCollectedAt")
-        SELECT id, "organizationId", "beneficiaryUserId", "totalAmount", currency, "cashCollectedAt" FROM assistance_request WHERE id = $1`, [s.requestId]);
-      const obligationId = (await billingAdmin.query(`SELECT id FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).rows[0].id as string;
-
-      // from here on, real events and real authority only: the provider's signed success → Payment's verified fact → payment.succeeded over
-      // the broker → Billing records the L-1 late settlement (the request has an obligation): no purchase, no entitlement (L-2)
-      await outcome(s.paymentId, a.id, { outcome: 'succeeded' });
-      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM assistance_late_settlement WHERE "assistanceRequestId" = $1`, [s.requestId])).rowCount === 1,
-        30_000, `Billing to record the late settlement from the verified event\n${tails()}`);
-      const late = (await billingAdmin.query(`SELECT id, reason FROM assistance_late_settlement WHERE "assistanceRequestId" = $1`, [s.requestId])).rows[0] as { id: string; reason: string };
-      expect(late.reason).toBe('cash_return_obligation_exists');
+    it('G4 (L-4) before settleBy: Payment\'s REAL final failure, then its verified late success (EVT-10) → a late assisted settlement and its case → the Owner\'s L-4 application: one purchase, the invoice paid at Payment\'s instant, B6 and BIL-12 entitled; Payment and the channel stay final', async () => {
+      // 1 to 3: a genuine request, its cash collection, its assisted payment at Payment, REALLY ended (attempt limit) → Billing and the channel follow
+      const s = await failedAtPayment(beneficiaryC, adminC);
+      // 4, 5: the provider later reports attempt 1's success (signed) → Payment's verified late success, EVT-10 once, never payment.succeeded
+      const late = await lateSuccessOf(s.paymentId, s.attempts[0]!, BASE);
+      const atPayment = (await paymentAdmin.query(`SELECT "paymentStatus", "recordedAt", amount::int AS amount FROM payment_late_success WHERE id = $1`, [late.id])).rows[0];
+      expect([atPayment.paymentStatus, atPayment.amount]).toEqual(['failed', BASE]);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.late_success.recorded' AND payload->>'lateSuccessId' = $1`, [late.id])).toBe(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.succeeded' AND payload->>'paymentId' = $1`, [s.paymentId])).toBe(0);
+      // 6, 7: Billing's late assisted settlement (channel_closed, Payment's instant) and its reconciliation case naming the capture; nothing sold
+      const ls = await lateSettlementOf(late.id);
+      expect([ls.reason, ls.receiptId, ls.invoiceId, new Date(ls.settledAt).toISOString()]).toEqual(['channel_closed', null, s.invoiceId, new Date(atPayment.recordedAt).toISOString()]);
+      expect((await billingAdmin.query(`SELECT "caseType", "captureFactId", amount::int AS amount FROM reconciliation_case WHERE "paymentId" = $1`, [s.paymentId])).rows)
+        .toEqual([{ caseType: 'late_assisted_settlement', captureFactId: late.factId, amount: BASE }]);
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(0);
       expect(await b6(beneficiaryC.id)).toEqual({ valid: false, expiresAt: null });
 
-      // the beneficiary attests (the Organization's administrator cannot); live through the real Auth
-      expect((await call(BILLING_URL, 'POST', adminC.token, `/billing/assistance-late-settlements/${late.id}/attestation`, { statement: 'cash_not_returned' })).status).toBe(403);
-      const att = await call(BILLING_URL, 'POST', beneficiaryC.token, `/billing/assistance-late-settlements/${late.id}/attestation`, { statement: 'cash_not_returned' });
+      // duplicate provider reports of the same capture (the identical notification again, and another notification of the same transaction)
+      const txn = (await paymentAdmin.query(`SELECT "providerTxnId" FROM provider_transaction_fact WHERE id = $1`, [late.factId])).rows[0].providerTxnId as string;
+      for (const eventId of [`sint_dup_${randomUUID()}`, `sint_dup_${randomUUID()}`]) {
+        expect(await signed({ eventId, type: 'payment.succeeded', reference: s.attempts[0], providerTransactionId: txn, amount: BASE, currency: 'TND' })).toBeLessThan(500);
+      }
+      await settle();
+      // Payment keeps every verified notification as evidence (one late success each, L-1), all of ONE captured movement (its fact, FC-1);
+      // Billing records that movement once (its `factId` is unique): one economic effect
+      expect((await paymentAdmin.query(`SELECT count(DISTINCT "factId")::int AS facts, bool_and("factId" = $2) AS same FROM payment_late_success WHERE "paymentId" = $1`,
+        [s.paymentId, late.factId])).rows[0]).toEqual({ facts: 1, same: true });
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'capture'`, [s.paymentId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM assistance_late_settlement WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(1);
+
+      // 8: the beneficiary attests (the administrator cannot); the Owner's factor-bound receipt; a member is never the Owner
+      expect((await attestOf(ls.id, adminC)).status).toBe(403);
+      const att = await attestOf(ls.id, beneficiaryC);
       expect(att.status, JSON.stringify(att.json)).toBe(201);
-
-      // the Owner's factor step-up for exactly this purpose, and Auth's receipt bound to exactly this application (AUTH-01)
-      const binding = { operation: 'late_settlement_apply', audience: 'billing-service', companyId: COMPANY, lateSettlementId: late.id, assistanceRequestId: s.requestId,
-        beneficiaryUserId: beneficiaryC.id, reasonCode: 'cash_not_returned_attested' };
-      await nextTotpStep();
-      const su = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/step-up', { purpose: 'billing.late_settlement.apply', method: 'totp', code: totp(totpSecret) }, null);
-      expect(su.status, JSON.stringify(su.json)).toBe(200);
-      const receipt = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/authorization-receipts', { stepUpToken: su.json.stepUpToken, binding });
-      expect(receipt.status, JSON.stringify(receipt.json)).toBe(201);
-      // a member is never the Owner: refused before any receipt is spent
-      expect((await call(BILLING_URL, 'POST', adminC.token, `/billing/admin/late-settlements/${late.id}/application`, { reasonCode: 'cash_not_returned_attested', receiptSecret: receipt.json.secret })).status).toBe(403);
-
-      // L-4: one transaction supersedes the obligation, records the ONE purchase and settles the request; the receipt is consumed by Billing
-      const applied = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/late-settlements/${late.id}/application`, { reasonCode: 'cash_not_returned_attested', receiptSecret: receipt.json.secret });
+      const receipt = await ownerReceipt(ls.id, s.requestId, beneficiaryC);
+      expect((await applyL4(ls.id, receipt.secret, adminC.token)).status).toBe(403);
+      expect((await applyL4(ls.id, receipt.secret, null)).status).toBe(401);
+      const applied = await applyL4(ls.id, receipt.secret);
       expect(applied.status, `${JSON.stringify(applied.json)}\n${tails()}`).toBe(201);
-      expect(applied.json).toMatchObject({ id: late.id, status: 'applied', application: { reasonCode: 'cash_not_returned_attested', appliedBy: { userId: OWNER }, supersededObligationId: obligationId } });
-      expect((await authAdmin.query(`SELECT status, "consumedBy" FROM authorization_receipt WHERE id = $1`, [receipt.json.receiptId])).rows[0]).toEqual({ status: 'consumed', consumedBy: 'billing-service' });
-      expect((await billingAdmin.query(`SELECT status FROM cash_return_obligation WHERE id = $1`, [obligationId])).rows[0].status).toBe('superseded_by_settlement');
-      expect((await billingAdmin.query(`SELECT status FROM assistance_request WHERE id = $1`, [s.requestId])).rows[0].status).toBe('settled');
-      const bought = (await billingAdmin.query(`SELECT purpose, "beneficiaryUserId", "productId" FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [s.requestId])).rows;
-      expect(bought).toEqual([{ purpose: 'assisted_settlement', beneficiaryUserId: beneficiaryC.id, productId }]);
+      expect(applied.json).toMatchObject({ id: ls.id, status: 'applied', application: { reasonCode: 'cash_not_returned_attested', appliedBy: { userId: OWNER }, supersededObligationId: null } });
+      expect((await authAdmin.query(`SELECT status, "consumedBy" FROM authorization_receipt WHERE id = $1`, [receipt.receiptId])).rows[0]).toEqual({ status: 'consumed', consumedBy: 'billing-service' });
+
+      // 9: exactly one paid invoice and one purchase, both at Payment's recorded instant; Payment, its request and the channel stay final
+      const bought = (await billingAdmin.query(`SELECT purpose, "beneficiaryUserId", "productId", "lateSuccessId", "receiptId", "settledAt" FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [s.requestId])).rows;
+      expect(bought.map((p) => ({ ...p, settledAt: new Date(p.settledAt).toISOString() })))
+        .toEqual([{ purpose: 'assisted_settlement', beneficiaryUserId: beneficiaryC.id, productId, lateSuccessId: late.id, receiptId: null, settledAt: new Date(atPayment.recordedAt).toISOString() }]);
+      const inv = (await billingAdmin.query(`SELECT status, "paidAt" FROM invoice WHERE id = $1`, [s.invoiceId])).rows[0];
+      expect([inv.status, new Date(inv.paidAt).toISOString()]).toEqual(['paid', new Date(atPayment.recordedAt).toISOString()]);
+      expect((await billingAdmin.query(`SELECT "actorType", "actorId" FROM billing_transition WHERE "entityId" = $1 AND "toStatus" = 'paid'`, [s.invoiceId])).rows)
+        .toEqual([{ actorType: 'user', actorId: OWNER }]);
+      expect((await billingAdmin.query(`SELECT a.status AS request, pr.status AS "paymentRequest", c.status AS channel FROM assistance_request a
+        JOIN assistance_settlement_channel c ON c."assistanceRequestId" = a.id JOIN payment_request pr ON pr.id = c."paymentRequestId" WHERE a.id = $1`, [s.requestId])).rows[0])
+        .toEqual({ request: 'settled', paymentRequest: 'failed', channel: 'closed' });
+      expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [s.paymentId])).rows[0].status).toBe('failed');
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(0); // LS-9
+      // the audit trail: the Owner's one canonical application audit, carrying the purchase (no Payment-path `invoice.paid` audit)
+      const audits = (await billingAdmin.query(`SELECT name, payload FROM outbox WHERE name LIKE 'audit.%' AND payload->'resource'->>'id' = ANY($1::text[])`, [[ls.id, s.invoiceId]])).rows;
+      // (the invoice's own `invoice.issued` is from the channel's start)
+      expect(audits.map((x) => x.name).sort((x, y) => x.localeCompare(y)))
+        .toEqual(['audit.assistance_late_settlement.applied', 'audit.assistance_late_settlement.attested', 'audit.invoice.issued']);
+      expect(audits.find((x) => x.name === 'audit.assistance_late_settlement.applied')!.payload.changes.purchase_id).toBeDefined();
+
+      // 10: B6 and the member's BIL-12 read reflect the purchase
       const entitled = await b6(beneficiaryC.id);
       expect(entitled.valid).toBe(true);
       expect((await bil12(beneficiaryC)).items).toEqual([{ productId, valid: true, expiresAt: entitled.expiresAt }]);
-      // the same receipt again, a second application: nothing more (L-5: never two purchases)
-      const again = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/late-settlements/${late.id}/application`, { reasonCode: 'cash_not_returned_attested', receiptSecret: receipt.json.secret });
-      expect(again.status, JSON.stringify(again.json)).not.toBe(201);
+      // the same receipt again: nothing more; the sweep never opens an obligation for a settled request (L-5, LS-9)
+      expect((await applyL4(ls.id, receipt.secret)).status).not.toBe(201);
+      await settle();
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(0);
       expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    it('G4 (L-4) after settleBy: a LABELLED clock shift once the channel is closed, then the REAL sweep opens the deadline obligation (T2); the application supersedes it; T1/T2 end; one purchase', async () => {
+      const s = await failedAtPayment(beneficiaryD, adminD);
+      const late = await lateSuccessOf(s.paymentId, s.attempts[2]!, BASE);
+      const ls = await lateSettlementOf(late.id);
+      // LABELLED CLOCK SHIFT (S0-C8 item 11; NOT an inserted obligation): the channel is already closed; all four of the request's times move
+      // back 73 hours together, which is exactly the state 73 hours of waiting produce. The triggers that make them immutable are bypassed only here.
+      const cl = await billingAdmin.connect();
+      try {
+        await cl.query('SET session_replication_role = replica');
+        await cl.query(`UPDATE assistance_request SET "consentAt" = "consentAt" - interval '73 hours', "cashCollectedAt" = "cashCollectedAt" - interval '73 hours',
+          "reportedAt" = "reportedAt" - interval '73 hours', "settleBy" = "settleBy" - interval '73 hours' WHERE id = $1`, [s.requestId]);
+      } finally {
+        await cl.query('SET session_replication_role = origin');
+        cl.release();
+      }
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).toBe(0);
+      // the REAL sweep (Billing's own interval) opens the deadline obligation: the deadline passed with the settlement side definitively unsuccessful
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM cash_return_obligation WHERE "assistanceRequestId" = $1 AND origin = 'deadline' AND status = 'open'`,
+        [s.requestId])).rowCount === 1, 30_000, `the real sweep to open the deadline obligation\n${tails()}`);
+      const obligationId = (await billingAdmin.query(`SELECT id FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId])).rows[0].id as string;
+      expect(await restrictions(ORG_D)).toEqual(expect.arrayContaining(['T2']));
+      expect((await attestOf(ls.id, beneficiaryD)).status).toBe(201);
+      const receipt = await ownerReceipt(ls.id, s.requestId, beneficiaryD);
+      const applied = await applyL4(ls.id, receipt.secret);
+      expect(applied.status, `${JSON.stringify(applied.json)}\n${tails()}`).toBe(201);
+      expect(applied.json.application.supersededObligationId).toBe(obligationId);
+      expect((await billingAdmin.query(`SELECT status FROM cash_return_obligation WHERE id = $1`, [obligationId])).rows[0].status).toBe('superseded_by_settlement');
+      expect(await restrictions(ORG_D)).toEqual([]);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "lateSuccessId" = $1`, [late.id])).toBe(1);
+      expect((await billingAdmin.query(`SELECT status FROM invoice WHERE id = $1`, [s.invoiceId])).rows[0].status).toBe('paid');
+      expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [s.paymentId])).rows[0].status).toBe('failed');
+      expect((await b6(beneficiaryD.id)).valid).toBe(true);
     }, 240_000);
+
+    it('G4 (L-4) safeguards: mismatched provider evidence is never a late settlement; a receipt for another application is refused; the application and the refund of the unsold capture race: exactly one wins', async () => {
+      // mismatched evidence: the provider reports attempt 2's success for ANOTHER amount → never this invoice's late settlement, nothing sold
+      const r = await failedAtPayment(beneficiaryE, adminE);
+      expect(await signed({ eventId: `sint_${randomUUID()}`, type: 'payment.succeeded', reference: r.attempts[1], providerTransactionId: `sim_late_${randomUUID()}`, amount: BASE + 1,
+        currency: 'TND' })).toBeLessThan(500);
+      await settle();
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM assistance_late_settlement WHERE "assistanceRequestId" = $1`, [r.requestId])).toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [r.requestId])).toBe(0);
+      // the genuine capture of attempt 1 is then the invoice's first eligible late success
+      const lateR = await lateSuccessOf(r.paymentId, r.attempts[0]!, BASE);
+      const lsR = await lateSettlementOf(lateR.id);
+      expect((await attestOf(lsR.id, beneficiaryE)).status).toBe(201);
+      // a second Organization request (the G6 outage one), also really failed and late-settled
+      const z = await failedAtPayment(beneficiaryE2, adminE);
+      const lsZ = await lateSettlementOf((await lateSuccessOf(z.paymentId, z.attempts[0]!, BASE)).id);
+      expect((await attestOf(lsZ.id, beneficiaryE2)).status).toBe(201);
+
+      // Owner authority: R's receipt presented for Z is refused by Auth's binding and never spent
+      const receiptR = await ownerReceipt(lsR.id, r.requestId, beneficiaryE);
+      const crossed = await applyL4(lsZ.id, receiptR.secret);
+      expect(crossed.json?.code, JSON.stringify(crossed.json)).toBe('late_settlement_authorization_refused');
+      expect((await authAdmin.query(`SELECT status FROM authorization_receipt WHERE id = $1`, [receiptR.receiptId])).rows[0].status).toBe('issued');
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [lsZ.id])).toBe(0);
+
+      // the race: the Owner's application of R and the Owner's refund case for R's unsold capture, concurrently
+      const [applied, refund] = await Promise.all([applyL4(lsR.id, receiptR.secret),
+        call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId: r.paymentId, reason: 'late_settlement_unapplied' })]);
+      const purchases = await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [r.requestId]);
+      const unsoldRefunds = await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case WHERE "paymentId" = $1 AND eligibility = 'late_assisted_settlement'`, [r.paymentId]);
+      expect(purchases + unsoldRefunds, `${applied.status} ${JSON.stringify(applied.json)} | ${refund.status} ${JSON.stringify(refund.json)}\n${tails()}`).toBe(1);
+      if (unsoldRefunds === 1) expect([applied.status, applied.json.reason]).toEqual([409, 'refund_exists']);
+      if (purchases === 1 && refund.status === 201) expect(refund.json.eligibility).toBe('personal_purchase'); // the purchase's own refund (S6d), never the unsold capture's
+      expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [r.paymentId])).rows[0].status).toBe('failed');
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM invoice WHERE id = $1 AND status = 'paid'`, [r.invoiceId])).toBe(purchases);
+
+      // Z's receipt, kept for G6 (applied while Auth is down)
+      const receiptZ = await ownerReceipt(lsZ.id, z.requestId, beneficiaryE2);
+      outage = { lateId: lsZ.id, requestId: z.requestId, invoiceId: z.invoiceId, secret: receiptZ.secret };
+      expect(await deadLettered()).toBe(0);
+    }, 360_000);
 
     it('G5: a forged payment.late_success.recorded (no broker-verified Payment identity) is refused and dead-lettered; no surplus, no case, nothing recorded', async () => {
       const template = (await paymentAdmin.query(`SELECT payload FROM outbox WHERE name = 'payment.late_success.recorded' ORDER BY "occurredAt" LIMIT 1`)).rows[0].payload as Record<string, unknown>;
@@ -554,6 +686,13 @@ describeWithEnv(
       expect((await call(BILLING_URL, 'GET', beneficiaryA.token, `/billing/me/platforms/${TEST_PLATFORM}/personal-subscriptions`)).status).toBe(503);
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM assistance_request`)).toBe(requests);
       expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM payment_attempt`)).toBe(attempts);
+      // G4 (L-4): the Owner's application cannot be verified without Auth: refused, nothing written (its receipt stays unspent)
+      expect(outage, 'the G4 safeguards test prepared the outage application').toBeDefined();
+      expect((await applyL4(outage!.lateId, outage!.secret)).status).toBe(503);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [outage!.lateId])).toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [outage!.requestId])).toBe(0);
+      expect((await billingAdmin.query(`SELECT status FROM invoice WHERE id = $1`, [outage!.invoiceId])).rows[0].status).toBe('open');
+      expect((await billingAdmin.query(`SELECT status FROM assistance_request WHERE id = $1`, [outage!.requestId])).rows[0].status).toBe('cash_collected');
     }, 60_000);
   },
 );
