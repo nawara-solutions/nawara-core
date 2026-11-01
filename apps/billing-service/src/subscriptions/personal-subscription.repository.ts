@@ -105,10 +105,18 @@ export class PersonalSubscriptionRepository {
   async entitlement(userId: string, platformId: string, productId: string, now: Date): Promise<PersonalEntitlement> {
     const subscription = await this.find(this.db, userId, productId);
     if (!subscription || subscription.platformId !== platformId) return { valid: false, expiresAt: null };
-    const spans = await this.spans(subscription.id);
+    return this.entitlementOf(subscription.id, now);
+  }
+
+  /**
+   * B6's calculation for one recorded Personal Subscription at `now`: its kept periods (K-3 Option D) and its fraud holds. The ONE
+   * calculation behind both B6 (`entitlement`) and the member's own list (BIL-12, D-B3), so the two can never disagree.
+   */
+  async entitlementOf(personalSubscriptionId: string, now: Date): Promise<PersonalEntitlement> {
+    const spans = await this.spans(personalSubscriptionId);
     // Core V2 S6e-H (H-1, H-4, C-1): this subscription's fraud holds restrict it from placement to the earlier of release and 14 days
     // (applied here directly, whatever the sweep's delay), and the paid time they denied is compensated after its run
-    const holds = await this.holds(this.db, subscription.id);
+    const holds = await this.holds(this.db, personalSubscriptionId);
     if (holds.length === 0) return personalEntitlementAt(spans, now);
     const e = entitlementAt(spans.map((s) => ({ start: s.effectiveStart.getTime(), end: s.effectiveEnd.getTime() })), holds, now.getTime());
     return { valid: e.valid, expiresAt: e.expiresAt === null ? null : new Date(e.expiresAt) };
@@ -120,6 +128,25 @@ export class PersonalSubscriptionRepository {
       `SELECT h.id, h."placedAt", LEAST(h."expiresAt", COALESCE(r."releasedAt", h."expiresAt")) AS "endsAt"
          FROM fraud_hold h LEFT JOIN fraud_hold_release r ON r."holdId" = h.id WHERE h."personalSubscriptionId" = $1`, [personalSubscriptionId]);
     return rows.map((h) => ({ id: h.id, start: h.placedAt.getTime(), end: h.endsAt.getTime() }));
+  }
+
+  /**
+   * BIL-12 (D-B5, D-B6): the user's recorded Personal Subscriptions on one Platform, newest first, whatever their validity. The user and
+   * the Platform filter every query; the cursor only positions within them. Creation time is compared at millisecond precision, the
+   * precision the cursor carries, so a page boundary never skips or repeats a row. `limit + 1` rows are fetched so `toPage` can tell
+   * whether another page follows. Reads only.
+   */
+  async listForUser(userId: string, platformId: string, limit: number, cursor: { createdAt: Date; id: string } | null): Promise<Array<{ id: string; productId: string; createdAt: Date }>> {
+    const { rows } = await this.db.query<{ id: string; productId: string; createdAt: Date }>(
+      `SELECT id, "productId", date_trunc('milliseconds', "createdAt") AS "createdAt"
+         FROM personal_subscription
+        WHERE "userId" = $1 AND "platformId" = $2
+          AND ($3::timestamptz IS NULL OR (date_trunc('milliseconds', "createdAt"), id) < ($3::timestamptz, $4::uuid))
+        ORDER BY date_trunc('milliseconds', "createdAt") DESC, id DESC
+        LIMIT $5`,
+      [userId, platformId, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1],
+    );
+    return rows;
   }
 
   /** Whether the product is a personal subscription product of that Platform (the B6 read's 404 otherwise). */
