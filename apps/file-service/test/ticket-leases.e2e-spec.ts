@@ -200,6 +200,8 @@ describeWithEnv('single-use ticket reservation leases (real PostgreSQL)', ['TEST
       const results = await Promise.all(Array.from({ length: 10 }, () => redeem(tk.url)));
       expect(results.filter((r) => r.status === 200)).toHaveLength(1);
       expect(results.filter((r) => r.status !== 200).every((r) => (r.status === 409 && code(r) === 'ticket_in_use') || (r.status === 404 && code(r) === 'ticket_invalid'))).toBe(true);
+      // the settlement follows the response (S2-File.4): wait, bounded, for the reservation to leave `reserved`, then require exactly committed once
+      await waitFor(async () => (await row(tk.ticketId)).redemption !== 'reserved');
       expect(await row(tk.ticketId)).toMatchObject({ redemption: 'committed', useCount: 1 });
     });
 
