@@ -74,10 +74,10 @@ register change, not made here.
 
 | Item | State | Effect |
 |---|---|---|
-| **OD-R6a** / DOC-1 (R-6a specification) | OPEN | blocks S2-Auth R-6a; R-6a must land no later than V-4 (S4e, S5e depend on it) |
+| **OD-R6a** / DOC-1 (R-6a specification) | OPEN; **D-2, 2026-10-30:** not a dependency of the S1 to S6 pre-lifecycle certification scope; due before the **earlier** of Organization authority activation (F6/F7) and the first lifecycle-enabled release; not V3 | blocks S2-Auth's R-6a work package only; its one current consumer (organization-service `org_admin`) is unreachable while organization-service is not authoritative; DOC-1 content is not decided |
 | **Q8** proof of receipt non-consumption (AUTH-03b) | OPEN, fail-closed | an unanswered authorization stays pending, never released (S6 §8) |
 | Auth receipt token provisioning and caller admission records (Q9) | OPEN (operational) | — |
-| Audit Organization-reference scope rows | BLOCKED until F7 | the Owner Organization read shows only broker-verified records |
+| Audit Organization-reference scope rows | BLOCKED until F7; **D-4, 2026-10-30:** bound to Organization authority activation (ADR-0069 decision 4; the kit reference contract), not deferred to V3, **not** an S0 §5 human hierarchy-read deferral | the Owner Organization read shows only broker-verified records (AUD-07); not an S2 certification-gate criterion |
 | **AUD-05** register entry | stale (implementation merged in #356) | documentation only |
 | Production: Auth digest deployment (M3, G-7); Audit 0004 and later (M9, G-7, AP-R); File (M8, DG-2); Release (MOVE V3) | NOT STARTED | nothing of S2 runs in production |
 | Unexplained Auth "sequential replays" `401` (observed once in Phase 2, not reproduced in 47 runs) | OPEN (test observation) | recorded in the [runbook](../runbooks/real-broker-certification.md) §4 and the S6 addendum |
@@ -93,3 +93,10 @@ register change, not made here.
 
 **S2: CONDITIONAL PASS (development).** S2-File and S2-Rel pass; S2-Auth passes except R-6a (OPEN); S2-Audit passes except the
 Organization-reference scope rows (BLOCKED until F7). No track is operationally accepted.
+
+## 6. Update (2026-10-31): S-INT entry classification
+
+Under the S-INT entry rule ([roadmap](./core-v2-s-execution-roadmap.md) §5, D-3) every S2 certification-gate criterion is PASS at
+development level (§2). R-6a and the Audit Organization-reference scope rows are dispositioned by D-2 and D-4 (c); Q8 is fail-closed and
+tested (d); Q9 and every production enablement are (a). See the [condition matrix](./core-v2-stage-condition-matrix.md). No development-level item is OPEN without a disposition. **The verdict
+is unchanged (CONDITIONAL PASS, development):** R-6a stays OPEN with its D-2 deadline; no Organization authority activation is claimed.

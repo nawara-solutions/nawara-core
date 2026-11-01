@@ -287,14 +287,18 @@ Core V2 S-track (development and simulation only; nothing deployed; ◐ = condit
   S0    architecture freeze                    ✅ FROZEN (PR #320); execution roadmap and contract register merged
   S1    event security                         ◐ CONDITIONAL PASS (development); S1-R rollout NOT STARTED (C-4, AP-R, NP-K, G-7);
                                                   OD-BRK-2b-L real-systemd half ⛔ BLOCKED — HARDWARE MAINTENANCE
-  S2    independent foundations                ◐ CONDITIONAL PASS (development); R-6a OPEN (OD-R6a); Audit Organization scope rows after F7
-  S3    Billing                                ◐ CONDITIONAL PASS (development, simulation); catalog values, BIL-12, EVT-05 open
-  S4    Payment                                ◐ CONDITIONAL PASS (development, simulation); Organization-payer grant inactive
-  S5    assistance and cash obligations        S5a–S5d ◐ CONDITIONAL PASS; S5e runtime and D6 ⏸ DEFERRED (V-4, OD-R6a): stage NOT CERTIFIED
+  S2    independent foundations                ◐ CONDITIONAL PASS (development); R-6a OPEN, due before F6/F7 or the first lifecycle
+                                                  release (D-2); Audit Organization scope rows bound to authority activation (D-4)
+  S3    Billing                                ◐ CONDITIONAL PASS (development, simulation); joint checkpoint one cross-process run (#410);
+                                                  BIL-12 OPEN: needs an Owner disposition before S-INT entry
+  S4    Payment                                ◐ CONDITIONAL PASS (development, simulation); joint checkpoint (#410); Organization-payer grant inactive
+  S5    assistance and cash obligations        ◐ CONDITIONAL PASS (development, simulation, pre-lifecycle; S0-C7, T-A1–T-A4); the inactive-scope
+                                                  criterion, V-4, S5e and D6 ⏸ with the first lifecycle-enabled release
   S6    refunds, disputes, recovery, losses    ◐ CONDITIONAL PASS (simulation); Q8 and partial chargebacks open
   S7    Notification inbox, Auth tenure        CONDITIONAL scope, not authorized (C-3, C-6, DG-3)
   S8    Organization authority changes         CONDITIONAL scope, not authorized (PR #319, C-5; RED items after F7)
-  S-INT integration certification              not started; needs S1–S6 each certified (S5 is not) and its own authorization
+  S-INT integration certification              not started; entry rule D-3; conditions classified (condition matrix); S3 blocked by BIL-12;
+                                                  needs the Owner-approved S-INT readiness record and its own authorization
 
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
 M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; E2 and E3 prepared, not installed; NOT CERTIFIED
@@ -412,8 +416,10 @@ S7 to A8; S8 to A5 (execution roadmap §11).
 - **S7 and S8 are conditional:** S7 only if C-3 and C-6 are approved (DG-3 separately decides Notification production); S8 only after
   PR #319 is reconciled and C-5 is decided, with RED items after F7.
 - **S-INT** certifies the cross-service paths together on simulation, under its own authorization and record, only after S1 to S6 are
-  each certified (and S7 / S8 if in scope). Today S5 is not certified (S5e and D6 DEFERRED behind V-4 and OD-R6a), so S-INT's
-  prerequisite is not met. S-INT is not a production certification.
+  each certified (and S7 / S8 if in scope), under the strict entry rule of the execution roadmap §5 (D-3). Every remaining condition of S1
+  to S6 is classified in the [condition matrix](architecture/core-v2-stage-condition-matrix.md); S5 is certified pre-lifecycle under S0-C7;
+  the one development-level item still OPEN is BIL-12 (S3), which needs an Owner disposition. No verdict is promoted automatically: entry
+  needs the Owner-approved S-INT readiness record. S-INT is not a production certification.
 - **Production-track gates are unchanged and separate:** S1-R (with C-4, AP-R, NP-K), G-7 (no S-stage Auth, Organization or Audit image
   in production before M3 or a G6 baseline refresh), M2 → G7 → F6 → F7 → post-F7 backup, the pilot readiness gate M13 / A19 (DG-7).
   No S-stage shortens or reorders them.
@@ -801,5 +807,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | Core V2 S0: the frozen architecture of the eight services (owner decisions, invariants FC-n / DB-n, deferral register) | [`core-v2-s0-architecture-freeze.md`](architecture/core-v2-s0-architecture-freeze.md) |
 | Core V2 S1–S8, S-INT and Final Core Validation: execution order, certification gates, gate register, DOC register | [`core-v2-s-execution-roadmap.md`](architecture/core-v2-s-execution-roadmap.md) |
 | Core V2 contracts: D-A2 receipts and the AR-04.6 contract register (routes, errors, idempotency, per-slice implementation status) | [`core-v2-d-a2-auth-authorization-receipts.md`](architecture/core-v2-d-a2-auth-authorization-receipts.md), [`core-v2-d-a2-contract-register.md`](architecture/core-v2-d-a2-contract-register.md) |
-| Core V2 stage records and certification evidence: S1 (and S1e-5), S2, S3, S4, S5, S6 | [`S1`](architecture/core-v2-s1-event-security.md), [`S1e-5`](architecture/core-v2-s1e5-integrated-certification.md), [`S2`](architecture/core-v2-s2-independent-foundations.md), [`S3`](architecture/core-v2-s3-billing.md), [`S4`](architecture/core-v2-s4-payment.md), [`S5`](architecture/core-v2-s5-assistance-and-cash-obligations.md), [`S6`](architecture/core-v2-s6-financial-certification.md) |
+| Core V2 stage records and certification evidence: S1 (and S1e-5), S2, S3, S4, S5, S6; the S1–S6 condition matrix ([`core-v2-stage-condition-matrix.md`](architecture/core-v2-stage-condition-matrix.md)) | [`S1`](architecture/core-v2-s1-event-security.md), [`S1e-5`](architecture/core-v2-s1e5-integrated-certification.md), [`S2`](architecture/core-v2-s2-independent-foundations.md), [`S3`](architecture/core-v2-s3-billing.md), [`S4`](architecture/core-v2-s4-payment.md), [`S5`](architecture/core-v2-s5-assistance-and-cash-obligations.md), [`S6`](architecture/core-v2-s6-financial-certification.md) |
 | On-demand real-broker certification in GitHub Actions | [`real-broker-certification.md`](runbooks/real-broker-certification.md) |

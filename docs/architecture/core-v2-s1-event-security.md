@@ -63,7 +63,7 @@ operational evidence). Full evidence and the run-page summary defect are in the
 | **AP-R** Audit provenance retention | OPEN | blocks any production deployment of Audit provenance |
 | **NP-K** Notification provenance keys | OPEN | blocks any production deployment of Notification provenance |
 | **G-7** G6 baseline fingerprints | OPEN | no S-stage Auth / Organization / Audit image in production before M3 or a refresh |
-| **S1c-3 R2b** Payment re-emission execution | OPEN (separately authorized) | only the inert dry run (R2a) exists |
+| **S1c-3 R2b** Payment re-emission execution | OPEN (separately authorized); **D-5 (a), 2026-10-30:** required before S1-R enforcement and before any production re-emission (R4), not before S-INT | only the inert dry run (R2a) exists; S0-C4 and its safety gates unchanged |
 | **S1c-3 R3** Auth and Organization re-emission | DEFERRED (G-7 / M3; undecided) | — |
 | **S1c-3 R4** production re-emission workflow | OPEN (CI and production authorization) | — |
 | **OD-BRK-2b-2** installation of the monitor and containment | OPEN | implemented, not installed |
@@ -85,3 +85,12 @@ operational evidence). Full evidence and the run-page summary defect are in the
 **S1: CONDITIONAL PASS (development).** Every S1 certification-gate criterion has local and integration evidence except the
 real-systemd half of OD-BRK-2b-L (BLOCKED — HARDWARE MAINTENANCE). The conditions are §4: the operational rollout S1-R and its gates,
 the remaining re-emission slices and the dead-letter work packages. S1 is **not** operationally accepted.
+
+## 7. Update (2026-10-31): S-INT entry classification
+
+Under the S-INT entry rule ([roadmap](./core-v2-s-execution-roadmap.md) §5, D-3) every S1 certification-gate criterion is PASS at
+development level (§2), except the real-systemd half of OD-BRK-2b-L, a Lab-only verification (b), BLOCKED — HARDWARE MAINTENANCE and never
+reported as passed. Every remaining condition of §4 is classified in the [condition matrix](./core-v2-stage-condition-matrix.md): S1-R and its gates, R4, OD-BRK-2b-2 to OD-BRK-5 (a); R2b by
+D-5 (a) and R3 by S0-C4 (c); OD-15 for other producers (d). No development-level item is OPEN without a disposition. **The verdict is
+unchanged (CONDITIONAL PASS, development);** S1 is not operationally accepted and no production rollout is certified. Its eligibility for
+S-INT is decided by the Owner's approval of the S-INT readiness record, not by this record.

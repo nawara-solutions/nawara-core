@@ -36,7 +36,7 @@ in `core-ci-passed`; **I** cross-process real-broker suites; **O** an operationa
 | `payment.*` version 1 compatibility; pre-S4a records never re-interpreted | L, I | `payment-purpose.e2e-spec.ts` ("a payment created before S4a …"); `review-adversarial.e2e-spec.ts` R-12 (common payload); `test/e2e-real-broker/s4f-simulation-settlement.e2e-spec.ts` | PASS |
 | Class-M idempotency of 90 days with permanent uniqueness keys | L | `money-idempotency.e2e-spec.ts` | PASS |
 | Organization-payer attempts: live Organization actor, Organization scope, creation grant default-denied and refused in production configuration | L, I | `organization-payer.e2e-spec.ts`; `test/e2e-real-broker/s4e-organization-payer.e2e-spec.ts` | PASS (capability inactive) |
-| S3/S4 joint checkpoint | L, I | see the [S3 record](./core-v2-s3-billing.md) §2 (segmented) | PASS (segmented) |
+| S3/S4 joint checkpoint | I | one continuous cross-process run (#410, `adb453c`; `test/e2e-real-broker/s3s4-joint-checkpoint.e2e-spec.ts`): see the [S3 record](./core-v2-s3-billing.md) §2 | PASS |
 | Payment never calls Billing (C4) | static | `apps/payment-service/src` has no Billing URL or HTTP client (static review, 2026-10-30); `check:repo` forbids cross-service imports | PASS |
 
 ## 3. Open, blocked and deferred
@@ -46,7 +46,7 @@ in `core-ci-passed`; **I** cross-process real-broker suites; **O** an operationa
 | S4e creation grant `payment.create.organization_payer` | inactive (default-denied, refused in production configuration); assisted and recovery settlement use their own narrow grants (S5b, S6f) | V-5 and OD-R6a open; R-6a no later than V-4 |
 | Real payment-provider adapters (Flouci, Konnect, Paymee, Stripe) | DEFERRED (S0 §5) | only `test` and `simulation` exist; both refused in production |
 | Payment production enablement | MOVE V3 (G-2; A11) | not deployed |
-| Re-emission execution (S1c-3 R2b) | OPEN | S1 record §4 |
+| Re-emission execution (S1c-3 R2b) | OPEN; D-5 (a): before S1-R enforcement and production re-emission, not before S-INT | S1 record §4 |
 
 ## 4. Unresolved contract decisions and their impact
 
@@ -57,3 +57,11 @@ in `core-ci-passed`; **I** cross-process real-broker suites; **O** an operationa
 
 **S4: CONDITIONAL PASS (development and simulation).** The conditions are §3: the inactive Organization-payer creation grant, the
 deferred real providers and Payment's production disposition. No production claim is made.
+
+## 6. Update (2026-10-31): joint checkpoint and S-INT entry classification
+
+The joint checkpoint is one continuous cross-process run (#410), simulation-only. Under the S-INT entry rule
+([roadmap](./core-v2-s-execution-roadmap.md) §5, D-3) every S4 certification-gate criterion is PASS at development level; the remaining
+conditions are classified in the [condition matrix](./core-v2-stage-condition-matrix.md): the inactive Organization-payer creation grant (d); real providers (c, S0 §5); Payment production
+(c, MOVE V3); R2b (c, D-5). No development-level item is OPEN without a disposition. **The verdict is unchanged (CONDITIONAL PASS,
+development and simulation);** no production readiness is claimed.
