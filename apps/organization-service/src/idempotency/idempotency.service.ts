@@ -54,4 +54,23 @@ export class IdempotencyService {
       return { replay: true, resourceId: existing.resourceId };
     }
   }
+
+  /**
+   * CIR S1: the resource an earlier create with this key already committed, or null; read-only and outside any transaction, so a
+   * caller can answer a completed replay BEFORE spending a step-up proof. A row exists only once its create committed (`reserve`
+   * runs in the create's transaction), so a create still in flight is not seen: `reserve` remains the atomic decision. The same key
+   * with a different body is the same 422 as `reserve`.
+   */
+  async lookup(p: { caller: string; operation: IdempotentOperation; key: string; requestHash: string }): Promise<string | null> {
+    const { rows } = await this.db.query<{ requestHash: string; resourceId: string }>(
+      `SELECT "requestHash", "resourceId" FROM idempotency_key WHERE caller = $1 AND operation = $2 AND key = $3`,
+      [p.caller, p.operation, p.key],
+    );
+    const existing = rows[0];
+    if (!existing) return null;
+    if (existing.requestHash !== p.requestHash) {
+      throw organizationError(422, 'idempotency_key_reused', ORGANIZATION_MESSAGES.idempotencyKeyReused);
+    }
+    return existing.resourceId;
+  }
 }

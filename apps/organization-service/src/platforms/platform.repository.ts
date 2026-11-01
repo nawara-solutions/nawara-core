@@ -34,8 +34,14 @@ export class PlatformRepository {
     private readonly audit: OrganizationAudit,
   ) {}
 
+  /** CIR S1: the platform an earlier, committed create with this caller and key produced, or null (see `IdempotencyService.lookup`). */
+  async completedCreate(caller: string, key: string, input: CreatePlatformInput): Promise<PlatformRow | null> {
+    const id = await this.idempotency.lookup({ caller, operation: 'platform.create', key, requestHash: IdempotencyService.requestHash('platform.create', input) });
+    return id === null ? null : this.get(id);
+  }
+
   /** `within` runs inside the transaction after the write (see `OrganizationRepository.create`): the success actor record commits or rolls back with the platform. */
-  async create(caller: string, key: string, input: CreatePlatformInput, actor: AuditActor, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<{ platform: PlatformRow; replayed: boolean }> {
+  async create(caller: string, key: string, input: CreatePlatformInput, actor: AuditActor, within?: (q: Queryable, platform: PlatformRow, replayed: boolean) => Promise<void>): Promise<{ platform: PlatformRow; replayed: boolean }> {
     const id = randomUUID();
     try {
       return await this.db.tx(async (q) => {
@@ -46,11 +52,11 @@ export class PlatformRepository {
         if (reserved.replay) {
           const { rows } = await q.query<PlatformRow>('SELECT * FROM platform WHERE id = $1', [reserved.resourceId]);
           if (!rows[0]) throw notFound();
-          await within?.(q, rows[0]);
+          await within?.(q, rows[0], true);
           return { platform: rows[0], replayed: true };
         }
         const { rows } = await q.query<PlatformRow>('INSERT INTO platform (id, "companyId", name) VALUES ($1, $2, $3) RETURNING *', [id, input.companyId, input.name]);
-        await within?.(q, rows[0]!);
+        await within?.(q, rows[0]!, false);
         await this.audit.hierarchy(q, 'platform.created', { type: 'platform', id }, actor); // Stage 18.7.3: same transaction
         return { platform: rows[0]!, replayed: false };
       });
