@@ -283,11 +283,15 @@ export class RefundCaseService {
       if (!s || (s.receiptId === null && s.factId === null)) return null;
       return { eligibility: 'recovery_surplus', receiptId: s.receiptId, purchaseId: null, lateSettlementId: null, surplusId: s.id, captureFactId: s.factId, amount: s.amount };
     }
-    const purchase = (await q.query<{ id: string; receiptId: string; reversed: boolean }>(
-      `SELECT s.id, s."receiptId", EXISTS (SELECT 1 FROM subscription_purchase_reversal v WHERE v."purchaseId" = s.id) AS reversed
-         FROM subscription_purchase s WHERE s."invoiceId" = $1 AND s."paymentRequestId" = $2 AND s.purpose IN ('direct_purchase', 'assisted_settlement')`,
+    // Core V2 S0-C8 PR-2b (BIL-23 H): an L-4 purchase from Payment's LATE success is refunded as exactly its capture
+    const purchase = (await q.query<{ id: string; receiptId: string | null; reversed: boolean; factId: string | null; amount: string | null }>(
+      `SELECT s.id, s."receiptId", EXISTS (SELECT 1 FROM subscription_purchase_reversal v WHERE v."purchaseId" = s.id) AS reversed, l."factId", l.amount
+         FROM subscription_purchase s LEFT JOIN payment_late_success l ON l."lateSuccessId" = s."lateSuccessId" WHERE s."invoiceId" = $1 AND s."paymentRequestId" = $2 AND s.purpose IN ('direct_purchase', 'assisted_settlement')`,
       [invoiceId, paymentRequestId])).rows[0];
-    if (purchase) return purchase.reversed ? null : { eligibility: 'personal_purchase', receiptId: purchase.receiptId, purchaseId: purchase.id, lateSettlementId: null };
+    if (purchase) {
+      return purchase.reversed ? null : { eligibility: 'personal_purchase', receiptId: purchase.receiptId, purchaseId: purchase.id, lateSettlementId: null,
+        captureFactId: purchase.factId, ...(purchase.amount !== null ? { amount: purchase.amount } : {}) };
+    }
     // Core V2 S0-C8 (BIL-23 H): a late settlement from Payment's LATE success names its capture: refunded in full as exactly that movement
     const late = (await q.query<{ id: string; receiptId: string | null; factId: string | null; amount: string | null }>(
       `SELECT l.id, l."receiptId", s."factId", s.amount FROM assistance_late_settlement l LEFT JOIN payment_late_success s ON s."lateSuccessId" = l."lateSuccessId"
