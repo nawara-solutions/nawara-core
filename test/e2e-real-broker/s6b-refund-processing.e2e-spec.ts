@@ -325,6 +325,13 @@ describeWithEnv(
       expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
         .toEqual([{ cause: 'refund_completion' }]);
       expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows[0].n).toBe(1);
+      // S-INT G2: the reversal reaches the entitlement: B6 (the access-decision contract) and the payer's own BIL-12 read are both invalid,
+      // the subscription still listed
+      const refundedProduct = (await billingAdmin.query(`SELECT "productId" FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows[0].productId as string;
+      expect((await call(BILLING_URL, 'GET', producerToken.token, `/billing/users/${PAYER}/platforms/${TEST_PLATFORM}/products/${refundedProduct}/entitlement`)).json)
+        .toEqual({ valid: false, expiresAt: null });
+      expect((await call(BILLING_URL, 'GET', payerToken, `/billing/me/platforms/${TEST_PLATFORM}/personal-subscriptions`)).json?.items)
+        .toContainEqual({ productId: refundedProduct, valid: false, expiresAt: null });
       expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [paymentId])).rows[0].status).toBe('succeeded');
       expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'refund.%'`)).rows.map((x) => x.name)).toEqual(['refund.case_completed']);
       expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE (name LIKE 'audit.refund_attempt.%' AND payload->'resource'->>'id' = $1) OR (name = 'audit.refund_authorization.completed' AND payload->'resource'->>'id' = $2) ORDER BY "occurredAt", name`, [attemptId, z.id])).rows.map((x) => x.name))
@@ -412,6 +419,8 @@ describeWithEnv(
       const productId = (await billingAdmin.query(`SELECT "productId" FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows[0].productId as string;
       expect((await call(BILLING_URL, 'GET', producerToken.token, `/billing/users/${PAYER}/platforms/${TEST_PLATFORM}/products/${productId}/entitlement`)).json)
         .toEqual({ valid: false, expiresAt: null });
+      expect((await call(BILLING_URL, 'GET', payerToken, `/billing/me/platforms/${TEST_PLATFORM}/personal-subscriptions`)).json?.items)
+        .toContainEqual({ productId, valid: false, expiresAt: null }); // S-INT G2: BIL-12 agrees with B6 after the direct final-lost chargeback
       expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
         .toEqual([{ cause: 'final_lost_chargeback' }]);
       expect((await paymentAdmin.query(`SELECT name FROM outbox WHERE name LIKE 'payment.dispute.%' AND payload->>'disputeId' = $1 ORDER BY name`, [d.id])).rows.map((x) => x.name))
@@ -420,5 +429,55 @@ describeWithEnv(
       expect((await ch.checkQueue(BILLING_DEAD_QUEUE)).messageCount).toBe(0);
       await ch.close();
     }, 240_000);
+
+    it('S-INT G5: a forged refund.case_completed and a forged payment.dispute.lost (no broker-verified Payment identity) change nothing; both are refused and dead-lettered', async () => {
+      const { paymentId, invoiceId } = await purchase();
+      const c = await openCase(paymentId);
+      // genuine bodies of each family, from Payment's own outbox (written by the earlier tests), re-targeted at this open case and payment
+      const template = async (name: string) => (await paymentAdmin.query(`SELECT payload FROM outbox WHERE name = $1 ORDER BY "occurredAt" LIMIT 1`, [name])).rows[0].payload as Record<string, unknown>;
+      const completion = { ...(await template('refund.case_completed')), refundCaseId: c.id, paymentId, refundAuthorizationId: randomUUID(), refundAttemptId: randomUUID() };
+      const loss = { ...(await template('payment.dispute.lost')), paymentId, disputeId: randomUUID() };
+      const deadBefore = await (async () => { const ch = await amqpConn.createChannel(); const n = (await ch.checkQueue(BILLING_DEAD_QUEUE)).messageCount; await ch.close(); return n; })();
+      const forged: Array<[string, string, Record<string, unknown>]> = [[randomUUID(), 'refund.case_completed', completion], [randomUUID(), 'payment.dispute.lost', loss]];
+      const pub = await amqpConn.createConfirmChannel();
+      for (const [id, name, body] of forged) {
+        // the test's own (guest) connection: the broker accepts it, but it carries no broker-verified `payment-service` user_id
+        pub.publish('nawara.events', name, Buffer.from(JSON.stringify(body)), { messageId: id, type: name, persistent: true, contentType: 'application/json',
+          headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      }
+      await pub.waitForConfirms();
+      await pub.close();
+      await waitFor(async () => { const ch = await amqpConn.createChannel(); const n = (await ch.checkQueue(BILLING_DEAD_QUEUE)).messageCount; await ch.close(); return n === deadBefore + 2; },
+        20_000, `both forgeries to be refused and dead-lettered\n${tails()}`);
+      const dead = await amqpConn.createChannel();
+      const reasons: Record<string, unknown> = {};
+      for (let m = await dead.get(BILLING_DEAD_QUEUE, { noAck: false }); m; m = await dead.get(BILLING_DEAD_QUEUE, { noAck: false })) {
+        reasons[String(m.properties.messageId)] = (m.properties.headers ?? {})['x-nawara-failure-reason'];
+      }
+      await dead.close(); // unacknowledged: the dead letters stay in their queue
+      for (const [id] of forged) {
+        expect(reasons[id], id).toBe('untrusted_unverified_original');
+        expect((await billingAdmin.query(`SELECT verified, "producerUserId" FROM event_provenance WHERE "eventId" = $1 AND consumer = $2`, [id, BILLING_QUEUE])).rows)
+          .toEqual([{ verified: false, producerUserId: null }]);
+      }
+      // nothing changed: the case is still open with no completion or effect, no dispute loss, no reversal, and the entitlement stands
+      expect((await billingAdmin.query(`SELECT status FROM refund_case WHERE id = $1`, [c.id])).rows[0].status).toBe('open');
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case_completion WHERE "refundCaseId" = $1`, [c.id])).rows[0].n).toBe(0);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM payment_dispute_loss WHERE "paymentId" = $1`, [paymentId])).rows[0].n).toBe(0);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows[0].n).toBe(0);
+      const productId = (await billingAdmin.query(`SELECT "productId" FROM subscription_purchase WHERE "invoiceId" = $1`, [invoiceId])).rows[0].productId as string;
+      expect((await call(BILLING_URL, 'GET', producerToken.token, `/billing/users/${PAYER}/platforms/${TEST_PLATFORM}/products/${productId}/entitlement`)).json?.valid).toBe(true);
+    }, 120_000);
+
+    it('S-INT G6: with Auth down, the Owner\'s refund case and the member\'s own read fail closed and write nothing (run last: it stops Auth)', async () => {
+      const { paymentId } = await purchase();
+      const cases = (await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case`)).rows[0].n as number;
+      await auth.stop();
+      const opened = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId, reason: 'customer_request' });
+      expect(opened.status, JSON.stringify(opened.json)).toBe(503); // the Owner cannot be verified live: nothing is opened
+      expect((await call(BILLING_URL, 'GET', payerToken, `/billing/me/platforms/${TEST_PLATFORM}/personal-subscriptions`)).status).toBe(503);
+      expect((await call(PAYMENT_URL, 'GET', ownerToken, `/payment/admin/payments/${paymentId}/balance`)).status).toBe(503);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case`)).rows[0].n).toBe(cases);
+    }, 120_000);
   },
 );
