@@ -290,15 +290,15 @@ Core V2 S-track (development and simulation only; nothing deployed; ◐ = condit
   S2    independent foundations                ◐ CONDITIONAL PASS (development); R-6a OPEN, due before F6/F7 or the first lifecycle
                                                   release (D-2); Audit Organization scope rows bound to authority activation (D-4)
   S3    Billing                                ◐ CONDITIONAL PASS (development, simulation); joint checkpoint one cross-process run (#410);
-                                                  BIL-12 OPEN: needs an Owner disposition before S-INT entry
+                                                  BIL-12 implemented and tested (#423 contract, #424; simulation only)
   S4    Payment                                ◐ CONDITIONAL PASS (development, simulation); joint checkpoint (#410); Organization-payer grant inactive
   S5    assistance and cash obligations        ◐ CONDITIONAL PASS (development, simulation, pre-lifecycle; S0-C7, T-A1–T-A4); the inactive-scope
                                                   criterion, V-4, S5e and D6 ⏸ with the first lifecycle-enabled release
   S6    refunds, disputes, recovery, losses    ◐ CONDITIONAL PASS (simulation); Q8 and partial chargebacks open
   S7    Notification inbox, Auth tenure        CONDITIONAL scope, not authorized (C-3, C-6, DG-3)
   S8    Organization authority changes         CONDITIONAL scope, not authorized (PR #319, C-5; RED items after F7)
-  S-INT integration certification              not started; entry rule D-3; conditions classified (condition matrix); S3 blocked by BIL-12;
-                                                  needs the Owner-approved S-INT readiness record and its own authorization
+  S-INT integration certification              not started; entry rule D-3; conditions classified (condition matrix); no development-level
+                                                  item OPEN; needs the Owner-approved S-INT readiness record and its own authorization
 
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
 M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; E2 and E3 prepared, not installed; NOT CERTIFIED
@@ -418,7 +418,8 @@ S7 to A8; S8 to A5 (execution roadmap §11).
 - **S-INT** certifies the cross-service paths together on simulation, under its own authorization and record, only after S1 to S6 are
   each certified (and S7 / S8 if in scope), under the strict entry rule of the execution roadmap §5 (D-3). Every remaining condition of S1
   to S6 is classified in the [condition matrix](architecture/core-v2-stage-condition-matrix.md); S5 is certified pre-lifecycle under S0-C7;
-  the one development-level item still OPEN is BIL-12 (S3), which needs an Owner disposition. No verdict is promoted automatically: entry
+  no development-level item is OPEN (BIL-12 was implemented, #424; F-INV-1, the invoice list's cursor, is an independent finding awaiting
+  the Owner's decision). No verdict is promoted automatically: entry
   needs the Owner-approved S-INT readiness record. S-INT is not a production certification.
 - **Production-track gates are unchanged and separate:** S1-R (with C-4, AP-R, NP-K), G-7 (no S-stage Auth, Organization or Audit image
   in production before M3 or a G6 baseline refresh), M2 → G7 → F6 → F7 → post-F7 backup, the pilot readiness gate M13 / A19 (DG-7).
