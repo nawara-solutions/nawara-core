@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Record | 2026-10-31, documentation only, on `main` at `e96c00d` (PRs #410 to #416 merged) |
+| Record | 2026-10-31, documentation only, on `main` at `e96c00d` (PRs #410 to #416 merged). Updated 2026-11-01 on `main` at `65aaaf1` (BIL-12: #423, #424) |
 | Rule applied | [Execution roadmap](./core-v2-s-execution-roadmap.md) §5 "S-INT entry: individual certification" (the Owner's decision D-3, 2026-10-30) |
 | What this is | The classification of every remaining condition of the S1 to S6 stage records, and the list of what is still OPEN at development level. It promotes no verdict and authorizes no S-INT: the S-INT readiness record lists these conditions for the Owner's approval |
 
@@ -17,7 +17,7 @@ for S-INT entry until it is dispositioned.
 |---|---|---|
 | S1 | all PASS; the real-systemd half of OD-BRK-2b-L is Lab-only (b) | [S1](./core-v2-s1-event-security.md) |
 | S2 | all PASS (R-6a is a work package, dispositioned by D-2) | [S2](./core-v2-s2-independent-foundations.md) |
-| S3 | all PASS, the S3/S4 joint checkpoint now in one cross-process run (#410) | [S3](./core-v2-s3-billing.md) |
+| S3 | all PASS, the S3/S4 joint checkpoint now in one cross-process run (#410); BIL-12 implemented and tested (#424) | [S3](./core-v2-s3-billing.md) |
 | S4 | all PASS, the joint checkpoint as S3 | [S4](./core-v2-s4-payment.md) |
 | S5 | S5a to S5d PASS; the inactive-scope criterion assigned to the first lifecycle-enabled release by S0-C7, evidenced pre-lifecycle by T-A1 to T-A4 | [S5](./core-v2-s5-assistance-and-cash-obligations.md) |
 | S6 | all PASS (simulation) | [S6](./core-v2-s6-financial-certification.md) |
@@ -39,7 +39,7 @@ for S-INT entry until it is dispositioned.
 | S2 | Q8 proof of receipt non-consumption | (d) | Q8: an unanswered authorization stays pending, never released (S6 report §3.6) |
 | S2 | Q9 receipt token provisioning and caller admission records | (a) | operational |
 | S2 | Production: Auth digest deployment (M3, G-7); Audit 0004+ (M9, G-7, AP-R); File (M8, DG-2); Release | (a) / (c) | roadmap dispositions (Release MOVE V3) |
-| S3 | **BIL-12** `GET /billing/me/personal-subscriptions` | **OPEN** | register: "whether this read is in initial scope"; not built and not tested, so it is not (d); needs an Owner disposition (in scope: implement; out of scope: record) |
+| S3 | BIL-12 production mounting (`GET /billing/me/platforms/:platformId/personal-subscriptions`) | (a) | the Owner's D-B6: development and simulation only until Billing's production activation is authorized (DG-4); implemented and tested (#424, register BIL-12 I). Resolved at development level 2026-11-01 (was OPEN) |
 | S3 | OD-05 catalog VALUES | (a) | the capability is built (D-CAT-1); values gate real catalog configuration only |
 | S3 | EVT-05 `billing.subscription.*` | (d) | not in Billing's event contract; the broker refuses Billing any ungranted key (S1d-3 `real-broker-topic-grants.mjs`) |
 | S3 | Invoice legal content (B-001, B-006, B-007, B-028) | (c) / (a) | S0 §5 (tax, invoicing entity); production only |
@@ -61,11 +61,17 @@ for S-INT entry until it is dispositioned.
 
 ## 3. OPEN at development level
 
-| Stage | Item | Effect | Decision needed |
-|---|---|---|---|
-| S3 | BIL-12 (personal-subscriptions read for the member) | S3 does not meet the S-INT entry rule until dispositioned | the Owner records BIL-12 either as outside Core V2's initial scope (category (c)) or as a work package to implement and test |
+None. The one item recorded here, BIL-12 (S3), was resolved on 2026-11-01: the Owner included it in Core V2 (D-B1 to D-B7, #423) and
+#424 implemented and tested it (S3 record §7).
 
-No other development-level criterion, invariant test or work package of S1 to S6 is OPEN, BLOCKED or NOT STARTED without a disposition.
+No development-level criterion, invariant test or work package of S1 to S6 is OPEN, BLOCKED or NOT STARTED without a disposition. This
+is not S-INT readiness: entry needs the Owner-approved S-INT readiness record and its own authorization (D-3).
+
+### 3.1 Independent finding outside the stage criteria
+
+| Id | Finding | State | Decision needed |
+|---|---|---|---|
+| F-INV-1 | Billing's invoice list (`GET /billing/invoices`, `InvoiceRepository.listForCaller`, ADR-0034) compares its millisecond cursor with the microsecond `createdAt`: invoices created within the same millisecond can be skipped across a page boundary | OPEN, found during BIL-12 (2026-11-01); not fixed | the Owner approves a separate Billing fix (or records another disposition). It is a pre-existing V1 read, not an S1 to S6 certification-gate criterion, so it is listed here rather than classified under D-3; whether it must close before S-INT is the Owner's decision |
 
 ## 4. Not changed by this record
 
