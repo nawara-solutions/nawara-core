@@ -7,7 +7,7 @@ import type { TransitionContext } from '../src/domain/actors.js';
 import { deriveEntitlement } from '../src/domain/entitlement.js';
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
-import { anchorOccurrence, periodEnds } from './support/billing-calendar.js';
+import { anchorOccurrence, monthlyPeriodEndingBy, periodEnds } from './support/billing-calendar.js';
 import { describeWithEnv } from './support/env.js';
 import { settle as settleThroughPayment, subscriptionPrice } from './support/settlement.js';
 
@@ -555,18 +555,59 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       expect(deriveEntitlement(row, row.graceUntil!)).toEqual({ valid: false, expiresAt: null });
     });
 
-    it('a subscription still `active` past its period end, but inside the real repository-computed graceUntil, derives valid — the exact Stage 12.2/12.3 sweeper-independence guarantee, over real PostgreSQL', async () => {
+    /**
+     * A first monthly period settled at `start` ends on its anchor's cadence (ADR-0044 B-025 amendment): checked by `activate`, and
+     * again here against the stored row. Then, with no sweeper, the row read back is still `active`; at the instant `at` (strictly
+     * after the period end, before graceUntil) it derives valid until graceUntil, and from graceUntil on it does not.
+     */
+    async function activeInGrace(start: Date, end: Date, at: Date) {
       const organizationId = org();
       const { productId, priceId } = await recurringPrice();
       await subs.create(organizationId, productId, priceId, ctx);
-      const end = new Date(Date.now() - hour); // the period ended an hour ago: inside its 24-hour grace
-      await paid.activate(organizationId, { start: anchorOccurrence(end, -1), end }); // graceUntil is set here (end + 24 h), status stays 'active'
+      await paid.activate(organizationId, { start, end });
       const row = await subs.getByOrganization(organizationId);
-      expect(row.status).toBe('active');
-      expect(row.graceUntil).not.toBeNull();
+      expect(row).toMatchObject({ status: 'active', billingAnchorAt: start, currentPeriodStart: start, currentPeriodEnd: end });
+      expect(row.graceUntil).toEqual(new Date(end.getTime() + day)); // exactly 24 hours after the period end (S3e)
+      expect(at.getTime()).toBeGreaterThan(end.getTime());
+      expect(at.getTime()).toBeLessThan(row.graceUntil!.getTime());
+      expect(deriveEntitlement(row, at)).toEqual({ valid: true, expiresAt: row.graceUntil });
+      expect(deriveEntitlement(row, new Date(row.graceUntil!.getTime() - 1))).toEqual({ valid: true, expiresAt: row.graceUntil });
+      expect(deriveEntitlement(row, row.graceUntil!)).toEqual({ valid: false, expiresAt: null });
+      return { organizationId, row };
+    }
 
-      const result = deriveEntitlement(row, new Date());
-      expect(result).toEqual({ valid: true, expiresAt: row.graceUntil });
+    it('a subscription still `active` past its period end, but inside the real repository-computed graceUntil, derives valid — the exact Stage 12.2/12.3 sweeper-independence guarantee, over real PostgreSQL', async () => {
+      // A period on the anchored monthly cadence that ended by an hour ago (up to 3 days earlier when the month before is too short
+      // for this day: Oct 31 gives Sep 30 -> Oct 30). It is evaluated one hour after its OWN end, an instant already in the past.
+      const now = Date.now();
+      const { start, end } = monthlyPeriodEndingBy(new Date(now - hour));
+      expect(end.getTime()).toBeLessThanOrEqual(now - hour); // the period end is in the past
+      const at = new Date(end.getTime() + hour);
+      expect(at.getTime()).toBeLessThanOrEqual(now);
+      await activeInGrace(start, end, at);
+    });
+
+    // Fixed dates: the month ends where a first monthly period cannot end on the clock-relative day itself. Each target is the
+    // instant the CI run of 2026-10-31 used ("an hour ago" at 01:10:51.560Z), moved to the day named; the expected period is
+    // written out, not derived.
+    it.each([
+      ['Oct 31 (Sep has 30 days)', '2026-10-31', '2026-09-30', '2026-10-30'],
+      ['Nov 1 (on cadence)', '2026-11-01', '2026-10-01', '2026-11-01'],
+      ['Mar 29, common year', '2027-03-29', '2027-02-28', '2027-03-28'],
+      ['Mar 30, common year', '2027-03-30', '2027-02-28', '2027-03-28'],
+      ['Mar 31, common year', '2027-03-31', '2027-02-28', '2027-03-28'],
+      ['Mar 29, leap year', '2028-03-29', '2028-02-29', '2028-03-29'],
+      ['Mar 30, leap year', '2028-03-30', '2028-02-29', '2028-03-29'],
+      ['Mar 31, leap year', '2028-03-31', '2028-02-29', '2028-03-29'],
+    ])('month end, %s: the anchored first period, then valid during its grace and not after', async (_label, target, startDay, endDay) => {
+      const time = 'T00:10:51.560Z';
+      const { start, end } = monthlyPeriodEndingBy(new Date(`${target}${time}`));
+      expect([start, end]).toEqual([new Date(`${startDay}${time}`), new Date(`${endDay}${time}`)]);
+      const at = new Date(end.getTime() + hour);
+      const { organizationId } = await activeInGrace(start, end, at);
+      // B-025 unchanged: a renewal inside graceUntil starts at the original period end and keeps the anchor and its cadence
+      const renewed = await paid.renew(organizationId, at);
+      expect(renewed.subscription).toMatchObject({ status: 'active', billingAnchorAt: start, currentPeriodStart: end, currentPeriodEnd: anchorOccurrence(start, 2) });
     });
   });
 });
