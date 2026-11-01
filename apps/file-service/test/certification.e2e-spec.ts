@@ -144,9 +144,23 @@ describeWithEnv('Stage 17.10 certification (real PostgreSQL, filesystem store)',
       expect((await request(server()).get(`/file/files/${id}`).set({ authorization: bearer.startsWith('Bearer') ? bearer : `Bearer ${bearer}` })).status).toBe(401);
       expect((await request(server()).delete(`/file/files/${id}`).set({ authorization: `Bearer ${token}` })).status).toBe(401);
     }
+    const ticket = async () => (await s.query<{ redemption: string | null; useCount: number }>(
+      `SELECT redemption, "useCount" FROM file_access_ticket WHERE "fileId" = $1 AND operation = 'download'`, [id]));
+    expect(await ticket()).toEqual([{ redemption: null, useCount: 0 }]); // nothing above reserved or spent it
     const r = await request(server()).get(path); // the single use is still there after all of the above
     expect([r.status, sha256(r.body as Buffer)]).toEqual([200, (await s.query<{ sha256: string }>('SELECT sha256 FROM file WHERE id = $1', [id]))[0]!.sha256]);
-    expect((await request(server()).get(path)).status).toBe(404);
+    // S2-File.4: the reservation settles just after the response; until then a retry is 409 ticket_in_use (nothing served, nothing
+    // consumed), then the ticket is spent: 404 ticket_invalid. Any other answer, a second download above all, fails at once.
+    const again = async () => { const a = await request(server()).get(path); return [a.status, a.body.code] as [number, unknown]; };
+    let answer = await again();
+    for (let i = 0; i < 100 && answer[0] === 409; i++) {
+      expect(answer).toEqual([409, 'ticket_in_use']);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      answer = await again();
+    }
+    expect(answer).toEqual([404, 'ticket_invalid']);
+    expect(await ticket()).toEqual([{ redemption: 'committed', useCount: 1 }]); // spent exactly once, by the completed download
+    expect(await again()).toEqual([404, 'ticket_invalid']); // and never served again
   });
 
   // ───────────────────────────────────────────────────────────────────── lifecycle end to end (§10–§17, §26–§27)
