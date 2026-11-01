@@ -27,6 +27,7 @@ import { FakeAuth } from './support/fake-auth.js';
 import { anchorOccurrence } from './support/billing-calendar.js';
 import { paymentPurposeOf } from './support/settlement.js';
 import { describeWithEnv } from './support/env.js';
+import { expectHttpMemberReadMatchesB6 } from './support/member-read.js';
 
 type Row = Record<string, any>;
 
@@ -435,6 +436,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       const month = await one(`SELECT ($1::timestamptz + interval '1 month') AS e`, [p.originalStart]);
       expect(p.originalEnd).toEqual(month.e); // the full authorized duration
       expect((await entitlement(U.b1, l.productId).expect(200)).body.valid).toBe(true);
+      expect(await expectHttpMemberReadMatchesB6(t.app, 'b1', U.b1, PLATFORM)).toContainEqual(expect.objectContaining({ productId: l.productId, valid: true })); // BIL-12: the L-4 application, as B6
       expect(await obligationsOf(l.requestId)).toEqual([{ id: l.obligationId, origin: 'deadline', status: 'superseded_by_settlement', supersededByApplicationId: expect.any(String) }]);
       expect((await one(`SELECT status FROM assistance_request WHERE id = $1`, [l.requestId])).status).toBe('settled');
       expect((await one(`SELECT status FROM assistance_settlement_channel WHERE "invoiceId" = $1`, [l.invoiceId])).status).toBe('settled');

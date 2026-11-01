@@ -20,6 +20,7 @@ import type { CancelPaymentOutcome, CreatePaymentOutcome, PaymentClient, Payment
 import { createTestApp, type TestApp } from './support/app.js';
 import { anchorOccurrence } from './support/billing-calendar.js';
 import { describeWithEnv } from './support/env.js';
+import { expectHttpMemberReadMatchesB6 } from './support/member-read.js';
 
 type Row = Record<string, any>;
 
@@ -257,6 +258,10 @@ describeWithEnv('assisted settlement and cash return (Core V2 S5b, simulation) â
     expect(await statusOf(r.id)).toBe('settled');
     expect((await entitlement(U.b1, r.productId).expect(200)).body).toEqual({ valid: true, expiresAt: anchorOccurrence(settledAt, 1).toISOString() });
     expect((await entitlement(U.a1, r.productId).expect(200)).body).toEqual({ valid: false, expiresAt: null }); // never the payer's administrator
+    // BIL-12: the beneficiary's own read lists the assisted purchase like a direct one, as B6; never the payer's administrator's
+    expect((await expectHttpMemberReadMatchesB6(t.app, 'b1', U.b1, PLATFORM)).find((i) => i.productId === r.productId))
+      .toEqual({ productId: r.productId, valid: true, expiresAt: anchorOccurrence(settledAt, 1).toISOString() });
+    expect(await expectHttpMemberReadMatchesB6(t.app, 'a1', U.a1, PLATFORM)).not.toContainEqual(expect.objectContaining({ productId: r.productId }));
     expect((await read(r.id, 'b1')).body).toMatchObject({ status: 'settled', overdue: false, cashReturnObligation: null });
 
     // exactly once: a redelivery, and later sweeps, change nothing; no obligation ever opens for a settled request

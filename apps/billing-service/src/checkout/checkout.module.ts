@@ -1,5 +1,6 @@
 import { Module, type DynamicModule } from '@nestjs/common';
 import { RateLimitModule } from '@nawara/service-kit';
+import { MemberVerifier } from '../auth/verified-member.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { InvoicesModule } from '../invoices/invoices.module.js';
 import { CheckoutMemberGuard } from './checkout-member.guard.js';
@@ -19,7 +20,7 @@ export class CheckoutModule {
       module: CheckoutModule,
       imports: [InvoicesModule, RateLimitModule],
       controllers: [CheckoutController],
-      providers: [CheckoutService, CheckoutMemberGuard],
+      providers: [CheckoutService, CheckoutMemberGuard, MemberVerifier],
     };
   }
 }

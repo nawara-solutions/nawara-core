@@ -31,6 +31,7 @@ import { PersonalSubscriptionRepository } from '../src/subscriptions/personal-su
 import type { CaptureReadOutcome, PaymentCapture, PaymentRefundClient, RefundRelayBody } from '../src/refunds/payment-refund-client.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
+import { expectHttpMemberReadMatchesB6 } from './support/member-read.js';
 import { paymentPurposeOf } from './support/settlement.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -155,6 +156,9 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     resolve: async (organizationId) => (([ORG, ORG2] as string[]).includes(organizationId) ? { organizationId, platformId: PLATFORM, companyId: COMPANY } : null),
   };
   const server = () => t.app.getHttpServer();
+  /** Core V2 BIL-12: the member's own read, through the route as that member, equals B6 for every subscription at one instant; this one's item. */
+  const memberItem = async (bearer: string, userId: string, productId: string) =>
+    (await expectHttpMemberReadMatchesB6(t.app, bearer, userId, PLATFORM)).find((i) => i.productId === productId);
 
   // ── fixtures
   let seq = 0;
@@ -618,6 +622,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect((await one(`SELECT "refundCaseId" FROM subscription_purchase_reversal_cause WHERE "purchaseId" = $1`, [purchase.id])).refundCaseId).toBe(caseId);
       expect(await purchaseOf(p.paymentId)).toEqual(purchase); // the original purchase is untouched
       expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(false);
+      expect(await memberItem('b2', U.b2, p.productId)).toEqual({ productId: p.productId, valid: false, expiresAt: null }); // BIL-12: still listed
       const a = (await audit(purchase.id)).find((e) => e.name === 'audit.subscription_purchase.reversed')!;
       expect(a.payload.actor).toEqual({ type: 'system', id: 'refund_effect_worker' });
       expect(a.payload.changes).toEqual({ refund_case_id: caseId, cause: 'refund_completion' });
@@ -842,6 +847,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(after.map((s) => s.purchaseId)).toEqual([(await purchaseOf(second.paymentId)).id]);
       expect(after[0].effectiveStart).toEqual((await purchaseOf(second.paymentId)).settledAt);
       expect((await entitlement(U.b2, productId).expect(200)).body.valid).toBe(true); // the second, paid period remains
+      expect(await memberItem('b2', U.b2, productId)).toMatchObject({ valid: true }); // BIL-12: the re-laid period, as B6
       const a = (await audit(purchase.id)).filter((x) => x.name === 'audit.subscription_purchase.reversed');
       expect(a.map((x) => [x.payload.actor, x.payload.changes])).toEqual([[{ type: 'system', id: 'dispute_loss_worker' }, { dispute_id: e.disputeId, cause: 'final_lost_chargeback' }]]);
       // the same loss again (redelivery) and again from Payment's read: nothing more
@@ -858,6 +864,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       await t.bus.deliver(e.envelope as never);
       expect(t.bus.deadLettered.some((x) => x.id === e.envelope.id)).toBe(false); // acknowledged, not an error
       expect(await count(`SELECT count(*) AS n FROM payment_dispute_loss WHERE "disputeId" = $1`, [e.disputeId])).toBe(0);
+      expect(await memberItem('b1', U.b1, p.productId)).toMatchObject({ valid: true }); // BIL-12: a dispute not yet final changes nothing
       lossesAtPayment.down = true;
       expect(await losses().drainOnce()).toMatchObject({ recorded: 0, applied: 0 }); // Payment unavailable: nothing inferred
       lossesAtPayment.down = false;
@@ -867,6 +874,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(await lossRow(e.disputeId)).toMatchObject({ source: 'reconciliation', eventId: null });
       expect(await reversals(purchase.id)).toEqual([{ cause: 'final_lost_chargeback' }]);
       expect((await entitlement(U.b1, p.productId).expect(200)).body.valid).toBe(false);
+      expect(await memberItem('b1', U.b1, p.productId)).toEqual({ productId: p.productId, valid: false, expiresAt: null }); // BIL-12, once final
     });
 
     it('an assisted purchase keeps its entitlement: no reversal, no obligation, no restriction; the verified loss is kept for S6f', async () => {
@@ -881,6 +889,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(await count(`SELECT count(*) AS n FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [a.requestId])).toBe(0);
       expect((await admin.query(`SELECT kind FROM billing_assistance_restrictions($1, now())`, [ORG])).rows).toEqual([]); // no T3 before S6f
       expect((await entitlement(U.b1, purchase.productId).expect(200)).body.valid).toBe(true);
+      expect(await memberItem('b1', U.b1, purchase.productId)).toMatchObject({ valid: true }); // BIL-12: B10, the assisted purchase is kept
       expect(await lossRow(e.disputeId)).toMatchObject({ cb: a.amount });
     });
 
@@ -894,6 +903,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(await count(`SELECT count(*) AS n FROM dispute_loss_effect WHERE "disputeId" = $1`, [e.disputeId])).toBe(0);
       expect(await reversals(purchase.id)).toEqual([]);
       expect((await entitlement(U.b2, p.productId).expect(200)).body.valid).toBe(true);
+      expect(await memberItem('b2', U.b2, p.productId)).toMatchObject({ valid: true }); // BIL-12: a partial chargeback changes nothing
     });
 
     it('FC-4: a purchase already reversed by a completed refund gets no second reversal; the chargeback cause is appended for S6h', async () => {
@@ -1016,6 +1026,10 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect((await entitlement(U.b2, productId).expect(200)).body.valid).toBe(true);
       expect((await entitlement(U.b1, otherProduct.productId).expect(200)).body.valid).toBe(true);
       expect(otherUser.paymentId).toBeDefined();
+      // BIL-12: the held subscription stays listed, invalid, with no hold state or reason; the other member and product are untouched
+      expect(await memberItem('b1', U.b1, productId)).toEqual({ productId, valid: false, expiresAt: null });
+      expect(await memberItem('b1', U.b1, otherProduct.productId)).toMatchObject({ valid: true });
+      expect(await memberItem('b2', U.b2, productId)).toMatchObject({ valid: true });
       const a = (await audit(h.holdId)).filter((x) => x.name === 'audit.fraud_hold.placed');
       expect(a.map((x) => [x.payload.actor, x.payload.changes])).toEqual([[{ type: 'user', id: U.owner, userKind: 'owner' }, { product_id: productId, reason: 'account_takeover' }]]);
       expect(await place(h, { secret, evidence: [ev] }).then((x) => x.status)).toBe(200); // the same holdId: the hold
@@ -1101,6 +1115,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       const e = (await entitlement(U.b1, productId).expect(200)).body;
       expect(e.valid).toBe(true);
       expect(Date.parse(e.expiresAt)).toBe(endBefore + denied); // exact, not rounded
+      expect(await memberItem('b1', U.b1, productId)).toEqual({ productId, valid: true, expiresAt: e.expiresAt }); // BIL-12: the same C-1 compensation
       // the paid spans themselves never moved
       expect((await admin.query(`SELECT "purchaseId", "effectiveStart", "effectiveEnd" FROM billing_personal_spans($1)`, [(await purchaseOf(first.paymentId)).personalSubscriptionId])).rows).toEqual(spansBefore);
       expect(renewal.paymentId).toBeDefined();

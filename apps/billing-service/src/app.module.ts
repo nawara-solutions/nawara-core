@@ -26,6 +26,7 @@ import type { PaymentReconciliationClient } from './reconciliation/payment-recon
 import { LateSettlementModule } from './late-settlements/late-settlement.module.js';
 import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
+import { MemberPersonalSubscriptionsModule } from './subscriptions/member-personal-subscriptions.module.js';
 import type { PaymentDisputeClient } from './refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts } from './fraud-holds/fraud-hold-clients.js';
 
@@ -111,6 +112,7 @@ export class AppModule {
         SubscriptionsModule,
         PlatformsModule.register(config, overrides.ownerAuthority), // Core V2 S3d (register BIL-01)
         CheckoutModule.register(config), // Core V2 S3f (BIL-10): development and simulation only; never mounted in production
+        MemberPersonalSubscriptionsModule.register(config), // Core V2 BIL-12 (D-B6): development and simulation only; never mounted in production
         AssistanceModule.register(config, overrides.ownerAuthority), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
         // Core V2 S6a (BIL-23, BIL-25) and S6b (BIL-24): development and simulation only
         RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient, fraudHoldReceipts: overrides.fraudHoldReceipts, fraudEvidenceFiles: overrides.fraudEvidenceFiles }),
