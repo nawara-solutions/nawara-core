@@ -64,11 +64,21 @@ describeWithEnv('the member\'s own personal subscriptions (BIL-12, simulation) �
   const page = (userId: string, platformId: string, at: Date, limit = 100, cursor: { createdAt: Date; id: string } | null = null) =>
     t.app.get(MemberPersonalSubscriptionsService).page(userId, platformId, limit, cursor, at);
 
-  /** Every table's full contents, hashed: a read must leave all of them, the outbox and the audit tables included, exactly as they were. */
+  /**
+   * Every table's full contents, hashed: a read must leave all of them, the audit tables included, exactly as they were. The outbox is
+   * hashed on its immutable event content only (`id`, `name`, `payload`, `correlationId`, `eventVersion`, `occurredAt`), so an event
+   * added, deleted or changed is caught, while the relay publishing the earlier purchase's events meanwhile (`publishedAt`, `attempts`,
+   * `lastError`, `availableAt`, its delivery fields) is not mistaken for a write by the read.
+   */
+  const OUTBOX_EVENT_CONTENT = `SELECT md5(coalesce(string_agg(x::text, ',' ORDER BY x::text), '')) AS h
+    FROM (SELECT id, name, payload, "correlationId", "eventVersion", "occurredAt" FROM outbox) x`;
   const fingerprint = async () => {
     const { rows } = await admin.query<{ t: string }>(`SELECT table_name AS t FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY 1`);
     const out: Record<string, string> = {};
-    for (const { t: table } of rows) out[table] = (await admin.query(`SELECT md5(coalesce(string_agg(x::text, ',' ORDER BY x::text), '')) AS h FROM "${table}" x`)).rows[0].h;
+    for (const { t: table } of rows) {
+      const sql = table === 'outbox' ? OUTBOX_EVENT_CONTENT : `SELECT md5(coalesce(string_agg(x::text, ',' ORDER BY x::text), '')) AS h FROM "${table}" x`;
+      out[table] = (await admin.query(sql)).rows[0].h;
+    }
     return out;
   };
 
@@ -332,13 +342,38 @@ describeWithEnv('the member\'s own personal subscriptions (BIL-12, simulation) �
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── reads only
 
-  it('the read changes nothing: every table (outbox and audit included) is byte-identical before and after', async () => {
+  it('the read changes nothing: every table (the audit tables included, the outbox\'s events included) is identical before and after', async () => {
     const u = member('read-only');
     const { priceId } = await personalPrice(admin);
     await buy(u, priceId, new Date(Date.now() - day));
     const before = await fingerprint();
     for (const bearer of ['read-only', 'owner-1', 'nobody', 'auth-down']) await read(bearer);
     await read('read-only', SUBSCRIPTION_PLATFORM, '?limit=1');
-    expect(await fingerprint()).toEqual(before);
+    const after = await fingerprint();
+    expect(after).toEqual(before);
+
+    // The fingerprint still sees every outbox event change; only the relay's delivery fields are left out. Events are immutable in the
+    // database itself, so the forbidden changes are made as a superuser with the triggers bypassed, for this probe only.
+    const asFixture = async (sql: string, params: unknown[]) => {
+      const cl = await admin.connect();
+      try {
+        await cl.query('SET session_replication_role = replica');
+        await cl.query(sql, params);
+      } finally {
+        await cl.query('SET session_replication_role = origin');
+        cl.release();
+      }
+    };
+    const probe = randomUUID();
+    await admin.query(`INSERT INTO outbox (id, name, payload) VALUES ($1, 'test.fingerprint_probe', '{}')`, [probe]);
+    const added = (await fingerprint()).outbox;
+    expect(added).not.toBe(after.outbox); // an added event
+    await asFixture(`UPDATE outbox SET payload = '{"changed": true}' WHERE id = $1`, [probe]);
+    const changed = (await fingerprint()).outbox;
+    expect(changed).not.toBe(added); // a modified event
+    await asFixture(`UPDATE outbox SET "publishedAt" = now(), attempts = attempts + 1, "lastError" = 'x', "availableAt" = now() WHERE id = $1`, [probe]);
+    expect((await fingerprint()).outbox).toBe(changed); // delivery fields only: what the relay writes
+    await asFixture(`DELETE FROM outbox WHERE id = $1`, [probe]);
+    expect((await fingerprint()).outbox).toBe(after.outbox); // a deleted event is seen too: back to the content before the probe
   });
 });
