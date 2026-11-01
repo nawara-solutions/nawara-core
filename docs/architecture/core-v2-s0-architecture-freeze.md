@@ -160,6 +160,58 @@ status change still needs its own explicit owner authorization.
   *Evidence of item 5 (recorded 2026-10-31):* T-A1 Auth (#411, `7cc86d1`), T-A2 Organization Service (#412, `6b0150b`), T-A4 Billing
   (#414, `31eebe1`) and T-A3 kit contract and `check:repo` `checkPreLifecycleInvariant` (#415, `abb39f4`) are merged. Item 1 certifies
   pre-lifecycle Core V2 behaviour only; it does not certify lifecycle-enabled behaviour. No stage verdict is changed by this record.
+- **S0-C8 Reachable late assisted settlement (2026-11-01, owner-approved clarification with ONE owner-approved policy addition, item 8;
+  S0 §3.4 L-1 to L-6, §3.2 DB-9, DB-10, DB-12, DB-14; finding F-SINT-1; decisions LS-1 to LS-10 of the
+  [proposal](./core-v2-f-sint-1-l4-reachability-proposal.md)).** The text of §3.2 and §3.4 is unchanged and governs. This entry states how
+  it applies to Payment's verified late success, which S4c finality makes the only real form of a success on a definitively closed
+  assisted channel. Items 1 to 7 and 9 to 11 are clarifications; item 8 is new policy.
+  1. *Input (LS-1, LS-4).* A late assisted settlement, the only input of L-4, is either (a) the S5b E-7 record of an applied
+     `payment.succeeded` that could not apply (unchanged, kept as a fail-closed path), or (b) Payment's verified late success (EVT-10
+     v1, or Payment's PAY-12 read when the event is lost; verified-only, S0-C6) of a payment whose immutable routing purpose (DB-1) is
+     `assisted_settlement`, eligible only when **all** hold: Payment's payment ended `failed`, `cancelled` or `expired` and the late
+     success states that status; Billing's payment request ended in the same state; that request's channel is definitively `closed`;
+     the verified capture fact (`factId`, FC-1) is present; the captured amount and currency equal the channel invoice's total; and no
+     late assisted settlement exists for that invoice. Any other late success stays a refund-only `late_success` case. Eligibility
+     never replaces L-4's five conditions; both apply in full.
+  2. *Finality.* Payment's final state, Billing's final payment request and the closed channel are never reopened or changed. No
+     `payment.succeeded` is produced. Nothing is purchased and no entitlement changes on receipt (L-2).
+  3. *Ordering (LS-5).* A late success received before Billing holds its payment request's final state is recorded (L-1). Its
+     classification is deferred and retried until Payment's authoritative state (event or read) is applied. Finality is never inferred
+     from time, absence or the late success itself.
+  4. *Default (L-3, LS-6).* The ordinary outcome remains the full refund of that captured movement to the school's card (Owner receipt
+     flow), executed by Payment's capture-specific refund (R6H-5) and bound to the capture fact (`captureFactId`). There is at most one
+     live (not cancelled) refund case per captured movement, whatever its eligibility. The request keeps its obligation, violations
+     and restrictions.
+  5. *Application (LS-2, LS-3, LS-9).* L-4 applies to (b) exactly as to (a): the BIL-32 route, the Auth `late_settlement_apply`
+     receipt with factor step-up and its unchanged binding, the attestation and evidence paths, every refusal, and the atomic commit.
+     A valid application commits, in one transaction: the single purchase; the invoice `paid`; the request `settled`; and the live
+     deadline obligation `superseded_by_settlement` when one exists. The settlement time is Payment's recorded instant of the late
+     success (`recordedAt`), never Billing's processing clock; the application instant anchors the period (R6G-5). Before `settleBy`,
+     an otherwise eligible application needs no obligation. After `settleBy`, the existing obligation and discharge rules apply unchanged.
+  6. *Evidence identity and uniqueness (DB-14 mechanism).* The identities are Payment's `lateSuccessId` and its capture fact `factId`.
+     Billing records each once. Each late success evidences **at most one** effect: one late assisted settlement, one recovery payment
+     (only under `recovery_settlement` routing), or one `late_success` case. An L-4 purchase from (b) is evidenced by its late success,
+     unique per late success, instead of a `payment.succeeded` receipt. The invariants of DB-9, DB-10, DB-12 and DB-14 are unchanged.
+  7. *Mutual exclusion.* A captured movement is either purchased under L-4 or refunded, never both. L-4 is refused while any refund
+     case of the payment is not cancelled, or ever relayed an authorization (R6G-7). After an application, the purchase is refunded only
+     as a Personal purchase of that capture, with S6d's effects (one reversal; a new `refund_completion` obligation). R6H-5's exclusions
+     between ordinary and capture-specific cases are kept. A late success under one routing can never produce another routing's effect.
+  8. **Policy addition (LS-7; Owner-approved; NOT a clarification of S0).** L-4 is also refused (`late_settlement_refused`, reason
+     `chargeback_recorded`) when Billing holds a verified chargeback (dispute loss) on that payment. It applies to inputs (a) and (b),
+     narrows L-4, and opens no new path to a purchase.
+  9. *Existing records (LS-8).* Late successes already handled as refund-only `late_success` cases (development and simulation only)
+     stay refund-only and are never reclassified. Late successes are never converted broadly into purchases. The direct-order rule of
+     §3.4 is unchanged.
+  10. *Preserved.* S4c finality; FC-1; L-1 to L-6 and L-4's five conditions; the invariants of DB-9, DB-10, DB-12 and DB-14;
+      ADR-0057 §13 and S0-C1 to S0-C7; Auth receipt bindings and Owner step-up semantics. ADR-0044 Part B (B14), ADR-0045 and ADR-0069
+      stay Proposed, and no Accepted ADR is edited.
+  11. *Certification (G4).* The S-INT G4 L-4 criterion is met only by real events, across separately spawned Auth, Billing and Payment
+      with RabbitMQ, as listed in the [S-INT readiness record](./core-v2-s-int-readiness.md) §7.3 (G4). Inserting an obligation while a
+      channel is in flight is never evidence. The only permitted test aid is a labelled clock shift: all of a request's times moved back
+      together, after its channel is closed, to reach `settleBy`.
+  12. This clarification implements and activates nothing and changes no stage verdict or ADR status. The register entries BIL-23 H,
+      BIL-32 G, BIL-33 G and EVT-10 record its contract. PR-2a, PR-2b, PR-3 and PR-4 (proposal §10) each need a separate Owner
+      authorization.
 
 ## 2. ADR disposition
 
