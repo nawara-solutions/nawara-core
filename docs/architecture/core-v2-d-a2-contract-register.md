@@ -107,8 +107,8 @@ is preserved as evidence even when its commercial processing fails.
 | AUTH-06 | Auth | `AUTH_SERVICE_POLICY` and inbound service tokens (configuration, P) | S2-Auth | M |
 | AUTH-07 | Auth | `GET /auth/me`, `GET /auth/platform-access/:platformId` (I) | S3d, S5 | H |
 | AUTH-08 | Auth | `GET /auth/grants`: R-6a (I route; correction OPEN) | S2-Auth | L |
-| AUTH-09 | Auth | Administrator tenure during suspension (OPEN, conditional) | S7 | L |
-| ORG-00 | Organization | none in Core V2 | — | H |
+| AUTH-09 | Auth | Administrator tenure during suspension (OPEN; deferred with the lifecycle work, Owner 2026-11-01) | S7 (excluded) | L |
+| ORG-00 | Organization | none in Core V2 (S8 excluded from this S-INT, Owner 2026-11-01) | — | H |
 | BIL-01 | Billing | `POST /billing/admin/platforms/:platformId` (P) | S3d | M |
 | BIL-02 | Billing | `POST /billing/admin/products` (P) | S3a, S3g | M |
 | BIL-03 | Billing | `POST /billing/admin/prices` (P) | S3g | L |
@@ -167,7 +167,7 @@ is preserved as evidence even when its commercial processing fails.
 | FIL-06 | File | `DELETE /file/files/:id` refused while held (route I) | S2-File | M |
 | FIL-07 | File | Ticket reservation lease (OPEN) | S2-File | L |
 | NOT-00 | Notification | none in Core V2 | — | H |
-| NOT-01 | Notification | Commercial IN_APP (excluded unless C-3) | S7 | L |
+| NOT-01 | Notification | Commercial IN_APP (excluded from Core V2, carried to V3, Owner 2026-11-01) | S7 (excluded) | L |
 | AUD-01 | Audit | Audit contract v2 envelope | S2-Audit | H |
 | AUD-02 | Audit | Verified-producer classification and non-live refusal (ingestion) | S2-Audit | H |
 | AUD-03 | Audit | `GET /audit/owner/company/records` (P) | S2-Audit | M |
@@ -293,6 +293,7 @@ is preserved as evidence even when its commercial processing fails.
 | C. Errors, idempotency | — |
 | D. Existing | none |
 | E. Open, gates | C-3, C-6. Excluded from initial Core V2 unless approved. Confidence L |
+| F. Owner scope decision (2026-11-01) | S7 excluded from Core V2. C-6 stays an OPEN decision, deferred with the lifecycle work ([V3 roadmap](../CORE-V3-ROADMAP.md)); no semantics are defined here. In Core V2 no Company, Platform or Organization can be inactive (S0-C7); account suspension (`user.isActive`) is unchanged |
 
 ### 5.2 Organization
 
@@ -305,6 +306,7 @@ is preserved as evidence even when its commercial processing fails.
 | C. Errors, idempotency | — |
 | D. Existing | unchanged |
 | E. Open, gates | S8 only if authorized (PR #319 reconciliation, C-5, A5.4-G1). Confidence H |
+| F. Owner scope decision (2026-11-01) | S8 is excluded from this S-INT. C-5 (operator Organization creation) and human hierarchy reads are deferred with their F6/F7 dependencies ([V3 roadmap](../CORE-V3-ROADMAP.md)). PR #319 awaits a read-only, change-by-change A5.4-G1 assessment; its RED changes stay blocked and any reconciliation needs its own authorization. No Organization route in Core V2 (unchanged) |
 
 ### 5.3 Billing
 
@@ -904,7 +906,7 @@ these contracts is therefore **OPEN (OD-FILE)** and no route or DTO is proposed 
 | Id | Contract | A. Frozen | B. Route and DTO | C. Errors, idempotency | D. Existing | E. Open, gates |
 |---|---|---|---|---|---|---|
 | NOT-00 | No Core V2 contract | Notification receives no route in Core V2 (S0 §3.10) | none | — | unchanged | none; H |
-| NOT-01 | Commercial IN_APP notifications | excluded from initial V2; additive later (inbox, Auth tenure, an [ADR-0046](../adr/0046-notification-service-architecture.md) amendment) (S0 §5) | none proposed | — | none | **C-3**, C-6; S7 conditional; L |
+| NOT-01 | Commercial IN_APP notifications | excluded from initial V2; additive later (inbox, Auth tenure, an [ADR-0046](../adr/0046-notification-service-architecture.md) amendment) (S0 §5) | none proposed | — | none | **C-3**, C-6; S7 conditional; L. **Owner scope decision (2026-11-01):** excluded from Core V2 and carried to the [V3 roadmap](../CORE-V3-ROADMAP.md) with its requirements (inbox, Auth tenure, the ADR-0046 amendment, source-event approvals); DG-3 unchanged |
 
 ### 5.7 Audit
 
@@ -1103,8 +1105,8 @@ The gates are those of the [roadmap](./core-v2-s-execution-roadmap.md) §7; this
 | S4 | PAY-01 to PAY-06, PAY-14, PAY-15, EVT-01 | OD-06, OD-08 | S1, G-2 (DOC-3), DOC-6, simulation adapter |
 | S5 | BIL-13 to BIL-22, BIL-26 | OD-04, OD-07 to OD-09 | V-4 (open), V-5 (policy Owner-approved, §7.1; S5e runtime deferred until V-4 and OD-R6a) |
 | S6 | BIL-23 to BIL-25, BIL-27 to BIL-35, PAY-07 to PAY-13, EVT-02, EVT-03, EVT-06 | Q1, Q2, Q8, OD-10 to OD-12, OD-FILE | S2-Auth, S2-Audit, S2-File, S3 to S5, DOC-4 |
-| S7 | AUTH-09, NOT-01 | — | C-3, C-6, DG-3 |
-| S8 | ORG-00 (no Core V2 contract) | — | PR #319, C-5, A5.4-G1, F7 |
+| S7 | AUTH-09, NOT-01 | — | C-3, C-6, DG-3. Excluded from Core V2 (Owner, 2026-11-01) |
+| S8 | ORG-00 (no Core V2 contract) | — | PR #319, C-5, A5.4-G1, F7. Excluded from this S-INT (Owner, 2026-11-01) |
 
 ## 9. Related documents
 
