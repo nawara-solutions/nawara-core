@@ -234,8 +234,9 @@ jobs:
       # `dist/main.js` (never one service's TypeScript imported into the other's test — see `scripts/lib/checks.mjs`),
       # talking only over real HTTP and the real broker, so both must be built first.
       # Stage 21 (CI-1): the audit contract is built right after the kit: every Core producer imports it (Stage 18.7).
-      - name: build service-kit, audit-contract, billing-service, payment-service, auth-service, notification-service
-        run: npm run build -w @nawara/service-kit -w @nawara/audit-contract -w billing-service -w payment-service -w auth-service -w notification-service
+      # Core V2 S-INT G8: organization-service too, whose real reference read Billing and Payment call (s-int-organization-reference).
+      - name: build service-kit, audit-contract, billing-service, payment-service, auth-service, notification-service, organization-service
+        run: npm run build -w @nawara/service-kit -w @nawara/audit-contract -w billing-service -w payment-service -w auth-service -w notification-service -w organization-service
       - name: real-broker E2E
         run: npm run test:e2e -w @nawara/e2e-real-broker
 
