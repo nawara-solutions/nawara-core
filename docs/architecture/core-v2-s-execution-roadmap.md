@@ -178,7 +178,7 @@ the production track has run.
 | S6 | S2-Auth, S2-Audit, S2-File, S3, S4, S5 | S-INT, S7 |
 | S7 | C-3, C-6 decided; S3 | S-INT (if in scope) |
 | S8 | PR #319 reconciliation, C-5, A5.4-G1 classification; F7 for RED items | S-INT (if in scope) |
-| S-INT | S1 to S6; S7 and S8 if in scope | Final Core Validation (with the production track and A19) |
+| S-INT | S1 to S6; S7 and S8 if in scope (both out of scope: the Owner's decision of 2026-11-01, §4.7, §4.8) | Final Core Validation (with the production track and A19) |
 
 ## 4. Stages
 
@@ -429,6 +429,10 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
 - Affected: notification-service, auth-service. Notification receives no route in Core V2 otherwise (S0 §3.10).
 - Independent of S7: DG-3 ([`CORE-ROADMAP.md`](../CORE-ROADMAP.md)) decides whether Notification production work is V2.
 - Certification, migration and approval rules: as §2, specified in its stage record if authorized.
+- **Owner scope decision (2026-11-01): EXCLUDED from Core V2.** C-3 is not approved for V2: commercial IN_APP (NOT-01) is carried to
+  the [V3 roadmap](../CORE-V3-ROADMAP.md) with its requirements, the ADR-0046 amendment it needs and its event approvals. C-6
+  (AUTH-09) stays an OPEN decision, deferred with the lifecycle work; no semantics are defined. DG-3 is unchanged and independent. S0,
+  ADR-0046 (Accepted) and the S0 §5 deferral register are unchanged.
 
 ### 4.8 S8: Organization authority-dependent changes — CONDITIONAL
 
@@ -439,10 +443,16 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
 - No production cutover; organization-service stays non-authoritative; human hierarchy reads stay deferred until authority
   activation (S0 §5); G6 and F7 unchanged.
 - Certification, migration and approval rules: as §2, specified in its stage record if authorized.
+- **Owner scope decision (2026-11-01): EXCLUDED from this S-INT.** C-5 (operator Organization creation) and human hierarchy reads are
+  deferred with their F6/F7 dependencies ([V3 roadmap](../CORE-V3-ROADMAP.md)). PR #319 is not classified or merged by this decision:
+  a read-only, change-by-change A5.4-G1 assessment comes first; RED changes stay blocked; reconciliation needs its own authorization.
+  The lifecycle runtime stays MOVE V3; V-4, S5e, D6 and the S0 §8 inactive-scope criterion stay with the first lifecycle-enabled
+  release (S0-C7); R-6a stays required before the earlier of F6/F7 and that release (D-2).
 
 ## 5. S-INT: Core V2 integration certification
 
-- **When.** After S1 to S6 are individually certified, and after S7 and S8 if they are in scope.
+- **When.** After S1 to S6 are individually certified, and after S7 and S8 if they are in scope. **Scope (the Owner's decision of
+  2026-11-01):** S7 and S8 are out of scope, so the final Core V2 S-INT covers S1 to S6 (§4.7, §4.8).
 - **S-INT entry: individual certification (the Owner's decision D-3, 2026-10-30).** A stage S1 to S6 is individually certified for
   S-INT entry when, and only when:
   1. its stage record is merged;
@@ -514,7 +524,7 @@ Separate from implementation; each item needs its own documentation authorizatio
 |---|---|
 | Mandatory (S0 frozen scope) | S1 code; S2 (all four tracks; Release production stays V3); S3; S4; S5; S6; S-INT |
 | Mandatory, production-gated | S1-R; every Auth, Organization, Audit, Billing, Payment, File or Release production deployment |
-| Conditional | S7 (C-3, C-6); S8 (PR #319, C-5, A5.4-G1; RED items after F7) |
+| Conditional | S7 (C-3, C-6); S8 (PR #319, C-5, A5.4-G1; RED items after F7). **2026-11-01:** S7 excluded from Core V2; S8 excluded from this S-INT; their deferred items in the V3 roadmap (§4.7, §4.8) |
 | Deferred ([S0 §5](./core-v2-s0-architecture-freeze.md)) | commercial IN_APP notifications; partial-amount refunds, including electronic partial over-recovery refunds; cash settlement for other sellers; the persistent repeat-violation threshold; real payment-provider integration; human hierarchy reads; tax, invoicing entity, credit notes, legal refund windows, limitation periods, retention durations, execution of legal remedies, commercial e-mail and SMS, push |
 
 ## 10. First implementation slice (recommendation, not authorized)

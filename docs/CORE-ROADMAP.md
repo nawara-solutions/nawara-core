@@ -295,10 +295,12 @@ Core V2 S-track (development and simulation only; nothing deployed; ◐ = condit
   S5    assistance and cash obligations        ◐ CONDITIONAL PASS (development, simulation, pre-lifecycle; S0-C7, T-A1–T-A4); the inactive-scope
                                                   criterion, V-4, S5e and D6 ⏸ with the first lifecycle-enabled release
   S6    refunds, disputes, recovery, losses    ◐ CONDITIONAL PASS (simulation); Q8 and partial chargebacks open
-  S7    Notification inbox, Auth tenure        CONDITIONAL scope, not authorized (C-3, C-6, DG-3)
-  S8    Organization authority changes         CONDITIONAL scope, not authorized (PR #319, C-5; RED items after F7)
-  S-INT integration certification              not started; entry rule D-3; conditions classified (condition matrix); no development-level
-                                                  item OPEN; needs the Owner-approved S-INT readiness record and its own authorization
+  S7    Notification inbox, Auth tenure        EXCLUDED from Core V2 (Owner scope decision 2026-11-01): C-3 commercial IN_APP carried to
+                                                  V3; C-6 open, deferred with lifecycle; DG-3 unchanged and independent
+  S8    Organization authority changes         EXCLUDED from this S-INT (Owner scope decision 2026-11-01): C-5 and human hierarchy reads
+                                                  deferred (F6/F7); PR #319 awaits a read-only A5.4-G1 assessment, no GO
+  S-INT integration certification              not started; scope S1 to S6 (final Core V2 S-INT); entry rule D-3; conditions classified
+                                                  (condition matrix); needs the Owner-approved S-INT readiness record and its own authorization
 
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
 M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; E2 and E3 prepared, not installed; NOT CERTIFIED
@@ -413,13 +415,20 @@ S7 to A8; S8 to A5 (execution roadmap §11).
   A11 **MOVE V3**, Release and Payment production enablement **MOVE V3** (see the dispositions below and the
   [V3 roadmap](CORE-V3-ROADMAP.md)). No Billing, Payment or Release production deployment, configuration or credential is in scope of
   any S-stage; their routes are unmounted in production where the stage records say so.
-- **S7 and S8 are conditional:** S7 only if C-3 and C-6 are approved (DG-3 separately decides Notification production); S8 only after
-  PR #319 is reconciled and C-5 is decided, with RED items after F7.
+- **S7 and S8: Owner scope decision (2026-11-01).** The frozen Core V2 architecture is kept (S0 §3.10: no Notification and no
+  Organization route in Core V2; S0 §5 deferrals). **S7 is excluded from Core V2:** commercial IN_APP (C-3; NOT-01) is carried to the
+  [V3 roadmap](CORE-V3-ROADMAP.md) with its requirements intact; administrator tenure (C-6; AUTH-09) stays an open decision, deferred
+  with the lifecycle work; DG-3 (Notification e-mail and SMS production) stays an independent, unresolved decision that neither deploys
+  nor disables the existing Notification Service. **S8 is excluded from this S-INT:** operator Organization creation (C-5) and human
+  hierarchy reads are deferred with their F6/F7 dependencies (V3 roadmap); PR #319 is neither classified nor merged: a read-only,
+  change-by-change A5.4-G1 assessment comes first, its RED changes stay blocked, and any reconciliation needs its own GO. R-6a (OD-R6a)
+  stays **required Core V2 work** before the earlier of F6/F7 and the first lifecycle-enabled release (D-2); S-INT does not waive it.
 - **S-INT** certifies the cross-service paths together on simulation, under its own authorization and record, only after S1 to S6 are
-  each certified (and S7 / S8 if in scope), under the strict entry rule of the execution roadmap §5 (D-3). Every remaining condition of S1
+  each certified, under the strict entry rule of the execution roadmap §5 (D-3). **The final Core V2 S-INT covers S1 to S6**: S7 and S8
+  are out of its scope by the Owner's explicit decision of 2026-11-01 (above). Every remaining condition of S1
   to S6 is classified in the [condition matrix](architecture/core-v2-stage-condition-matrix.md); S5 is certified pre-lifecycle under S0-C7;
-  no development-level item is OPEN (BIL-12 was implemented, #424; F-INV-1, the invoice list's cursor, is an independent finding awaiting
-  the Owner's decision). No verdict is promoted automatically: entry
+  no development-level item is OPEN (BIL-12 was implemented, #424; F-INV-1, the invoice list's cursor, was fixed by #426, and its
+  records close in the S-INT readiness record). No verdict is promoted automatically: entry
   needs the Owner-approved S-INT readiness record. S-INT is not a production certification.
 - **Production-track gates are unchanged and separate:** S1-R (with C-4, AP-R, NP-K), G-7 (no S-stage Auth, Organization or Audit image
   in production before M3 or a G6 baseline refresh), M2 → G7 → F6 → F7 → post-F7 backup, the pilot readiness gate M13 / A19 (DG-7).
