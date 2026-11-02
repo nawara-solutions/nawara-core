@@ -26,7 +26,9 @@ let paymentIdentity: PaymentIdentity | undefined;
  *
  * Auth's own reference cache from Organization Service (`ensure`) is certified across processes by `test/e2e-auth-organization`
  * (stage21c2), and each service's absence of lifecycle state by T-A1 to T-A4. Here `/auth/me` is the established stand-in
- * (`support/fake-auth.ts`): no human authority is under test. DEVELOPMENT AND SIMULATION ONLY.
+ * (`support/fake-auth.ts`): no human authority is under test, and this suite proves nothing about Auth; `s-int-pre-lifecycle-real-auth` runs the same
+ * invariant with the real Auth. SEEDED BY SQL: the hierarchy, its test activation in this disposable database (not F7), and Billing's catalog.
+ * DEVELOPMENT AND SIMULATION ONLY.
  * Prerequisite: `npm run build -w @nawara/service-kit -w @nawara/audit-contract -w organization-service -w billing-service -w payment-service`.
  */
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
