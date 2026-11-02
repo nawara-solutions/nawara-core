@@ -473,7 +473,8 @@ policy or by redeploying the previous image. **Owner approvals:** stage start; e
 - **Inactive scope (S0-C7).** In Core V2: the pre-lifecycle invariant (S0-C7 item 1); the full path belongs to the first
   lifecycle-enabled release (item 2).
 - **Not.** A production certification, a replacement for any stage's own certification, or Final Core Validation.
-- **Approval.** Its own Owner authorization and its own record.
+- **Approval.** Its own Owner authorization and its own record: the [S-INT certification record](./core-v2-s-int-certification.md), approved only by the
+  Owner's merge.
 
 ## 6. Final Core Validation
 
