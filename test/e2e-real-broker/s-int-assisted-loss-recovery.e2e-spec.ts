@@ -19,8 +19,9 @@ afterAll(() => refStub.close());
  * Core V2 S-INT (readiness record `docs/architecture/core-v2-s-int-readiness.md` §7.3): G3, G4 and part of G6, across THREE separately spawned,
  * BUILT processes — the REAL auth-service (every actor's bearer is verified live through `/auth/me`; Organization memberships are Auth's own),
  * billing-service and payment-service — over real HTTP and a REAL RabbitMQ, on Payment's simulation provider. Every money movement enters
- * only through Payment's signed provider notifications; the one fixture is the Organization reference read (Organization Service is not
- * authoritative before F7), which places every Organization in the test Platform.
+ * only through Payment's signed provider notifications. SEEDED BY SQL as test setup, not behaviour under test: Auth's Company, Platform, Organizations,
+ * users and memberships, and Billing's Platform configuration and catalog. The Organization reference read is a stand-in (Organization Service is
+ * not authoritative before F7) that places every Organization in the test Platform; `s-int-pre-lifecycle-real-auth` uses the real service.
  *
  *   G3: an assisted purchase (the Organization pays the frozen base) → the provider's final loss with a full chargeback over the broker →
  *       the beneficiary KEEPS the entitlement (ADR-0044 B10) → the Organization's base-only recovery obligation and T3 → the Organization's

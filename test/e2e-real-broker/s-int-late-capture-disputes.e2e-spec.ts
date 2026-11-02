@@ -20,7 +20,9 @@ afterAll(() => refStub.close());
  * BIL-33 H; ADR-0044 B10; S0 FC-1, FC-4, FC-5; the Owner's CB-1 to CB-6), across THREE separately spawned, BUILT processes — the REAL
  * auth-service, billing-service and payment-service — over real HTTP and a REAL RabbitMQ, on Payment's simulation provider. Every money
  * movement and every dispute enters only through Payment's signed provider notifications (the authorized harness or a signed body); Billing
- * learns of them only from Payment's broker-verified events or Payment's own reads. The only fixture is the Organization reference read.
+ * learns of them only from Payment's broker-verified events or Payment's own reads. SEEDED BY SQL as test setup, not behaviour under test: Auth's
+ * Company, Platform, Organizations, users and memberships, and Billing's Platform configuration and catalog. The Organization reference read is a
+ * stand-in. The retry bound is reached by a labelled counter shift, and the real retrier is observed for seconds, not its ~85-minute real backoff.
  *
  *   A + E  dispute BEFORE L-4: a verified late capture is disputed before the Owner applies L-4 → Payment binds it to that capture and
  *          exposes it → Billing refuses L-4 (`payment_dispute_open`) without spending the Owner's receipt or selling anything → the provider

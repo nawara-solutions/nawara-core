@@ -103,14 +103,14 @@ export interface CapturedMessage {
 }
 
 /**
- * A capture of every `payment.*` message the broker routes (an exclusive queue on the test connection), so a test can redeliver the
+ * A capture of every message the broker routes for `patterns`, by default `payment.*` (an exclusive queue on the test connection), so a test can redeliver the
  * EXACT message Payment published, as at-least-once delivery does. Binding needs no topic grant for the test's own connection.
  */
-export async function tapPaymentEvents(conn: ChannelModel): Promise<{ take(messageId: string, ms?: number): Promise<CapturedMessage>; close(): Promise<void> }> {
+export async function tapPaymentEvents(conn: ChannelModel, patterns: readonly string[] = ['payment.#']): Promise<{ take(messageId: string, ms?: number): Promise<CapturedMessage>; close(): Promise<void> }> {
   const ch = await conn.createChannel();
   await ch.assertExchange(EXCHANGE, 'topic', { durable: true });
   const { queue } = await ch.assertQueue('', { exclusive: true, autoDelete: true });
-  await ch.bindQueue(queue, EXCHANGE, 'payment.#');
+  for (const pattern of patterns) await ch.bindQueue(queue, EXCHANGE, pattern);
   const seen = new Map<string, CapturedMessage>();
   await ch.consume(queue, (m: ConsumeMessage | null) => {
     if (!m) return;
