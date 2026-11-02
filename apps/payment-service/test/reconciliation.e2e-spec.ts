@@ -139,6 +139,9 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
     auth = await startFakeReceiptServer();
     t = await createTestApp({
       databaseUrl: db.url, authClient, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], refundWorker: false, ownerAuthority,
+      // F-29: this suite certifies the dormant PAY-13 mechanism and its database guards, behind a stand-in no application wiring provides.
+      // `f29-unmatched-fact-isolation.e2e-spec.ts` certifies the application's own wiring, which refuses every Owner.
+      unmatchedFactAuthority: { authorizes: () => true },
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
         AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SUPPORTED_CURRENCIES: 'TND,EUR', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
@@ -218,7 +221,7 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       await ageWebhook(noRef.eventId, 3600);
       await signed(noRef).expect(200);
       expect((await one(`SELECT state, outcome FROM webhook_event WHERE "providerEventId" = $1`, [noRef.eventId]))).toEqual({ state: 'unmatched', outcome: null });
-      expect((await itemsOf('unmatched_fact')).find((i) => i.id === fact.id)).toMatchObject({ amount: 9000, currency: 'TND', detail: { movement: 'capture', association: null } });
+      expect((await ownerGet('/reconciliation-items?kind=unmatched_fact&limit=200')).body.code).toBe('invalid_reconciliation_request'); // F-29: no Owner reads it
       // immutable
       await expect(admin.query(`UPDATE provider_transaction_fact SET amount = 1 WHERE id = $1`, [fact.id])).rejects.toThrow();
       await expect(admin.query(`DELETE FROM provider_transaction_fact WHERE id = $1`, [fact.id])).rejects.toThrow();

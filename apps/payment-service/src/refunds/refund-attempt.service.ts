@@ -253,6 +253,8 @@ export class RefundAttemptService {
     if (completed.length > 0) return { refusal: 'refund_case_completed' };
     const c = await this.captureEvidence(q, p, factId);
     if (!c || c.conflicted || !c.capturedAttemptId) return { refusal: 'refund_capture_unverified' };
+    // F-29 (PAY-13 H): an association names no authority over the money it attached; no refund returns it until an approved basis exists
+    if (c.basis === 'associated_capture') return { refusal: 'refund_capture_unverified' };
     if (c.basis === 'duplicate_capture' && !(await this.anotherCaptureRemains(q, p, factId))) return { refusal: 'refund_capture_not_eligible' };
     const exposure = await disputeExposure(q, p.id);
     if (exposure.state === 'unresolved') throw paymentError(503, 'refund_dispute_unavailable', PAYMENT_MESSAGES.refundDisputeUnavailable);
@@ -315,7 +317,7 @@ export class RefundAttemptService {
       `SELECT EXISTS (SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND NOT "captureSpecific" AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed')) AS live,
               EXISTS (SELECT 1 FROM refund_authorization WHERE "paymentId" = $1 AND NOT "captureSpecific" AND "completedAt" IS NOT NULL) AS done`, [p.id])).rows[0]!
       : { live: false, done: false };
-    const refundableOnItsOwn = basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id));
+    const refundableOnItsOwn = basis !== 'associated_capture' && (basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id)));
     return {
       factId: f.id, paymentId: p.id, provider: f.provider, providerTxnId: f.providerTxnId, amount: Number(f.amount), currency: f.currency, paymentStatus: p.status,
       basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn,

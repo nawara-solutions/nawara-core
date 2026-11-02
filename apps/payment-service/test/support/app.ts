@@ -16,6 +16,7 @@ import { RefundsModule } from '../../src/refunds/refunds.module.js';
 import type { ReceiptAuthority } from '../../src/refunds/receipt-authority.js';
 import { DisputesModule } from '../../src/disputes/disputes.module.js';
 import { ReconciliationModule } from '../../src/reconciliation/reconciliation.module.js';
+import type { UnmatchedFactAuthority } from '../../src/reconciliation/unmatched-fact-authority.js';
 import type { DisputeEvidenceFiles } from '../../src/disputes/dispute-evidence-files.js';
 import type { OwnerCompanyAuthority } from '../../src/disputes/owner-company.authority.js';
 import { SimulationModule } from '../../src/simulation/simulation.module.js';
@@ -84,6 +85,8 @@ export async function createTestApp(opts: {
   refundWorker?: boolean;
   /** Core V2 S6e-D: the live Owner check (`GET /auth/grants`) and File's evidence-grant read (defaults: the HTTP clients). */
   ownerAuthority?: OwnerCompanyAuthority;
+  /** F-29: only for tests of the dormant PAY-13 mechanism. Absent: the application's own wiring, which refuses every Owner. */
+  unmatchedFactAuthority?: UnmatchedFactAuthority;
   evidenceFiles?: DisputeEvidenceFiles;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
@@ -112,7 +115,7 @@ export async function createTestApp(opts: {
       AttemptsModule,
       RefundsModule.register(config, { receiptAuthority: opts.receiptAuthority, worker: opts.refundWorker }), // Core V2 S6b: as AppModule
       DisputesModule.register(config, { ownerAuthority: opts.ownerAuthority, evidenceFiles: opts.evidenceFiles }), // Core V2 S6e-D: as AppModule
-      ReconciliationModule.register(config, { ownerAuthority: opts.ownerAuthority }), // Core V2 S6h-P: as AppModule
+      ReconciliationModule.register(config, { ownerAuthority: opts.ownerAuthority, unmatchedFactAuthority: opts.unmatchedFactAuthority }), // Core V2 S6h-P: as AppModule
       WebhooksModule,
       ...(config.simulation && !config.isProduction ? [SimulationModule] : []), // Core V2 S4f: as AppModule
     ],
