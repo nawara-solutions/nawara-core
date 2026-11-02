@@ -8,7 +8,7 @@ import type { FetchStatusResult, PaymentProvider, RefundStatusResult } from '../
 import { RefundEvidenceService } from '../refunds/refund-evidence.service.js';
 import { DisputeIngestionService } from '../disputes/dispute-ingestion.service.js';
 import { isDisputeNotificationType, parseDisputeNotice } from '../disputes/dispute.types.js';
-import type { WebhookEventRow } from './webhook-event.types.js';
+import { WEBHOOK_RETRY_MAX_ATTEMPTS, type WebhookEventRow } from './webhook-event.types.js';
 import { CORE_V2_LIVE_MODE } from '../payments/payment.types.js';
 
 export interface WebhookResult {
@@ -169,6 +169,9 @@ export class WebhookService {
    * Core V2 S6e-D (register PAY-09, EVT-03; R6E-2): a verified dispute notification, through the same pipeline (signature, permanent event key),
    * then `DisputeIngestionService`'s rules. It names the disputed attempt OF THIS PROVIDER. A notification Payment cannot read is kept as a
    * `conflict` (never retried, never applied); a preserved dispute conflict is a `conflict` too. Without disputes configured: `ignored`.
+   * Core V2 S0-C9 (CB-5): a notification whose capture is not verified yet is HELD: its event stays `unmatched` (retryable, outcome
+   * `dispute_held:capture_pending`, the attempt it names recorded), so the retrier revisits it within its existing bound; its last permitted
+   * processing (this one would use the final attempt) makes it the `capture_unverified` conflict instead.
    */
   private async processDispute(
     eventId: string,
@@ -186,8 +189,9 @@ export class WebhookService {
       return { status: 200 };
     }
     try {
-      const r = await this.disputes.ingest(eventId, provider.id, parsed.reference, notice, webhookContext(provider.id, eventId));
-      await this.markState(eventId, r.state, r.outcome, r.attemptId, claim);
+      const used = (await (claim ?? this.db).query<{ attempts: number }>('SELECT attempts FROM webhook_event WHERE id = $1', [eventId])).rows[0]?.attempts ?? 0;
+      const r = await this.disputes.ingest(eventId, provider.id, parsed.reference, notice, webhookContext(provider.id, eventId), used + 1 >= WEBHOOK_RETRY_MAX_ATTEMPTS);
+      await this.markState(eventId, r.state === 'held' ? 'unmatched' : r.state, r.outcome, r.attemptId, claim);
       return { status: 200 };
     } catch (e) {
       this.logger.warn(`dispute notification ${eventId} failed transiently: ${(e as Error).message}`);

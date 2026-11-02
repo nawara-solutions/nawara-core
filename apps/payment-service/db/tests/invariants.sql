@@ -845,6 +845,38 @@ SELECT pg_temp.assert_eq('R6H-5', 'completion uniqueness: per payment for ordina
     WHERE indexname IN ('refund_authorization_payment_completed', 'refund_authorization_capture_completed', 'refund_attempt_one_effective', 'refund_attempt_one_effective_capture')),
   'refund_attempt_one_effective:true,refund_attempt_one_effective_capture:true,refund_authorization_capture_completed:true,refund_authorization_payment_completed:true');
 
+-- ======================================================= Core V2 S0-C9: late-capture disputes (0023) ----
+\o /dev/null
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-c9', 'user', 'u-c9', 'company', '00000000-0000-4000-8000-00000000c6e0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS g1 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'g1', 1, 'test', false) RETURNING id AS g1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'g1';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-c9-1', "submittedAt" = now() WHERE id = :'g1a';
+UPDATE payment_attempt SET status = 'failed', "failureCode" = 'declined', "failureClass" = 'terminal', "completedAt" = now() WHERE id = :'g1a';
+UPDATE payment SET status = 'failed', "closedAt" = now() WHERE id = :'g1';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-c9-1', 'capture', :'g1', :'g1a', 1000, 'TND', false, 'status_check') RETURNING id AS g1f \gset
+CREATE FUNCTION pg_temp.c9(ref text, p uuid, a uuid, f uuid, basis text) RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", "captureBasis", amount, currency, status)
+    VALUES ('test', %L, %L, %L, %L, %L, 1000, 'TND', 'open')$$, ref, p, a, f, basis) $f$;
+\o
+SELECT pg_temp.assert_eq('S0-C9', 'CB-6: a dispute recorded without a basis is the settling capture (EVT-03 legacy meaning)', (SELECT "captureBasis" FROM payment_dispute WHERE id = :'d1'), 'settling_capture');
+SELECT pg_temp.expect_constraint('S0-C9', 'CB-1: never a late capture before Payment recorded the late success naming it', pg_temp.c9('d-c9-0', :'g1', :'g1a', :'g1f', 'late_capture'), 'payment_dispute_capture_basis');
+SELECT pg_temp.expect_constraint('S0-C9', 'CB-1: the capture of a final payment''s attempt is never its settling capture', pg_temp.c9('d-c9-0', :'g1', :'g1a', :'g1f', 'settling_capture'), 'payment_dispute_capture_basis');
+SELECT pg_temp.expect_error('S0-C9', 'CB-2: the basis is settling_capture or late_capture only', pg_temp.c9('d-c9-0', :'e1', :'e1a', :'e1f', 'other'), '23514');
+\o /dev/null
+INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (:'g1', :'g1a', 'status_check', 1000, 'TND', 'failed', :'g1f');
+\o
+SELECT pg_temp.expect_constraint('S0-C9', 'CB-1: a settling capture''s dispute is never declared late', pg_temp.c9('d-c9-0', :'e1', :'e1a', :'e1f', 'late_capture'), 'payment_dispute_capture_basis');
+SELECT pg_temp.expect_ok('S0-C9', 'CB-1: the single uncontested capture of a final failed payment''s attempt, named by its late success', pg_temp.c9('d-c9-1', :'g1', :'g1a', :'g1f', 'late_capture'));
+SELECT pg_temp.assert_eq('S0-C9', 'CB-1: the payment stays final and unsettled', (SELECT status || ':' || coalesce("succeededAttemptId"::text, '-') FROM payment WHERE id = :'g1'), 'failed:-');
+SELECT pg_temp.expect_constraint('S0-C9', 'CB-2: the capture basis is part of the immutable binding', $$UPDATE payment_dispute SET "captureBasis" = 'settling_capture' WHERE "providerDisputeId" = 'd-c9-1'$$, 'payment_dispute_immutable');
+\o /dev/null
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-c9-2', 'capture', :'g1', :'g1a', 1000, 'TND', false, 'status_check');
+\o
+SELECT pg_temp.expect_constraint('S0-C9', 'CB-1: two captures of the attempt are ambiguous: never a late-capture dispute', pg_temp.c9('d-c9-2', :'g1', :'g1a', :'g1f', 'late_capture'), 'payment_dispute_capture_basis');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

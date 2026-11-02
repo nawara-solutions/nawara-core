@@ -83,6 +83,9 @@ export const PRODUCED_EVENTS = {
    * Core V2 S6e-D (register EVT-03; ADR-0044 B10; the Owner's R6E-6): a verified provider dispute, as Payment recorded it. `amount` is the
    * exposure the PROVIDER states (never the capture inferred). Written to the outbox in the transaction that records the dispute; its id is
    * derived from the dispute. Development and simulation only (`liveMode` false). No evidence content, no provider data beyond the reason code.
+   * Core V2 S0-C9 (CB-2, additive in version 1, always present): `captureFactId`, the disputed capture fact, and `captureBasis`
+   * (`settling_capture`: the payment's succeeded attempt; `late_capture`: the single capture of an attempt of a final failed / cancelled /
+   * expired payment, named by a recorded late success). A consumer reads an event without them as a legacy `settling_capture`.
    */
   'payment.dispute.opened': {
     version: 1,
@@ -98,12 +101,15 @@ export const PRODUCED_EVENTS = {
       reason: { type: 'string', nullable: true },
       openedAt: { type: 'datetime' },
       liveMode: { type: 'boolean' },
+      captureFactId: { type: 'uuid' },
+      captureBasis: { type: 'enum', values: ['settling_capture', 'late_capture'] },
     },
   },
   /**
    * Core V2 S6e-D (EVT-03; R6E-5, R6E-6): the provider's final `lost` outcome, once per dispute. `chargeback` is the VERIFIED chargeback fact
    * linked to the dispute when the provider reported one with the loss, else null: a loss alone never implies money moved. A chargeback
-   * reported after the loss is read through `GET /payment/disputes/losses` (no second event).
+   * reported after the loss is read through `GET /payment/disputes/losses` (no second event). Core V2 S0-C9 (CB-2): the lost capture,
+   * `captureFactId` and `captureBasis`, as on `payment.dispute.opened`.
    */
   'payment.dispute.lost': {
     version: 1,
@@ -119,6 +125,8 @@ export const PRODUCED_EVENTS = {
       lostAt: { type: 'datetime' },
       chargeback: { type: 'object', nullable: true },
       liveMode: { type: 'boolean' },
+      captureFactId: { type: 'uuid' },
+      captureBasis: { type: 'enum', values: ['settling_capture', 'late_capture'] },
     },
   },
   /**

@@ -209,13 +209,18 @@ describeWithEnv('payment disputes (Core V2 S6e-D) — real PostgreSQL', ['TEST_D
       expect(await disputeOf(`simd_${big}`)).toBeUndefined();
       expect(await observations(`simd_${big}`)).toEqual([{ kind: 'opened', disposition: 'conflict', reason: 'exposure_mismatch' }]);
       expect((await exposure(p2.id)).body.state).toBe('unresolved');
-      // the attempt of a payment that never captured: no verified capture to dispute
+      // the attempt of a payment that has not captured (yet): no verified capture to dispute. Core V2 S0-C9 (CB-5): held for the webhook
+      // retrier's bound, never a dispute and not a conflict while held; the exposure is unresolved meanwhile (late-capture-disputes.e2e-spec
+      // covers its release and its conflict once the bound is exhausted)
       const uncaptured = await createPayment();
       const a = await startAttempt(uncaptured.id);
       const uref = `simd_u-${randomUUID()}`;
-      await signed({ eventId: `raw_${randomUUID()}`, type: 'payment.dispute.opened', reference: a.id, amount: 100, currency: 'TND', data: { disputeId: uref } }).expect(200);
+      const eventId = `raw_${randomUUID()}`;
+      await signed({ eventId, type: 'payment.dispute.opened', reference: a.id, amount: 100, currency: 'TND', data: { disputeId: uref } }).expect(200);
       expect(await disputeOf(uref)).toBeUndefined();
-      expect(await observations(uref)).toEqual([{ kind: 'opened', disposition: 'conflict', reason: 'capture_unverified' }]);
+      expect(await observations(uref)).toEqual([]);
+      expect((await admin.query(`SELECT state, outcome FROM webhook_event WHERE "providerEventId" = $1`, [eventId])).rows[0]).toEqual({ state: 'unmatched', outcome: 'dispute_held:capture_pending' });
+      expect((await exposure(uncaptured.id)).body.state).toBe('unresolved');
     });
 
     it('a loss without its chargeback is unresolved; the chargeback reported later completes it once; a different one is a conflict', async () => {

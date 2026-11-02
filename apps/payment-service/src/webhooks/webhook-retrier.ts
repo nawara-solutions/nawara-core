@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { ProviderRegistry } from '../providers/provider-registry.js';
-import type { WebhookEventRow } from './webhook-event.types.js';
+import { WEBHOOK_RETRY_MAX_ATTEMPTS, type WebhookEventRow } from './webhook-event.types.js';
 import { WebhookService } from './webhook.service.js';
 
 const BATCH_SIZE = 100;
@@ -12,7 +12,7 @@ const STUCK_THRESHOLD_MS = 10_000; // a delivery left in a non-terminal state th
  * used them all is marked `failed` / `retries_exhausted`: terminal for the retrier (an operator looks at it), and still
  * reprocessed if the PROVIDER itself redelivers the webhook. Deterministic, no jitter, no schema change.
  */
-export const WEBHOOK_RETRY_MAX_ATTEMPTS = 10;
+export { WEBHOOK_RETRY_MAX_ATTEMPTS };
 const RETRYABLE = `state IN ('received', 'processing', 'failed', 'unmatched')
   AND NOT (state = 'failed' AND outcome IN ('malformed_body', 'retries_exhausted'))`; // malformed: will never parse differently (SDD section 7)
 const STILL_RETRYABLE = new Set(['received', 'processing', 'failed', 'unmatched']); // mirrors RETRYABLE, for the log line only
