@@ -362,6 +362,10 @@ describeWithEnv(
       expect((await call(PAYMENT_URL, 'GET', harnessToken.token, '/payment/reconciliation/items?kind=late_success')).status).toBe(403);
       expect((await call(PAYMENT_URL, 'GET', ownerToken, '/payment/reconciliation/items?kind=late_success')).status).toBe(401);
       expect((await call(PAYMENT_URL, 'GET', billingToPaymentToken.token, '/payment/reconciliation/items?kind=unmatched_fact')).json?.code).toBe('invalid_reconciliation_request');
+      // F-29 (PAY-12 G, PAY-13 H): the real Owner, verified live through real Auth, reads no unmatched fact and associates none
+      const ownerRead = await call(PAYMENT_URL, 'GET', ownerToken, '/payment/admin/reconciliation-items?kind=unmatched_fact');
+      expect([ownerRead.status, ownerRead.json?.code]).toEqual([400, 'invalid_reconciliation_request']);
+      expect((await call(PAYMENT_URL, 'GET', ownerToken, '/payment/admin/reconciliation-items?kind=late_success')).status).toBe(200); // scoped kinds are unchanged
     }, 60_000);
   },
 );

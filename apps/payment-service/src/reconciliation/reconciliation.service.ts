@@ -10,6 +10,7 @@ import type { EventContext } from '../events/payment-events.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 import { RECEIPT_AUTHORITY, type ReceiptAuthority, type ReceiptConsumption } from '../refunds/receipt-authority.js';
 import { receiptDigest, type ProviderFactAssociateBinding } from '../refunds/refund.types.js';
+import { UNMATCHED_FACT_AUTHORITY, type UnmatchedFactAuthority } from './unmatched-fact-authority.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
@@ -17,13 +18,16 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 /** Q8 (R6H-9): an authorization intent this old with no definitive Auth answer is an unresolved item (fail closed; never released). */
 export const AUTHORIZATION_PENDING_ITEM_AFTER_MINUTES = 15;
 
-/** Core V2 S6h (PAY-12; R6H-1, R6H-6): the reconciliation item kinds Payment exposes. `unmatched_fact` has no producer: the Owner's only. */
+/**
+ * Core V2 S6h (PAY-12; R6H-1, R6H-6): the reconciliation item kinds Payment exposes, each scoped through its payment. F-29 (PAY-12 G): an unmatched
+ * fact has no payment, so no Company scope: it is no item kind for anyone until an approved authority and scope basis exists.
+ */
 export const ITEM_KINDS = [
-  'unmatched_fact', 'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
+  'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
   'association', 'capture_refund_unavailable',
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
-export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS.filter((k) => k !== 'unmatched_fact');
+export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS;
 
 export type ItemScope = { kind: 'owner'; companyId: string } | { kind: 'producer'; producer: string };
 
@@ -52,7 +56,7 @@ const invalid = () => paymentError(400, 'invalid_reconciliation_request', PAYMEN
 const refused = () => paymentError(409, 'provider_fact_association_refused', PAYMENT_MESSAGES.providerFactAssociationRefused);
 
 /** Per kind: its rows (scope-filtered through the payment), keyed by `id` for keyset paging. `p` is the payment; `$1` the scope value. */
-const ITEM_SQL: Record<Exclude<ItemKind, 'unmatched_fact'>, string> = {
+const ITEM_SQL: Record<ItemKind, string> = {
   fact_conflict: `SELECT c.id, c."paymentId", c."factId", c.amount, c.currency, c."observedAt" AS at,
       jsonb_build_object('attemptId', c."attemptId", 'refundAttemptId', c."refundAttemptId", 'source', c.source) AS detail
     FROM provider_transaction_fact_conflict c JOIN payment p ON p.id = c."paymentId"`,
@@ -102,13 +106,13 @@ const ITEM_SQL: Record<Exclude<ItemKind, 'unmatched_fact'>, string> = {
 
 /**
  * Core V2 S6h-P (register PAY-12, PAY-13; S0 FC-1, FC-2, FC-5; the Owner's R6H-1, R6H-3, R6H-6, R6H-9, R6H-12). DEVELOPMENT AND SIMULATION ONLY.
- * - Items: Payment's own durable evidence that needs reconciliation, read-only, never derived into a new fact: unmatched verified facts (the
- *   Owner's only: they have no producer yet), contradicting observations, late successes, blocked allocations, over-returns, discrepancies,
+ * - Items: Payment's own durable evidence that needs reconciliation, read-only, never derived into a new fact: contradicting observations, late successes, blocked allocations, over-returns, discrepancies,
  *   authorization intents still pending without a definitive Auth answer (Q8: fail closed, never released), chargebacks, associations and the
  *   captures no original-payment refund can return. Scoped through the payment: the Owner's Company, or the producer's own payments.
  * - Balances (FC-5): signed sums of verified facts per currency, never clamped; pending and unresolved movements kept apart.
  * - Association (PAY-13): the Owner of the destination's seller Company, an Auth `provider_fact_associate` receipt consumed once under the
  *   association's id, the database's own re-check of the fact and the destination. Append-only; the fact never changes.
+ *   F-29 (PAY-13 H): refused for every Owner until an approved authority establishes whose money the fact is (`UnmatchedFactAuthority`).
  */
 @Injectable()
 export class ReconciliationService {
@@ -120,6 +124,7 @@ export class ReconciliationService {
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
     @Inject(OWNER_COMPANY_AUTHORITY) private readonly owners: OwnerCompanyAuthority,
     @Inject(RECEIPT_AUTHORITY) private readonly receipts: ReceiptAuthority,
+    @Inject(UNMATCHED_FACT_AUTHORITY) private readonly unmatchedFacts: UnmatchedFactAuthority,
   ) {}
 
   /** The live Owner, and THEIR Company (Auth's answer for their own bearer, never a request value). */
@@ -133,19 +138,7 @@ export class ReconciliationService {
   /** One kind's items for a scope, by id (keyset). */
   async items(scope: ItemScope, kind: string, after: string | undefined, limit: number): Promise<ReconciliationItem[]> {
     if (!(ITEM_KINDS as readonly string[]).includes(kind) || (after !== undefined && !UUID.test(after)) || !Number.isInteger(limit) || limit < 1 || limit > 200) throw invalid();
-    if (kind === 'unmatched_fact') {
-      if (scope.kind !== 'owner') throw invalid(); // no producer owns an unmatched fact
-      const { rows } = await this.db.query<Record<string, any>>(
-        `SELECT f.id, f.provider, f."providerTxnId", f.kind, f.amount, f.currency, f."observedAt", f."providerOccurredAt",
-                (SELECT s.status FROM provider_fact_association s WHERE s."factId" = f.id AND s.status IN ('authorization_pending', 'associated')) AS association
-           FROM provider_transaction_fact f WHERE f."paymentId" IS NULL AND ($1::uuid IS NULL OR f.id > $1::uuid) ORDER BY f.id LIMIT $2`, [after ?? null, limit]);
-      return rows.map((r) => ({
-        kind: 'unmatched_fact', id: r.id, paymentId: null, paymentRequestId: null, producer: null, organizationId: null, purpose: null, factId: r.id,
-        amount: Number(r.amount), currency: r.currency.trim(), at: iso(r.observedAt),
-        detail: { provider: r.provider, providerTxnId: r.providerTxnId, movement: r.kind, providerOccurredAt: iso(r.providerOccurredAt), association: r.association ?? null },
-      }));
-    }
-    const base = ITEM_SQL[kind as Exclude<ItemKind, 'unmatched_fact'>];
+    const base = ITEM_SQL[kind as ItemKind];
     const scopeSql = scope.kind === 'owner' ? `p."sellerType" = 'company' AND p."sellerId" = $1` : `p.producer = $1`;
     const { rows } = await this.db.query<Record<string, any>>(
       `SELECT i.*, p."paymentRequestId", p.producer, p."organizationId", p.purpose FROM (${base}) i JOIN payment p ON p.id = i."paymentId"
@@ -204,9 +197,13 @@ export class ReconciliationService {
     const targetType = input.targetType;
     const secret = input.receiptSecret;
     const digest = receiptDigest(secret);
-    const fact = (await this.db.query<{ id: string; kind: 'capture' | 'refund' | 'chargeback'; amount: string; currency: string; paymentId: string | null }>(
-      `SELECT id, kind, amount, currency, "paymentId" FROM provider_transaction_fact WHERE id = $1`, [factId])).rows[0];
+    const fact = (await this.db.query<{ id: string; kind: 'capture' | 'refund' | 'chargeback'; amount: string; currency: string; paymentId: string | null; ownCompany: boolean }>(
+      `SELECT f.id, f.kind, f.amount, f.currency, f."paymentId", (p."sellerType" = 'company' AND p."sellerId" = $2) AS "ownCompany"
+         FROM provider_transaction_fact f LEFT JOIN payment p ON p.id = f."paymentId" WHERE f.id = $1`, [factId, owner.companyId])).rows[0];
     if (!fact) throw notFound();
+    // F-29 (PAY-13 H), before any key, intent or receipt: an unmatched fact no approved authority places in this Owner's Company, and another
+    // Company's matched fact, answer exactly as an unknown id does. A receipt or a replay of this request establishes nothing and spends nothing.
+    if (fact.paymentId === null ? !this.unmatchedFacts.authorizes(owner, fact) : !fact.ownCompany) throw notFound();
 
     // (1) the intent, or the one this key already names
     const { intent, created } = await this.db.tx(async (q) => {

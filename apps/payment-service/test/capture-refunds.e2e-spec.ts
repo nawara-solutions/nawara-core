@@ -125,6 +125,8 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
     auth = await startFakeReceiptServer();
     t = await createTestApp({
       databaseUrl: db.url, authClient, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], refundWorker: false, ownerAuthority,
+      // F-29: a stand-in no application wiring provides, only to reach an association row like one recorded before the correction
+      unmatchedFactAuthority: { authorizes: () => true },
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
         AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
@@ -323,7 +325,7 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
     expect(await completions(caseId)).toBe(1);
   });
 
-  it('16. an unmatched capture associated with an ended payment is refunded on its own: the provider transaction of THAT capture is the one returned', async () => {
+  it('16. F-29: an unmatched capture with an association row is refused a refund: the association names no authority over that money', async () => {
     const { payment } = await lateCaptured(); // an ended payment with an attempt of the simulation provider
     const body = { eventId: `x_${randomUUID()}`, type: 'payment.succeeded', reference: randomUUID(), providerTransactionId: `sim_x_${randomUUID()}`, amount: 9000, currency: 'TND' };
     await signed(body).expect(200);
@@ -343,13 +345,12 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
       currency: 'TND', targetType: 'payment', targetId: payment.id }, OWNER);
     await request(server()).post(`/payment/admin/provider-facts/${fact.id}/associations`).set('authorization', 'Bearer owner-jwt').set('idempotency-key', key())
       .send({ targetType: 'payment', targetId: payment.id, receiptSecret: r.secret }).expect(201);
-    expect((await captureRead(payment.id, fact.id).expect(200)).body.basis).toBe('associated_capture');
-    const caseId = randomUUID();
-    const res = await refund(payment.id, { captureFactId: fact.id, caseId });
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    await complete(res.body.refundAttemptId);
-    expect(dispatches.find((d) => d.refundAttemptId === res.body.refundAttemptId)!.capturedTransactionId).toBe(body.providerTransactionId);
-    expect(await completions(caseId)).toBe(1);
+    // F-29 (PAY-13 H): even with an association row, no refund returns money no approved authority places in this Company
+    expect((await captureRead(payment.id, fact.id).expect(200)).body).toMatchObject({ basis: 'associated_capture', refundableOnItsOwn: false });
+    const dispatched = dispatches.length;
+    expect((await refund(payment.id, { captureFactId: fact.id })).body.code).toBe('refund_capture_unverified');
+    expect(await one(`SELECT count(*)::int AS n FROM refund_attempt WHERE "captureFactId" = $1`, [fact.id])).toEqual({ n: 0 });
+    expect(dispatches.length).toBe(dispatched);
     expect(await one(`SELECT "paymentId", "attemptId" FROM provider_transaction_fact WHERE id = $1`, [fact.id])).toEqual({ paymentId: null, attemptId: null }); // never rewritten
   });
 

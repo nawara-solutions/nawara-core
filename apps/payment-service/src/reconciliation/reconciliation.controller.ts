@@ -35,7 +35,7 @@ export class ReconciliationOwnerController {
   @Get('reconciliation-items')
   @Header('Cache-Control', 'no-store')
   @ApiOperation({
-    summary: "PAY-12: one kind of Payment's reconciliation items for the Owner's Company (keyset by id); `unmatched_fact` lists the verified movements that match no payment yet.",
+    summary: "PAY-12: one kind of Payment's reconciliation items for the Owner's Company (keyset by id). Every kind is scoped through its payment.",
     description: 'Read-only evidence: nothing here creates, changes or resolves a fact. authorization_pending lists intents with no definitive Auth answer after '
       + '15 minutes (Q8: fail closed; never released on missing evidence). capture_refund_unavailable lists the captures no original-payment refund can return.',
   })
@@ -74,8 +74,9 @@ export class ReconciliationOwnerController {
   @Header('Cache-Control', 'no-store')
   @ApiHeader({ name: 'Idempotency-Key', required: true, description: '8 to 128 of A-Z a-z 0-9 . _ : -' })
   @ApiOperation({
-    summary: "PAY-13: associate one unmatched verified provider fact with one payment (a capture) or refund authorization (a refund) of the Owner's Company.",
-    description: 'Body {targetType: payment | refund_authorization, targetId, receiptSecret}. The Auth provider_fact_associate receipt (factor-only step-up) must name '
+    summary: "PAY-13: refused for every Owner until an approved authority and scope basis exists (F-29). Associates one unmatched verified provider fact with one payment or refund authorization of the Owner's Company.",
+    description: 'An unmatched fact has no payment, so nothing establishes its Company: it answers 404 exactly as an unknown id does, as does another Company\'s matched fact; no receipt is spent and nothing is written. '
+      + 'Body {targetType: payment | refund_authorization, targetId, receiptSecret}. The Auth provider_fact_associate receipt (factor-only step-up) must name '
       + 'this Company, the fact, its kind, amount and currency, and the destination; it is consumed once under the association id. The database re-checks the '
       + 'destination (kind, currency, amount for a capture, provider, Company). The fact never changes; a refund fact is then allocated by the refund worker. '
       + 'A pending association (503) resumes with the same key and receipt.',
@@ -83,7 +84,7 @@ export class ReconciliationOwnerController {
   @ApiResponse({ status: 201, description: 'The recorded association.' })
   @ApiResponse({ status: 200, description: 'The association this key already recorded.' })
   @ApiResponse({ status: 400, description: 'invalid_reconciliation_request | idempotency_key_required' })
-  @ApiResponse({ status: 404, description: "not_found: an unknown fact, or a destination outside the Owner's Company" })
+  @ApiResponse({ status: 404, description: "not_found: an unknown or unmatched fact, another Company's matched fact, or a destination outside the Owner's Company" })
   @ApiResponse({ status: 409, description: 'provider_fact_matched | fact_already_associated | provider_fact_association_invalid | provider_fact_association_refused | provider_fact_association_conflict' })
   @ApiResponse({ status: 422, description: 'idempotency_key_reused' })
   @ApiResponse({ status: 503, description: 'provider_fact_association_unresolved (repeat the same request) | owner_authority_unavailable' })
