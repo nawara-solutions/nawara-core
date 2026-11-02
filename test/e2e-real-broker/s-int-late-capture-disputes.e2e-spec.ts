@@ -421,6 +421,18 @@ describeWithEnv(
       const effect = (await billingAdmin.query(`SELECT outcome, reason, "purchaseId" FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId])).rows[0];
       return { loss, effect };
     }
+    /**
+     * The loss is bound to exactly this capture, whichever verified path recorded it first: Payment's event, or Payment's authenticated losses read
+     * that Billing's loss worker also polls (EVT-03, R6E-6; a race both ways). Either way the event itself crossed the broker and Billing verified it.
+     */
+    async function expectVerifiedLoss(disputeId: string, loss: Record<string, unknown>, captureFactId: string) {
+      const { source, ...binding } = loss;
+      expect(['event', 'reconciliation']).toContain(source);
+      expect(binding).toEqual({ captureBasis: 'late_capture', captureFactId, chargebackAmount: BASE });
+      const eventId = (await paymentAdmin.query(`SELECT id FROM outbox WHERE name = 'payment.dispute.lost' AND payload->>'disputeId' = $1`, [disputeId])).rows[0].id as string;
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM event_provenance WHERE "eventId" = $1 AND consumer = $2 AND verified`, [eventId, BILLING_QUEUE])).rowCount === 1,
+        30_000, `Billing to verify Payment's payment.dispute.lost over the broker\n${tails()}`);
+    }
     /** Payment's final state of one payment: never reopened by a dispute (S0-C9 item 1, F-4). */
     const finality = async (paymentId: string) => (await paymentAdmin.query(
       `SELECT p.status, p."succeededAttemptId", (SELECT json_agg(a.status ORDER BY a."attemptNumber") FROM payment_attempt a WHERE a."paymentId" = p.id) AS attempts,
@@ -499,7 +511,7 @@ describeWithEnv(
       const dO = (await paymentDispute(refO))!;
       expect(dO).toMatchObject({ captureFactId: other.factId, captureBasis: 'late_capture', status: 'lost' });
       const o = await lossAtBilling(dO.id);
-      expect(o.loss).toEqual({ source: 'event', captureBasis: 'late_capture', captureFactId: other.factId, chargebackAmount: BASE });
+      await expectVerifiedLoss(dO.id, o.loss, other.factId);
       expect(o.effect).toEqual({ outcome: 'none', reason: 'late_capture_unsold', purchaseId: null });
       await settle();
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_obligation WHERE "disputeId" = $1`, [dO.id])).toBe(0);
@@ -514,7 +526,7 @@ describeWithEnv(
       expect(d).toMatchObject({ captureFactId: late.factId, captureBasis: 'late_capture', status: 'lost' });
       expect(d.chargebackFactId).not.toBeNull();
       const l = await lossAtBilling(d.id);
-      expect(l.loss).toEqual({ source: 'event', captureBasis: 'late_capture', captureFactId: late.factId, chargebackAmount: BASE });
+      await expectVerifiedLoss(d.id, l.loss, late.factId);
       // B10 / FC-4: the assisted purchase is preserved and the beneficiary keeps the entitlement (B6 and BIL-12 agree)
       expect(l.effect).toEqual({ outcome: 'none', reason: 'assisted_purchase_preserved', purchaseId: purchase });
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [purchase])).toBe(0);
