@@ -246,7 +246,15 @@ describeWithEnv('download + authorization (real PostgreSQL, filesystem store)', 
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
     // S2-File.4: a loser meets the winner's reservation in progress (409 ticket_in_use) or, once it committed, a consumed ticket (404)
     expect(results.filter((r) => (r.status === 409 && r.body.code === 'ticket_in_use') || (r.status === 404 && r.body.code === 'ticket_invalid'))).toHaveLength(19);
-    expect((await request(server()).get(path(url))).body.code).toBe('ticket_invalid');
+    // A client can finish reading before the winner's lease commits, so a later redemption may still meet the reservation in progress (409), and
+    // only that: it settles as consumed (404), and never yields the bytes again.
+    const deadline = Date.now() + 10_000;
+    let after = await request(server()).get(path(url));
+    while (after.status === 409 && after.body.code === 'ticket_in_use' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      after = await request(server()).get(path(url));
+    }
+    expect([after.status, after.body.code]).toEqual([404, 'ticket_invalid']);
   });
 
   it('every unusable ticket is the same 404 ticket_invalid (malformed, unknown, expired, revoked, upload ticket, file gone, issuer lost the right)', async () => {
