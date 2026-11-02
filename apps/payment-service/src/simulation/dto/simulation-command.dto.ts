@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, ValidateIf } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, Min, ValidateIf } from 'class-validator';
 
 /** The caller's stable identity for one command (F-S6): the shape of an Idempotency-Key. */
 const COMMAND_ID = /^[A-Za-z0-9._:-]{8,128}$/;
@@ -119,6 +119,15 @@ export class SimulationDisputeDto {
   @IsString()
   @Matches(DISPUTE_REF)
   disputeRef!: string;
+
+  @ApiPropertyOptional({
+    description: "Core V2 S0-C9 (PAY-14 H): the disputed attempt. Absent: the payment's succeeded attempt (unchanged). Otherwise an attempt of this payment, "
+      + 'which must be its succeeded attempt or belong to a final failed / cancelled / expired payment (a late capture, reported or not yet: out-of-order delivery).',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  attemptId?: string;
 
   @ApiProperty({ enum: DISPUTE_EVENTS, description: 'payment.dispute.opened, payment.dispute.won or payment.dispute.lost.' })
   @IsIn(DISPUTE_EVENTS)

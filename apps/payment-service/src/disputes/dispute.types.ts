@@ -8,6 +8,8 @@ export interface DisputeRow {
   paymentId: string;
   attemptId: string;
   captureFactId: string;
+  /** Core V2 S0-C9 (CB-1, migration 0023): the payment's settling capture, or a verified late capture of a final payment */
+  captureBasis: 'settling_capture' | 'late_capture';
   amount: string;
   currency: string;
   reason: string | null;
@@ -71,6 +73,10 @@ export function parseDisputeNotice(parsed: { type: string; amount?: number; curr
  *     established, so a NEW refund is never admitted (fail closed); work already in flight is not affected;
  *   - `exposed`: an open dispute (its provider-stated amount, net of chargeback facts already linked to it) or a chargeback already taken;
  *   - `clear`: neither.
+ * Core V2 S0-C9 (CB-1, CB-5): a dispute of a late capture is the payment's like any other (its open exposure, its chargeback); a verified
+ * dispute notification Payment is still HOLDING for its capture (or has not finished processing) names a dispute Payment cannot attribute
+ * yet, so the exposure is `unresolved` until it is applied or preserved as a conflict (fail closed: never read as `clear`). The response
+ * shape is unchanged; the held notifications are not a field of it.
  */
 export interface DisputeExposure {
   state: 'clear' | 'exposed' | 'unresolved';
@@ -84,18 +90,20 @@ export interface DisputeExposure {
 }
 
 export async function disputeExposure(q: Queryable, paymentId: string): Promise<DisputeExposure> {
-  const { rows } = await q.query<{ open: string; exposure: string; charged: string; conflicts: string; unfunded: string }>(
+  const { rows } = await q.query<{ open: string; exposure: string; charged: string; conflicts: string; unfunded: string; pending: string }>(
     `SELECT
        (SELECT count(*) FROM payment_dispute WHERE "paymentId" = $1 AND status = 'open') AS open,
        (SELECT COALESCE(sum(GREATEST(0, d.amount - COALESCE((SELECT sum(f.amount) FROM provider_transaction_fact f WHERE f."disputeId" = d.id AND f.kind = 'chargeback'), 0))), 0)
           FROM payment_dispute d WHERE d."paymentId" = $1 AND d.status = 'open') AS exposure,
        (SELECT COALESCE(sum(amount), 0) FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'chargeback') AS charged,
        (SELECT count(*) FROM payment_dispute_observation WHERE "paymentId" = $1 AND disposition = 'conflict') AS conflicts,
-       (SELECT count(*) FROM payment_dispute WHERE "paymentId" = $1 AND status = 'lost' AND "chargebackFactId" IS NULL) AS unfunded`,
+       (SELECT count(*) FROM payment_dispute WHERE "paymentId" = $1 AND status = 'lost' AND "chargebackFactId" IS NULL) AS unfunded,
+       (SELECT count(*) FROM webhook_event w JOIN payment_attempt a ON a.id = w."matchedAttemptId"
+         WHERE a."paymentId" = $1 AND w."eventType" LIKE 'payment.dispute.%' AND w.state NOT IN ('processed', 'ignored', 'conflict')) AS pending`,
     [paymentId],
   );
   const r = rows[0]!;
   const e = { openDisputes: Number(r.open), disputeExposure: Number(r.exposure), chargedBack: Number(r.charged), conflicts: Number(r.conflicts), lostWithoutChargeback: Number(r.unfunded) };
-  const state = e.conflicts > 0 || e.lostWithoutChargeback > 0 ? 'unresolved' : e.openDisputes > 0 || e.disputeExposure > 0 || e.chargedBack > 0 ? 'exposed' : 'clear';
+  const state = e.conflicts > 0 || e.lostWithoutChargeback > 0 || Number(r.pending) > 0 ? 'unresolved' : e.openDisputes > 0 || e.disputeExposure > 0 || e.chargedBack > 0 ? 'exposed' : 'clear';
   return { state, ...e };
 }

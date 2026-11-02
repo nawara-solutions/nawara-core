@@ -15,3 +15,9 @@ export interface WebhookEventRow {
   matchedAttemptId: string | null;
   processedAt: Date | null;
 }
+
+/**
+ * Stage 14.6: retries are BOUNDED (see `WebhookRetriever`). Defined here so the pipeline itself knows a notification's last permitted
+ * processing (Core V2 S0-C9, CB-5) without importing the retrier.
+ */
+export const WEBHOOK_RETRY_MAX_ATTEMPTS = 10;

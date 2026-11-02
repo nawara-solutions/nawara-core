@@ -30,7 +30,7 @@ export interface SimulationCommandResult {
 /** The fields that make two commands under one `commandId` the same command (F-S6); everything else is derived from them. */
 const CONTENT = ['kind', 'paymentId', 'attemptId', 'instruction', 'failureCode', 'delivery'] as const;
 const REFUND_CONTENT = ['kind', 'paymentId', 'refundAttemptId', 'instruction', 'failureCode', 'delivery'] as const;
-const DISPUTE_CONTENT = ['paymentId', 'providerDisputeId', 'instruction', 'amount', 'reason', 'chargebackTxnId', 'chargebackAmount', 'delivery'] as const;
+const DISPUTE_CONTENT = ['paymentId', 'attemptId', 'providerDisputeId', 'instruction', 'amount', 'reason', 'chargebackTxnId', 'chargebackAmount', 'delivery'] as const;
 
 export interface SimulationDisputeCommandResult {
   command: SimulationDisputeCommandRow;
@@ -211,7 +211,9 @@ export class SimulationService {
    * Core V2 S6e-D (R6E-2): what the simulated provider reports about a dispute of one captured simulation payment, delivered (now or later)
    * through the signed webhook pipeline: the harness never writes a dispute, an observation or a chargeback fact itself. The disputed attempt,
    * the currency and the provider references are derived from Payment's own rows (F-S3); a payment with no captured simulation attempt has
-   * nothing to dispute.
+   * nothing to dispute. Core V2 S0-C9 (PAY-14 H): `attemptId` may name another simulation attempt of the payment when the payment ended
+   * `failed` / `cancelled` / `expired` (its late capture, whether or not the provider reported it yet); Payment alone decides whether the
+   * notification is attributable (CB-1), held (CB-5) or a conflict.
    */
   async recordDispute(paymentId: string, dto: SimulationDisputeDto): Promise<SimulationDisputeCommandResult> {
     this.assertEnabled();
@@ -220,11 +222,14 @@ export class SimulationService {
     if (dto.chargeback === 'none' && (dto.chargebackAmount !== undefined || dto.chargebackRef !== undefined)) {
       throw paymentError(400, 'invalid_simulation_command', PAYMENT_MESSAGES.invalidSimulationCommand);
     }
-    const { rows } = await this.db.query<PaymentRow & { attemptProvider: string | null }>(
-      `SELECT p.*, a.provider AS "attemptProvider" FROM payment p LEFT JOIN payment_attempt a ON a.id = p."succeededAttemptId" WHERE p.id = $1`, [paymentId]);
-    const payment = rows[0];
+    const payment = (await this.db.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [paymentId])).rows[0];
     if (!payment || payment.liveMode === true) throw notFound();
-    if (!payment.succeededAttemptId || payment.attemptProvider !== SIMULATION_PROVIDER_ID) {
+    const attemptId = dto.attemptId?.toLowerCase() ?? payment.succeededAttemptId;
+    if (!attemptId) throw paymentError(409, 'simulation_nothing_to_dispute', PAYMENT_MESSAGES.simulationNothingToDispute);
+    const attempt = (await this.db.query<{ provider: string }>('SELECT provider FROM payment_attempt WHERE id = $1 AND "paymentId" = $2', [attemptId, paymentId])).rows[0];
+    if (!attempt) throw notFound(); // another payment's attempt, or none
+    const lateTarget = attemptId !== payment.succeededAttemptId;
+    if (attempt.provider !== SIMULATION_PROVIDER_ID || (lateTarget && !['failed', 'cancelled', 'expired'].includes(payment.status))) {
       throw paymentError(409, 'simulation_nothing_to_dispute', PAYMENT_MESSAGES.simulationNothingToDispute);
     }
     const amount = dto.amount ?? Number(payment.amount);
@@ -234,20 +239,20 @@ export class SimulationService {
       ? { txnId: `simcb_${dto.chargebackRef ?? dto.disputeRef}`, amount: dto.chargebackAmount ?? amount, currency }
       : null;
     const eventBody = SimulationPaymentProvider.disputeNotificationBody({
-      commandId: dto.commandId, attemptId: payment.succeededAttemptId, instruction: dto.event, providerDisputeId, amount, currency, reason: dto.reason ?? null, chargeback,
+      commandId: dto.commandId, attemptId, instruction: dto.event, providerDisputeId, amount, currency, reason: dto.reason ?? null, chargeback,
     });
     const delivery = dto.delivery ?? 'immediate';
     const inserted = await this.db.query<SimulationDisputeCommandRow>(
       `INSERT INTO simulation_dispute_command ("commandId", "paymentId", "attemptId", "providerDisputeId", instruction, amount, currency, reason,
          "chargebackTxnId", "chargebackAmount", "chargebackCurrency", "eventBody", delivery)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT ("commandId") DO NOTHING RETURNING *`,
-      [dto.commandId, paymentId, payment.succeededAttemptId, providerDisputeId, dto.event, amount, currency, dto.reason ?? null,
+      [dto.commandId, paymentId, attemptId, providerDisputeId, dto.event, amount, currency, dto.reason ?? null,
         chargeback?.txnId ?? null, chargeback?.amount ?? null, chargeback ? currency : null, eventBody, delivery],
     );
     if (!inserted.rows[0]) {
       const stored = (await this.db.query<SimulationDisputeCommandRow>('SELECT * FROM simulation_dispute_command WHERE "commandId" = $1', [dto.commandId])).rows[0]!;
       const now: Record<(typeof DISPUTE_CONTENT)[number], unknown> = {
-        paymentId, providerDisputeId, instruction: dto.event, amount: String(amount), reason: dto.reason ?? null, chargebackTxnId: chargeback?.txnId ?? null,
+        paymentId, attemptId, providerDisputeId, instruction: dto.event, amount: String(amount), reason: dto.reason ?? null, chargebackTxnId: chargeback?.txnId ?? null,
         chargebackAmount: chargeback ? String(chargeback.amount) : null, delivery,
       };
       if (DISPUTE_CONTENT.some((k) => (stored[k] === null ? null : String(stored[k])) !== now[k])) {

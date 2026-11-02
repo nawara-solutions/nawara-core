@@ -7,11 +7,25 @@ import type { PaymentRow } from '../payments/payment.types.js';
 import type { DisputeNotice, DisputeRow } from './dispute.types.js';
 
 type Disposition = 'applied' | 'duplicate' | 'conflict';
+type Outcome = { disposition: Disposition | 'held'; reason: string | null; disputeId: string | null };
 type ConflictReason = 'capture_unverified' | 'exposure_mismatch' | 'payment_mismatch' | 'terminal_contradiction' | 'chargeback_mismatch' | 'chargeback_unverifiable';
 
-/** What the webhook pipeline records for the notification: `processed` (applied or duplicate), `conflict` (preserved for S6h) or `unmatched`. */
+/** Core V2 S0-C9 (CB-5): the outcome a held dispute notification keeps on its webhook event while its capture is not yet verified. */
+export const DISPUTE_HELD_OUTCOME = 'dispute_held:capture_pending';
+
+/** The payment states a late capture may follow (CB-1): the payment's workflow ended without its money. */
+const FINAL_WITHOUT_SUCCESS = new Set(['failed', 'cancelled', 'expired']);
+
+type Capture = { id: string; amount: string; currency: string };
+/** How a new dispute's referenced attempt relates to a verified capture (CB-1, CB-5). */
+type Attribution = { kind: 'bound'; capture: Capture; basis: 'settling_capture' | 'late_capture' } | { kind: 'held' } | { kind: 'unverified' };
+
+/**
+ * What the webhook pipeline records for the notification: `processed` (applied or duplicate), `conflict` (preserved for S6h), `unmatched`
+ * (no attempt of this provider) or, Core V2 S0-C9 (CB-5), `held`: its capture is not verified yet, so the webhook event stays retryable.
+ */
 export interface DisputeIngestionResult {
-  state: 'processed' | 'conflict' | 'unmatched';
+  state: 'processed' | 'conflict' | 'unmatched' | 'held';
   outcome: string | null;
   attemptId?: string;
 }
@@ -34,6 +48,17 @@ export interface DisputeIngestionResult {
  *   - a loss moves no money by itself: only a chargeback the provider reports with it becomes a `chargeback` fact linked to the dispute
  *     (once; reported later, it completes the loss; a different chargeback for the same loss is a `conflict`).
  * A conflict changes nothing and keeps the payment's exposure `unresolved` (no new refund) until S6h reconciles it.
+ *
+ * Core V2 S0-C9 (register PAY-09 G, EVT-03 M; the Owner's CB-1, CB-2, CB-5, CB-6; FC-1, FC-4, FC-5):
+ *   - attribution (CB-1): an unknown dispute is bound to the payment's settling capture (S6e, unchanged) or, when the payment is final
+ *     `failed` / `cancelled` / `expired`, to the referenced attempt's single, uncontested capture fact named by a recorded late success
+ *     (`late_capture`). The payment, its attempts and its facts never change. Two captures of the attempt, a contested fact, an exposure above
+ *     the capture or in another currency, and a further capture of a SUCCEEDED payment stay conflicts, as before;
+ *   - out of order (CB-5): a notification whose capture is not verified YET (no capture fact, or no late success naming it, while the
+ *     payment is not succeeded through another attempt) is held: nothing is recorded, its webhook event stays retryable for the retrier's
+ *     existing bound, and it is processed once attribution succeeds. On its last permitted processing it becomes the `capture_unverified`
+ *     conflict (no dispute, no chargeback fact, no event), never before;
+ *   - existing observations (CB-6) are never rewritten.
  */
 @Injectable()
 export class DisputeIngestionService {
@@ -45,7 +70,8 @@ export class DisputeIngestionService {
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
   ) {}
 
-  async ingest(webhookEventId: string, providerId: string, reference: string, n: DisputeNotice, ctx: EventContext): Promise<DisputeIngestionResult> {
+  /** `lastChance`: this is the notification's last processing the retrier permits (CB-5): an unattributable capture is then a conflict. */
+  async ingest(webhookEventId: string, providerId: string, reference: string, n: DisputeNotice, ctx: EventContext, lastChance = false): Promise<DisputeIngestionResult> {
     const result = await this.db.tx(async (q) => {
       const attempt = (await q.query<AttemptRow>(
         `SELECT * FROM payment_attempt WHERE provider = $1 AND ("providerTransactionId" = $2 OR id::text = $2)`, [providerId, reference])).rows[0];
@@ -58,7 +84,9 @@ export class DisputeIngestionService {
 
       const d = (await q.query<DisputeRow>(
         `SELECT * FROM payment_dispute WHERE provider = $1 AND "providerDisputeId" = $2 FOR UPDATE`, [providerId, n.providerDisputeId])).rows[0];
-      const outcome = d ? await this.onKnown(q, d, payment, attempt, n, webhookEventId, ctx) : await this.onNew(q, payment, attempt, n, webhookEventId, ctx);
+      const outcome: Outcome = d ? await this.onKnown(q, d, payment, attempt, n, webhookEventId, ctx) : await this.onNew(q, payment, attempt, n, webhookEventId, ctx, lastChance);
+      // CB-5: held, not observed: the observation is written once, when the notification is finally applied or preserved as a conflict
+      if (outcome.disposition === 'held') return { state: 'held' as const, outcome: DISPUTE_HELD_OUTCOME, attemptId: attempt.id };
       await q.query(
         `INSERT INTO payment_dispute_observation ("webhookEventId", provider, "providerDisputeId", kind, "paymentId", "attemptId", "disputeId", amount, currency,
            "chargebackTxnId", "chargebackAmount", "chargebackCurrency", "providerOccurredAt", disposition, reason)
@@ -68,7 +96,8 @@ export class DisputeIngestionService {
       );
       return this.answer(outcome.disposition, outcome.reason, outcome.disputeId, attempt.id);
     });
-    if (result.state === 'conflict') this.log.warn(`payment_dispute_conflict providerDispute=${n.providerDisputeId} kind=${n.kind} outcome=${result.outcome} — preserved for reconciliation (S6h)`);
+    if (result.state === 'held') this.log.warn(`payment_dispute_held providerDispute=${n.providerDisputeId} kind=${n.kind} — its capture is not verified yet; retried within the webhook retry bound (CB-5)`);
+    else if (result.state === 'conflict') this.log.warn(`payment_dispute_conflict providerDispute=${n.providerDisputeId} kind=${n.kind} outcome=${result.outcome} — preserved for reconciliation (S6h)`);
     else if (result.state === 'processed') this.log.log(`payment_dispute_observed providerDispute=${n.providerDisputeId} kind=${n.kind} outcome=${result.outcome}`);
     return result;
   }
@@ -82,21 +111,40 @@ export class DisputeIngestionService {
     return { disposition: 'conflict' as const, reason, disputeId };
   }
 
-  /** A dispute Payment has not recorded yet: bound to the payment's verified capture, in the provider's stated exposure. */
-  private async onNew(q: Queryable, payment: PaymentRow, attempt: AttemptRow, n: DisputeNotice, webhookEventId: string, ctx: EventContext) {
-    const facts = (await q.query<{ id: string; amount: string; currency: string; contested: boolean }>(
-      `SELECT f.id, f.amount, f.currency, EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id) AS contested
+  /**
+   * CB-1, CB-5: the verified capture a new dispute of this attempt is bound to, under the payment's row lock (the late success and the capture
+   * fact are recorded in their own transactions, so either may still be missing when the provider's dispute arrives: held, never guessed).
+   */
+  private async attribute(q: Queryable, payment: PaymentRow, attempt: AttemptRow): Promise<Attribution> {
+    if (payment.liveMode !== false) return { kind: 'unverified' };
+    const facts = (await q.query<Capture & { contested: boolean; named: boolean }>(
+      `SELECT f.id, f.amount, f.currency, EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id) AS contested,
+              EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id AND l."attemptId" = f."attemptId" AND l."paymentId" = f."paymentId") AS named
          FROM provider_transaction_fact f WHERE f."attemptId" = $1 AND f."paymentId" = $2 AND f.kind = 'capture'`, [attempt.id, payment.id])).rows;
-    if (payment.succeededAttemptId !== attempt.id || payment.liveMode !== false || facts.length !== 1 || facts[0]!.contested) return this.conflict('capture_unverified', null);
-    const capture = facts[0]!;
+    // ambiguous evidence is never resolved by waiting: two captures of the attempt, or a contested one
+    if (facts.length > 1 || facts.some((f) => f.contested)) return { kind: 'unverified' };
+    const fact = facts[0];
+    if (payment.succeededAttemptId === attempt.id) return fact ? { kind: 'bound', capture: fact, basis: 'settling_capture' } : { kind: 'unverified' };
+    if (payment.status === 'succeeded') return { kind: 'unverified' }; // a further capture of a SUCCEEDED payment: out of scope (CB-1)
+    if (fact && fact.named && FINAL_WITHOUT_SUCCESS.has(payment.status)) return { kind: 'bound', capture: fact, basis: 'late_capture' };
+    return { kind: 'held' }; // the capture, its late success or the payment's final state may still be recorded (CB-5)
+  }
+
+  /** A dispute Payment has not recorded yet: bound to a verified capture (CB-1), in the provider's stated exposure; or held (CB-5). */
+  private async onNew(q: Queryable, payment: PaymentRow, attempt: AttemptRow, n: DisputeNotice, webhookEventId: string, ctx: EventContext, lastChance: boolean) {
+    const a = await this.attribute(q, payment, attempt);
+    if (a.kind === 'held' && !lastChance) return { disposition: 'held' as const, reason: null, disputeId: null };
+    if (a.kind !== 'bound') return this.conflict('capture_unverified', null);
+    const capture = a.capture;
     if (n.currency !== capture.currency.trim() || n.amount > Number(capture.amount)) return this.conflict('exposure_mismatch', null);
     if (n.chargeback && (await this.chargebackTaken(q, attempt.provider, n.chargeback.txnId))) return this.conflict('chargeback_unverifiable', null);
 
     const status = n.kind === 'opened' ? 'open' : n.kind;
     const d = (await q.query<DisputeRow>(
-      `INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", amount, currency, reason, status, "providerOpenedAt", "providerClosedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [attempt.provider, n.providerDisputeId, payment.id, attempt.id, capture.id, n.amount, n.currency, n.reason, status,
+      `INSERT INTO payment_dispute (provider, "providerDisputeId", "paymentId", "attemptId", "captureFactId", "captureBasis", amount, currency, reason, status,
+         "providerOpenedAt", "providerClosedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [attempt.provider, n.providerDisputeId, payment.id, attempt.id, capture.id, a.basis, n.amount, n.currency, n.reason, status,
         n.kind === 'opened' ? n.providerOccurredAt : null, n.kind === 'opened' ? null : n.providerOccurredAt],
     )).rows[0]!;
     await this.outbox.enqueue(q, disputeOpenedEvent(d, payment, ctx));

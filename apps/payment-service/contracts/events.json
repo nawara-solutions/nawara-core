@@ -144,6 +144,16 @@
         "amount": {
           "type": "integer"
         },
+        "captureBasis": {
+          "type": "enum",
+          "values": [
+            "settling_capture",
+            "late_capture"
+          ]
+        },
+        "captureFactId": {
+          "type": "uuid"
+        },
         "chargeback": {
           "type": "object",
           "nullable": true
@@ -192,6 +202,16 @@
       "payload": {
         "amount": {
           "type": "integer"
+        },
+        "captureBasis": {
+          "type": "enum",
+          "values": [
+            "settling_capture",
+            "late_capture"
+          ]
+        },
+        "captureFactId": {
+          "type": "uuid"
         },
         "currency": {
           "type": "string"

@@ -120,6 +120,13 @@ no production traffic can reach any of this (the test provider refuses to start 
   under an Owner receipt whose binding names it; one potentially effective attempt and one completion per capture fact; the ordinary
   per-payment rules are unchanged. `GET /payment/payments/:paymentId/captures/:factId` (`payment.read`, the producer) is the evidence
   Billing binds a capture-specific case to.
+- **Late-capture disputes (Core V2 S0-C9; register PAY-09 G, EVT-03 M, PAY-14 H; migration 0023) — DEVELOPMENT AND SIMULATION ONLY:**
+  a verified provider dispute is also attributed to the single, uncontested capture of an attempt of a final `failed` / `cancelled` /
+  `expired` payment that a recorded late success names (`captureBasis` `late_capture`); the payment, its attempts and its facts never
+  change. `payment.dispute.opened` / `payment.dispute.lost` (v1) and `GET /payment/disputes/losses` carry `captureFactId` and
+  `captureBasis`. A dispute notification whose capture is not verified yet is held (its webhook event stays retryable, outcome
+  `dispute_held:capture_pending`) within the webhook retrier's existing bound, then becomes the `capture_unverified` conflict; while held
+  the payment's dispute exposure is `unresolved`. The simulation dispute command takes an optional `attemptId`.
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the

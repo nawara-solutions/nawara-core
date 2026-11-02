@@ -142,7 +142,8 @@ export class DisputeServiceController {
   @Header('Cache-Control', 'no-store')
   @ApiOperation({
     summary: "R6E-4: a payment's dispute exposure (FC-5), from Payment's own rows: clear, exposed or unresolved (a preserved conflict or a loss without its chargeback fact).",
-    description: 'Unresolved is never zero: a new refund case or attempt is refused. 404 is never "no dispute".',
+    description: 'Unresolved is never zero: a new refund case or attempt is refused. 404 is never "no dispute". Core V2 S0-C9: disputes of a late capture count like any other; a '
+      + 'verified dispute notification still held for its capture (CB-5) makes the exposure unresolved until it is applied or preserved as a conflict.',
   })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted' })
@@ -158,6 +159,7 @@ export class DisputeServiceController {
   @Header('Cache-Control', 'no-store')
   @ApiOperation({
     summary: "R6E-6 recovery: the caller's lost disputes WITH their verified chargeback fact, by dispute id (keyset), for a consumer that missed payment.dispute.lost.",
+    description: 'Core V2 S0-C9 (CB-2): each item names the lost capture, `captureFactId` and `captureBasis` (`settling_capture` | `late_capture`), as the event does.',
   })
   @ApiQuery({ name: 'after', required: false, description: 'the last disputeId of the previous page' })
   @ApiQuery({ name: 'limit', required: false, description: '1 to 200 (default 100)' })
@@ -176,6 +178,7 @@ export class DisputeServiceController {
       items: rows.map((d) => ({
         disputeId: d.id, paymentId: d.paymentId, paymentRequestId: d.paymentRequestId, amount: Number(d.amount), currency: d.currency.trim(), lostAt: iso(d.closedAt),
         chargeback: { factId: d.chargebackFactId, amount: Number(d.cbAmount), currency: d.cbCurrency.trim() }, liveMode: false,
+        captureFactId: d.captureFactId, captureBasis: d.captureBasis, // Core V2 S0-C9 (CB-2): the lost capture, as on payment.dispute.lost
       })),
     };
   }

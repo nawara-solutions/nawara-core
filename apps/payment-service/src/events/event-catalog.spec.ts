@@ -86,20 +86,26 @@ describe('payment-service event catalog (V2 A3M.2)', () => {
   });
 
   it('Core V2 S6e-D: payment.dispute.opened and payment.dispute.lost match their catalog entries, with a deterministic id per dispute and liveMode false', () => {
-    const d = { id: '77777777-7777-4777-8777-777777777777', paymentId: row.id, amount: '4000', currency: 'TND', reason: 'fraudulent',
-      recordedAt: new Date('2026-10-29T10:00:00.000Z'), closedAt: new Date('2026-10-30T10:00:00.000Z') };
-    for (const ctx of [webhookContext('simulation', 'evt-3'), webhookContext('simulation', 'evt-4')]) {
-      for (const base of [{ ...s4aRow, organizationId: '33333333-3333-4333-8333-333333333333' }, row]) {
-        const opened = disputeOpenedEvent({ ...d, reason: null }, base, ctx);
-        expect(conformance(JSON.parse(JSON.stringify(opened.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.dispute.opened'].payload)).toEqual([]);
-        expect(opened.payload).toMatchObject({ disputeId: d.id, amount: 4000, openedAt: '2026-10-29T10:00:00.000Z', liveMode: false });
-        for (const cb of [null, { id: '88888888-8888-4888-8888-888888888888', amount: '4000', currency: 'TND' }]) {
-          const lost = disputeLostEvent(d, base, cb, ctx);
-          expect(conformance(JSON.parse(JSON.stringify(lost.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.dispute.lost'].payload)).toEqual([]);
-          expect(lost.payload).toMatchObject({ lostAt: '2026-10-30T10:00:00.000Z', chargeback: cb ? { factId: cb.id, amount: 4000, currency: 'TND' } : null, liveMode: false });
-          expect(lost.id).toBe(disputeLostEvent(d, base, null, webhookContext('simulation', 'evt-9')).id); // one id per dispute
+    const captureFactId = '14141414-1414-4141-8141-141414141414';
+    for (const captureBasis of ['settling_capture', 'late_capture'] as const) {
+      const d = { id: '77777777-7777-4777-8777-777777777777', paymentId: row.id, amount: '4000', currency: 'TND', reason: 'fraudulent',
+        recordedAt: new Date('2026-10-29T10:00:00.000Z'), closedAt: new Date('2026-10-30T10:00:00.000Z'), captureFactId, captureBasis };
+      for (const ctx of [webhookContext('simulation', 'evt-3'), webhookContext('simulation', 'evt-4')]) {
+        for (const base of [{ ...s4aRow, organizationId: '33333333-3333-4333-8333-333333333333' }, row]) {
+          const opened = disputeOpenedEvent({ ...d, reason: null }, base, ctx);
+          expect(conformance(JSON.parse(JSON.stringify(opened.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.dispute.opened'].payload)).toEqual([]);
+          // Core V2 S0-C9 (CB-2): the disputed capture, always present, additively in version 1
+          expect(opened.payload).toMatchObject({ disputeId: d.id, amount: 4000, openedAt: '2026-10-29T10:00:00.000Z', liveMode: false, captureFactId, captureBasis });
+          for (const cb of [null, { id: '88888888-8888-4888-8888-888888888888', amount: '4000', currency: 'TND' }]) {
+            const lost = disputeLostEvent(d, base, cb, ctx);
+            expect(conformance(JSON.parse(JSON.stringify(lost.payload)) as Record<string, unknown>, PRODUCED_EVENTS['payment.dispute.lost'].payload)).toEqual([]);
+            expect(lost.payload).toMatchObject({ lostAt: '2026-10-30T10:00:00.000Z', chargeback: cb ? { factId: cb.id, amount: 4000, currency: 'TND' } : null, liveMode: false,
+              captureFactId, captureBasis });
+            expect(lost.id).toBe(disputeLostEvent(d, base, null, webhookContext('simulation', 'evt-9')).id); // one id per dispute
+          }
+          expect(opened.id).not.toBe(disputeLostEvent(d, base, null, ctx).id);
+          expect(opened.id).toBe(disputeOpenedEvent({ ...d, captureBasis: 'settling_capture' }, base, ctx).id); // the id is the dispute's, never the basis's
         }
-        expect(opened.id).not.toBe(disputeLostEvent(d, base, null, ctx).id);
       }
     }
   });
