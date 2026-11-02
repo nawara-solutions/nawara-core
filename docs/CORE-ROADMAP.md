@@ -299,9 +299,9 @@ Core V2 S-track (development and simulation only; nothing deployed; ◐ = condit
                                                   V3; C-6 open, deferred with lifecycle; DG-3 unchanged and independent
   S8    Organization authority changes         EXCLUDED from this S-INT (Owner scope decision 2026-11-01): C-5 and human hierarchy reads
                                                   deferred (F6/F7); PR #319 awaits a read-only A5.4-G1 assessment, no GO
-  S-INT integration certification              not started; scope S1 to S6 (final Core V2 S-INT); entry rule D-3; conditions classified
-                                                  (condition matrix); readiness record proposed (core-v2-s-int-readiness.md, Owner approval
-                                                  pending); execution needs its own authorization
+  S-INT integration certification              executed at 3e73097; scope S1 to S6 (final Core V2 S-INT); record proposed with the verdict
+                                                  CONDITIONAL PASS (development, simulation), awaiting the Owner
+                                                  (core-v2-s-int-certification.md); promotes no stage verdict; not production readiness
 
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
 M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; E2 and E3 prepared, not installed; NOT CERTIFIED
@@ -430,7 +430,8 @@ S7 to A8; S8 to A5 (execution roadmap §11).
   to S6 is classified in the [condition matrix](architecture/core-v2-stage-condition-matrix.md); S5 is certified pre-lifecycle under S0-C7;
   no development-level item is OPEN (BIL-12 was implemented, #424; F-INV-1, the invoice list's cursor, was fixed by #426, and its
   records close in the [S-INT readiness record](architecture/core-v2-s-int-readiness.md)). No verdict is promoted automatically: entry
-  needs the Owner-approved S-INT readiness record. S-INT is not a production certification.
+  needs the Owner-approved S-INT readiness record. S-INT is not a production certification. **Its record, with a proposed verdict that takes
+  effect only by the Owner's merge, is the [S-INT certification record](architecture/core-v2-s-int-certification.md).**
 - **Production-track gates are unchanged and separate:** S1-R (with C-4, AP-R, NP-K), G-7 (no S-stage Auth, Organization or Audit image
   in production before M3 or a G6 baseline refresh), M2 → G7 → F6 → F7 → post-F7 backup, the pilot readiness gate M13 / A19 (DG-7).
   No S-stage shortens or reorders them.
@@ -818,5 +819,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | Core V2 S0: the frozen architecture of the eight services (owner decisions, invariants FC-n / DB-n, deferral register) | [`core-v2-s0-architecture-freeze.md`](architecture/core-v2-s0-architecture-freeze.md) |
 | Core V2 S1–S8, S-INT and Final Core Validation: execution order, certification gates, gate register, DOC register | [`core-v2-s-execution-roadmap.md`](architecture/core-v2-s-execution-roadmap.md) |
 | Core V2 contracts: D-A2 receipts and the AR-04.6 contract register (routes, errors, idempotency, per-slice implementation status) | [`core-v2-d-a2-auth-authorization-receipts.md`](architecture/core-v2-d-a2-auth-authorization-receipts.md), [`core-v2-d-a2-contract-register.md`](architecture/core-v2-d-a2-contract-register.md) |
-| Core V2 stage records and certification evidence: S1 (and S1e-5), S2, S3, S4, S5, S6; the S1–S6 condition matrix ([`core-v2-stage-condition-matrix.md`](architecture/core-v2-stage-condition-matrix.md)) | [`S1`](architecture/core-v2-s1-event-security.md), [`S1e-5`](architecture/core-v2-s1e5-integrated-certification.md), [`S2`](architecture/core-v2-s2-independent-foundations.md), [`S3`](architecture/core-v2-s3-billing.md), [`S4`](architecture/core-v2-s4-payment.md), [`S5`](architecture/core-v2-s5-assistance-and-cash-obligations.md), [`S6`](architecture/core-v2-s6-financial-certification.md) |
+| Core V2 stage records and certification evidence: S1 (and S1e-5), S2, S3, S4, S5, S6; the S1–S6 condition matrix ([`core-v2-stage-condition-matrix.md`](architecture/core-v2-stage-condition-matrix.md)); the S-INT certification record ([`core-v2-s-int-certification.md`](architecture/core-v2-s-int-certification.md)) | [`S1`](architecture/core-v2-s1-event-security.md), [`S1e-5`](architecture/core-v2-s1e5-integrated-certification.md), [`S2`](architecture/core-v2-s2-independent-foundations.md), [`S3`](architecture/core-v2-s3-billing.md), [`S4`](architecture/core-v2-s4-payment.md), [`S5`](architecture/core-v2-s5-assistance-and-cash-obligations.md), [`S6`](architecture/core-v2-s6-financial-certification.md) |
 | On-demand real-broker certification in GitHub Actions | [`real-broker-certification.md`](runbooks/real-broker-certification.md) |

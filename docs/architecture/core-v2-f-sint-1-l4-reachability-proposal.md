@@ -2,7 +2,8 @@
 
 - **Decision (2026-11-01):** the Owner approved LS-1 to LS-10. The approved record is **S0-C8** in the
   [S0 freeze record](./core-v2-s0-architecture-freeze.md) §1.5 with register BIL-23 H, BIL-32 G, BIL-33 G and EVT-10; where this
-  proposal and S0-C8 differ, S0-C8 governs. LS-7 is recorded as a policy addition. Nothing is implemented.
+  proposal and S0-C8 differ, S0-C8 governs. LS-7 is recorded as a policy addition. **Implemented for development and simulation only by #434 and #435, with real-event evidence in #436;
+  closure: the [S-INT certification record](./core-v2-s-int-certification.md) §6.** The rest of this document is the proposal as written.
 - **Status (as written):** PROPOSED, for Owner review. Prepared 2026-11-01 under the Owner's F-SINT-1 decision (Option A, documentation proposal
   only), on `main` at `480f94826cd31f00ed8a46865b765f493eae2682` (the PR #431 merge; Core CI push run `41321579398` green).
 - **What it is:** an approval-ready draft of one S0 clarification (S0-C8) and of the contract changes it needs in the

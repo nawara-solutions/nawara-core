@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **PROPOSED readiness record, for the Owner's review and approval.** Documentation only |
+| Status | **PROPOSED readiness record, for the Owner's review and approval.** Documentation only. Execution and its result: the [S-INT certification record](./core-v2-s-int-certification.md) |
 | Prepared | 2026-11-01, on `main` at `085a75008678fb9a5f70cc0bce65e2aa51c7ea42` (the #429 merge) |
 | Baseline CI | `main` push run `41309502612` (Core CI), 2026-11-01 13:04–13:11 UTC: **24 of 24 jobs succeeded**, none skipped or missing (§2) |
 | Rule applied | [Execution roadmap](./core-v2-s-execution-roadmap.md) §5 "S-INT entry: individual certification" (the Owner's D-3, 2026-10-30) |
