@@ -114,6 +114,7 @@ describeWithEnv(
     const adminF = actor(ORG_F, true);
     const benL4 = actor(ORG_F, false);
     const benRead = actor(ORG_X, false);
+    const benSecond = actor(ORG_X, false);
     const benLost = actor(ORG_X, false);
     const benOrder = actor(ORG_X, false);
     const adminR = actor(ORG_R, true);
@@ -123,7 +124,7 @@ describeWithEnv(
     const adminO = actor(ORG_O, true);
     const benO = actor(ORG_O, false);
     const benO2 = actor(ORG_O, false);
-    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2];
+    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -739,6 +740,26 @@ describeWithEnv(
       }
     }, 240_000);
 
+    it('G4 (6): a second capture of the invoice is refund-only: a late_success case and a capture-specific refund path, never a second late settlement or purchase', async () => {
+      const { s, ls } = await attestedLateSettlement(benSecond, adminX);
+      const before = await lateSettlementsOf(s.requestId);
+      expect(before).toBe(1);
+      const second = await lateSuccessOf(s.paymentId, s.attempts[1]!, BASE);
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'late_success' AND "evidenceKey" = $1`, [second.id])).rowCount === 1,
+        30_000, `Billing to classify the second capture\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT "captureFactId", amount::int AS amount, detail FROM reconciliation_case WHERE "caseType" = 'late_success' AND "evidenceKey" = $1`, [second.id])).rows)
+        .toEqual([{ captureFactId: second.factId, amount: BASE, detail: 'assisted_settlement' }]);
+      expect(await lateSettlementsOf(s.requestId)).toBe(1);
+      expect((await billingAdmin.query(`SELECT "lateSuccessId" FROM assistance_late_settlement WHERE id = $1`, [ls.id])).rows[0].lateSuccessId).not.toBe(second.id);
+      expect(await purchasesOf(s.requestId)).toBe(0);
+      // its way back is a refund of exactly that capture
+      const opened = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId: s.paymentId, captureFactId: second.factId, reason: 'duplicate_charge' });
+      expect(opened.status, `${JSON.stringify(opened.json)}\n${tails()}`).toBe(201);
+      expect(opened.json).toMatchObject({ eligibility: 'capture_specific', amount: BASE, capture: { captureFactId: second.factId, basis: 'late_capture' } });
+      expect(await paymentStatus(s.paymentId)).toBe('failed');
+      expect(await deadLettered()).toBe(0);
+    }, 180_000);
+
     it('G5 per family: payment.succeeded, payment.failed, refund.case_completed, payment.dispute.lost, payment.late_success.recorded: default-exchange injection without a stored row, tampered bodies and a verified contradiction are refused before any state change; a verified duplicate applies nothing', async () => {
       const fingerprint = async () => JSON.stringify((await billingAdmin.query(`SELECT
         (SELECT count(*) FROM payment_event_receipt) AS receipts, (SELECT count(*) FROM payment_late_success) AS lates, (SELECT count(*) FROM payment_dispute_loss) AS losses,
@@ -761,6 +782,12 @@ describeWithEnv(
           expect(await deadReason(id), `${name}: ${reason}`).toBe(reason);
           expect(await fingerprint(), `${name}: ${reason} changed state`).toBe(before);
         };
+        // a forged user_id: the BROKER refuses it (406) on the guest connection, before any consumer sees it
+        const forger = await amqpConn.createConfirmChannel();
+        const brokerError = new Promise<Error>((r) => forger.once('error', r));
+        forger.publish('nawara.events', name, original.content, { messageId: randomUUID(), type: name, persistent: true, contentType: 'application/json', headers: original.headers, userId: 'payment-service' });
+        expect(String((await brokerError).message), `${name}: forged user_id`).toMatch(/406|PRECONDITION_FAILED/);
+        expect(await fingerprint(), `${name}: a forged user_id changed state`).toBe(before);
         // the default exchange, no stored row: a replay without provenance
         await refused(randomUUID(), { body: original.content, defaultExchange: true }, 'untrusted_replay_no_provenance');
         // the genuine id with a tampered body, through the default exchange: a replay that mismatches its stored original

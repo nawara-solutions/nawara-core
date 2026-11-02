@@ -9,7 +9,7 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, startReferenceStub, TEST_PLATFORM } from './support/admission.js';
-import { createPaymentIdentity, type PaymentIdentity } from './support/payment-identity.js';
+import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 const refStub = await startReferenceStub();
 let paymentIdentity: PaymentIdentity | undefined;
@@ -78,6 +78,7 @@ describeWithEnv(
     let billing: LiveService;
     let payment: LiveService;
     let amqpConn: ChannelModel;
+    let tap: Awaited<ReturnType<typeof tapPaymentEvents>>;
     let authAdmin: pg.Pool;
     let billingAdmin: pg.Pool;
     let paymentAdmin: pg.Pool;
@@ -139,6 +140,7 @@ describeWithEnv(
       await billingAdmin.query(`INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, $2, 'TND', $3)`, [TEST_PLATFORM, COMPANY, randomUUID()]);
 
       amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL);
+      tap = await tapPaymentEvents(amqpConn, ['refund.#']); // the exact message Payment publishes, for S-INT G2's redelivery
       paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
       await purgeQueue(BILLING_QUEUE);
       await purgeQueue(BILLING_DEAD_QUEUE);
@@ -212,6 +214,7 @@ describeWithEnv(
       await billing?.stop();
       await payment?.stop();
       await auth?.stop();
+      await tap?.close();
       await paymentIdentity?.remove();
       if (amqpConn) {
         await purgeQueue(BILLING_QUEUE);
@@ -348,6 +351,18 @@ describeWithEnv(
         receiptSecret: randomBytes(32).toString('base64url') })).json.code).toBe('refund_case_completed');
       expect((await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${c.id}/authorizations`, { receiptSecret: randomBytes(32).toString('base64url') })).json.code)
         .toBe('refund_case_completed');
+      // S-INT G2 (exactly once under redelivery): the exact message Payment published, delivered again under Payment's own broker identity
+      const completedId = (await paymentAdmin.query(`SELECT id FROM outbox WHERE name = 'refund.case_completed' AND payload->>'refundCaseId' = $1`, [c.id])).rows[0].id as string;
+      const message = await tap.take(completedId);
+      const asPayment = await amqp.connect(paymentIdentity!.url(env.TEST_RABBITMQ_URL));
+      const redelivery = await asPayment.createConfirmChannel();
+      redelivery.publish('nawara.events', 'refund.case_completed', message.content, { messageId: message.messageId, type: message.type, persistent: true, contentType: 'application/json', headers: message.headers, userId: 'payment-service' });
+      await redelivery.waitForConfirms();
+      await asPayment.close();
+      await new Promise((r) => setTimeout(r, 3_000));
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case_effect WHERE "refundCaseId" = $1`, [c.id])).rows[0].n).toBe(1);
+      expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
+        .toEqual([{ cause: 'refund_completion' }]);
       // nothing dead-lettered: the completion event was applied or acknowledged as a duplicate
       expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case_completion WHERE "refundCaseId" = $1`, [c.id])).rows[0].n).toBe(1);
       const ch = await amqpConn.createChannel();
