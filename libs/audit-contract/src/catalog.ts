@@ -677,7 +677,8 @@ const SPEC = {
     resource: ['reconciliation_case'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       resolution: { type: 'code', shape: 'value', required: true, values: ['refund_completed', 'late_settlement_applied', 'surplus_refunded', 'surplus_repaid',
-        'recovery_counted', 'loss_recognized', 'effect_applied', 'authorization_resolved', 'acknowledged'] },
+        'recovery_counted', 'loss_recognized', 'effect_applied', 'authorization_resolved', 'acknowledged',
+        'chargeback_returned'] }, // Core V2 S0-C9 (CB-4, BIL-33 H): an unsold late capture fully charged back by the provider
       reason: { type: 'code', shape: 'value', required: false, values: ['reviewed_no_financial_effect', 'provider_statement_reviewed', 'duplicate_evidence_reviewed'] },
     },
     purpose: 'A reconciliation case was resolved by the authoritative evidence its resolution names, or (review-only cases) acknowledged by the Owner; the evidence stays.',

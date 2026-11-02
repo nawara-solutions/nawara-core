@@ -635,6 +635,11 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "L'autorisation n'a pas pu être confirmée ; répétez la même requête.",
     ar: 'تعذّر تأكيد التفويض؛ أعد إرسال الطلب نفسه.',
   },
+  lateSettlementDisputeUnavailable: { // Core V2 S0-C9 (CB-3, BIL-32 H)
+    en: "The payment's dispute exposure could not be verified; nothing was changed.",
+    fr: "L'exposition aux litiges du paiement n'a pas pu être vérifiée ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من تعرّض الدفعة للنزاعات؛ لم يتغيّر شيء.',
+  },
   lateSettlementAuthorizationUnavailable: { // Core V2 S6g
     en: 'The late settlement application is not available; nothing was changed.',
     fr: "L'application du règlement tardif n'est pas disponible ; rien n'a été modifié.",

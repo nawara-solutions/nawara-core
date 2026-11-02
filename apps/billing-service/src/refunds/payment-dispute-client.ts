@@ -1,7 +1,7 @@
 import { correlationHeaders } from '@nawara/service-kit';
 import { billingError } from '../domain/errors.js';
 import { BILLING_MESSAGES } from '../messages.js';
-import type { DisputeExposure } from './dispute-exposure.js';
+import type { DisputeExposure, LateSettlementExposure, LateSettlementExposureState } from './dispute-exposure.js';
 
 /** DI token of Payment's dispute reads (Core V2 S6e-D). */
 export const PAYMENT_DISPUTE_CLIENT = Symbol('BILLING_PAYMENT_DISPUTE_CLIENT');
@@ -15,6 +15,9 @@ export interface PaymentDisputeLoss {
   currency: string;
   lostAt: string;
   chargeback: { factId: string; amount: number; currency: string };
+  /** Core V2 S0-C9 (CB-2): the disputed captured movement, passed through as stated (absent = legacy); `DisputeLossService.record` validates it. */
+  captureFactId?: unknown;
+  captureBasis?: unknown;
 }
 
 export interface PaymentDisputeClient {
@@ -33,7 +36,7 @@ export const disputeUnavailable = () => billingError(503, 'refund_dispute_unavai
  * answers only for its producer's payments). It replaces the pre-S6e adapter: a payment with an open dispute or a chargeback is `open`; an
  * exposure Payment cannot establish (`unresolved`), a `404`, a timeout or any unexpected answer is never "no dispute": it throws `503`.
  */
-export class HttpPaymentDisputeClient implements DisputeExposure, PaymentDisputeClient {
+export class HttpPaymentDisputeClient implements DisputeExposure, PaymentDisputeClient, LateSettlementExposure {
   constructor(private readonly opts: { baseUrl: string; serviceToken: string; timeoutMs: number }) {}
 
   private async get(path: string, deadline?: AbortSignal): Promise<{ status: number; body: Record<string, unknown> | null }> {
@@ -61,6 +64,28 @@ export class HttpPaymentDisputeClient implements DisputeExposure, PaymentDispute
     throw disputeUnavailable(); // `unresolved` or anything else: never zero
   }
 
+  /**
+   * Core V2 S0-C9 (CB-3): the same exposure read, classified for the L-4 application. Only a well-formed `200` for exactly this payment counts;
+   * its counts must agree with its state, else the answer is unverifiable (`unavailable`). A chargeback taken refuses as `chargeback_recorded`
+   * even while another dispute is open (the stronger, definitive fact).
+   */
+  async lateSettlement(paymentId: string, deadline: AbortSignal): Promise<LateSettlementExposureState> {
+    const r = await this.get(`/payment/payments/${encodeURIComponent(paymentId)}/dispute-exposure`, deadline);
+    const b = r.body;
+    if (r.status !== 200 || !b || b.paymentId !== paymentId) return 'unavailable';
+    const n = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null);
+    const open = n(b.openDisputes);
+    const exposure = n(b.disputeExposure);
+    const charged = n(b.chargedBack);
+    if (open === null || exposure === null || charged === null) return 'unavailable';
+    if (b.state === 'clear') return open === 0 && exposure === 0 && charged === 0 ? 'clear' : 'unavailable';
+    if (b.state === 'exposed') {
+      if (charged > 0) return 'chargeback_recorded';
+      return open > 0 || exposure > 0 ? 'dispute_open' : 'unavailable';
+    }
+    return 'unavailable'; // `unresolved` or anything else: never clear
+  }
+
   async losses(after: string | undefined, limit: number): Promise<PaymentDisputeLoss[]> {
     const r = await this.get(`/payment/disputes/losses?limit=${limit}${after ? `&after=${encodeURIComponent(after)}` : ''}`);
     if (r.status !== 200 || !r.body || !Array.isArray(r.body.items)) throw new Error(`payment-service GET disputes/losses failed (status ${r.status})`);
@@ -71,7 +96,8 @@ export class HttpPaymentDisputeClient implements DisputeExposure, PaymentDispute
         throw new Error('payment-service GET disputes/losses: malformed loss');
       }
       return { disputeId: x.disputeId as string, paymentId: x.paymentId as string, paymentRequestId: x.paymentRequestId as string, amount: x.amount, currency: x.currency,
-        lostAt: x.lostAt, chargeback: { factId: c.factId, amount: c.amount, currency: c.currency } };
+        lostAt: x.lostAt, chargeback: { factId: c.factId, amount: c.amount, currency: c.currency },
+        ...('captureFactId' in x ? { captureFactId: x.captureFactId } : {}), ...('captureBasis' in x ? { captureBasis: x.captureBasis } : {}) };
     });
   }
 }

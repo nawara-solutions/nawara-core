@@ -13,7 +13,8 @@ export type CaseType = (typeof CASE_TYPES)[number];
 export const REVIEW_ONLY: readonly CaseType[] = ['refund_discrepancy', 'partial_chargeback', 'second_reversal_cause'];
 export const ACKNOWLEDGEMENT_REASONS = ['reviewed_no_financial_effect', 'provider_statement_reviewed', 'duplicate_evidence_reviewed'] as const;
 export type ResolutionKind = 'refund_completed' | 'late_settlement_applied' | 'surplus_refunded' | 'surplus_repaid' | 'recovery_counted' | 'loss_recognized'
-  | 'effect_applied' | 'authorization_resolved' | 'acknowledged';
+  | 'effect_applied' | 'authorization_resolved' | 'acknowledged'
+  | 'chargeback_returned'; // Core V2 S0-C9 (CB-4, BIL-33 H): an unsold late capture fully charged back by the provider
 
 export const workerContext = (id: string): TransitionContext => ({
   actor: { type: 'system', id: RECONCILIATION_WORKER }, cause: { type: 'sweep', id }, correlationId: `reconciliation:${id}`,
@@ -67,12 +68,12 @@ export class ReconciliationCases {
   }
 
   /** Records a resolution once (a concurrent identical one is answered as already resolved); the database checks its evidence. */
-  async resolve(q: Queryable, caseId: string, kind: ResolutionKind, refs: { refundCaseId?: string; lossId?: string; recoveryPaymentId?: string; userId?: string; reason?: string },
-    ctx: TransitionContext): Promise<boolean> {
+  async resolve(q: Queryable, caseId: string, kind: ResolutionKind,
+    refs: { refundCaseId?: string; lossId?: string; recoveryPaymentId?: string; disputeId?: string; userId?: string; reason?: string }, ctx: TransitionContext): Promise<boolean> {
     const ins = (await q.query(
-      `INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId", "lossId", "recoveryPaymentId", "resolvedByUserId", reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT ("caseId") DO NOTHING RETURNING "caseId"`,
-      [caseId, kind, refs.refundCaseId ?? null, refs.lossId ?? null, refs.recoveryPaymentId ?? null, refs.userId ?? null, refs.reason ?? null])).rows[0];
+      `INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId", "lossId", "recoveryPaymentId", "disputeId", "resolvedByUserId", reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT ("caseId") DO NOTHING RETURNING "caseId"`,
+      [caseId, kind, refs.refundCaseId ?? null, refs.lossId ?? null, refs.recoveryPaymentId ?? null, refs.disputeId ?? null, refs.userId ?? null, refs.reason ?? null])).rows[0];
     if (!ins) return false;
     const c = (await q.query<{ organizationId: string | null }>(`SELECT "organizationId" FROM reconciliation_case WHERE id = $1`, [caseId])).rows[0]!;
     await this.audit.record(q, 'reconciliation_case.resolved', {

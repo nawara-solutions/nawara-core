@@ -56,6 +56,30 @@ describe('HttpPaymentDisputeClient (Core V2 S6e-D)', () => {
     expect(await code503(status({ paymentId: PAYMENT, state: 'clear' }, 200, 400))).toBe('503 refund_dispute_unavailable');
   });
 
+  // Core V2 S0-C9 (CB-3): the same read, classified for the L-4 application; nothing Billing cannot verify is ever `clear`
+  it('L-4 exposure: clear only when Payment states clear with zero counts; an open dispute, a chargeback, and everything else fail safe', async () => {
+    const read = (body: unknown, code = 200, hangMs = 0) => {
+      answers.set(path, { status: code, body, hangMs });
+      return client().lateSettlement(PAYMENT, AbortSignal.timeout(100));
+    };
+    const e = (state: string, openDisputes: unknown, disputeExposure: unknown, chargedBack: unknown) =>
+      ({ paymentId: PAYMENT, currency: 'TND', state, openDisputes, disputeExposure, chargedBack, conflicts: 0, lostWithoutChargeback: 0, asOf: new Date().toISOString() });
+    expect(await read(e('clear', 0, 0, 0))).toBe('clear');
+    expect(seen.auth).toBe('Bearer billing-token');
+    expect(await read(e('exposed', 1, 5600, 0))).toBe('dispute_open');
+    expect(await read(e('exposed', 0, 1200, 0))).toBe('dispute_open');
+    expect(await read(e('exposed', 0, 0, 5600))).toBe('chargeback_recorded');
+    expect(await read(e('exposed', 1, 5600, 5600)), 'a chargeback taken is the definitive fact').toBe('chargeback_recorded');
+    for (const [body, code] of [
+      [e('unresolved', 0, 0, 0), 200], [e('clear', 1, 0, 0), 200], [e('clear', 0, 0, 1), 200], [e('exposed', 0, 0, 0), 200], [e('zero', 0, 0, 0), 200],
+      [e('clear', '0', 0, 0), 200], [e('clear', -1, 0, 0), 200], [e('clear', 0, 0.5, 0), 200], [{ paymentId: PAYMENT, state: 'clear' }, 200],
+      [{ ...e('clear', 0, 0, 0), paymentId: '22222222-2222-4222-8222-222222222222' }, 200], [{ code: 'not_found' }, 404], [{ code: 'x' }, 503], [undefined, 200],
+    ] as const) {
+      expect(await read(body, code), JSON.stringify(body)).toBe('unavailable');
+    }
+    expect(await read(e('clear', 0, 0, 0), 200, 400), 'a timeout').toBe('unavailable');
+  });
+
   it('the losses read accepts only well-formed losses with their verified chargeback', async () => {
     const loss = { disputeId: '33333333-3333-4333-8333-333333333333', paymentId: PAYMENT, paymentRequestId: '44444444-4444-4444-8444-444444444444', amount: 4900, currency: 'TND',
       lostAt: '2026-10-29T10:00:00.000Z', chargeback: { factId: '55555555-5555-4555-8555-555555555555', amount: 4900, currency: 'TND' }, liveMode: false };

@@ -18,6 +18,26 @@ export interface PaymentLoss {
   currency: string;
   lostAt: string;
   chargeback: { factId: string; amount: number; currency: string } | null;
+  /**
+   * Core V2 S0-C9 (CB-2, register EVT-03): the disputed captured movement, as Payment states it. Both ABSENT (`undefined`) is a legacy
+   * version-1 statement and means `settling_capture`; anything else must be a known basis with a capture fact, or the loss is refused.
+   */
+  captureFactId?: unknown;
+  captureBasis?: unknown;
+}
+
+export type CaptureBasis = 'settling_capture' | 'late_capture';
+export const CAPTURE_BASES: readonly CaptureBasis[] = ['settling_capture', 'late_capture'];
+
+/**
+ * CB-2 compatibility: a statement without both fields is legacy (`settling_capture`, no fact Billing knows); a basis without a fact, a fact
+ * without a basis, an unknown basis or a malformed fact is `null` (a `binding_mismatch`: refused, never applied).
+ */
+export function captureOf(l: Pick<PaymentLoss, 'captureFactId' | 'captureBasis'>): { basis: CaptureBasis; factId: string | null } | null {
+  if (l.captureFactId === undefined && l.captureBasis === undefined) return { basis: 'settling_capture', factId: null };
+  if (typeof l.captureBasis !== 'string' || !(CAPTURE_BASES as readonly string[]).includes(l.captureBasis)) return null;
+  if (typeof l.captureFactId !== 'string' || !UUID.test(l.captureFactId)) return null;
+  return { basis: l.captureBasis as CaptureBasis, factId: l.captureFactId };
 }
 
 export type LossOutcome = 'recorded' | 'duplicate' | 'no_chargeback' | 'binding_mismatch' | 'conflict';
@@ -29,9 +49,17 @@ const isAmount = (v: unknown): v is number => typeof v === 'number' && Number.is
 export type DisputeEffectOutcome =
   | { kind: 'applied'; outcome: 'reversed_purchase' | 'none'; reason?: string }
   | { kind: 'already_applied' }
-  | { kind: 'review'; reason: string };
+  | { kind: 'review'; reason: string }
+  | { kind: 'held'; reason: string };
 
 class Review extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
+
+/** S0-C9 item 2: a late-capture loss whose late success Billing has not recorded yet: never applied to a purchase until it is. */
+class Held extends Error {
   constructor(readonly reason: string) {
     super(reason);
   }
@@ -84,22 +112,33 @@ export class DisputeLossService {
       return 'no_chargeback';
     }
     if (typeof c.factId !== 'string' || !UUID.test(c.factId) || !isAmount(c.amount) || typeof c.currency !== 'string' || c.currency.length > 16) return this.refused('binding_mismatch', l, 'malformed_chargeback');
+    const capture = captureOf(l);
+    if (!capture) return this.refused('binding_mismatch', l, 'malformed_capture');
     try {
       return await this.db.tx(async (q) => {
         const pr = (await q.query<{ id: string }>(`SELECT id FROM payment_request WHERE "paymentId" = $1`, [l.paymentId])).rows[0];
         if (!pr) return this.refused('binding_mismatch', l, 'unknown_payment');
-        const prior = (await q.query<{ chargebackFactId: string; chargebackAmount: string; disputeAmount: string }>(
-          `SELECT "chargebackFactId", "chargebackAmount", "disputeAmount" FROM payment_dispute_loss WHERE "disputeId" = $1`, [l.disputeId])).rows[0];
+        const prior = (await q.query<{ chargebackFactId: string; chargebackAmount: string; disputeAmount: string; captureBasis: string; captureFactId: string | null }>(
+          `SELECT "chargebackFactId", "chargebackAmount", "disputeAmount", "captureBasis", "captureFactId" FROM payment_dispute_loss WHERE "disputeId" = $1`, [l.disputeId])).rows[0];
         if (prior) {
-          const same = prior.chargebackFactId === c.factId && Number(prior.chargebackAmount) === c.amount && Number(prior.disputeAmount) === l.amount;
+          // the same verified loss, stating the same captured movement; any other statement of it is a conflict (S0-C9 item 7)
+          const same = prior.chargebackFactId === c.factId && Number(prior.chargebackAmount) === c.amount && Number(prior.disputeAmount) === l.amount
+            && prior.captureBasis === capture.basis && prior.captureFactId === capture.factId;
           return same ? 'duplicate' : this.refused('conflict', l, 'another_statement');
         }
+        // S0-C9 item 2: a late capture Billing already holds as Payment's late success must be this payment's
+        if (capture.basis === 'late_capture') {
+          const ls = (await q.query<{ paymentId: string; paymentRequestId: string }>(`SELECT "paymentId", "paymentRequestId" FROM payment_late_success WHERE "factId" = $1`, [capture.factId])).rows[0];
+          if (ls && (ls.paymentId !== l.paymentId || ls.paymentRequestId !== pr.id)) return this.refused('binding_mismatch', l, 'capture_of_another_payment');
+        }
         await q.query(
-          `INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount", "chargebackCurrency", "lostAt", source, "eventId")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-          [l.disputeId, l.paymentId, pr.id, l.amount, l.currency, c.factId, c.amount, c.currency, l.lostAt, source.kind, source.kind === 'event' ? source.eventId : null],
+          `INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount", "chargebackCurrency", "lostAt", source, "eventId",
+                                             "captureBasis", "captureFactId")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [l.disputeId, l.paymentId, pr.id, l.amount, l.currency, c.factId, c.amount, c.currency, l.lostAt, source.kind, source.kind === 'event' ? source.eventId : null,
+            capture.basis, capture.factId],
         );
-        this.log.log(`dispute_loss_recorded dispute=${l.disputeId} payment=${l.paymentId} source=${source.kind}`);
+        this.log.log(`dispute_loss_recorded dispute=${l.disputeId} payment=${l.paymentId} source=${source.kind} captureBasis=${capture.basis}`);
         return 'recorded' as const;
       });
     } catch (e) {
@@ -118,11 +157,11 @@ export class DisputeLossService {
    * One pass: Payment's losses read first (a delivery of `payment.dispute.lost` lost, or a chargeback reported after the loss), then every
    * recorded loss without an effect. Exposed for tests.
    */
-  async drainOnce(): Promise<{ recorded: number; applied: number; review: number; failed: number }> {
-    if (this.running) return { recorded: 0, applied: 0, review: 0, failed: 0 };
+  async drainOnce(): Promise<{ recorded: number; applied: number; review: number; held: number; failed: number }> {
+    if (this.running) return { recorded: 0, applied: 0, review: 0, held: 0, failed: 0 };
     this.running = true;
     try {
-      const tally = { recorded: 0, applied: 0, review: 0, failed: 0 };
+      const tally = { recorded: 0, applied: 0, review: 0, held: 0, failed: 0 };
       try {
         tally.recorded = await this.reconcile();
       } catch (e) {
@@ -137,6 +176,7 @@ export class DisputeLossService {
           const o = await this.apply(r.disputeId);
           if (o.kind === 'applied') tally.applied++;
           if (o.kind === 'review') tally.review++;
+          if (o.kind === 'held') tally.held++;
         } catch (e) {
           tally.failed++;
           await this.note(r.disputeId, 'retry', 'technical_failure').catch(() => undefined);
@@ -168,18 +208,29 @@ export class DisputeLossService {
     const ctx: TransitionContext = { actor: { type: 'system', id: DISPUTE_LOSS_WORKER }, cause: { type: 'sweep', id: disputeId }, correlationId: `dispute-loss:${disputeId}` };
     try {
       const outcome = await this.db.tx(async (q) => {
-        const l = (await q.query<{ disputeId: string; paymentId: string; paymentRequestId: string; disputeAmount: string; currency: string; chargebackAmount: string; chargebackCurrency: string }>(
-          `SELECT "disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackAmount", "chargebackCurrency" FROM payment_dispute_loss WHERE "disputeId" = $1 FOR UPDATE`,
+        const l = (await q.query<{ disputeId: string; paymentId: string; paymentRequestId: string; disputeAmount: string; currency: string; chargebackAmount: string; chargebackCurrency: string;
+          captureBasis: CaptureBasis; captureFactId: string | null }>(
+          `SELECT "disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackAmount", "chargebackCurrency", "captureBasis", "captureFactId"
+             FROM payment_dispute_loss WHERE "disputeId" = $1 FOR UPDATE`,
           [disputeId])).rows[0];
         if (!l) throw new Review('loss_missing');
         if ((await q.query(`SELECT 1 FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId])).rows.length > 0) return { kind: 'already_applied' as const };
+        // S0-C9 item 7: the payment request's lock, as the L-4 application and the loss's insert take it: a purchase applied concurrently is
+        // either committed before this effect (and bound by it) or refused afterwards (`chargeback_recorded`)
         const pr = (await q.query<{ id: string; paymentId: string; amount: string; currency: string; organizationId: string | null }>(
-          `SELECT pr.id, pr."paymentId", pr.amount, trim(pr.currency) AS currency, i."organizationId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1`,
+          `SELECT pr.id, pr."paymentId", pr.amount, trim(pr.currency) AS currency, i."organizationId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1
+            FOR UPDATE OF pr`,
           [l.paymentRequestId])).rows[0];
         if (!pr || pr.paymentId !== l.paymentId) throw new Review('payment_mismatch');
+        if (l.captureBasis === 'late_capture') return this.applyLateCapture(q, l, pr);
+        // `settling_capture` (every legacy loss): the purchase Payment's verified `payment.succeeded` evidences, never an L-4 purchase
         const p = (await q.query<{ id: string; purpose: string; beneficiaryUserId: string; productId: string }>(
-          `SELECT id, purpose, "beneficiaryUserId", "productId" FROM subscription_purchase WHERE "paymentRequestId" = $1`, [pr.id])).rows[0];
-        if (!p) return this.recordEffect(q, disputeId, 'none', null, 'not_a_personal_purchase');
+          `SELECT id, purpose, "beneficiaryUserId", "productId" FROM subscription_purchase WHERE "paymentRequestId" = $1 AND "lateSuccessId" IS NULL`, [pr.id])).rows[0];
+        if (!p) {
+          // a settling-capture loss of a request whose only purchase is an L-4 purchase names another captured movement: never applied to it
+          if ((await q.query(`SELECT 1 FROM subscription_purchase WHERE "paymentRequestId" = $1`, [pr.id])).rows.length > 0) throw new Review('capture_mismatch');
+          return this.recordEffect(q, disputeId, 'none', null, 'not_a_personal_purchase');
+        }
         if (l.currency !== pr.currency || l.chargebackCurrency !== pr.currency) throw new Review('currency_mismatch');
         // FC-4: an assisted purchase lost at final stage is never reversed; its beneficiary keeps the entitlement (S6f recovers the base)
         if (p.purpose === 'assisted_settlement') return this.recordEffect(q, disputeId, 'none', p.id, 'assisted_purchase_preserved');
@@ -205,6 +256,11 @@ export class DisputeLossService {
       if (outcome.kind === 'applied') this.log.log(`dispute_loss_effect_applied dispute=${disputeId} outcome=${outcome.outcome}${outcome.reason ? ` reason=${outcome.reason}` : ''}`);
       return outcome;
     } catch (e) {
+      if (e instanceof Held) {
+        await this.note(disputeId, 'held', e.reason);
+        this.log.warn(`dispute_loss_effect_held dispute=${disputeId} reason=${e.reason} — never applied to a purchase until Billing records its late success`);
+        return { kind: 'held', reason: e.reason };
+      }
       if (!(e instanceof Review)) throw e;
       await this.note(disputeId, 'review', e.reason);
       this.log.error(`dispute_loss_effect_review dispute=${disputeId} reason=${e.reason} — nothing applied; kept for review and re-checked`);
@@ -212,12 +268,38 @@ export class DisputeLossService {
     }
   }
 
+  /**
+   * Core V2 S0-C9 item 2 (CB-2): a loss of a LATE capture affects only the L-4 purchase evidenced by the late success naming that fact (B10 /
+   * FC-4 / S6f: the entitlement preserved, the base-only recovery obligation and T3 from S6f); any other late capture has no purchase effect
+   * (`late_capture_unsold`; its reconciliation case may resolve `chargeback_returned`, BIL-33 H). Billing not yet holding the late success:
+   * HELD, never applied to a purchase, re-checked until the late success is recorded (event or Payment's read).
+   */
+  private async applyLateCapture(q: Queryable, l: { disputeId: string; paymentId: string; paymentRequestId: string; currency: string; chargebackAmount: string;
+    chargebackCurrency: string; captureFactId: string | null }, pr: { id: string }): Promise<DisputeEffectOutcome> {
+    const ls = (await q.query<{ lateSuccessId: string; paymentId: string; paymentRequestId: string; amount: string; currency: string }>(
+      `SELECT "lateSuccessId", "paymentId", "paymentRequestId", amount, trim(currency) AS currency FROM payment_late_success WHERE "factId" = $1`, [l.captureFactId])).rows[0];
+    if (!ls) throw new Held('late_success_not_recorded');
+    if (ls.paymentId !== l.paymentId || ls.paymentRequestId !== pr.id) throw new Review('capture_mismatch');
+    if (l.currency !== ls.currency || l.chargebackCurrency !== ls.currency) throw new Review('currency_mismatch');
+    if (Number(l.chargebackAmount) > Number(ls.amount)) throw new Review('chargeback_exceeds_capture');
+    const p = (await q.query<{ id: string; purpose: string }>(`SELECT id, purpose FROM subscription_purchase WHERE "lateSuccessId" = $1`, [ls.lateSuccessId])).rows[0];
+    if (!p) {
+      // a late success counted as a RECOVERY payment (S6h R6H-4) charged back: no purchase effect, but recovered principal is at stake, which
+      // S0-C9 does not define: kept for review (contradictory_effect), never silently closed
+      if ((await q.query(`SELECT 1 FROM recovery_payment WHERE "lateSuccessId" = $1`, [ls.lateSuccessId])).rows.length > 0) throw new Review('recovery_payment_capture');
+      return this.recordEffect(q, l.disputeId, 'none', null, 'late_capture_unsold');
+    }
+    // FC-4: the L-4 purchase is assisted; a chargeback never reverses it (S6f recovers the base and applies T3 from this recorded loss)
+    if (p.purpose !== 'assisted_settlement') throw new Review('purchase_mismatch');
+    return this.recordEffect(q, l.disputeId, 'none', p.id, 'assisted_purchase_preserved');
+  }
+
   private async recordEffect(q: Queryable, disputeId: string, outcome: 'reversed_purchase' | 'none', purchaseId: string | null, reason: string | null): Promise<DisputeEffectOutcome> {
     await q.query(`INSERT INTO dispute_loss_effect ("disputeId", outcome, "purchaseId", reason) VALUES ($1, $2, $3, $4)`, [disputeId, outcome, purchaseId, reason]);
     return { kind: 'applied', outcome, ...(reason ? { reason } : {}) };
   }
 
-  private async note(disputeId: string, state: 'retry' | 'review', reason: string): Promise<void> {
+  private async note(disputeId: string, state: 'retry' | 'review' | 'held', reason: string): Promise<void> {
     await this.db.query(
       `INSERT INTO dispute_loss_effect_attempt ("disputeId", state, reason, "workAfter") VALUES ($1, $2, $3, now() + make_interval(secs => $4))
        ON CONFLICT ("disputeId") DO UPDATE SET state = $2, reason = $3, attempts = dispute_loss_effect_attempt.attempts + 1, "lastSeenAt" = now(),

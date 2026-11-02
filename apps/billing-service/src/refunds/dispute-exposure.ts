@@ -10,3 +10,17 @@ export const PAYMENT_DISPUTE_EXPOSURE = Symbol('BILLING_PAYMENT_DISPUTE_EXPOSURE
 export interface DisputeExposure {
   status(paymentId: string, deadline: AbortSignal): Promise<'none' | 'open'>;
 }
+
+/** DI token of the L-4 application's dispute-exposure read (Core V2 S0-C9, CB-3). */
+export const PAYMENT_LATE_SETTLEMENT_EXPOSURE = Symbol('BILLING_PAYMENT_LATE_SETTLEMENT_EXPOSURE');
+
+/**
+ * Core V2 S0-C9 item 4 (CB-3, an Owner-approved POLICY ADDITION; register BIL-32 H): Payment's authoritative dispute exposure of the late
+ * payment, read (R6A-3, Billing's service token) before the Owner's L-4 receipt is consumed. `clear` continues; an open dispute or open
+ * exposure is `dispute_open`; a chargeback recorded at Payment is `chargeback_recorded`; `unresolved`, an unavailable Payment or any answer
+ * Billing cannot verify is `unavailable` (never `clear`). The read is NOT a lock (S0-C9 item 7).
+ */
+export type LateSettlementExposureState = 'clear' | 'dispute_open' | 'chargeback_recorded' | 'unavailable';
+export interface LateSettlementExposure {
+  lateSettlement(paymentId: string, deadline: AbortSignal): Promise<LateSettlementExposureState>;
+}
