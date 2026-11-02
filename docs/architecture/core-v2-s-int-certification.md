@@ -9,6 +9,7 @@
 | Local run | 2026-11-02, 16:54:19Z to 18:17:26Z: Phase 1 **33 of 33 steps**; Phase 2 **21 files, 86 of 86 tests**. No failure, retry or abort |
 | Rules applied | [Readiness record](./core-v2-s-int-readiness.md) §7; [execution roadmap](./core-v2-s-execution-roadmap.md) §5 |
 | Scope | S1 to S6. S7 and S8 are outside this S-INT, with their V3 carry-over (§10) |
+| Amendment | §14 (2026-11-02): gaps registered after this certification by a later audit. It changes no result or verdict below |
 
 **What this record is not.** It is not production readiness, a production certification, a stage verdict promotion, an ADR acceptance or
 Final Core Validation. Nothing here was run against production, a real payment provider or Lab 01. It changes no code. It authorizes no
@@ -210,3 +211,95 @@ nothing by itself.
 ## 13. Approval
 
 This record is approved only by the Owner's merge.
+
+## 14. Amendment 1: gaps registered after this certification (2026-11-02)
+
+Added by the Owner's documentation-only GO. It takes effect only by the Owner's merge. §1 to §13 stand as written at their merge (#447).
+
+### 14.1 What stands
+
+Every run, count and observation at pin `3e73097` stands as recorded: Core CI 24 of 24; Phase 1, 33 of 33 steps; Phase 2, 21 files, 86 of 86 tests. So does the
+**CONDITIONAL PASS** verdict of §9, for development and simulation, S1 to S6, pre-lifecycle. §6's "Product defects found by the final run: none" remains true of
+that run. No stage verdict changes. The header's "PROPOSED" is this record's text at the time; it took effect through the Owner's merge of #447.
+
+### 14.2 What the S-INT run did not test
+
+A read-only Logic and Architecture Audit at `65f3c3a`, after this certification, read code and contracts rule by rule. It registered the findings below. **The S-INT
+run did not test these behaviours, and §7.3's criteria did not require it to.** No test in this record failed or is withdrawn, and this amendment does not claim that
+the original run exercised any of them.
+
+Except where stated, a finding rests on reading code, with no test run for it. The contract proposals named as drafts have not been adopted.
+
+| Finding | Gap | Disposition |
+|---|---|---|
+| F-27 | After a wrong-amount capture, a later notification equal to the payment, under the same reference, can settle it or qualify for L-4 against a contested fact | **Open.** Draft S0-C11, not adopted |
+| F-28 | A capture with no provider reference gets no fact, and can still settle | **Open.** Draft S0-C11, not adopted |
+| F-01 | A wrong-amount capture on a final payment reaches no Billing case | **Open.** Draft S0-C12, not adopted |
+| F-20 | On an open payment, a wrong-amount capture can prevent finality and leave no refund route | **Open.** Draft S0-C12, not adopted. An existing test proves one pass only; duration was not run |
+| F-02 | S0-C9 item 3's "visible for manual reconciliation" is not implemented; recording a conflict writes no audit record; no conflict can be cleared | **Open.** Draft S0-C13, not adopted. See [PAY-09 I](./core-v2-d-a2-contract-register.md) |
+| F-03 | Repeated full losses of one capture open repeated assisted obligations, and a second direct write-off appears automatic. S0-C9 item 6 is ambiguous on this | **Open.** Draft S0-C10, not adopted; liability undecided |
+| F-07 | An assisted chargeback above the payment retries on every pass, with no review | **Open.** Draft S0-C10, not adopted |
+| F-26 | A provider's chargeback reversal is not modelled | **Open.** Not drafted |
+| F-29 | Any active Owner could read every unmatched provider fact, and could attach one to its own payment and then refund it | **Corrected only after this certification**: see §14.3 |
+| F-05 | S0 §8 criteria not fully carried into the readiness record | Open |
+| F-06 | A transient failure on the last permitted processing bypasses the conflict path | Open, suspected |
+| F-13 | A `503` on `unresolved` exposure gives the reader no reason | Open |
+| F-14, F-16, F-21 | Documentation drift: the #319 classification; register index routes; register rows not refreshed after implementation | Open; no behaviour effect |
+| F-17 | DB-6 holds, by a trigger for currency rather than the composite key S0 names | Open; invariant holds |
+| F-18, F-19 | Legacy terminology; events with no consumer | Open; to confirm |
+| F-22 | ADR-0067's text covers refunds; Auth issues 8 receipt operations, each Owner-approved in the register | Open; ADR revision not done |
+| F-23 | G-1 acceptance timing: see §14.5 | Open |
+| F-24 | Only the three receipt actions can assert trusted scope, so the Owner timeline shows no financial action | Approved deferral (S2-Audit D3), to revisit |
+| F-25 | A `404` from AUTH-03 proves nothing, so an intent whose secret was lost stays pending | Reported at S6b; fails closed |
+
+F-08, F-09 and F-12 restate limits already in §11. F-10 and F-11 restate §7 and §8.
+
+The audit found no new money or authorization defect in the frozen rules of Auth, File, Audit, Notification or Release. That review covered those frozen rules, by reading code,
+not every behaviour of those services.
+
+### 14.3 F-29: corrected after this certification
+
+The correction exists only from PR #448 (merge `6e8ea08`), which is **after** the pin `3e73097`. At the pin, both the read and the association path were open. The S-INT run neither
+found nor tested this. Since #448, in development and simulation (Payment is not in production), under Accepted ADR-0050:
+
+- no Owner reads an unmatched fact, and no Owner associates one, until an approved authority and scope basis exists;
+- a capture-specific refund of an `associated_capture` is refused;
+- rows recorded before the correction stay as immutable evidence, and keep their item, balance and allocation effects.
+
+Register [PAY-12 G and PAY-13 H](./core-v2-d-a2-contract-register.md) record it. #448 deliberately changed two tests' assertions for that behaviour; earlier runs stand as evidence of the
+behaviour at their pins. This is a correction of one defect, not a re-certification.
+
+### 14.4 Corrections to §9, §10 and §11
+
+- **§9.** "No open development-level finding" reflected the §7.3 criteria. It does not describe Core V2's contracts as a whole, given §14.2. The verdict is unchanged.
+- **§10.** Its three ADRs were examples, not the inventory. **Sixteen ADRs are Proposed:** 0018, 0021, 0022, 0024, 0032, 0035, 0036, 0037, 0038, 0043, 0044, 0045, 0057, 0067, 0068, 0069.
+  G-1 and S0 §2 name eight of them (0035, 0036, 0044, 0045, 0057, 0067, 0068, 0069). The roadmaps defer three (0022 and 0024 to A6, 0043 to V3). No disposition was found for five (0018, 0021, 0032,
+  0037, 0038). This record accepts none of them. ADR-0044 is Proposed as a whole, though §10 said Part B.
+- **§11.** Item 3 also lacks the read: a terminal conflict is not visible through any API. Its opening line, "Not defects under the approved contracts", does not hold for that item's visibility,
+  which S0-C9 item 3 requires.
+
+### 14.5 G-1
+
+Stage records state these ADRs remained Proposed, except S6's, which has no such statement. Acceptance timing, in the words of G-1 rule 1, was not found recorded per stage. The Owner's instructions on file repeatedly kept
+the ADRs Proposed; those instructions are not in this repository, and that search was by keyword and may be incomplete. No ADR was accepted, and no retrospective authorization is recorded here.
+
+### 14.6 Proposed real-money readiness gates (pending)
+
+**These are not S-INT certification criteria.** S-INT did not test them, its verdict does not depend on them, and none is met, implemented or scheduled by this record. They are proposed, pending conditions before any real money,
+in addition to §10's gates.
+
+| Gate | Blocks | Exit | State |
+|---|---|---|---|
+| G-RM1 Contested captures | Real money | An approved contradiction-resolution contract | Pending |
+| G-RM2 Pre-final mismatched captures | Real money | A decided outcome per provider | Pending |
+| G-RM3 Unmatched provider notifications | Real money | A secure intake and reconciliation design, with an approved scope basis; the exposure blind spot monitored | Pending |
+| G-RM4 Provider reads | Conflict outcomes and exposure clearance in production | An authenticated dispute and capture read for that provider | Pending |
+| G-RM5 Production monitoring | Real money | Alerts for open-case age, reconciliation-pass lag and unmatched count | Pending |
+| G-RM6 Liability policy | Unassigned provider debits | A separately approved liability policy | Pending |
+| G-RM7 L-4 race | L-4 with a real provider | That provider's correction behaviour documented; the reconciliation pass and its read grant verified running | Pending |
+| G-RM8 Adapter semantics | Any real provider | Amounts, currency mapping, references and corrections certified per adapter | Pending |
+| G-RM9 ADR dispositions | Production of each service | One separate Owner approval per ADR | Pending |
+
+### 14.7 What this amendment does not do
+
+It changes no contract, code, ADR status, stage verdict or historical result. It adopts no draft S0 entry. It authorizes no implementation, production work, real provider, Lab 01 work, Stage 22 or deployment.
