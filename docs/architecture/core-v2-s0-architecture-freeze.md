@@ -275,6 +275,52 @@ status change still needs its own explicit owner authorization.
       dispute notifications and events give no second effect; (7) capture or amount mismatches fail safe; (8) Payment's final state and
       provider evidence are unchanged. The register entries PAY-09 G, PAY-14 H, EVT-03, BIL-32 H and BIL-33 H record its contract.
       Implements and activates nothing; each Billing, Payment, harness and certification PR needs a separate Owner authorization.
+- **S0-C11 Capture evidence for commercial effect (2026-11-03, owner-approved clarification of FC-1, FI-13, S4c F-4 and S0-C8 item 1, with
+  owner-approved additions in items 2, 3, 7 and 8; logic-audit findings F-27, F-28).** The number S0-C10 is reserved for a separate draft that is not
+  adopted. FC-1 to FC-5, S0-C8 and S0-C9 are unchanged and govern except as stated here. The first recorded fact under an identity
+  `(provider, providerTxnId, 'capture')` is the only evidence of what was captured under that identity.
+  1. *Verified capture.* A capture is **verified for commercial effect** only when all hold: it reached Payment through an authenticated provider
+     channel; it is committed as a `provider_transaction_fact`; the observation equals that fact in amount, currency, payment and attempt; and the
+     fact has no recorded contradiction.
+  2. *Settlement.* A payment moves to `succeeded` only on a verified capture whose amount and currency equal the payment's, and only while that capture
+     is the attempt's single capture fact. A missing, mismatched or contested fact never settles.
+  3. *Several references.* Distinct provider references on one attempt are distinct facts. None is merged, netted, preferred or discarded, and none
+     settles automatically. Payment may report that facts share an attempt, amount and currency as *potentially equivalent*: a derived observation, never
+     stored as a determination and with no financial effect. Only a separately approved contract may determine equivalence. A further capture of an
+     already `succeeded` payment stays on its existing path (R6H-5).
+  4. *Missing evidence.* An observation that can't be keyed to a fact creates no settlement, late success or L-4 eligibility. A stored notification,
+     where one exists, is kept and stays visible.
+  5. *Contradiction.* An observation contradicting a recorded fact is kept once and changes nothing: it never overwrites the fact, settles, grants or
+     reverses a purchase, records a late success, qualifies for L-4, or authorizes a refund. No precedence rule applies: neither figure is treated as true.
+     The fact remains what was first reported, and is contested.
+  6. *Late success.* A late success states the amount and currency of the fact it names, and only an observation equal to that fact records one.
+  7. *L-4.* A late assisted settlement is applied only when, at the last read before the receipt is consumed, Payment states that its capture fact exists,
+     is uncontested and equals the late success and the channel invoice's total. Contested, missing or mismatched: `409`. Payment unavailable or an
+     invalid answer: `503`. Neither spends the receipt or writes anything.
+     - *Not a lock.* This read is a point-in-time check and **not a cross-service lock**: no guarantee extends between it and Billing's commit. A
+       contradiction recorded before the read refuses. One recorded after it doesn't refuse, doesn't undo the commit, and doesn't reverse the committed
+       purchase (FC-4).
+     - *Evidence.* In that case, the contradiction stays visible under item 8, and its `capture_contradiction` case records that an L-4 purchase rests on
+       the contested capture.
+  8. *Visibility.* A capture contradiction stays visible until an approved contract resolves it: as Payment's Owner-readable `fact_conflict` item; as a
+     commercial audit record written with the contradiction; and as one Billing `capture_contradiction` reconciliation case per contested fact. That
+     case can't be acknowledged or closed by an Owner and reverses nothing.
+  9. *What a contradiction blocks,* for the contested capture only: settlement; a new late success; L-4; ordinary and capture-specific refunds; attribution
+     of a new dispute to it (S0-C9 item 1); counting it as a new recovery payment. **It doesn't block or undo:** a purchase already made (FC-4); an authorized
+     refund attempt (FC-2, FC-3); a recovery payment already counted; existing T1, T2 or T3 state; reads; or operations on another capture.
+  10. *Reading with existing text.* "Verified success" in L-1, S4c F-4, S0-C8 item 1 and §3.5 means, for commercial effect, a capture verified under
+      item 1. L-1 stays satisfied for a contradiction: the fact and the conflict are the record, and nothing is discarded. L-3 and S0-C8 item 4 keep the
+      refund as the default, but while the capture is contested that refund waits and the case stays in reconciliation (L-4's closing rule). FC-1 is
+      unchanged: a movement that can't be keyed stays what it already is under PAY-05 and PAY-13, an unmatched notification with no fact.
+  11. *Preserved.* FC-1 to FC-5; S4c F-1 to F-5, with F-4's matching-amount behaviour unchanged where the capture is verified under item 1; S0-C8 other than
+      the addition in item 7; S0-C9; PAY-12's scoping, including G. ADR statuses are unchanged, and no Accepted ADR is edited.
+  12. *Acceptance (later implementation; real events across processes, simulation only).* (1) A signed contradiction, before or after settlement, in either
+      order and through either channel, produces no settlement, purchase or late success. (2) No fact and several facts never settle. (3) L-4 refuses a
+      contested, missing or mismatched capture without spending the receipt, and answers `503` when Payment can't. (4) A contradiction after the read
+      leaves the purchase and opens one case recording it. (5) Both refund routes refuse a contested capture, and an authorized attempt continues. (6) F-4's
+      paths are unchanged. (7) The contradiction is audited once, atomically. The register entries PAY-02, PAY-05, PAY-07, PAY-12, BIL-32, BIL-33 and EVT-10
+      record its contract. **Current code does not yet meet this entry.** It implements and activates nothing; each Payment, Billing and certification PR needs
+      a separate Owner authorization.
 
 ## 2. ADR disposition
 
