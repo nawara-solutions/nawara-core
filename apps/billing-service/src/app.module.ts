@@ -18,7 +18,7 @@ import { InvoicesModule } from './invoices/invoices.module.js';
 import { PaymentIntegrationModule } from './payment-integration/payment-integration.module.js';
 import { PlatformsModule } from './platforms/platforms.module.js';
 import type { OwnerAuthority } from './platforms/owner-authority.client.js';
-import type { DisputeExposure } from './refunds/dispute-exposure.js';
+import type { DisputeExposure, LateSettlementExposure } from './refunds/dispute-exposure.js';
 import { RefundModule } from './refunds/refund.module.js';
 import { RecoveryModule } from './recovery/recovery.module.js';
 import { ReconciliationModule } from './reconciliation/reconciliation.module.js';
@@ -53,6 +53,8 @@ export interface AppModuleOverrides {
   ownerAuthority?: OwnerAuthority;
   /** Core V2 S6a: tests replace the dispute-exposure boundary of refund cases (default: no dispute source exists before S6e). */
   disputeExposure?: DisputeExposure;
+  /** Core V2 S0-C9 (CB-3): the L-4 application's exposure read (default: Payment's HTTP read, Billing's service token). */
+  lateSettlementExposure?: LateSettlementExposure;
   /** Core V2 S6b: the refund port to Payment (tests only) and whether the relay reconciler runs its passes (default true). */
   paymentRefundClient?: PaymentRefundClient;
   /** Core V2 S6e-D: Payment's dispute reads (tests only; default: the HTTP client). */
@@ -115,7 +117,7 @@ export class AppModule {
         MemberPersonalSubscriptionsModule.register(config), // Core V2 BIL-12 (D-B6): development and simulation only; never mounted in production
         AssistanceModule.register(config, overrides.ownerAuthority), // Core V2 S5a (BIL-13 to BIL-15): development and simulation only; never mounted in production
         // Core V2 S6a (BIL-23, BIL-25) and S6b (BIL-24): development and simulation only
-        RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient, fraudHoldReceipts: overrides.fraudHoldReceipts, fraudEvidenceFiles: overrides.fraudEvidenceFiles }),
+        RefundModule.register(config, overrides.ownerAuthority, overrides.disputeExposure, { paymentRefundClient: overrides.paymentRefundClient, reconciler: overrides.refundRelayReconciler, paymentDisputeClient: overrides.paymentDisputeClient, fraudHoldReceipts: overrides.fraudHoldReceipts, fraudEvidenceFiles: overrides.fraudEvidenceFiles, lateSettlementExposure: overrides.lateSettlementExposure }),
         // Core V2 S6f (BIL-26 T3, BIL-28 to BIL-31): recovery of verified assisted losses; development and simulation only
         RecoveryModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler }),
         // Core V2 S6g (BIL-32): the L-4 application of verified late assisted settlements; development and simulation only

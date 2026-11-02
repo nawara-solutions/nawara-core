@@ -567,6 +567,23 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" IN ($1, $2, $3)`, [a.requestId, b.requestId, c.requestId])).toBe(0);
     });
 
+    it('Core V2 S0-C9 (CB-3, both inputs): Payment\'s dispute exposure of an E-7 late payment is read before the receipt; open refuses, unresolved is 503; neither spends it', async () => {
+      const l = await lateFixture();
+      await attest(l.lateId, 'cash_not_returned').expect(201);
+      const body = attested(l);
+      const idem = key();
+      disputes.open.add(l.paymentId);
+      expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem))).toEqual([409, 'late_settlement_refused', 'payment_dispute_open']);
+      disputes.open.clear();
+      disputes.down = true;
+      expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem))).toEqual([503, 'late_settlement_dispute_unavailable', undefined]);
+      expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef, 'not spent').toBeUndefined();
+      expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [l.lateId])).toBe(0);
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(0);
+      disputes.down = false;
+      expect((await applyLate(l.lateId, body, 'owner-tok', idem)).status).toBe(201);
+    });
+
     it('R6G-7: a refund case on the late payment refuses the application; a cancelled case that never relayed does not', async () => {
       const [l, m] = (await lateFixtures('b1', 'b2')) as [Late, Late];
       await attest(l.lateId, 'cash_not_returned').expect(201);

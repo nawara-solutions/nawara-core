@@ -826,6 +826,24 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       return c.id as string;
     };
 
+    it('Core V2 S0-C9: a late-capture loss of a late success counted as a RECOVERY payment has no purchase effect and is kept for review, never silently closed', async () => {
+      const o = await opened();
+      const c1 = (await settleRecovery(o.obligationId)).body;
+      const failed = await recoveryEvent(c1.paymentRequestId, 'payment.failed');
+      const factId = randomUUID();
+      expect(await s6hLateSuccess(c1.paymentRequestId, failed.paymentId, factId)).toBe('recovery');
+      const amount = Number((await one(`SELECT amount FROM payment_request WHERE id = $1`, [c1.paymentRequestId])).amount);
+      const id = randomUUID();
+      const disputeId = randomUUID();
+      await t.bus.deliver({ id, name: 'payment.dispute.lost', payload: {
+        disputeId, paymentId: failed.paymentId, paymentRequestId: c1.paymentRequestId, producer: 'billing-service', organizationId: ORG, purpose: 'recovery_settlement', amount,
+        currency: 'TND', lostAt: new Date().toISOString(), chargeback: { factId: randomUUID(), amount, currency: 'TND' }, liveMode: false, captureFactId: factId, captureBasis: 'late_capture',
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as never);
+      expect(await losses().apply(disputeId)).toEqual({ kind: 'review', reason: 'recovery_payment_capture' });
+      expect(await one(`SELECT 1 AS x FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId])).toBeUndefined();
+      expect(await recovery().visit(disputeId)).toBe('already');
+    });
+
     it('CERTIFICATION: A undecided blocks a second attempt; A fails, B recovers the base (T3 clears once); A\'s verified LATE success is counted once, as surplus', async () => {
       const o = await opened();
       expect(await restrictions()).toEqual([{ kind: 'T3', sourceId: o.obligationId }]);

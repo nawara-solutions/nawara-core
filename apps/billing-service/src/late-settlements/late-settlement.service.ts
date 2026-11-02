@@ -13,6 +13,7 @@ import { recordTransition } from '../domain/transitions.js';
 import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
+import { PAYMENT_LATE_SETTLEMENT_EXPOSURE, type LateSettlementExposure } from '../refunds/dispute-exposure.js';
 import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscription.repository.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -31,6 +32,8 @@ export const LATE_SETTLEMENT_REFUSALS = [
   'evidence_insufficient', 'evidence_contradictory', 'settlement_time_unavailable', 'already_applied',
   // Core V2 S0-C8 item 8 (LS-7, an Owner-approved policy addition): a verified chargeback of the payment refuses L-4 (both inputs)
   'chargeback_recorded',
+  // Core V2 S0-C9 item 4 (CB-3, an Owner-approved policy addition): Payment states an open dispute or open exposure of the payment
+  'payment_dispute_open',
 ] as const;
 export type LateSettlementRefusal = (typeof LATE_SETTLEMENT_REFUSALS)[number];
 
@@ -135,6 +138,7 @@ export class LateSettlementService {
     @Inject(OWNER_AUTHORITY) private readonly owners: OwnerAuthority,
     @Inject(FRAUD_HOLD_RECEIPTS) private readonly receipts: FraudHoldReceipts,
     @Inject(FRAUD_EVIDENCE_FILES) private readonly files: FraudEvidenceFiles,
+    @Inject(PAYMENT_LATE_SETTLEMENT_EXPOSURE) private readonly exposure: LateSettlementExposure,
   ) {}
 
   private deadline(): AbortSignal {
@@ -303,6 +307,9 @@ export class LateSettlementService {
       operation: 'late_settlement_apply', audience: 'billing-service', companyId: l.companyId!, lateSettlementId: id, assistanceRequestId: l.assistanceRequestId,
       beneficiaryUserId: l.beneficiaryUserId, reasonCode: input.reasonCode,
     };
+    // Core V2 S0-C9 item 4 (CB-3): Payment's authoritative dispute exposure, read last before the receipt is consumed; a refusal or a 503
+    // spends no receipt and writes nothing. Not a lock: a dispute recorded after this read follows S0-C9 item 7 (EVT-03's capture binding)
+    await this.disputeExposureClear(l);
     const consumption = await this.consume(binding, input.receiptSecret, lateSettlementConsumeRef(id, input.receiptSecret), owner);
     try {
       return await this.idempotency.run(owner.userId, key, 'assistance_late_settlement.apply', command, (q) => this.applyIn(q, l, input, owner, consumption, ctx));
@@ -369,6 +376,24 @@ export class LateSettlementService {
     }, ctx);
     this.log.log(`late_settlement_applied lateSettlement=${l.id} request=${l.assistanceRequestId} purchase=${purchase.id} superseded=${live?.id ?? 'none'}`);
     return { status: 201, body: await this.view(q, l) };
+  }
+
+  /** CB-3: `clear` continues; Payment's open dispute or chargeback refuses `409`; anything Billing cannot verify is `503` (never clear). */
+  private async disputeExposureClear(l: LateRow): Promise<void> {
+    const paymentId = (await this.db.query<{ paymentId: string | null }>(`SELECT "paymentId" FROM payment_request WHERE id = $1`, [l.paymentRequestId])).rows[0]?.paymentId;
+    let state = 'unavailable';
+    if (paymentId) {
+      try {
+        state = await this.exposure.lateSettlement(paymentId, this.deadline());
+      } catch {
+        state = 'unavailable';
+      }
+    }
+    if (state === 'clear') return;
+    this.log.warn(`late_settlement_dispute_exposure lateSettlement=${l.id} payment=${paymentId ?? 'none'} state=${state} — refused before the receipt; nothing written`);
+    if (state === 'dispute_open') throw lateSettlementRefused('payment_dispute_open');
+    if (state === 'chargeback_recorded') throw lateSettlementRefused('chargeback_recorded');
+    throw billingError(503, 'late_settlement_dispute_unavailable', BILLING_MESSAGES.lateSettlementDisputeUnavailable);
   }
 
   private async consume(binding: FraudHoldBinding, secret: string, consumeRef: string, owner: VerifiedRefundOwner): Promise<ReceiptConsumption> {

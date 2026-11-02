@@ -14,6 +14,18 @@ import type { RefundCaseInput } from './refund-input.js';
 import type { VerifiedRefundOwner } from './refund-owner.guard.js';
 
 const notEligible = () => billingError(409, 'refund_not_eligible', BILLING_MESSAGES.refundNotEligible);
+
+/**
+ * Core V2 S0-C9 item 6: one return per captured movement. A capture the provider returned in full by chargeback (its reconciliation case
+ * resolved `chargeback_returned`, BIL-33 H) is never refunded: `409 refund_dispute_open`, under the payment request's lock (the database
+ * agrees: `refund_case_06_chargeback_returned`).
+ */
+async function refuseChargebackReturned(q: Queryable, paymentId: string, captureFactId: string | null): Promise<void> {
+  if ((await q.query(`SELECT 1 FROM reconciliation_case c JOIN reconciliation_case_resolution x ON x."caseId" = c.id
+       WHERE x.kind = 'chargeback_returned' AND c."paymentId" = $1 AND ($2::uuid IS NULL OR c."captureFactId" = $2)`, [paymentId, captureFactId])).rows.length > 0) {
+    throw billingError(409, 'refund_dispute_open', BILLING_MESSAGES.refundDisputeOpen);
+  }
+}
 const caseExists = () => billingError(409, 'refund_case_exists', BILLING_MESSAGES.refundCaseExists);
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
@@ -119,6 +131,7 @@ export class RefundCaseService {
       if (!basis || (pr.status !== 'paid' && !basis.captureFactId)) throw notEligible();
       // Core V2 S6f (R6F-5 Path A): the recovery-surplus reason is required for, and only for, the recovery-surplus basis
       if ((input.reason === 'recovery_surplus') !== (basis.eligibility === 'recovery_surplus')) throw notEligible();
+      await refuseChargebackReturned(q, input.paymentId, basis.captureFactId ?? null);
       // Core V2 S0-C8 (LS-6): one live case per captured movement, whatever its eligibility
       if (basis.captureFactId && (await q.query(`SELECT 1 FROM refund_case WHERE "captureFactId" = $1 AND status IN ('open', 'completed')`, [basis.captureFactId])).rows.length > 0) {
         throw caseExists();
@@ -174,6 +187,7 @@ export class RefundCaseService {
       // Core V2 S0-C8 (LS-6): the capture that evidences a late assisted settlement is refunded by that settlement's own case (L-3)
       if ((await q.query(`SELECT 1 FROM assistance_late_settlement l JOIN payment_late_success s ON s."lateSuccessId" = l."lateSuccessId" WHERE s."factId" = $1`,
         [factId])).rows.length > 0) throw notEligible();
+      await refuseChargebackReturned(q, input.paymentId, factId);
       if ((await q.query(`SELECT 1 FROM refund_case WHERE "captureFactId" = $1 AND status IN ('open', 'completed')
             UNION ALL SELECT 1 FROM refund_case WHERE "paymentId" = $2 AND eligibility <> 'capture_specific'
               AND (status = 'open' OR (status = 'completed' AND $3::text = 'unrouted_capture'))`, [factId, input.paymentId, basis.basis])).rows.length > 0) throw caseExists();

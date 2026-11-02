@@ -1,7 +1,7 @@
 import { Module, type DynamicModule } from '@nestjs/common';
 import type { BillingConfig } from '../config/billing-config.js';
 import { HttpOwnerAuthority, OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
-import { PAYMENT_DISPUTE_EXPOSURE, type DisputeExposure } from './dispute-exposure.js';
+import { PAYMENT_DISPUTE_EXPOSURE, PAYMENT_LATE_SETTLEMENT_EXPOSURE, type DisputeExposure, type LateSettlementExposure } from './dispute-exposure.js';
 import { DisputeLossService, DisputeLossWorkerService } from './dispute-loss.service.js';
 import { HttpPaymentDisputeClient, PAYMENT_DISPUTE_CLIENT, type PaymentDisputeClient } from './payment-dispute-client.js';
 import { FraudHoldController } from '../fraud-holds/fraud-hold.controller.js';
@@ -29,7 +29,8 @@ import { RefundEffectService, RefundEffectWorkerService } from './refund-effect.
 @Module({})
 export class RefundModule {
   static register(config: BillingConfig, ownerAuthority?: OwnerAuthority, disputeExposure?: DisputeExposure,
-    refunds: { paymentRefundClient?: PaymentRefundClient; reconciler?: boolean; paymentDisputeClient?: PaymentDisputeClient; fraudHoldReceipts?: FraudHoldReceipts; fraudEvidenceFiles?: FraudEvidenceFiles } = {}): DynamicModule {
+    refunds: { paymentRefundClient?: PaymentRefundClient; reconciler?: boolean; paymentDisputeClient?: PaymentDisputeClient; fraudHoldReceipts?: FraudHoldReceipts; fraudEvidenceFiles?: FraudEvidenceFiles;
+      lateSettlementExposure?: LateSettlementExposure } = {}): DynamicModule {
     if (config.isProduction) return { module: RefundModule };
     // Core V2 S6e-H (BIL-27): fraud holds' Auth receipt and File evidence clients (Billing's own tokens); not configured, nothing is placed
     const fh = config.fraudHolds;
@@ -64,10 +65,12 @@ export class RefundModule {
         },
         { provide: OWNER_AUTHORITY, useValue: ownerAuthority ?? new HttpOwnerAuthority({ baseUrl: config.authServiceUrl }) },
         { provide: PAYMENT_DISPUTE_EXPOSURE, useValue: disputeExposure ?? disputes }, // R6E-4: Payment's authoritative exposure, fail closed
+        // Core V2 S0-C9 (CB-3): the same read, classified for the L-4 application (the late settlement module consumes it)
+        { provide: PAYMENT_LATE_SETTLEMENT_EXPOSURE, useValue: refunds.lateSettlementExposure ?? disputes },
       ],
       // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
       global: true,
-      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService, FRAUD_HOLD_RECEIPTS, FRAUD_EVIDENCE_FILES], // S6f: the recovery Path B reuses both clients
+      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService, FRAUD_HOLD_RECEIPTS, FRAUD_EVIDENCE_FILES, PAYMENT_LATE_SETTLEMENT_EXPOSURE], // S6f: the recovery Path B reuses both clients
     };
   }
 }

@@ -13,7 +13,7 @@ import { BILLING_OPERATIONS } from '../../src/admission/caller-admission.policy.
 import { TrustedDeliveryBus } from './trusted-delivery-bus.js';
 import { BillingExceptionFilter } from '../../src/errors/billing-exception.filter.js';
 import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/owner-authority.client.js';
-import type { DisputeExposure } from '../../src/refunds/dispute-exposure.js';
+import type { DisputeExposure, LateSettlementExposure } from '../../src/refunds/dispute-exposure.js';
 import type { PaymentRefundClient } from '../../src/refunds/payment-refund-client.js';
 import type { PaymentDisputeClient } from '../../src/refunds/payment-dispute-client.js';
 import type { PaymentReconciliationClient } from '../../src/reconciliation/payment-reconciliation-client.js';
@@ -64,6 +64,19 @@ export function allOperationsPolicy(tokens: ServiceTokenEntry[]): string {
   return JSON.stringify({ callers: Object.fromEntries(callers.map((c) => [c, { operations: [...BILLING_OPERATIONS], allowedPlatforms: [TEST_PLATFORM] }])) });
 }
 
+/** The CB-3 read derived from a suite's R6A-3 fake, so suites written before S0-C9 keep their meaning (an open dispute refuses L-4). */
+export function lateSettlementFrom(d: DisputeExposure): LateSettlementExposure {
+  return {
+    lateSettlement: async (paymentId, deadline) => {
+      try {
+        return (await d.status(paymentId, deadline)) === 'none' ? 'clear' : 'dispute_open';
+      } catch {
+        return 'unavailable';
+      }
+    },
+  };
+}
+
 export async function createTestApp(opts: {
   databaseUrl: string;
   tokens?: ServiceTokenEntry[];
@@ -78,6 +91,11 @@ export async function createTestApp(opts: {
   ownerAuthority?: OwnerAuthority;
   /** Core V2 S6a: the refund cases' dispute-exposure boundary (default: the pre-S6e adapter). */
   disputeExposure?: DisputeExposure;
+  /**
+   * Core V2 S0-C9 (CB-3): the L-4 application's exposure read. Default: derived from `disputeExposure` when a suite gives one (`none` → clear,
+   * `open` → dispute_open, a throw → unavailable), else Payment's HTTP read against the unreachable test URL (always `unavailable`).
+   */
+  lateSettlementExposure?: LateSettlementExposure;
   /** Core V2 S6b: the refund port to Payment (default: the HTTP client on the configured URL) and no relay-reconciler passes unless asked. */
   paymentRefundClient?: PaymentRefundClient;
   paymentDisputeClient?: PaymentDisputeClient;
@@ -117,6 +135,7 @@ export async function createTestApp(opts: {
         organizationReference: opts.organizationReference ?? anyOrganizationReference,
         ownerAuthority: opts.ownerAuthority ?? unreachableOwnerAuthority,
         disputeExposure: opts.disputeExposure,
+        lateSettlementExposure: opts.lateSettlementExposure ?? (opts.disputeExposure ? lateSettlementFrom(opts.disputeExposure) : undefined),
         paymentRefundClient: opts.paymentRefundClient,
         paymentDisputeClient: opts.paymentDisputeClient,
         fraudHoldReceipts: opts.fraudHoldReceipts,

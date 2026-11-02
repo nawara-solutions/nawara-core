@@ -109,6 +109,7 @@ export class ReconciliationService {
       await this.discoverLocal(tally);
       await this.recognizeChargebackLosses(tally);
       await this.resolveOpen(tally);
+      await this.resolveChargebackReturned(tally);
       return tally;
     } finally {
       this.running = false;
@@ -228,9 +229,20 @@ export class ReconciliationService {
       (r) => ({ caseType: 'contradictory_effect', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, detail: 'dispute_effect_review' }));
     await run(`SELECT x."disputeId" AS id, l."paymentRequestId", l."chargebackAmount" AS amount, trim(l.currency) AS currency FROM (
           SELECT "disputeId" FROM dispute_loss_effect_attempt WHERE reason = 'partial_chargeback_threshold_open'
-          UNION SELECT "disputeId" FROM recovery_review WHERE reason = 'partial_chargeback') x
+          UNION SELECT "disputeId" FROM recovery_review WHERE reason = 'partial_chargeback'
+          -- Core V2 S0-C9 item 5 (CB-4): a PARTIAL chargeback of an unsold late capture never resolves its case; it is reviewed here
+          UNION SELECT e."disputeId" FROM dispute_loss_effect e JOIN payment_dispute_loss pl ON pl."disputeId" = e."disputeId"
+            JOIN payment_late_success ls ON ls."factId" = pl."captureFactId"
+           WHERE e.reason = 'late_capture_unsold' AND pl."chargebackAmount" < ls.amount) x
         JOIN payment_dispute_loss l ON l."disputeId" = x."disputeId" WHERE ${fresh('partial_chargeback', 'x."disputeId"')}`,
       (r) => ({ caseType: 'partial_chargeback', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, amount: Number(r.amount), currency: r.currency, detail: 'partial_chargeback' }));
+    // Core V2 S0-C9 item 6: a late capture refunded (completed) AND charged back: preserved for reconciliation, never `chargeback_returned`
+    await run(`SELECT l."disputeId" AS id, l."paymentRequestId", l."chargebackAmount" AS amount, trim(l.currency) AS currency FROM payment_dispute_loss l
+        WHERE l."captureBasis" = 'late_capture'
+          AND EXISTS (SELECT 1 FROM refund_case r WHERE r."paymentId" = l."paymentId" AND r."captureFactId" = l."captureFactId" AND r.status = 'completed')
+          AND ${fresh('chargeback_refund_overlap', 'l."disputeId"')}`,
+      (r) => ({ caseType: 'chargeback_refund_overlap', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, amount: Number(r.amount), currency: r.currency,
+        detail: 'refund_and_chargeback' }));
     // recovery surpluses: owed to the Organization until resolved (R-2); the case is the Owner's visibility, the obligation's Company
     for (const r of (await this.db.query<{ id: string; amount: string; currency: string; companyId: string; platformId: string; organizationId: string }>(
       `SELECT s.id, s.amount, trim(s.currency) AS currency, o."companyId", o."platformId", s."organizationId" FROM recovery_surplus s JOIN recovery_obligation o ON o.id = s."obligationId"
@@ -249,7 +261,7 @@ export class ReconciliationService {
       `SELECT l."disputeId", l."paymentId", l."paymentRequestId", l."chargebackFactId", l."chargebackAmount" AS amount, trim(r.currency) AS currency, i."sellerId", i."organizationId",
               EXISTS (SELECT 1 FROM refund_case c WHERE c."paymentId" = l."paymentId" AND c.status = 'completed') AS refunded
          FROM payment_dispute_loss l JOIN payment_request r ON r.id = l."paymentRequestId" JOIN invoice i ON i.id = r."invoiceId"
-        WHERE i."sellerType" = 'company' AND l."chargebackAmount" = r.amount AND l."chargebackCurrency" = trim(r.currency)
+        WHERE i."sellerType" = 'company' AND l."chargebackAmount" = r.amount AND l."chargebackCurrency" = trim(r.currency) AND l."captureBasis" = 'settling_capture'
           AND EXISTS (SELECT 1 FROM subscription_purchase s WHERE s."paymentRequestId" = r.id AND s.purpose = 'direct_purchase')
           AND NOT EXISTS (SELECT 1 FROM financial_loss f WHERE f.kind = 'direct_chargeback_write_off' AND f."evidenceKey" = l."chargebackFactId")
           AND NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = 'chargeback_refund_overlap' AND k."evidenceKey" = l."disputeId")`);
@@ -316,6 +328,36 @@ export class ReconciliationService {
         }
       });
       if (done) tally.resolved++;
+    }
+  }
+
+  /**
+   * Core V2 S0-C9 item 5 (CB-4, an Owner-approved POLICY ADDITION; register BIL-33 H): the case of an UNSOLD late capture resolves as
+   * `chargeback_returned` when Billing holds a verified late-capture loss of exactly that capture whose chargeback is the capture's FULL amount
+   * in its currency, with no purchase from that late success and no live or completed refund case of that capture. Nothing is refunded, sold
+   * or changed (the request keeps its obligation, violations and restrictions). The database re-checks every condition under the payment
+   * request's lock; a refusal (a refund or an application won the race) leaves the case open. A partial chargeback never qualifies.
+   */
+  private async resolveChargebackReturned(tally: { resolved: number }): Promise<void> {
+    const { rows } = await this.db.query<{ id: string; evidenceKey: string; disputeId: string }>(
+      `SELECT c.id, c."evidenceKey", l."disputeId" FROM reconciliation_case c
+         JOIN payment_dispute_loss l ON l."captureBasis" = 'late_capture' AND l."captureFactId" = c."captureFactId" AND l."paymentId" = c."paymentId"
+         JOIN payment_late_success s ON s."factId" = l."captureFactId"
+        WHERE c."caseType" IN ('late_assisted_settlement', 'late_success') AND c."captureFactId" IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM reconciliation_case_resolution x WHERE x."caseId" = c.id)
+          AND l."chargebackAmount" = s.amount AND l."chargebackCurrency" = trim(s.currency) AND l.currency = trim(s.currency)
+          AND NOT EXISTS (SELECT 1 FROM subscription_purchase p WHERE p."lateSuccessId" = s."lateSuccessId")
+        ORDER BY c."openedAt", c.id`);
+    for (const c of rows) {
+      try {
+        if (await this.db.tx(async (q) => this.cases.resolve(q, c.id, 'chargeback_returned', { disputeId: c.disputeId }, workerContext(c.evidenceKey)))) {
+          tally.resolved++;
+          this.log.log(`reconciliation_chargeback_returned case=${c.id} dispute=${c.disputeId} — the provider returned the whole unsold capture; nothing refunded`);
+        }
+      } catch (e) {
+        if (pgConstraint(e) !== 'reconciliation_case_resolution_evidence') throw e;
+        this.log.warn(`reconciliation_chargeback_returned_refused case=${c.id} dispute=${c.disputeId} — its evidence no longer supports it (a refund or an application); kept open`);
+      }
     }
   }
 

@@ -333,7 +333,9 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     }
     const outcome = await this.disputeLosses.record(
       { disputeId: p.disputeId, paymentId: p.paymentId, amount: p.amount, currency: p.currency, lostAt: p.lostAt,
-        chargeback: c ? { factId: c.factId as string, amount: c.amount as number, currency: c.currency as string } : null },
+        chargeback: c ? { factId: c.factId as string, amount: c.amount as number, currency: c.currency as string } : null,
+        // Core V2 S0-C9 (CB-2): additive in version 1; both absent = a legacy loss of the settling capture (validated by `record`)
+        ...('captureFactId' in p ? { captureFactId: p.captureFactId } : {}), ...('captureBasis' in p ? { captureBasis: p.captureBasis } : {}) },
       { kind: 'event', eventId: t.eventId },
     );
     if (outcome === 'binding_mismatch' || outcome === 'conflict') {
