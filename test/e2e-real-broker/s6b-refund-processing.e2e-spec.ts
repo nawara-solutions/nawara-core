@@ -287,7 +287,13 @@ describeWithEnv(
       expect(relayed.json.attempts).toEqual([expect.objectContaining({ refundAttemptId: attemptId, status: 'authorized' })]);
       // Auth: consumed once, by payment-service, under the attempt id; Payment: authorized, the approver from Auth
       expect(await receiptRow(r.receiptId)).toEqual({ status: 'consumed', consumeRef: attemptId, consumedBy: 'payment-service' });
-      expect(await attemptRow(attemptId)).toMatchObject({ status: 'authorized', receiptId: r.receiptId, approvedByUserId: OWNER, companyId: COMPANY, paymentId });
+      // Payment's refund worker may already have dispatched it (authorized -> submitted) by the time this row is read: the AUTHORIZED state is
+      // the relay's synchronous answer above; here the authorization itself is asserted, whichever of the two states the row is in, and a
+      // dispatch never precedes it
+      const authorized = await attemptRow(attemptId);
+      expect(authorized).toMatchObject({ receiptId: r.receiptId, approvedByUserId: OWNER, companyId: COMPANY, paymentId, authorizedAt: expect.any(Date), consumedAt: expect.any(Date) });
+      expect(['authorized', 'submitted'], `attempt ${attemptId} is ${authorized.status}`).toContain(authorized.status);
+      if (authorized.status === 'submitted') expect(authorized.submittedAt.getTime()).toBeGreaterThanOrEqual(authorized.authorizedAt.getTime());
       // the secret is in no database
       for (const [pool, sql] of [[billingAdmin, `SELECT string_agg(row_to_json(r)::text, ' ') AS a FROM refund_authorization_relay r`], [paymentAdmin, `SELECT string_agg(row_to_json(r)::text, ' ') AS a FROM refund_attempt r`],
         [billingAdmin, `SELECT string_agg(payload::text, ' ') AS a FROM outbox`], [paymentAdmin, `SELECT string_agg(payload::text, ' ') AS a FROM outbox`]] as const) {
