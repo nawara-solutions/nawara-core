@@ -584,7 +584,8 @@ SELECT pg_temp.expect_error('SUB', 'a subscription is never deleted', format($$D
 
 -- renewal (the database half, mirroring SubscriptionRepository.renew exactly): the frozen anchor rule
 SELECT t_mk_active_subscription('2026-11-01T00:00:00Z'::timestamptz) AS early_sub \gset
-SELECT t_try_renew(:'early_sub');
+-- settled at a fixed instant INSIDE the period (2026-10-01 to 2026-11-01), never the wall clock: an early renewal by construction, on any date
+SELECT t_try_renew(:'early_sub', '2026-10-15T00:00:00Z'::timestamptz);
 -- compared as VALUES, not text: the session's display timezone (not necessarily UTC) would otherwise show a different offset
 SELECT pg_temp.assert_eq('SUB', 'early renewal anchors on the ORIGINAL currentPeriodEnd', (SELECT ("currentPeriodStart" = '2026-11-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'early_sub'), 'true');
 SELECT pg_temp.assert_eq('SUB', 'early renewal extends by exactly one recurring interval', (SELECT ("currentPeriodEnd" = '2026-12-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'early_sub'), 'true');
