@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
 import { ServiceUnavailableException } from '@nestjs/common';
 import pg from 'pg';
 import request from 'supertest';
@@ -19,7 +20,7 @@ import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
-import type { CaptureReadOutcome, PaymentRefundClient, SettlingCaptureOutcome } from '../src/refunds/payment-refund-client.js';
+import { HttpPaymentRefundClient, type CaptureReadOutcome, type PaymentRefundClient, type SettlingCaptureOutcome } from '../src/refunds/payment-refund-client.js';
 import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
 import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
 import { LateSettlementModule } from '../src/late-settlements/late-settlement.module.js';
@@ -709,7 +710,6 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
     it('missing, legacy, ambiguous, unequal and contested evidence refuse before the receipt; nothing is written', async () => {
       const cases: Array<[string, (p: string) => Promise<SettlingCaptureOutcome>, string]> = [
         ['no settling capture (not succeeded or legacy)', async () => ({ kind: 'none', reason: 'settling_capture_not_found' }), 'capture_unverified'],
-        ['the collapsed answer', async () => ({ kind: 'none', reason: 'not_found' }), 'capture_unverified'],
         ['two capture facts', async () => ({ kind: 'ambiguous' }), 'capture_unverified'],
         ['another amount', settling({ amount: 5301 }), 'capture_unverified'],
         ['another currency', settling({ currency: 'EUR' }), 'capture_unverified'],
@@ -742,6 +742,97 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       }
       settlingAt.answer = verifiedSettlingCapture;
       expect((await applyLate(l.lateId, body)).status).toBe(201);
+    });
+
+    /**
+     * BIL-32 L (C-2), through Billing's REAL HTTP client (`HttpPaymentRefundClient`, the production wiring) against a local server answering
+     * exactly as Payment's PAY-16 does (the bodies of `paymentError` / `notFound`; the real Payment process is shown to answer them in
+     * `test/e2e-real-broker/s6b-refund-processing.e2e-spec.ts`): the collapsed `404 not_found` is 503, never ordinary missing evidence;
+     * `404 settling_capture_not_found` stays 409 capture_unverified; neither spends the Owner's receipt or changes anything financial.
+     */
+    describe('C-2: Payment\'s HTTP answers through Billing\'s real client', () => {
+      let server: Server;
+      let base = '';
+      const hits: Array<{ path: string; auth?: string }> = [];
+      let reply: (paymentId: string) => Promise<{ status: number; body: unknown }> = async () => ({ status: 500, body: { code: 'unset' } });
+      beforeAll(async () => {
+        server = createServer((req, res) => {
+          hits.push({ path: req.url ?? '', auth: req.headers.authorization });
+          const m = /^\/payment\/payments\/([^/]+)\/settling-capture$/.exec(req.url ?? '');
+          void (m ? reply(decodeURIComponent(m[1]!)) : Promise.resolve({ status: 404, body: { code: 'route_missing' } })).then((a) => {
+            res.writeHead(a.status, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(a.body));
+          });
+        });
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+        base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      });
+      afterAll(() => new Promise<void>((r) => server.close(() => r())));
+      beforeEach(() => {
+        hits.length = 0;
+        const client = new HttpPaymentRefundClient({ baseUrl: base, serviceToken: 'billing-to-payment-token', timeoutMs: 2000 });
+        settlingAt.answer = (paymentId) => client.settlingCapture(paymentId);
+      });
+      const collapsed = { status: 404, body: { code: 'not_found', message: 'Not found.' } };
+      const noCapture = { status: 404, body: { code: 'settling_capture_not_found', message: 'This payment has no verified settling capture.' } };
+      const verified = async (paymentId: string) => {
+        const v = await verifiedSettlingCapture(paymentId);
+        return v.kind === 'capture' ? { status: 200, body: v.capture } : { status: 500, body: { code: 'fixture' } };
+      };
+
+      it('the collapsed 404 not_found (as for a caller without payment.read) is 503 late_settlement_capture_unavailable, not capture_unverified; the receipt is unspent', async () => {
+        const l = await ready();
+        reply = async () => collapsed;
+        const body = attested(l);
+        const r = await applyLate(l.lateId, body);
+        expect(refusal(r)).toEqual([503, 'late_settlement_capture_unavailable', undefined]);
+        expect(refusal(r), 'never ordinary missing capture evidence').not.toEqual([409, 'late_settlement_refused', 'capture_unverified']);
+        expect(hits).toEqual([{ path: `/payment/payments/${l.paymentId}/settling-capture`, auth: 'Bearer billing-to-payment-token' }]);
+        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef, 'the receipt is not spent').toBeUndefined();
+        await untouched(l);
+        expect((await readLate(l.lateId)).body.application).toBeNull();
+      });
+
+      it('404 settling_capture_not_found stays 409 capture_unverified; the receipt is unspent and nothing is written', async () => {
+        const l = await ready();
+        reply = async () => noCapture;
+        const body = attested(l);
+        expect(refusal(await applyLate(l.lateId, body))).toEqual([409, 'late_settlement_refused', 'capture_unverified']);
+        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef).toBeUndefined();
+        await untouched(l);
+      });
+
+      it('401, 403, 5xx and a malformed 200 are 503; retried with the SAME unspent receipt once Payment answers, the verified application commits once and records its fact', async () => {
+        const l = await ready();
+        const body = attested(l);
+        const idem = key();
+        for (const a of [{ status: 401, body: { code: 'unauthorized' } }, { status: 403, body: { code: 'operation_not_permitted' } }, { status: 503, body: { code: 'unavailable' } },
+          { status: 200, body: { paymentId: l.paymentId, factId: 'not-a-uuid', attemptId: randomUUID(), amount: 5300, currency: 'TND', conflicted: false } }, collapsed]) {
+          reply = async () => a;
+          expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem)), JSON.stringify(a)).toEqual([503, 'late_settlement_capture_unavailable', undefined]);
+          expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef).toBeUndefined();
+          await untouched(l);
+        }
+        reply = verified;
+        const ok = await applyLate(l.lateId, body, 'owner-tok', idem);
+        expect(ok.status, JSON.stringify(ok.body)).toBe(201);
+        expect(ok.body.application.captureFactId).toBe(settlingFacts.get(l.paymentId));
+        const n = hits.length;
+        expect((await applyLate(l.lateId, body, 'owner-tok', idem)).status, 'the replay answers the stored application').toBe(201);
+        expect(hits.length, 'the replay reads nothing').toBe(n);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(1);
+      });
+
+      it('another Company\'s Owner is refused before Payment is asked anything, whatever Payment would answer', async () => {
+        const l = await ready();
+        reply = verified;
+        const body = attested(l);
+        const r = await applyLate(l.lateId, body, 'foreign-owner-tok');
+        expect(r.status).toBe(404);
+        expect(hits, 'Payment is not read for a foreign Owner').toEqual([]);
+        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef).toBeUndefined();
+        await untouched(l);
+      });
     });
 
     it('order: the earlier refusals and the dispute exposure refusal come first and read no capture; a replay answers the stored application with no new read', async () => {
