@@ -624,6 +624,8 @@ describeWithEnv(
       const d = (await paymentDispute(ref))!;
       expect(d).toMatchObject({ captureFactId: late.factId, captureBasis: 'late_capture', status: 'lost' });
       expect(d.chargebackFactId).not.toBeNull();
+      // the dispute commits in ingestion's own transaction; the retrier marks its notification `processed` right after, in its claim: wait for it
+      await waitFor(async () => (await notifications(ref))[0]?.state !== 'unmatched', 30_000, `Payment's retrier to record the notification's outcome\n${tails()}`);
       const [n] = await notifications(ref);
       expect(n.state).toBe('processed');
       expect(n.attempts).toBeGreaterThanOrEqual(2); // received and held, then retried
