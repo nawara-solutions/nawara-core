@@ -7,10 +7,10 @@ const ATTEMPT = '33333333-3333-4333-8333-333333333333';
 const FACT = '44444444-4444-4444-8444-444444444444';
 
 /**
- * Core V2 S0-C11 item 7c (BIL-32 J): Billing's reading of Payment's PAY-16 settling capture
- * (`GET /payment/payments/:paymentId/settling-capture`). Only a well-formed 200 about THIS payment is a capture; 404 is "none" (Billing never
- * infers one); 409 `settling_capture_ambiguous` is ambiguous; anything else (unavailable, timeout, malformed, another payment) is `unknown`,
- * which the application turns into the fail-closed 503.
+ * Core V2 S0-C11 item 7c (BIL-32 J, L): Billing's reading of Payment's PAY-16 settling capture
+ * (`GET /payment/payments/:paymentId/settling-capture`). Only a well-formed 200 about THIS payment is a capture; `404 settling_capture_not_found`
+ * is "none" (Billing never infers one); 409 `settling_capture_ambiguous` is ambiguous; anything else (the collapsed `404 not_found` (C-2),
+ * unavailable, unauthorized, timeout, malformed, another payment) is `unknown`, which the application turns into the fail-closed 503.
  */
 describe('HttpPaymentRefundClient.settlingCapture (Core V2 S0-C11 7c, PAY-16)', () => {
   let server: Server;
@@ -43,15 +43,21 @@ describe('HttpPaymentRefundClient.settlingCapture (Core V2 S0-C11 7c, PAY-16)', 
     expect(await read({ ...good, conflicted: true })).toEqual({ kind: 'capture', capture: { ...good, conflicted: true } });
   });
 
-  it('404 (no settling capture, or the collapsed answer) is none; 409 settling_capture_ambiguous is ambiguous', async () => {
-    expect(await read({ code: 'settling_capture_not_found' }, 404)).toMatchObject({ kind: 'none' });
-    expect(await read({ code: 'not_found' }, 404)).toMatchObject({ kind: 'none' });
+  it('404 settling_capture_not_found is none; 409 settling_capture_ambiguous is ambiguous', async () => {
+    expect(await read({ code: 'settling_capture_not_found', message: 'This payment has no verified settling capture.' }, 404))
+      .toEqual({ kind: 'none', reason: 'settling_capture_not_found' });
     expect(await read({ code: 'settling_capture_ambiguous' }, 409)).toEqual({ kind: 'ambiguous' });
+  });
+
+  it('BIL-32 L (C-2): the collapsed 404 not_found (no payment.read, a payment not held as Billing\'s, a malformed id) is unknown, never none', async () => {
+    const collapsed = await read({ code: 'not_found', message: 'Not found.' }, 404);
+    expect(collapsed).toMatchObject({ kind: 'unknown' });
+    expect(collapsed.kind, 'an authorization-shaped answer never reads as absent evidence').not.toBe('none');
   });
 
   it('everything else is unknown, never a capture or none: unavailable, a timeout, unauthorized, a malformed or another payment\'s answer', async () => {
     const cases: Array<[unknown, number, number?]> = [
-      [{ code: 'x' }, 503], [{ code: 'unauthorized' }, 401], [{ code: 'other' }, 404], [{ code: 'other_conflict' }, 409], [undefined, 200],
+      [{ code: 'x' }, 503], [{ code: 'unauthorized' }, 401], [{ code: 'not_found' }, 404], [{ code: 'operation_not_permitted' }, 403], [{ code: 'other' }, 404], [{ code: 'other_conflict' }, 409], [undefined, 200],
       [{ ...good, paymentId: '22222222-2222-4222-8222-222222222222' }, 200], [{ ...good, factId: 'not-a-uuid' }, 200], [{ ...good, attemptId: undefined }, 200],
       [{ ...good, amount: 0 }, 200], [{ ...good, amount: 53.5 }, 200], [{ ...good, amount: '5300' }, 200], [{ ...good, currency: 'tnd' }, 200],
       [{ ...good, conflicted: 'false' }, 200], [{ ...good, conflicted: undefined }, 200], [good, 200, 400],

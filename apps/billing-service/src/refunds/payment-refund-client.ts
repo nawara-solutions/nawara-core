@@ -86,8 +86,11 @@ export interface PaymentRefunds {
 /** Core V2 S0-C11 item 7c (PAY-16): a payment's settling capture, as Payment's committed records state it. */
 export interface SettlingCapture { paymentId: string; attemptId: string; factId: string; amount: number; currency: string; conflicted: boolean }
 /**
- * What PAY-16 PROVES: the settling capture; `none` (Payment states this payment has none: not succeeded, no fact, or the collapsed answer for a
- * payment it does not hold as Billing's); `ambiguous` (more than one capture fact on the succeeded attempt); anything else proves nothing.
+ * What PAY-16 PROVES: the settling capture; `none` (`404 settling_capture_not_found`: Payment states this payment has none: not succeeded, no
+ * succeeded attempt, or no fact); `ambiguous` (more than one capture fact on the succeeded attempt); anything else proves nothing (`unknown`).
+ * BIL-32 L (C-2): the collapsed `404 not_found` is `unknown`, never `none`: Billing names the payment from its own payment request, so that answer
+ * (Billing without `payment.read`, a payment Payment does not hold as Billing's, a malformed id) is a configuration or consistency fault, not
+ * absent evidence.
  */
 export type SettlingCaptureOutcome = { kind: 'capture'; capture: SettlingCapture } | { kind: 'none'; reason: string } | { kind: 'ambiguous' }
   | { kind: 'unknown'; reason: string };
@@ -166,7 +169,7 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
   async settlingCapture(paymentId: string): Promise<SettlingCaptureOutcome> {
     const r = await this.call('GET', `/payment/payments/${encodeURIComponent(paymentId)}/settling-capture`);
     const code = typeof r.body?.code === 'string' ? r.body.code : null;
-    if (r.status === 404 && (code === 'settling_capture_not_found' || code === 'not_found')) return { kind: 'none', reason: code };
+    if (r.status === 404 && code === 'settling_capture_not_found') return { kind: 'none', reason: code };
     if (r.status === 409 && code === 'settling_capture_ambiguous') return { kind: 'ambiguous' };
     const b = r.body;
     if (r.status !== 200 || !b) return { kind: 'unknown', reason: code ?? `status_${r.status}` };
