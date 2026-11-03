@@ -21,7 +21,7 @@ export type RefundAuditAction = 'refund_attempt.authorized' | 'refund_attempt.fa
 /** Core V2 S6e-D (R6E-8): the dispute actions (version 1, no trusted scope): provider observations by the verified webhook, Owner actions by the Owner. */
 export type DisputeAuditAction = 'payment_dispute.opened' | 'payment_dispute.closed' | 'payment_dispute.evidence_added' | 'payment_dispute.decided';
 /** Core V2 S6h (R6H-11): the Owner's association of an unmatched provider fact (version 1, no trusted scope). */
-export type ReconciliationAuditAction = 'provider_fact.associated';
+export type ReconciliationAuditAction = 'provider_fact.associated' | 'provider_fact_conflict.recorded';
 
 /**
  * The catalog actor of a Payment transition, from Payment's own verified attribution (never a request value). A service caller is the
@@ -115,6 +115,19 @@ export class PaymentAudit {
    * Core V2 S6h (R6H-3, R6H-11): the association of an unmatched provider fact, in the association's transaction. Identifiers only (the fact, its
    * destination and the association); never an amount, a provider reference, a receipt or its secret. The event id is derived from the association.
    */
+  /** Core V2 S0-C11 item 8: a contradiction of a recorded capture fact, in the conflict row's transaction, once (its id keys the event). */
+  async recordFactConflict(q: Queryable, c: { id: string; factId: string; paymentId: string; attemptId: string; source: 'webhook' | 'status_check'; amount: number },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    // a provider's observation, recorded by Payment: never attributed to whoever asked for the status read
+    const actor = { type: 'system' as const, id: c.source === 'webhook' ? 'payment_webhook' : 'payment_status_read' };
+    await this.writer.write(
+      q,
+      { action: 'provider_fact_conflict.recorded' satisfies ReconciliationAuditAction, actor, organizationId, resource: { type: 'provider_transaction_fact', id: c.factId }, outcome: 'succeeded',
+        changes: { conflict_id: c.id, payment_id: c.paymentId, attempt_id: c.attemptId, source: c.source, observed_amount: c.amount } },
+      { eventId: deterministicEventId(c.id, 'audit.provider_fact_conflict.recorded'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
   async recordAssociation(q: Queryable, a: { id: string; factId: string; targetType: string; paymentId: string; refundAuthorizationId: string | null },
     organizationId: string | null, ctx: EventContext): Promise<void> {
     // the destination's id (the payment, or the refund authorization) as `target_id`: a change key never names an authorization

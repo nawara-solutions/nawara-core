@@ -179,7 +179,7 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
       async initiate(p, attempt) {
         const accepted = await inner.initiate(p, attempt);
         // The provider's callback lands while our own T2 has not committed yet: the attempt is still `initiated`.
-        await attempts.applyStatus(attempt.id, { kind: 'succeeded', amount: Number(p.amount), currency: p.currency }, this);
+        await attempts.applyStatus(attempt.id, { kind: 'succeeded', amount: Number(p.amount), currency: p.currency, providerTransactionId: `ptx_${attempt.id}` }, this);
         return accepted;
       },
     };
@@ -341,7 +341,7 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
     try {
       await holder.query('BEGIN');
       await holder.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [payment.id]);
-      const blocked = t.app.get(AttemptService).applyStatus(a.id, { kind: 'succeeded', amount: 1000, currency: 'TND' }, provider);
+      const blocked = t.app.get(AttemptService).applyStatus(a.id, { kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: `ptx_${a.id}` }, provider);
       await sleep(300); // applyStatus is now waiting for the payment row
       await probe.query('BEGIN');
       await expect(probe.query('SELECT 1 FROM payment_attempt WHERE id = $1 FOR UPDATE NOWAIT', [a.id])).resolves.toBeDefined(); // would be 55P03 if the attempt were locked first

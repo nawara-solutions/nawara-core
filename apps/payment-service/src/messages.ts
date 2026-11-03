@@ -135,6 +135,11 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "Impossible de démarrer une tentative sur un paiement à l'état {status}.",
     ar: 'لا يمكن بدء محاولة على عملية دفع في الحالة {status}.',
   },
+  captureEvidenceUnverified: {
+    en: 'Provider capture evidence is missing, ambiguous or contradicted, so it has no commercial effect.',
+    fr: "Les preuves de capture du prestataire sont absentes, ambiguës ou contredites : elles n'ont aucun effet commercial.",
+    ar: 'أدلة التحصيل لدى مزوّد الدفع مفقودة أو ملتبسة أو متعارضة، لذلك ليس لها أي أثر تجاري.',
+  },
   amountCurrencyMismatch: {
     en: 'Provider-reported amount/currency does not match the payment snapshot.',
     fr: "Le montant ou la devise indiqués par le prestataire ne correspondent pas à l'instantané du paiement.",

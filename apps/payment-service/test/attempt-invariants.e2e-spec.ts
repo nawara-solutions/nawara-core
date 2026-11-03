@@ -83,7 +83,7 @@ describeWithEnv('financial invariants FI-12/FI-13 (real PostgreSQL)', ['TEST_DAT
     const attempts = t.app.get(AttemptService);
     const providers = t.app.get(ProviderRegistry);
     const provider = providers.get('test');
-    const updated = await attempts.applyStatus(start.body.id, { kind: 'succeeded', amount: 1000, currency: 'TND' }, provider);
+    const updated = await attempts.applyStatus(start.body.id, { kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: `ptx_${start.body.id}` }, provider);
     expect(updated.status).toBe('succeeded');
 
     const after = await getPayment(payment.id).expect(200);
@@ -98,7 +98,7 @@ describeWithEnv('financial invariants FI-12/FI-13 (real PostgreSQL)', ['TEST_DAT
     const attempts = t.app.get(AttemptService);
     const providers = t.app.get(ProviderRegistry);
     const provider = providers.get('test');
-    await expect(attempts.applyStatus(start.body.id, { kind: 'succeeded', amount: 1000, currency: 'TND' }, provider)).rejects.toMatchObject({
+    await expect(attempts.applyStatus(start.body.id, { kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: `ptx_${start.body.id}` }, provider)).rejects.toMatchObject({
       status: 409,
       response: { code: 'invalid_state_transition' },
     });
