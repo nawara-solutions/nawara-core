@@ -54,6 +54,7 @@ const ORG_X = randomUUID(); // G4: expiry, L-3, out of order, read recovery
 const ORG_R = randomUUID(); // G4: the refusals (a deadline obligation restricts only it)
 const ORG_O = randomUUID(); // G6: the outage and its recovery
 const ORG_F = randomUUID(); // G4 (8): the refund of an L-4 purchase opens a real obligation, and its T2 restricts only this Organization
+const ORG_K = randomUUID(); // S0-C11 C-4: capture contradictions before and after L-4
 const OWNER = randomUUID(); // the Owner of the seller Company (L-4), with a real TOTP factor at the real Auth
 const OWNER_EMAIL = `owner-${randomUUID().slice(0, 8)}@s-int.e2e.test`;
 const PASSWORD = 's-int assisted certification password';
@@ -124,7 +125,10 @@ describeWithEnv(
     const adminO = actor(ORG_O, true);
     const benO = actor(ORG_O, false);
     const benO2 = actor(ORG_O, false);
-    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2];
+    const adminK = actor(ORG_K, true);
+    const benBefore = actor(ORG_K, false);
+    const benAfter = actor(ORG_K, false);
+    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -183,7 +187,7 @@ describeWithEnv(
       const hash = await bcrypt.hash(PASSWORD, 4);
       await authAdmin.query(`INSERT INTO company(id, name) VALUES ($1, 'S-INT')`, [COMPANY]);
       await authAdmin.query(`INSERT INTO platform(id, "companyId", name) VALUES ($1, $2, 'S-INT platform')`, [TEST_PLATFORM, COMPANY]);
-      for (const org of [ORG_S, ORG_X, ORG_R, ORG_O, ORG_F]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
+      for (const org of [ORG_S, ORG_X, ORG_R, ORG_O, ORG_F, ORG_K]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
       const oc = await authAdmin.connect();
       try {
         await oc.query('BEGIN');
@@ -350,14 +354,15 @@ describeWithEnv(
     }
     /** The provider later reports a FAILED attempt's success (signed): Payment's verified late success and its event over the broker. */
     async function lateSuccessOf(paymentId: string, attemptId: string, amount: number) {
-      expect(await signed({ eventId: `sint_${randomUUID()}`, type: 'payment.succeeded', reference: attemptId, providerTransactionId: `sim_late_${randomUUID()}`, amount, currency: 'TND' }))
+      const providerTransactionId = `sim_late_${randomUUID()}`;
+      expect(await signed({ eventId: `sint_${randomUUID()}`, type: 'payment.succeeded', reference: attemptId, providerTransactionId, amount, currency: 'TND' }))
         .toBeLessThan(500);
       const late = (await paymentAdmin.query(`SELECT id, "factId" FROM payment_late_success WHERE "paymentId" = $1 AND "attemptId" = $2`, [paymentId, attemptId])).rows[0];
       expect(late, `Payment records the late success\n${tails()}`).toBeDefined();
       await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM payment_late_success WHERE "lateSuccessId" = $1`, [late.id])).rowCount === 1,
         30_000, `Billing's verified consumer to record the late success over the broker\n${tails()}`);
       // with the read grant either verified path may record it first (the event or Payment's read); the tests below pin each path where it matters
-      return late as { id: string; factId: string };
+      return { ...late, providerTransactionId } as { id: string; factId: string; providerTransactionId: string };
     }
     /**
      * S0-C8: an assisted settlement whose payment REALLY ends unsuccessfully: the Organization's attempts all fail at the provider, so Payment's
@@ -759,6 +764,127 @@ describeWithEnv(
       expect(await paymentStatus(s.paymentId)).toBe('failed');
       expect(await deadLettered()).toBe(0);
     }, 180_000);
+
+    // ─────────────────────────────────────────────────────────────── S0-C11 C-4 (BIL-32 L; register BIL-33 I): real-event capture contradictions
+    /**
+     * A contradicting provider observation of an existing capture: the SAME provider transaction of the SAME attempt, signed by the simulated
+     * provider, with another amount (F-27). Payment keeps the original fact and records the contradiction (S0-C11 item 6); nothing here is
+     * seeded or inserted: input (b) is a genuine late success of a really failed payment. E-7 is not exercised (unreachable, BIL-32 L).
+     */
+    const contradict = (attemptId: string, providerTransactionId: string, amount: number, eventId = `sint_${randomUUID()}`) =>
+      signed({ eventId, type: 'payment.succeeded', reference: attemptId, providerTransactionId, amount, currency: 'TND' });
+    const factOf = async (factId: string) => (await paymentAdmin.query(
+      `SELECT "paymentId", "attemptId", kind, amount::int AS amount, trim(currency) AS currency, "providerTxnId" AS "providerTransactionId" FROM provider_transaction_fact WHERE id = $1`, [factId])).rows[0];
+    const conflictsOf = (factId: string) => count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [factId]);
+    const contradictionCases = (paymentId: string) => count(billingAdmin, `SELECT count(*)::int AS n FROM reconciliation_case WHERE "caseType" = 'capture_contradiction' AND "paymentId" = $1`, [paymentId]);
+    /** The Owner's view of the case (BIL-33 I), once Billing's reconciliation worker has read Payment's `fact_conflict` item (PAY-12). */
+    async function contradictionCase(paymentId: string) {
+      await waitFor(async () => (await contradictionCases(paymentId)) === 1, 45_000, `Billing's reconciliation worker to open the capture_contradiction case\n${tails()}`);
+      const r = await call(BILLING_URL, 'GET', ownerToken, '/billing/admin/reconciliation-cases?type=capture_contradiction&limit=200');
+      expect(r.status, JSON.stringify(r.json)).toBe(200);
+      const mine = (r.json.items as Array<Record<string, any>>).filter((c) => c.paymentId === paymentId);
+      expect(mine).toHaveLength(1);
+      return mine[0]!;
+    }
+    /** Every financial and entitlement fact of one request and its payment, to prove a refusal or a contradiction changed none of them. */
+    const financialState = async (s: { requestId: string; invoiceId: string; paymentRequestId: string; paymentId: string }, beneficiary: Actor) => ({
+      purchases: await purchasesOf(s.requestId),
+      applications: await count(billingAdmin, `SELECT count(*)::int AS n FROM late_settlement_application WHERE "assistanceRequestId" = $1`, [s.requestId]),
+      request: (await billingAdmin.query(`SELECT status FROM assistance_request WHERE id = $1`, [s.requestId])).rows[0].status,
+      invoice: await invoiceStatus(s.invoiceId),
+      paymentRequest: (await billingAdmin.query(`SELECT status FROM payment_request WHERE id = $1`, [s.paymentRequestId])).rows[0].status,
+      obligations: await count(billingAdmin, `SELECT count(*)::int AS n FROM cash_return_obligation WHERE "assistanceRequestId" = $1`, [s.requestId]),
+      refundCases: await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case WHERE "paymentId" = $1`, [s.paymentId]),
+      reversals: await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase_reversal v JOIN subscription_purchase p ON p.id = v."purchaseId" WHERE p."assistanceRequestId" = $1`, [s.requestId]),
+      losses: await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_dispute_loss WHERE "paymentId" = $1`, [s.paymentId]),
+      entitlement: (await b6(beneficiary.id)).valid,
+      payment: await paymentStatus(s.paymentId),
+      lateSuccesses: await count(paymentAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId]),
+      refundAttempts: await count(paymentAdmin, `SELECT count(*)::int AS n FROM refund_attempt WHERE "paymentId" = $1`, [s.paymentId]),
+      restrictions: await restrictions(ORG_K),
+    });
+
+    it('S0-C11 C-4: a contradiction recorded BEFORE L-4: the original fact stays, the contradiction is recorded once (replays add nothing) and visible as one capture_contradiction case; L-4 is refused capture_contested with the real Owner receipt unspent; nothing financial changes', async () => {
+      const { s, late, ls } = await attestedLateSettlement(benBefore, adminK);
+      const original = await factOf(late.factId);
+      expect(original).toEqual({ paymentId: s.paymentId, attemptId: s.attempts[0], kind: 'capture', amount: BASE, currency: 'TND', providerTransactionId: late.providerTransactionId });
+      const before = await financialState(s, benBefore);
+      expect(before).toMatchObject({ purchases: 0, applications: 0, request: 'cash_collected', paymentRequest: 'failed', obligations: 0, refundCases: 0, losses: 0, entitlement: false,
+        payment: 'failed', lateSuccesses: 1, refundAttempts: 0 });
+
+      // the provider's contradicting observation, then the very same signed notification again (a replay) and once more concurrently
+      const eventId = `sint_${randomUUID()}`;
+      expect(await contradict(s.attempts[0]!, late.providerTransactionId, BASE + 100, eventId)).toBeLessThan(500);
+      await Promise.all([contradict(s.attempts[0]!, late.providerTransactionId, BASE + 100, eventId), contradict(s.attempts[0]!, late.providerTransactionId, BASE + 100, eventId)]);
+      expect(await conflictsOf(late.factId), 'one recorded contradiction').toBe(1);
+      expect(await factOf(late.factId), 'the original fact is immutable').toEqual(original);
+      // Payment states the capture contested (the R6H-5 read Billing uses for input b), with its original figures
+      const read = await call(PAYMENT_URL, 'GET', billingToPaymentToken.token, `/payment/payments/${s.paymentId}/captures/${late.factId}`);
+      expect(read.json, JSON.stringify(read.json)).toMatchObject({ factId: late.factId, paymentId: s.paymentId, amount: BASE, currency: 'TND', conflicted: true });
+
+      // visibility (item 8): one case for this fact and this observing payment, in its Company and Organization from Billing's own records
+      const c = await contradictionCase(s.paymentId);
+      expect(c).toMatchObject({ caseType: 'capture_contradiction', companyId: COMPANY, organizationId: ORG_K, paymentId: s.paymentId, captureFactId: late.factId,
+        l4Purchase: false, status: 'open', resolution: null });
+
+      // L-4: the Owner's REAL receipt (TOTP step-up at the real Auth) is refused before it is consumed
+      const receipt = await ownerReceipt(ls.id, s.requestId, benBefore);
+      const refused = await applyL4(ls.id, receipt.secret);
+      expect(refusal(refused), `${JSON.stringify(refused.json)}\n${tails()}`).toEqual([409, 'late_settlement_refused', 'capture_contested']);
+      expect(await receiptStatus(receipt.receiptId), 'the Owner receipt is unspent').toBe('issued');
+      expect(refusal(await applyL4(ls.id, receipt.secret)), 'repeated: the same refusal').toEqual([409, 'late_settlement_refused', 'capture_contested']);
+      expect(await receiptStatus(receipt.receiptId)).toBe('issued');
+
+      await reconciliationPass();
+      expect(await financialState(s, benBefore), 'no financial or entitlement effect').toEqual(before);
+      expect(await contradictionCases(s.paymentId), 'still one case after further passes').toBe(1);
+      expect(await conflictsOf(late.factId)).toBe(1);
+      expect((await call(BILLING_URL, 'GET', ownerToken, `/billing/admin/late-settlements/${ls.id}`)).json).toMatchObject({ status: 'unapplied', application: null });
+      // the case is the Owner's only: the Organization's administrator and the beneficiary, verified live, are refused
+      for (const a of [adminK, benBefore]) {
+        expect((await call(BILLING_URL, 'GET', a.token, '/billing/admin/reconciliation-cases?type=capture_contradiction')).status, a === adminK ? 'admin' : 'member').toBe(403);
+      }
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    it('S0-C11 C-4: a genuine input (b) L-4 records its late success\'s capture fact once (replay answers it unchanged); a contradiction recorded AFTER L-4 keeps the purchase and entitlement, refunds nothing and becomes one case with l4Purchase: true; each payment\'s case names only its own fact', async () => {
+      const { s, late, ls } = await attestedLateSettlement(benAfter, adminK);
+      const original = await factOf(late.factId);
+      const receipt = await ownerReceipt(ls.id, s.requestId, benAfter);
+      const idem = `idem-${randomUUID()}`;
+      const applied = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/late-settlements/${ls.id}/application`, { reasonCode: 'cash_not_returned_attested', receiptSecret: receipt.secret }, idem);
+      expect(applied.status, `${JSON.stringify(applied.json)}\n${tails()}`).toBe(201);
+      // provenance (BIL-32 J/K): Payment's verified fact of THIS late success, recorded once, from the real R6H-5 read
+      expect(applied.json.application.captureFactId).toBe(late.factId);
+      expect((await billingAdmin.query(`SELECT "captureFactId" FROM late_settlement_application WHERE "lateSettlementId" = $1`, [ls.id])).rows).toEqual([{ captureFactId: late.factId }]);
+      expect(await receiptStatus(receipt.receiptId)).toBe('consumed');
+      const replay = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/late-settlements/${ls.id}/application`, { reasonCode: 'cash_not_returned_attested', receiptSecret: receipt.secret }, idem);
+      expect([replay.status, replay.json.application?.id, replay.json.application?.captureFactId]).toEqual([201, applied.json.application.id, late.factId]);
+      const after = await financialState(s, benAfter);
+      expect(after).toMatchObject({ purchases: 1, applications: 1, request: 'settled', invoice: 'paid', paymentRequest: 'failed', obligations: 0, refundCases: 0, reversals: 0, losses: 0,
+        entitlement: true, payment: 'failed', lateSuccesses: 1, refundAttempts: 0 });
+
+      // the provider later contradicts that capture (not a lock, item 7a): two different contradicting observations
+      expect(await contradict(s.attempts[0]!, late.providerTransactionId, BASE - 100)).toBeLessThan(500);
+      expect(await contradict(s.attempts[0]!, late.providerTransactionId, BASE + 1)).toBeLessThan(500);
+      expect(await conflictsOf(late.factId)).toBe(2);
+      expect(await factOf(late.factId)).toEqual(original);
+      const c = await contradictionCase(s.paymentId);
+      expect(c).toMatchObject({ caseType: 'capture_contradiction', companyId: COMPANY, organizationId: ORG_K, paymentId: s.paymentId, captureFactId: late.factId,
+        l4Purchase: true, status: 'open', resolution: null });
+
+      await reconciliationPass();
+      expect(await financialState(s, benAfter), 'the purchase and entitlement stand; nothing refunded, reversed or lost (FC-4)').toEqual(after);
+      expect(await contradictionCases(s.paymentId), 'one case per contested fact and observing payment, whatever the observations and passes').toBe(1);
+      expect((await billingAdmin.query(`SELECT "captureFactId" FROM late_settlement_application WHERE "lateSettlementId" = $1`, [ls.id])).rows, 'the provenance never changes')
+        .toEqual([{ captureFactId: late.factId }]);
+      // isolation between payments of the Company: every capture_contradiction case of the Organization names only its own payment's fact
+      const cases = (await billingAdmin.query(`SELECT "paymentId", "captureFactId" FROM reconciliation_case WHERE "caseType" = 'capture_contradiction' AND "organizationId" = $1`,
+        [ORG_K])).rows as Array<{ paymentId: string; captureFactId: string }>;
+      expect(cases.map((x) => x.paymentId)).toContain(s.paymentId);
+      for (const x of cases) expect((await factOf(x.captureFactId)).paymentId, 'a case names its own payment\'s fact').toBe(x.paymentId);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
 
     it('G5 per family: payment.succeeded, payment.failed, refund.case_completed, payment.dispute.lost, payment.late_success.recorded: default-exchange injection without a stored row, tampered bodies and a verified contradiction are refused before any state change; a verified duplicate applies nothing', async () => {
       const fingerprint = async () => JSON.stringify((await billingAdmin.query(`SELECT
