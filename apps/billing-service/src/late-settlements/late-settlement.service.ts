@@ -433,7 +433,9 @@ export class LateSettlementService {
           read = { kind: 'unknown', reason: 'error' };
         }
         if (read.kind === 'unknown') refusal = 'unavailable';
-        else if (read.kind === 'not_found') refusal = 'capture_unverified';
+        // BIL-32 M: only Payment's statement that the fact is not a capture of that payment is missing evidence (409); the collapsed answer
+        // (Billing names its own payment and fact, so Payment cannot answer about Billing's own evidence) or any other 404 proves nothing (503)
+        else if (read.kind === 'not_found') refusal = read.reason === 'collapsed' || read.reason === 'unrecognized' ? 'unavailable' : 'capture_unverified';
         else if (read.capture.paymentId !== ls.paymentId || read.capture.factId !== ls.factId) refusal = 'unavailable'; // an answer about something else proves nothing
         else if (read.capture.conflicted) refusal = 'capture_contested';
         else if (read.capture.amount !== Number(ls.amount) || read.capture.currency !== ls.currency

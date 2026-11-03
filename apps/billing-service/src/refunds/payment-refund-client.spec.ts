@@ -65,3 +65,44 @@ describe('HttpPaymentRefundClient.settlingCapture (Core V2 S0-C11 7c, PAY-16)', 
     for (const [body, status, hang] of cases) expect(await read(body, status, hang), JSON.stringify([body, status, hang])).toMatchObject({ kind: 'unknown' });
   });
 });
+
+/**
+ * Core V2 S0-C11 BIL-32 M: the production client's R6H-5 capture read (`GET /payment/payments/:paymentId/captures/:factId`) states WHICH 404
+ * Payment answered, with Payment's exact bodies. Only L-4 input (b) acts on the reason; every other consumer reads `kind` alone, unchanged.
+ */
+describe('HttpPaymentRefundClient.capture (Core V2 S0-C11 BIL-32 M, R6H-5)', () => {
+  let server: Server;
+  let url = '';
+  let answer: { status: number; body?: unknown } = { status: 500 };
+  beforeAll(async () => {
+    server = createServer((_req, res) => {
+      res.writeHead(answer.status, { 'content-type': 'application/json' });
+      res.end(answer.body === undefined ? 'not json' : JSON.stringify(answer.body));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  });
+  afterAll(() => new Promise<void>((r) => server.close(() => r())));
+  const read = (status: number, body?: unknown) => {
+    answer = { status, body };
+    return new HttpPaymentRefundClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 200 }).capture(PAYMENT, FACT);
+  };
+  const capture = { factId: FACT, paymentId: PAYMENT, provider: 'simulation', amount: 5300, currency: 'TND', paymentStatus: 'failed', basis: 'late_capture',
+    conflicted: false, refund: 'none', refundableOnItsOwn: true, observedAt: '2026-11-03T10:00:00.000Z' };
+
+  it('404 capture_not_found and the collapsed 404 not_found are both not_found, each with its own reason; any other 404 is unrecognized', async () => {
+    expect(await read(404, { message: 'No verified capture of this payment has this identifier.', code: 'capture_not_found' }))
+      .toEqual({ kind: 'not_found', reason: 'capture_not_found' });
+    expect(await read(404, { message: 'Not found.', code: 'not_found' })).toEqual({ kind: 'not_found', reason: 'collapsed' });
+    expect(await read(404, { statusCode: 404, message: 'Cannot GET /x', error: 'Not Found' })).toEqual({ kind: 'not_found', reason: 'unrecognized' });
+    expect(await read(404)).toEqual({ kind: 'not_found', reason: 'unrecognized' });
+  });
+
+  it('a well-formed capture is a capture; 403, 401, 400, 5xx, a malformed or another fact\'s answer prove nothing (unknown), unchanged', async () => {
+    expect(await read(200, capture)).toMatchObject({ kind: 'capture', capture: { factId: FACT, paymentId: PAYMENT, amount: 5300, conflicted: false } });
+    for (const [status, body] of [[403, { message: 'You may not perform this operation.', code: 'operation_not_permitted' }], [401, { code: 'unauthorized' }],
+      [400, { code: 'bad_request' }], [503, { code: 'x' }], [200, { ...capture, factId: ATTEMPT }], [200, { ...capture, amount: '5300' }], [200, undefined]] as const) {
+      expect(await read(status, body), JSON.stringify([status, body])).toMatchObject({ kind: 'unknown' });
+    }
+  });
+});
