@@ -27,6 +27,9 @@ export interface RefundRequestInput {
 }
 
 /** Core V2 R6H-5: how a verified capture relates to its payment (Payment's own evidence; Billing maps it to a refund-case basis). */
+/** Core V2 S0-C11 item 7c (PAY-16): a payment's settling capture, as Payment's committed records state it. */
+export interface SettlingCapture { paymentId: string; attemptId: string; factId: string; amount: number; currency: string; conflicted: boolean }
+
 export type CaptureBasis = 'settling_capture' | 'duplicate_capture' | 'other_attempt_capture' | 'late_capture' | 'associated_capture';
 export interface CaptureEvidence {
   factId: string;
@@ -323,6 +326,29 @@ export class RefundAttemptService {
       basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn,
       refund: refunded || ordinary.done ? 'refunded' : live.length > 0 || ordinary.live ? 'in_progress' : 'none',
     };
+  }
+
+  /**
+   * Core V2 S0-C11 item 7c (register PAY-16): the SETTLING capture of the caller's own succeeded payment, derived only from Payment's committed
+   * records: the payment's succeeded attempt, then that attempt's capture facts of this payment, read in ONE statement (one committed state). No
+   * capture reference, amount or provider value is taken from the caller. The caller is checked by the controller; another producer's or an unknown
+   * payment is the collapsed `404 not_found`. Not succeeded, or no capture fact (a legacy settlement): `404 settling_capture_not_found`. More than
+   * one: `409 settling_capture_ambiguous`. A contested fact is answered with `conflicted: true` (Billing refuses it). Nothing is written.
+   */
+  async settlingCapture(caller: string, paymentId: string): Promise<SettlingCapture> {
+    this.assertEnabled();
+    const { rows } = await this.db.query<{ producer: string; status: string; attemptId: string | null; facts: Array<{ factId: string; amount: string; currency: string; conflicted: boolean }> }>(
+      `SELECT p.producer, p.status, p."succeededAttemptId" AS "attemptId",
+              COALESCE((SELECT json_agg(json_build_object('factId', f.id, 'amount', f.amount::text, 'currency', trim(f.currency),
+                  'conflicted', EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id)) ORDER BY f.id)
+                FROM provider_transaction_fact f WHERE f."paymentId" = p.id AND f."attemptId" = p."succeededAttemptId" AND f.kind = 'capture'), '[]'::json) AS facts
+         FROM payment p WHERE p.id = $1`, [paymentId]);
+    const p = rows[0];
+    if (!p || p.producer !== caller) throw notFound();
+    if (p.status !== 'succeeded' || !p.attemptId || p.facts.length === 0) throw paymentError(404, 'settling_capture_not_found', PAYMENT_MESSAGES.settlingCaptureNotFound);
+    if (p.facts.length > 1) throw paymentError(409, 'settling_capture_ambiguous', PAYMENT_MESSAGES.settlingCaptureAmbiguous);
+    const f = p.facts[0]!;
+    return { paymentId, attemptId: p.attemptId, factId: f.factId, amount: Number(f.amount), currency: f.currency, conflicted: f.conflicted };
   }
 
   /** Core V2 R6H-5 (Billing's capture read, `payment.read`): one verified capture of the caller's own payment; 404 for anything else. */

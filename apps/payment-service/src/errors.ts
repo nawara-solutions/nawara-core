@@ -41,6 +41,8 @@ export type ErrorCode =
   | 'refund_case_completed' // Core V2 S6c (FC-3, frozen)
   | 'refund_capture_not_eligible' // Core V2 R6H-5
   | 'capture_not_found' // Core V2 R6H-5
+  | 'settling_capture_not_found' // Core V2 S0-C11 item 7c (PAY-16)
+  | 'settling_capture_ambiguous' // Core V2 S0-C11 item 7c (PAY-16)
   // Core V2 S6e-D (PAY-09 to PAY-11, R6E-3)
   | 'invalid_dispute_request'
   | 'dispute_not_open'

@@ -176,6 +176,16 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "Cette capture ne peut pas être remboursée seule : c'est la dernière capture qui couvre la vente.",
     ar: 'لا يمكن استرداد عملية التحصيل هذه بمفردها: إنها آخر عملية تحصيل تغطي عملية البيع.',
   },
+  settlingCaptureNotFound: { // Core V2 S0-C11 item 7c (PAY-16)
+    en: 'This payment has no verified settling capture.',
+    fr: "Ce paiement n'a aucune capture de règlement vérifiée.",
+    ar: 'لا توجد لعملية الدفع هذه عملية تحصيل تسوية موثّقة.',
+  },
+  settlingCaptureAmbiguous: { // Core V2 S0-C11 item 7c (PAY-16)
+    en: "This payment's settling attempt holds more than one capture; none is its settling capture.",
+    fr: 'La tentative de règlement de ce paiement comporte plus d\'une capture ; aucune n\'est sa capture de règlement.',
+    ar: 'تتضمّن محاولة التسوية لعملية الدفع هذه أكثر من عملية تحصيل؛ ولا تُعدّ أيّ منها تحصيل التسوية.',
+  },
   captureNotFound: {
     en: 'No verified capture of this payment has this identifier.',
     fr: "Aucune capture vérifiée de ce paiement ne porte cet identifiant.",

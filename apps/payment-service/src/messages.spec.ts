@@ -45,6 +45,8 @@ describe('PAYMENT_MESSAGES', () => {
       paymentNotRefundable: 'This payment cannot be refunded.',
       refundCaptureUnverified: 'This payment has no verified capture to refund.',
       refundCaptureNotEligible: 'This captured payment cannot be refunded on its own: it is the last capture backing the sale.', // Core V2 R6H-5
+      settlingCaptureNotFound: 'This payment has no verified settling capture.',
+      settlingCaptureAmbiguous: "This payment's settling attempt holds more than one capture; none is its settling capture.",
       captureNotFound: 'No verified capture of this payment has this identifier.', // Core V2 R6H-5
       refundAmountNotFull: 'Only a full refund of the captured amount, in its currency, is supported.',
       refundDisputeOpen: 'A dispute on this payment blocks a new refund attempt.',
