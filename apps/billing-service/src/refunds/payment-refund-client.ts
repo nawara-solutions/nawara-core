@@ -45,8 +45,15 @@ export interface PaymentCapture {
   /** S6 certification: false when Payment would refuse to refund this capture on its own (the last capture backing the sale) */
   refundableOnItsOwn: boolean;
 }
+/**
+ * Which `404` Payment's R6H-5 capture read answered (BIL-32 M): `capture_not_found` (Payment states the named fact is not a capture of that
+ * payment), `collapsed` (`not_found`: an unknown payment, or one Payment does not hold as the caller's), `unrecognized` (any other 404 body).
+ * The production client always states it; consumers that read only `kind` (capture-specific refund cases, item 8 contradiction cases) keep
+ * their own approved meaning of `not_found`.
+ */
+export type CaptureNotFoundReason = 'capture_not_found' | 'collapsed' | 'unrecognized';
 /** What Payment's capture read proves: the capture, or that this payment has no such capture (404); anything else proves nothing. */
-export type CaptureReadOutcome = { kind: 'capture'; capture: PaymentCapture } | { kind: 'not_found' } | { kind: 'unknown'; reason: string };
+export type CaptureReadOutcome = { kind: 'capture'; capture: PaymentCapture } | { kind: 'not_found'; reason?: CaptureNotFoundReason } | { kind: 'unknown'; reason: string };
 const CAPTURE_BASES: readonly string[] = ['settling_capture', 'duplicate_capture', 'other_attempt_capture', 'late_capture', 'associated_capture'];
 const CAPTURE_REFUND: readonly string[] = ['none', 'in_progress', 'refunded'];
 
@@ -154,7 +161,10 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
 
   async capture(paymentId: string, factId: string): Promise<CaptureReadOutcome> {
     const r = await this.call('GET', `/payment/payments/${encodeURIComponent(paymentId)}/captures/${encodeURIComponent(factId)}`);
-    if (r.status === 404) return { kind: 'not_found' };
+    if (r.status === 404) {
+      const code = typeof r.body?.code === 'string' ? r.body.code : null;
+      return { kind: 'not_found', reason: code === 'capture_not_found' ? 'capture_not_found' : code === 'not_found' ? 'collapsed' : 'unrecognized' };
+    }
     const b = r.body;
     if (r.status !== 200 || !b) return { kind: 'unknown', reason: `status_${r.status}` };
     if (b.factId !== factId || b.paymentId !== paymentId || typeof b.amount !== 'number' || !Number.isSafeInteger(b.amount) || b.amount < 1

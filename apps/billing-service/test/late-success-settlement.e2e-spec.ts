@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
 import { ServiceUnavailableException } from '@nestjs/common';
 import pg from 'pg';
 import request from 'supertest';
@@ -18,7 +19,7 @@ import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
-import type { CaptureReadOutcome, PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
+import { HttpPaymentRefundClient, type CaptureReadOutcome, type PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
 import { ReconciliationService, captureContradictionKey } from '../src/reconciliation/reconciliation.service.js';
 import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
 import { CashReturnSweep } from '../src/assistance/cash-return-sweep.js';
@@ -867,6 +868,104 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
         expect(refundTry.status, JSON.stringify(refundTry.body)).toBeGreaterThanOrEqual(400);
         expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "paymentId" = $1`, [x.s.paymentId])).toBe(0);
         expect(relayed).toEqual([]);
+      });
+    });
+
+    /**
+     * Core V2 S0-C11 BIL-32 M, through Billing's PRODUCTION client (`HttpPaymentRefundClient.capture`) over real HTTP, against a local server
+     * answering exactly as Payment's R6H-5 capture read does (`paymentError` / `notFound` bodies). L-4 input (b) only: `capture_not_found` stays
+     * `409 capture_unverified`; the collapsed `not_found` and any other answer that proves nothing are `503`; the receipt is never spent. The
+     * capture-specific refund case and the item 8 contradiction cases keep their own meaning of `not_found`, unchanged.
+     */
+    describe('BIL-32 M: input (b) failure semantics through Billing\'s real client', () => {
+      let stub: Server;
+      let base = '';
+      const hits: string[] = [];
+      let reply: (paymentId: string, factId: string) => { status: number; body?: unknown } = () => ({ status: 500, body: { code: 'unset' } });
+      beforeAll(async () => {
+        stub = createServer((req, res) => {
+          hits.push(req.url ?? '');
+          const m = /^\/payment\/payments\/([^/]+)\/captures\/([^/]+)$/.exec(req.url ?? '');
+          const a = m ? reply(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!)) : { status: 404, body: { statusCode: 404, message: 'Cannot GET', error: 'Not Found' } };
+          res.writeHead(a.status, { 'content-type': 'application/json' });
+          res.end(a.body === undefined ? 'not json' : JSON.stringify(a.body));
+        });
+        await new Promise<void>((r) => stub.listen(0, '127.0.0.1', () => r()));
+        base = `http://127.0.0.1:${(stub.address() as { port: number }).port}`;
+      });
+      afterAll(() => new Promise<void>((r) => stub.close(() => r())));
+      beforeEach(() => {
+        hits.length = 0;
+        const client = new HttpPaymentRefundClient({ baseUrl: base, serviceToken: 'billing-to-payment-token', timeoutMs: 2000 });
+        captureAt.answer = (paymentId, factId) => client.capture(paymentId, factId);
+      });
+      const captureNotFound = { status: 404, body: { message: 'No verified capture of this payment has this identifier.', code: 'capture_not_found' } };
+      const collapsed = { status: 404, body: { message: 'Not found.', code: 'not_found' } };
+      const conflictOf = (paymentId: string, factId: string, o: Partial<PaymentItem> = {}) =>
+        asItem({ kind: 'fact_conflict', id: randomUUID(), paymentId, factId, amount: 4500, currency: 'TND', detail: { source: 'webhook' }, ...o });
+      const contradictionCases = (paymentId: string) => admin.query(`SELECT * FROM reconciliation_case WHERE "caseType" = 'capture_contradiction' AND "paymentId" = $1`, [paymentId])
+        .then((r) => r.rows as Row[]);
+      const verified = (paymentId: string, factId: string) => ({ status: 200, body: { factId, paymentId, provider: 'simulation', amount: 5300, currency: 'TND',
+        paymentStatus: 'expired', basis: 'late_capture', conflicted: false, refund: 'none', refundableOnItsOwn: true, observedAt: new Date().toISOString() } });
+
+      it('404 capture_not_found stays 409 capture_unverified; the receipt is unspent and nothing changes', async () => {
+        const x = await ready();
+        reply = () => captureNotFound;
+        const secret = receipt(x.row, x.r);
+        expect(refusal(await apply(x.row.id, secret))).toEqual([409, 'late_settlement_refused', 'capture_unverified']);
+        expect(hits).toEqual([`/payment/payments/${x.s.paymentId}/captures/${x.l.factId}`]);
+        expect(fraudAuth.issued.get(secret)!.consumeRef, 'the receipt is not spent').toBeUndefined();
+        await unchanged(x);
+      });
+
+      it('the collapsed 404 not_found is 503 late_settlement_capture_unavailable, never ordinary missing evidence; the receipt is unspent and nothing changes', async () => {
+        const x = await ready();
+        reply = () => collapsed;
+        const secret = receipt(x.row, x.r);
+        const r = await apply(x.row.id, secret);
+        expect(refusal(r)).toEqual([503, 'late_settlement_capture_unavailable', undefined]);
+        expect(refusal(r)).not.toEqual([409, 'late_settlement_refused', 'capture_unverified']);
+        expect(fraudAuth.issued.get(secret)!.consumeRef).toBeUndefined();
+        await unchanged(x);
+      });
+
+      it('403, another 404, 5xx and a malformed or foreign 200 are 503; retried with the SAME receipt and key, the application commits once and records the late success\'s fact', async () => {
+        const x = await ready();
+        const secret = receipt(x.row, x.r);
+        const idem = key();
+        for (const a of [{ status: 403, body: { message: 'You may not perform this operation.', code: 'operation_not_permitted' } },
+          { status: 404, body: { statusCode: 404, message: 'Cannot GET', error: 'Not Found' } }, { status: 503, body: { code: 'unavailable' } },
+          { ...verified(x.s.paymentId, x.l.factId!), body: { ...verified(x.s.paymentId, x.l.factId!).body, amount: '5300' } }, verified(x.s.paymentId, randomUUID()), collapsed]) {
+          reply = () => a;
+          expect(refusal(await apply(x.row.id, secret, 'owner-tok', idem)), JSON.stringify(a)).toEqual([503, 'late_settlement_capture_unavailable', undefined]);
+          expect(fraudAuth.issued.get(secret)!.consumeRef).toBeUndefined();
+          await unchanged(x);
+        }
+        reply = verified;
+        const ok = await apply(x.row.id, secret, 'owner-tok', idem);
+        expect(ok.status, JSON.stringify(ok.body)).toBe(201);
+        expect(ok.body.application.captureFactId).toBe(x.l.factId);
+        const n = hits.length;
+        expect((await apply(x.row.id, secret, 'owner-tok', idem)).status, 'the replay answers the stored application').toBe(201);
+        expect(hits.length, 'the replay reads nothing').toBe(n);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [x.r.id])).toBe(1);
+      });
+
+      it('unchanged consumers: with either 404 the capture-specific refund case is refused not eligible, and an item 8 contradiction is the observing payment\'s case without the fact', async () => {
+        for (const answer of [captureNotFound, collapsed]) {
+          const e = await ended('payment.expired');
+          const elsewhere = randomUUID();
+          reply = () => answer;
+          const opened = await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: e.s.paymentId, captureFactId: elsewhere, reason: 'customer_request' });
+          expect(opened.status, JSON.stringify(opened.body)).toBeGreaterThanOrEqual(400);
+          expect(opened.status, 'not eligible, never a 503').not.toBe(503);
+          expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "captureFactId" = $1`, [elsewhere])).toBe(0);
+          paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, elsewhere, { amount: 4500 })]);
+          await reconcile();
+          const [c] = await contradictionCases(e.s.paymentId);
+          expect(c, JSON.stringify(answer.body)).toMatchObject({ evidenceKey: captureContradictionKey(elsewhere, e.s.paymentId), captureFactId: null, detail: 'contradicts_capture_elsewhere' });
+          paymentItems.items.delete('fact_conflict');
+        }
       });
     });
 
