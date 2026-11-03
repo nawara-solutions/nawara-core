@@ -135,7 +135,7 @@ export class LateSettlementAdminController {
   @ApiResponse({ status: 404, description: 'not_found: unknown, or another Company\'s or Platform\'s' })
   @ApiResponse({ status: 409, description: `late_settlement_refused (body \`reason\` ∈ ${LATE_SETTLEMENT_REFUSALS.join(', ')}) | late_settlement_authorization_refused | idempotency_key_conflict` })
   @ApiResponse({ status: 422, description: 'late_settlement_evidence_invalid' })
-  @ApiResponse({ status: 503, description: 'late_settlement_evidence_unavailable | late_settlement_authorization_unresolved (repeat the same request) | late_settlement_authorization_unavailable | late_settlement_dispute_unavailable (Payment\'s dispute exposure unresolved or unverifiable; S0-C9 CB-3)' })
+  @ApiResponse({ status: 503, description: 'late_settlement_evidence_unavailable | late_settlement_authorization_unresolved (repeat the same request) | late_settlement_authorization_unavailable | late_settlement_capture_unavailable (Payment\'s capture evidence could not be verified; S0-C11) | late_settlement_dispute_unavailable (Payment\'s dispute exposure unresolved or unverifiable; S0-C9 CB-3)' })
   async apply(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const k = idempotencyKey(key);
     const input = normaliseApplicationInput(body);

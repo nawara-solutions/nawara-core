@@ -51,7 +51,7 @@ class FakePaymentClient implements PaymentClient {
 const refundsAtPayment: PaymentRefundClient = {
   relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
-  capture: async () => ({ kind: 'not_found' as const }), // Core V2 R6H-5: no capture-specific case in this suite
+  capture: async (paymentId, factId) => { captureReads.push([paymentId, factId]); return { kind: 'not_found' as const }; }, // Core V2 R6H-5: no capture-specific case in this suite
 };
 
 /** Core V2 S6e-D: Payment's losses read under test control (a page of verified losses, or Payment unavailable). */
@@ -65,6 +65,14 @@ const paymentDisputes: PaymentDisputeClient = {
 
 /** Core V2 S6e-H: Auth's fraud-hold receipts (AUTH-02 / AUTH-03 semantics) and File's fraud_evidence grants, under test control. */
 type IssuedReceipt = { id: string; binding: Record<string, unknown>; issuer: string; consumeRef?: string };
+/**
+ * Core V2 S0-C11 item 7, the Owner's interim E-7 rule (2026-11-03): an E-7 late settlement names no capture fact, so its L-4 application is refused
+ * (`409 capture_unverified`) until a certified Payment read of the settling capture exists. These tests complete an E-7 application; they are
+ * PAUSED, not rewritten, so that they return unchanged with that read. The refusal itself is certified below ('S0-C11 interim E-7 rule').
+ */
+const pausedByInterimE7Rule = it.skip;
+/** Every capture read Billing makes (S0-C11): an E-7 application must make none, since it has no fact to name. */
+const captureReads: Array<[string, string]> = [];
 const canon = (b: Record<string, unknown>) => JSON.stringify(Object.keys(b).sort().map((k) => [k, b[k]]));
 const fraudAuth = { issued: new Map<string, IssuedReceipt>(), down: false };
 const fraudHoldReceipts: FraudHoldReceipts = {
@@ -419,7 +427,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── L-4 application
 
   describe('the Owner\'s L-4 application (R6G-1, R6G-3 to R6G-7)', () => {
-    it('attested: one transaction supersedes the deadline obligation, records the purchase (original instant kept, full period from now) and settles the request; T1/T2 end for it only', async () => {
+    pausedByInterimE7Rule('attested: one transaction supersedes the deadline obligation, records the purchase (original instant kept, full period from now) and settles the request; T1/T2 end for it only', async () => {
       const [other, l_] = await lateFixtures('b2', 'b1'); // another request of the same Organization: untouched
       const l = l_!;
       await attest(l.lateId, 'cash_not_returned').expect(201);
@@ -458,7 +466,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(view.cashReturnObligations).toEqual([expect.objectContaining({ id: l.obligationId, status: 'superseded_by_settlement', supersededAt: expect.any(String) })]);
     });
 
-    it('R6G-5 within K-3: an existing paid period of the same product is never overlapped; the applied period continues it at full duration', async () => {
+    pausedByInterimE7Rule('R6G-5 within K-3: an existing paid period of the same product is never overlapped; the applied period continues it at full duration', async () => {
       const l = await lateFixture();
       const direct = await directPurchase('b1', { productId: l.productId, priceId: l.priceId }); // the beneficiary already pays for this product
       await attest(l.lateId, 'cash_not_returned').expect(201);
@@ -504,7 +512,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(await periodEnd(nov30, octAnchor, 'month')).toEqual(new Date('2026-12-31T00:03:14.921Z'));
     });
 
-    it('evidenced (Path B): live settlement_evidence grants plus the Owner\'s explicit determination; a file reference alone proves nothing', async () => {
+    pausedByInterimE7Rule('evidenced (Path B): live settlement_evidence grants plus the Owner\'s explicit determination; a file reference alone proves nothing', async () => {
       const l = await lateFixture();
       const { ownerDetermination: _d, ...noDetermination } = evidenced(l);
       expect((await applyLate(l.lateId, noDetermination)).body.code).toBe('invalid_late_settlement_request');
@@ -525,7 +533,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect((await audit(l.lateId)).find((x) => x.name === 'audit.assistance_late_settlement.applied')!.payload.changes.evidence_count).toBe(2);
     });
 
-    it('authority and receipts: another Company\'s Owner, an operator, a member; a receipt of another Owner, reason or late settlement; Auth unresolved is repeated', async () => {
+    pausedByInterimE7Rule('authority and receipts: another Company\'s Owner, an operator, a member; a receipt of another Owner, reason or late settlement; Auth unresolved is repeated', async () => {
       const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
       expect((await applyLate(l.lateId, attested(l), 'foreign-owner-tok')).status).toBe(404);
@@ -567,7 +575,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" IN ($1, $2, $3)`, [a.requestId, b.requestId, c.requestId])).toBe(0);
     });
 
-    it('Core V2 S0-C9 (CB-3, both inputs): Payment\'s dispute exposure of an E-7 late payment is read before the receipt; open refuses, unresolved is 503; neither spends it', async () => {
+    pausedByInterimE7Rule('Core V2 S0-C9 (CB-3, both inputs): Payment\'s dispute exposure of an E-7 late payment is read before the receipt; open refuses, unresolved is 503; neither spends it', async () => {
       const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
       const body = attested(l);
@@ -584,7 +592,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect((await applyLate(l.lateId, body, 'owner-tok', idem)).status).toBe(201);
     });
 
-    it('R6G-7: a refund case on the late payment refuses the application; a cancelled case that never relayed does not', async () => {
+    pausedByInterimE7Rule('R6G-7: a refund case on the late payment refuses the application; a cancelled case that never relayed does not', async () => {
       const [l, m] = (await lateFixtures('b1', 'b2')) as [Late, Late];
       await attest(l.lateId, 'cash_not_returned').expect(201);
       const open = await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: l.paymentId, reason: 'late_settlement_unapplied' });
@@ -599,7 +607,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(refusal(await applyLate(m.lateId, attested(m)))).toEqual([409, 'late_settlement_refused', 'refund_exists']);
     });
 
-    it('historical late records: Payment\'s trusted envelope supplies the instant; without any trusted instant the application is refused, never invented', async () => {
+    pausedByInterimE7Rule('historical late records: Payment\'s trusted envelope supplies the instant; without any trusted instant the application is refused, never invented', async () => {
       const [l, u] = (await lateFixtures('b1', 'b2')) as [Late, Late];
       await attest(l.lateId, 'cash_not_returned').expect(201);
       await backdate(l.lateId, `UPDATE assistance_late_settlement SET "settledAt" = NULL WHERE id = $1`); // as recorded before S6g
@@ -613,7 +621,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(refusal(await applyLate(u.lateId, attested(u)))).toEqual([409, 'late_settlement_refused', 'settlement_time_unavailable']);
     });
 
-    it('concurrency: duplicate applications and two late successes of one request give one purchase; a racing return report and application never both win', async () => {
+    pausedByInterimE7Rule('concurrency: duplicate applications and two late successes of one request give one purchase; a racing return report and application never both win', async () => {
       const [l, ...racers] = (await lateFixtures('b1', 'b2', 'm1', 'admin-beneficiary')) as Late[];
       await attest(l!.lateId, 'cash_not_returned').expect(201);
       const outs = await Promise.all(Array.from({ length: 6 }, () => applyLate(l!.lateId, attested(l!))));
@@ -638,8 +646,51 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── Option A: refund after application
 
+  describe('S0-C11 interim E-7 rule (the Owner\'s decision, 2026-11-03): no E-7 L-4 application without verified capture evidence', () => {
+    it('attested or evidenced, with a valid receipt and every other condition met: 409 capture_unverified; the receipt is unspent and nothing financial changes', async () => {
+      const [l, m] = (await lateFixtures('b1', 'b2')) as [Late, Late];
+      await attest(l.lateId, 'cash_not_returned').expect(201);
+      captureReads.length = 0;
+      for (const body of [attested(l), evidenced(l)]) {
+        expect(refusal(await applyLate(l.lateId, body))).toEqual([409, 'late_settlement_refused', 'capture_unverified']);
+        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef, 'the receipt is not spent').toBeUndefined();
+      }
+      expect(captureReads, 'no fact is invented or guessed: nothing is read').toEqual([]);
+      expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [l.lateId])).toBe(0);
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(0);
+      expect((await entitlement(U.b1, l.productId).expect(200)).body.valid).toBe(false);
+      expect((await obligationsOf(l.requestId)).map((o) => o.status), 'the deadline obligation is not superseded').toEqual(['open']);
+      expect((await readLate(l.lateId)).body).toMatchObject({ status: 'unapplied', application: null });
+      // the earlier refusals keep their order: they come before the capture check
+      expect(refusal(await applyLate(m.lateId, attested(m)))).toEqual([409, 'late_settlement_refused', 'evidence_insufficient']);
+    });
+
+    it('the same key replayed, and concurrent applications: every one refused, no purchase, no receipt spent', async () => {
+      const l = await lateFixture();
+      await attest(l.lateId, 'cash_not_returned').expect(201);
+      const body = attested(l);
+      const idem = key();
+      expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem))[2]).toBe('capture_unverified');
+      expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem))[2]).toBe('capture_unverified');
+      const all = await Promise.all(Array.from({ length: 6 }, () => applyLate(l.lateId, attested(l))));
+      expect(all.map((r) => refusal(r))).toEqual(Array.from({ length: 6 }, () => [409, 'late_settlement_refused', 'capture_unverified']));
+      expect([...fraudAuth.issued.values()].filter((r) => r.consumeRef)).toEqual([]);
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(0);
+    });
+
+    it('the unapplied E-7 late settlement stays a visible, unresolved reconciliation case', async () => {
+      const l = await lateFixture();
+      await attest(l.lateId, 'cash_not_returned').expect(201);
+      expect(refusal(await applyLate(l.lateId, attested(l)))[2]).toBe('capture_unverified');
+      await t.app.get(ReconciliationService).drainOnce();
+      await t.app.get(ReconciliationService).drainOnce();
+      expect((await admin.query(`SELECT r.kind FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+        WHERE c."caseType" = 'late_assisted_settlement' AND c."evidenceKey" = $1`, [l.lateId])).rows).toEqual([{ kind: null }]);
+    });
+  });
+
   describe('obligation history (Option A): a refund after the application', () => {
-    it('the refund reverses the applied purchase once and opens a NEW refund-origin obligation; the superseded one is kept; T2 returns; discharge works', async () => {
+    pausedByInterimE7Rule('the refund reverses the applied purchase once and opens a NEW refund-origin obligation; the superseded one is kept; T2 returns; discharge works', async () => {
       const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
       await applyLate(l.lateId, attested(l)).expect(201);
@@ -689,7 +740,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── the database
 
   describe('the database (migration 0040)', () => {
-    it('supersession only by an application; superseded is terminal; an application commits with its purchase, settled request and superseded obligation', async () => {
+    pausedByInterimE7Rule('supersession only by an application; superseded is terminal; an application commits with its purchase, settled request and superseded obligation', async () => {
       const l = await lateFixture();
       await expect(admin.query(`UPDATE cash_return_obligation SET status = 'superseded_by_settlement', "supersededByApplicationId" = gen_random_uuid() WHERE id = $1`, [l.obligationId]))
         .rejects.toThrow();
@@ -726,7 +777,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
     });
   });
 
-  it('Core V2 S6h-B (L-2, R6H-1): an unapplied late settlement is a reconciliation case, found again by every pass; the L-4 application resolves it, once', async () => {
+  pausedByInterimE7Rule('Core V2 S6h-B (L-2, R6H-1): an unapplied late settlement is a reconciliation case, found again by every pass; the L-4 application resolves it, once', async () => {
     const l = await lateFixture({ beneficiary: 'b2' });
     const reconcile = () => t.app.get(ReconciliationService).drainOnce();
     const caseOf = () => one(`SELECT c.id, c."companyId", c."organizationId", r.kind FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id

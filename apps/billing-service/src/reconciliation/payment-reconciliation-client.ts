@@ -3,7 +3,8 @@ import { correlationHeaders } from '@nawara/service-kit';
 export const PAYMENT_RECONCILIATION_CLIENT = Symbol('BILLING_PAYMENT_RECONCILIATION_CLIENT');
 
 /** Core V2 S6h-B: the kinds of Payment's evidence Billing reconciles (PAY-12's producer read, `payment.reconciliation.read`). */
-export const PAYMENT_ITEM_KINDS = ['late_success', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback', 'capture_refund_unavailable'] as const;
+export const PAYMENT_ITEM_KINDS = ['late_success', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback', 'capture_refund_unavailable',
+  'fact_conflict'] as const; // Core V2 S0-C11 item 8 (BIL-33 I)
 export type PaymentItemKind = (typeof PAYMENT_ITEM_KINDS)[number];
 
 /** One item of Payment's evidence, as Payment states it (never derived): its id is the evidence's own identity. */
@@ -31,6 +32,9 @@ function item(kind: PaymentItemKind, v: unknown): PaymentItem | null {
   const amount = r.amount === null || r.amount === undefined ? null : r.amount;
   if (amount !== null && (typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount < 1)) return null;
   const currency = typeof r.currency === 'string' && /^[A-Z]{3}$/.test(r.currency) ? r.currency : null;
+  // Core V2 S0-C11: a contradicting observation states whatever the provider sent; one unusable currency is kept with no figures rather than
+  // blocking every later contradiction of the pass (a malformed page throws)
+  if (kind === 'fact_conflict' && (amount === null) !== (currency === null)) return item('fact_conflict', { ...r, amount: null, currency: null });
   if ((amount === null) !== (currency === null)) return null;
   const factId = typeof r.factId === 'string' && UUID.test(r.factId) ? r.factId : null;
   const detail = r.detail && typeof r.detail === 'object' && !Array.isArray(r.detail) ? (r.detail as Record<string, unknown>) : {};

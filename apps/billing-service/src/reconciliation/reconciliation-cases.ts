@@ -7,7 +7,8 @@ import type { TransitionContext } from '../domain/actors.js';
 export const RECONCILIATION_WORKER = 'reconciliation_worker';
 
 export const CASE_TYPES = ['late_assisted_settlement', 'recovery_surplus', 'late_success', 'unmatched_capture', 'unrouted_settlement', 'over_return',
-  'refund_discrepancy', 'partial_chargeback', 'second_reversal_cause', 'contradictory_effect', 'authorization_pending', 'chargeback_refund_overlap'] as const;
+  'refund_discrepancy', 'partial_chargeback', 'second_reversal_cause', 'contradictory_effect', 'authorization_pending', 'chargeback_refund_overlap',
+  'capture_contradiction'] as const; // Core V2 S0-C11 item 8 (BIL-33 I): visibility only, never acknowledged, closed or resolved
 export type CaseType = (typeof CASE_TYPES)[number];
 /** R6H-2: the ONLY types the Owner may acknowledge: their evidence moves no money Billing could act on; every other type needs its evidence. */
 export const REVIEW_ONLY: readonly CaseType[] = ['refund_discrepancy', 'partial_chargeback', 'second_reversal_cause'];

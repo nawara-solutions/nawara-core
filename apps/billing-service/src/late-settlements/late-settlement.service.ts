@@ -14,6 +14,7 @@ import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { PAYMENT_LATE_SETTLEMENT_EXPOSURE, type LateSettlementExposure } from '../refunds/dispute-exposure.js';
+import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient } from '../refunds/payment-refund-client.js';
 import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscription.repository.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -34,6 +35,8 @@ export const LATE_SETTLEMENT_REFUSALS = [
   'chargeback_recorded',
   // Core V2 S0-C9 item 4 (CB-3, an Owner-approved policy addition): Payment states an open dispute or open exposure of the payment
   'payment_dispute_open',
+  // Core V2 S0-C11 item 7 (BIL-32 I): Payment states the capture fact is contested; or the fact is missing or differs from the late success or invoice
+  'capture_contested', 'capture_unverified',
 ] as const;
 export type LateSettlementRefusal = (typeof LATE_SETTLEMENT_REFUSALS)[number];
 
@@ -139,6 +142,7 @@ export class LateSettlementService {
     @Inject(FRAUD_HOLD_RECEIPTS) private readonly receipts: FraudHoldReceipts,
     @Inject(FRAUD_EVIDENCE_FILES) private readonly files: FraudEvidenceFiles,
     @Inject(PAYMENT_LATE_SETTLEMENT_EXPOSURE) private readonly exposure: LateSettlementExposure,
+    @Inject(PAYMENT_REFUND_CLIENT) private readonly captures: PaymentRefundClient,
   ) {}
 
   private deadline(): AbortSignal {
@@ -310,6 +314,10 @@ export class LateSettlementService {
     // Core V2 S0-C9 item 4 (CB-3): Payment's authoritative dispute exposure, read last before the receipt is consumed; a refusal or a 503
     // spends no receipt and writes nothing. Not a lock: a dispute recorded after this read follows S0-C9 item 7 (EVT-03's capture binding)
     await this.disputeExposureClear(l);
+    // Core V2 S0-C11 item 7 (BIL-32 I): Payment's capture evidence, read after the exposure and before the receipt is consumed; a refusal or a 503
+    // spends no receipt and writes nothing. A point-in-time check, NOT a cross-service lock (item 7a): a contradiction recorded after this read is
+    // made visible by the reconciliation worker's `capture_contradiction` case (item 7b) and reverses nothing (FC-4)
+    await this.captureEvidenceVerified(l);
     const consumption = await this.consume(binding, input.receiptSecret, lateSettlementConsumeRef(id, input.receiptSecret), owner);
     try {
       return await this.idempotency.run(owner.userId, key, 'assistance_late_settlement.apply', command, (q) => this.applyIn(q, l, input, owner, consumption, ctx));
@@ -394,6 +402,40 @@ export class LateSettlementService {
     if (state === 'dispute_open') throw lateSettlementRefused('payment_dispute_open');
     if (state === 'chargeback_recorded') throw lateSettlementRefused('chargeback_recorded');
     throw billingError(503, 'late_settlement_dispute_unavailable', BILLING_MESSAGES.lateSettlementDisputeUnavailable);
+  }
+
+  /**
+   * S0-C11 item 7: the late success's capture fact exists, is uncontested, and equals the late success and the channel invoice's total, as Payment's
+   * capture read states it now. Contested: `409 capture_contested`. Missing or unequal: `409 capture_unverified`. Payment unanswerable or an answer
+   * that proves nothing: `503 late_settlement_capture_unavailable`.
+   */
+  private async captureEvidenceVerified(l: LateRow): Promise<void> {
+    // Input (a), the S5b E-7 receipt: Billing can name no capture fact, so no Payment statement can establish it. INTERIM fail-closed rule
+    // (the Owner's E-7 decision, 2026-11-03): refused until a certified Payment read of the settling capture exists; never bypassed
+    const ls = (await this.db.query<{ paymentId: string; factId: string | null; amount: string; currency: string; total: string; invoiceCurrency: string }>(
+      `SELECT s."paymentId", s."factId", s.amount, trim(s.currency) AS currency, i.total, trim(i.currency) AS "invoiceCurrency"
+         FROM payment_late_success s JOIN payment_request pr ON pr.id = s."paymentRequestId" JOIN invoice i ON i.id = pr."invoiceId"
+        WHERE s."lateSuccessId" = $1`, [l.lateSuccessId ?? null])).rows[0];
+    let refusal: 'capture_contested' | 'capture_unverified' | 'unavailable' | null = null;
+    if (!l.lateSuccessId || !ls?.factId) refusal = 'capture_unverified';
+    else {
+      let read: CaptureReadOutcome;
+      try {
+        read = await this.captures.capture(ls.paymentId, ls.factId);
+      } catch {
+        read = { kind: 'unknown', reason: 'error' };
+      }
+      if (read.kind === 'unknown') refusal = 'unavailable';
+      else if (read.kind === 'not_found') refusal = 'capture_unverified';
+      else if (read.capture.paymentId !== ls.paymentId || read.capture.factId !== ls.factId) refusal = 'unavailable'; // an answer about something else proves nothing
+      else if (read.capture.conflicted) refusal = 'capture_contested';
+      else if (read.capture.amount !== Number(ls.amount) || read.capture.currency !== ls.currency
+        || read.capture.amount !== Number(ls.total) || read.capture.currency !== ls.invoiceCurrency) refusal = 'capture_unverified';
+    }
+    if (!refusal) return;
+    this.log.warn(`late_settlement_capture_evidence lateSettlement=${l.id} lateSuccess=${l.lateSuccessId} outcome=${refusal} — refused before the receipt; nothing written`);
+    if (refusal === 'unavailable') throw billingError(503, 'late_settlement_capture_unavailable', BILLING_MESSAGES.lateSettlementCaptureUnavailable);
+    throw lateSettlementRefused(refusal);
   }
 
   private async consume(binding: FraudHoldBinding, secret: string, consumeRef: string, owner: VerifiedRefundOwner): Promise<ReceiptConsumption> {

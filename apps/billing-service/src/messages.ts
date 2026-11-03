@@ -635,6 +635,11 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "L'autorisation n'a pas pu être confirmée ; répétez la même requête.",
     ar: 'تعذّر تأكيد التفويض؛ أعد إرسال الطلب نفسه.',
   },
+  lateSettlementCaptureUnavailable: { // Core V2 S0-C11 (BIL-32 I)
+    en: "The payment's capture evidence could not be verified; nothing was changed.",
+    fr: "Les preuves de capture du paiement n'ont pas pu être vérifiées ; rien n'a été modifié.",
+    ar: 'تعذّر التحقق من أدلة تحصيل الدفعة؛ لم يتغيّر شيء.',
+  },
   lateSettlementDisputeUnavailable: { // Core V2 S0-C9 (CB-3, BIL-32 H)
     en: "The payment's dispute exposure could not be verified; nothing was changed.",
     fr: "L'exposition aux litiges du paiement n'a pas pu être vérifiée ; rien n'a été modifié.",

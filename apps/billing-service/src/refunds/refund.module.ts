@@ -70,7 +70,8 @@ export class RefundModule {
       ],
       // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
       global: true,
-      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService, FRAUD_HOLD_RECEIPTS, FRAUD_EVIDENCE_FILES, PAYMENT_LATE_SETTLEMENT_EXPOSURE], // S6f: the recovery Path B reuses both clients
+      exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService, FRAUD_HOLD_RECEIPTS, FRAUD_EVIDENCE_FILES, PAYMENT_LATE_SETTLEMENT_EXPOSURE,
+        PAYMENT_REFUND_CLIENT /* Core V2 S0-C11: L-4 and the contradiction cases read capture evidence */], // S6f: the recovery Path B reuses both clients
     };
   }
 }
