@@ -190,6 +190,10 @@ export class AttemptService {
           // FI-13: never applied silently. No new state is introduced for this — it is refused outright.
           throw paymentError(502, 'provider_error', PAYMENT_MESSAGES.amountCurrencyMismatch);
         }
+        // Core V2 S0-C11 (items 1, 4, 5): only an authenticated observation equal to its committed, uncontested fact has a commercial effect. The
+        // notification is never compared with the payment alone: a correction under a recorded reference settles nothing and records nothing.
+        const evidence = await this.captureEvidence(q, payment.id, attemptId, status, factId);
+        if (!evidence.verified) throw paymentError(502, 'provider_error', PAYMENT_MESSAGES.captureEvidenceUnverified);
         // Core V2 S4c (F-4, S0 L-1 and §3.4): a verified success for a payment whose workflow already ended changes nothing about it and
         // emits no payment.succeeded (no automatic purchase); it is recorded durably below, after this transaction, and surfaced.
         if (payment.status === 'failed' || payment.status === 'cancelled' || payment.status === 'expired' || payment.status === 'succeeded') {
@@ -204,6 +208,8 @@ export class AttemptService {
             return current;
           }
         }
+        // Core V2 S0-C11 (items 2, 3): several provider references on one attempt are distinct facts: none is preferred, merged or settled on
+        if (evidence.captures !== 1) throw paymentError(502, 'provider_error', PAYMENT_MESSAGES.captureEvidenceUnverified);
         // An attempt still `initiated` (crash before T2, or a webhook that beat T2) is first moved through `unknown`: the
         // provider's success proves it reached the provider, and the state machine has no direct `initiated -> succeeded`.
         // Core V2 S4c (F-4): a `closing` payment succeeds here too — it was never definitively closed.
@@ -288,12 +294,31 @@ export class AttemptService {
   }
 
   /**
+   * Core V2 S0-C11 item 1, under the payment's lock: whether this observation is verified for commercial effect (it IS the committed fact of this
+   * attempt and payment, and that fact has no recorded contradiction), and how many capture facts the attempt holds. The database guards agree
+   * (`0024_capture_evidence.sql`).
+   */
+  private async captureEvidence(q: Queryable, paymentId: string, attemptId: string, status: Extract<FetchStatusResult, { kind: 'succeeded' }>, factId: string | null) {
+    const { rows } = await q.query<{ factId: string | null; amount: string | null; currency: string | null; contested: boolean; captures: number }>(
+      `SELECT f.id AS "factId", f.amount, trim(f.currency) AS currency,
+              EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id) AS contested,
+              (SELECT count(*)::int FROM provider_transaction_fact g WHERE g."attemptId" = $2 AND g."paymentId" = $3 AND g.kind = 'capture') AS captures
+         FROM provider_transaction_fact f WHERE f.id = $1 AND f.kind = 'capture' AND f."attemptId" = $2 AND f."paymentId" = $3`,
+      [factId, attemptId, paymentId],
+    );
+    const f = rows[0];
+    const verified = !!f && !f.contested && Number(f.amount) === status.amount && f.currency === status.currency;
+    return { verified, captures: f?.captures ?? 0 };
+  }
+
+  /**
    * Core V2 S4d (register PAY-05, I-6; S0 FC-1, V-2; ADR-0035 C2): records the provider's reported capture as an immutable
    * `provider_transaction_fact`, committed on its own before any commercial processing, and returns its id. The evidence reached Payment
    * only through an authenticated channel (a signature-verified webhook, or the provider's status read: `ctx` says which). Identity
    * `(provider, providerTxnId, 'capture')`: an identical redelivery, or the same capture seen through the other channel, is the same fact; a
    * contradicting observation (other amount, currency, payment or attempt) never overwrites it and is kept, once, as a conflict.
-   * A capture whose provider transaction reference is unknown (an adapter that does not supply it) cannot be keyed: refused loudly.
+   * A capture whose provider transaction reference is unknown (an adapter that does not supply it) cannot be keyed: no fact, so `applyStatus`
+   * refuses it (S0-C11 item 4). A contradiction is audited with its conflict row, once (S0-C11 item 8).
    */
   private async recordCaptureFact(attemptId: string, status: Extract<FetchStatusResult, { kind: 'succeeded' }>, ctx: EventContext): Promise<string | null> {
     const attempt = await this.findById(attemptId);
@@ -321,11 +346,16 @@ export class AttemptService {
       const fact = existing[0]!;
       const same = fact.paymentId === attempt.paymentId && fact.attemptId === attemptId && Number(fact.amount) === status.amount && fact.currency === status.currency;
       if (!same) {
-        await q.query(
+        const { rows: recorded } = await q.query<{ id: string }>(
           `INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", provider, amount, currency, source, "webhookEventId")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT ON CONSTRAINT provider_transaction_fact_conflict_once DO NOTHING`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT ON CONSTRAINT provider_transaction_fact_conflict_once DO NOTHING RETURNING id`,
           [fact.id, attempt.paymentId, attemptId, attempt.provider, status.amount, status.currency, source, webhookEventId],
         );
+        if (recorded[0]) {
+          const { rows: payment } = await q.query<{ organizationId: string | null }>(`SELECT "organizationId" FROM payment WHERE id = $1`, [attempt.paymentId]);
+          await this.audit.recordFactConflict(q, { id: recorded[0].id, factId: fact.id, paymentId: attempt.paymentId, attemptId, source, amount: status.amount },
+            payment[0]?.organizationId ?? null, ctx);
+        }
         this.logger.warn(`provider_fact_conflict fact=${fact.id} attempt=${attemptId} provider=${attempt.provider} — a contradicting observation of the same provider transaction; kept for reconciliation, the fact is unchanged`);
       }
       return fact.id;

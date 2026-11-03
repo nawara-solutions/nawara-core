@@ -37,6 +37,7 @@ describe('PAYMENT_MESSAGES', () => {
       paymentExpired: 'This payment has expired.',
       attemptAlreadyOpen: 'An attempt is already open for this payment.',
       cannotStartAttemptInStatus: 'Cannot start an attempt on a payment in status {status}.',
+      captureEvidenceUnverified: 'Provider capture evidence is missing, ambiguous or contradicted, so it has no commercial effect.',
       amountCurrencyMismatch: 'Provider-reported amount/currency does not match the payment snapshot.',
       providerSuccessConflicts: 'Provider success conflicts with a payment that is already {status}.',
       lateSuccessConflicts: 'Late success conflicts with a provider-confirmed failure.',

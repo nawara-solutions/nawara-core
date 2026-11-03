@@ -109,7 +109,7 @@ describeWithEnv('required concurrency scenarios (real PostgreSQL)', ['TEST_DATAB
     const providers = t.app.get(ProviderRegistry);
     const provider = providers.get('test');
 
-    await Promise.all([sweeper.sweepOnce(), attempts.applyStatus(start.id, { kind: 'succeeded', amount: 1000, currency: 'TND' }, provider)]);
+    await Promise.all([sweeper.sweepOnce(), attempts.applyStatus(start.id, { kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: `ptx_${start.id}` }, provider)]);
 
     // The open-attempt guard means expiry can never win this race while the attempt is still open: the only
     // consistent outcome is succeeded, regardless of which transaction's row lock was granted first.

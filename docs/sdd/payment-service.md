@@ -48,7 +48,7 @@ read and means workflow finality only, never that a refund, dispute, chargeback 
 authenticated channel (a signature-verified webhook or the provider's status read) is first committed, in its own transaction, as an
 immutable `provider_transaction_fact` keyed `(provider, providerTxnId, kind = capture)`; only then does the existing processing decide
 what it means (settle, FI-13 refusal, late success). A fact is never refused, edited or deleted; redeliveries are the same fact; a
-contradicting observation is kept in `provider_transaction_fact_conflict`; `payment_late_success` references its fact. Refund and
+contradicting observation is kept in `provider_transaction_fact_conflict`; `payment_late_success` references its fact. S0-C11: a capture has a commercial effect only when the observation equals its committed, uncontested fact (a gateway payment settles only on the attempt's single capture fact; a contradiction or a missing reference settles nothing and records no late success; `0024_capture_evidence.sql`; audit `provider_fact_conflict.recorded`). Refund and
 chargeback facts, allocation (FC-2) and the association of unmatched evidence are S6.
 
 **Core V2 S4g (class-M idempotency; S0 §3.7, [OD] D7; register PAY-15 F):** every `Idempotency-Key` record (attempt start, cancel) is a

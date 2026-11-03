@@ -845,6 +845,21 @@ const SPEC = {
     },
     purpose: "The Owner associated an unmatched verified provider money fact with one payment or refund authorization of their Company (append-only; the fact never changes).",
   },
+  // Core V2 S0-C11 item 8: an authenticated observation contradicted a recorded capture fact. The fact never changes, and nothing commercial follows.
+  // Version 1, no trusted scope (S2-Audit D3).
+  'provider_fact_conflict.recorded': {
+    producer: 'payment-service', category: 'commercial', since: 1,
+    actors: { system: ['payment_webhook', 'payment_status_read'] }, organization: 'optional',
+    resource: ['provider_transaction_fact'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      conflict_id: { type: 'uuid', shape: 'value', required: true },
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      attempt_id: { type: 'uuid', shape: 'value', required: true },
+      source: { type: 'code', shape: 'value', required: true, values: ['webhook', 'status_check'] },
+      observed_amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+    },
+    purpose: 'An authenticated provider observation contradicted a recorded capture fact: the fact stays as first reported and is contested, with no commercial effect.',
+  },
   'refund_authorization.completed': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_authorization'], subject: NO_SUBJECT, outcomes: OK,

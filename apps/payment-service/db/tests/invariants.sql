@@ -59,6 +59,12 @@ BEGIN
   RETURN aid;
 END $$;
 
+-- Fixture (Core V2 S0-C11): the capture fact an attempt's settlement needs (0024_capture_evidence.sql).
+CREATE FUNCTION pg_temp.capture_fact(pid uuid, aid uuid, amt bigint DEFAULT 1000, cur text DEFAULT 'TND') RETURNS uuid LANGUAGE sql AS $f$
+  INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-' || gen_random_uuid(), 'capture', pid, aid, amt, cur, false, 'status_check') RETURNING id;
+$f$;
+
 -- Fixture: a `pending` payment whose one attempt has genuinely succeeded (the state right before a payment settles).
 CREATE FUNCTION pg_temp.pending_with_succeeded_attempt(req uuid, org uuid) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE pid uuid; aid uuid;
@@ -68,6 +74,7 @@ BEGIN
   UPDATE payment SET status = 'pending' WHERE id = pid;
   UPDATE payment_attempt SET status = 'submitted' WHERE id = aid;
   UPDATE payment_attempt SET status = 'succeeded' WHERE id = aid;
+  PERFORM pg_temp.capture_fact(pid, aid);
   RETURN pid;
 END $$;
 
@@ -81,7 +88,7 @@ BEGIN
   UPDATE payment SET status = 'pending' WHERE id = pid;
   UPDATE payment_attempt SET status = 'failed', "failureInferred" = inferred, "failureClass" = 'terminal', "failureCode" = 'x' WHERE id = aid;
   UPDATE payment SET status = 'created' WHERE id = pid;
-  IF inferred THEN UPDATE payment_attempt SET status = 'succeeded' WHERE id = aid; END IF;
+  IF inferred THEN UPDATE payment_attempt SET status = 'succeeded' WHERE id = aid; PERFORM pg_temp.capture_fact(pid, aid); END IF;
   RETURN pid;
 END $$;
 
@@ -187,6 +194,9 @@ SELECT pg_temp.expect_error('FI-04', 'succeededAttemptId cannot reference an att
 SELECT pg_temp.expect_ok('SM', 'the attempt itself can move initiated -> submitted -> succeeded',
   format($$UPDATE payment_attempt SET status = 'submitted' WHERE id = %L$$, :'att4'));
 SELECT pg_temp.expect_ok('SM', 'submitted -> succeeded', format($$UPDATE payment_attempt SET status = 'succeeded' WHERE id = %L$$, :'att4'));
+\o /dev/null
+SELECT pg_temp.capture_fact(:'pay4', :'att4');
+\o
 SELECT pg_temp.new_payment('00000000-0000-0000-0000-0000000000b5', '00000000-0000-0000-0000-0000000000a1') AS pay5 \gset
 SELECT pg_temp.new_attempt(:'pay5', 1) AS att5_other_payment \gset
 SELECT pg_temp.expect_error('FI-04', 'succeededAttemptId cannot reference an attempt belonging to ANOTHER payment',
@@ -335,6 +345,7 @@ SELECT pg_temp.new_attempt(:'s4b_gw', 1) AS s4b_att \gset
 UPDATE payment SET status = 'pending' WHERE id = :'s4b_gw';
 UPDATE payment_attempt SET status = 'submitted' WHERE id = :'s4b_att';
 UPDATE payment_attempt SET status = 'succeeded' WHERE id = :'s4b_att';
+SELECT pg_temp.capture_fact(:'s4b_gw', :'s4b_att', (SELECT amount FROM payment WHERE id = :'s4b_gw'), (SELECT currency FROM payment WHERE id = :'s4b_gw')) AS s4b_fact \gset
 SELECT pg_temp.expect_ok('S4b', 'a Company seller''s payment is settled through a gateway', format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = %L, "closedAt" = now() WHERE id = %L$$, :'s4b_att', :'s4b_gw'));
 SELECT pg_temp.expect_constraint('S4b', 'DB-16: a settled Company payment cannot be re-labelled cash by a raw UPDATE', format($$UPDATE payment SET "settledMethod" = 'cash' WHERE id = %L$$, :'s4b_gw'), 'payment_no_company_cash_settlement');
 SELECT pg_temp.expect_error('S4b', 'S4a: the same payment''s purpose stays immutable', format($$UPDATE payment SET purpose = 'non_entitlement' WHERE id = %L$$, :'s4b_gw'), '23514');
@@ -380,6 +391,7 @@ SELECT pg_temp.expect_error('S4c', 'F-6: no second attempt after an inferred fai
 SELECT pg_temp.expect_error('S4c', 'F-3: an inferred failure never lets the payment fail', format($$UPDATE payment SET status = 'failed', "closedAt" = now() WHERE id = %L$$, :'c2'), '23514');
 SELECT pg_temp.expect_ok('S4c', 'F-1: an expiry while uncertain starts closing', format($$UPDATE payment SET status = 'closing', "closingReason" = 'expiry' WHERE id = %L$$, :'c2'));
 UPDATE payment_attempt SET status = 'succeeded' WHERE id = :'c2a';
+SELECT pg_temp.capture_fact(:'c2', :'c2a', (SELECT amount FROM payment WHERE id = :'c2'), (SELECT currency FROM payment WHERE id = :'c2')) AS c2_fact \gset
 SELECT pg_temp.expect_ok('S4c', 'F-4: a verified success during closing settles the payment', format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = %L, "closedAt" = now() WHERE id = %L$$, :'c2a', :'c2'));
 -- a confirmed inferred failure: definitive; created -> failed only then; the late-success edge closes
 SELECT pg_temp.s4c_pay() AS c3 \gset
@@ -401,11 +413,12 @@ SELECT pg_temp.expect_ok('S4c', 'a payment with no attempt is cancelled at once 
 SELECT pg_temp.expect_error('S4c', 'a payment is never created closing', $$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, status, "closingReason")
   VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'company', 'n', 100, 'TND', 'non_entitlement', 'closing', 'cancel')$$, '23514');
 -- F-4: the durable late-success record (append-only, once per attempt/source/webhook event)
-INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus") VALUES (:'c1', :'c1a', 'status_check', 1000, 'TND', 'cancelled');
-SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is recorded once per (attempt, source, webhook event)', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus") VALUES (%L, %L, 'status_check', 1000, 'TND', 'cancelled')$$, :'c1', :'c1a'), '23505');
+SELECT pg_temp.capture_fact(:'c1', :'c1a') AS c1f \gset
+INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (:'c1', :'c1a', 'status_check', 1000, 'TND', 'cancelled', :'c1f');
+SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is recorded once per (attempt, source, webhook event)', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'cancelled', %L)$$, :'c1', :'c1a', :'c1f'), '23505');
 SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is never changed', $$UPDATE payment_late_success SET amount = 1$$, '23514');
 SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is never deleted', $$DELETE FROM payment_late_success$$, '23514');
-SELECT pg_temp.expect_error('S4c', 'F-4: a webhook-sourced record names its stored webhook event', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus") VALUES (%L, %L, 'webhook', 1000, 'TND', 'cancelled')$$, :'c1', :'c1a'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-4: a webhook-sourced record names its stored webhook event', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'webhook', 1000, 'TND', 'cancelled', %L)$$, :'c1', :'c1a', :'c1f'), '23514');
 SELECT pg_temp.assert_eq('S4c', 'F-4: recording a late success leaves the payment final and unchanged', (SELECT status FROM payment WHERE id = :'c1'), 'cancelled');
 \o
 
@@ -442,7 +455,10 @@ SELECT pg_temp.expect_error('S4d', 'a contradiction redelivered is recorded once
 SELECT pg_temp.expect_error('S4d', 'a contradiction is never edited', $$UPDATE provider_transaction_fact_conflict SET amount = 1$$, '23514');
 SELECT pg_temp.expect_error('S4d', 'a contradiction is never deleted', $$DELETE FROM provider_transaction_fact_conflict$$, '23514');
 SELECT pg_temp.assert_eq('S4d', 'a contradiction never changes its fact', (SELECT amount::text FROM provider_transaction_fact WHERE id = :'fact1'), '1000');
-SELECT pg_temp.expect_ok('S4d', 'C2: a late success references its own fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f1', :'f1a', :'fact1'));
+\o /dev/null
+SELECT pg_temp.capture_fact(:'f1', :'f1a') AS fact1b \gset
+\o
+SELECT pg_temp.expect_ok('S4d', 'C2: a late success references its own fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f1', :'f1a', :'fact1b'));
 SELECT pg_temp.expect_error('S4d', 'C2: a late success never references another attempt''s fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f2', :'f2a', :'fact1'), '23514');
 SELECT pg_temp.assert_eq('S4d', 'the runtime grants: no UPDATE or DELETE on facts for anyone but the owner',
   (SELECT count(*)::text FROM information_schema.role_table_grants g JOIN pg_tables t ON t.tablename = g.table_name
@@ -823,9 +839,10 @@ UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-
 UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'q1a';
 INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
   VALUES ('test', 'ptx-r6h5-1', 'capture', :'q1', :'q1a', 1000, 'TND', false, 'status_check') RETURNING id AS q1f \gset
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'q1a', "closedAt" = now() WHERE id = :'q1';
+-- S0-C11 item 3: a further capture of an already succeeded payment (R6H-5); two facts before settlement would never settle
 INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
   VALUES ('test', 'ptx-r6h5-2', 'capture', :'q1', :'q1a', 1000, 'TND', false, 'status_check') RETURNING id AS q1g \gset
-UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'q1a', "closedAt" = now() WHERE id = :'q1';
 \o
 SELECT pg_temp.expect_constraint('R6H-5', 'a capture-specific refund is the capture in full', pg_temp.r5(gen_random_uuid(), :'q1', :'q1g', :'q1a', 999, true), 'refund_attempt_capture_verified');
 SELECT pg_temp.expect_constraint('R6H-5', 'never another payment''s capture', pg_temp.r5(gen_random_uuid(), :'q1', :'e1f', :'e1a', 1000, true), 'refund_attempt_capture_verified');
@@ -876,6 +893,58 @@ INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "payment
   VALUES ('test', 'ptx-c9-2', 'capture', :'g1', :'g1a', 1000, 'TND', false, 'status_check');
 \o
 SELECT pg_temp.expect_constraint('S0-C9', 'CB-1: two captures of the attempt are ambiguous: never a late-capture dispute', pg_temp.c9('d-c9-2', :'g1', :'g1a', :'g1f', 'late_capture'), 'payment_dispute_capture_basis');
+
+-- ======================================================= Core V2 S0-C11: capture evidence (0024) ----
+\o /dev/null
+CREATE FUNCTION pg_temp.c11(pid uuid) RETURNS uuid LANGUAGE plpgsql AS $$
+DECLARE aid uuid;
+BEGIN
+  aid := pg_temp.new_attempt(pid, 1);
+  UPDATE payment SET status = 'pending' WHERE id = pid;
+  UPDATE payment_attempt SET status = 'submitted' WHERE id = aid;
+  UPDATE payment_attempt SET status = 'succeeded' WHERE id = aid;
+  RETURN aid;
+END $$;
+CREATE FUNCTION pg_temp.c11_settle(pid uuid, aid uuid) RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = %L WHERE id = %L$$, aid, pid);
+$f$;
+CREATE FUNCTION pg_temp.c11_late(pid uuid, aid uuid, fid uuid, amt bigint DEFAULT 1000, cur text DEFAULT 'TND') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', %s, %L, 'created', %L)$$, pid, aid, amt, cur, fid);
+$f$;
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11a \gset
+SELECT pg_temp.c11(:'c11a') AS c11aa \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11b \gset
+SELECT pg_temp.c11(:'c11b') AS c11ba \gset
+SELECT pg_temp.capture_fact(:'c11b', :'c11ba', 1001) AS c11bf \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11c \gset
+SELECT pg_temp.c11(:'c11c') AS c11ca \gset
+SELECT pg_temp.capture_fact(:'c11c', :'c11ca', 1000, 'EUR') AS c11cf \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11d \gset
+SELECT pg_temp.c11(:'c11d') AS c11da \gset
+SELECT pg_temp.capture_fact(:'c11d', :'c11da') AS c11df \gset
+INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", provider, amount, currency, source) VALUES (:'c11df', :'c11d', :'c11da', 'test', 999, 'TND', 'status_check');
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11e \gset
+SELECT pg_temp.c11(:'c11e') AS c11ea \gset
+SELECT pg_temp.capture_fact(:'c11e', :'c11ea');
+SELECT pg_temp.capture_fact(:'c11e', :'c11ea');
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11f \gset
+SELECT pg_temp.c11(:'c11f') AS c11fa \gset
+SELECT pg_temp.capture_fact(:'c11f', :'c11fa') AS c11ff \gset
+\o
+SELECT pg_temp.expect_constraint('S0-C11', 'item 4: no capture fact never settles', pg_temp.c11_settle(:'c11a', :'c11aa'), 'payment_settlement_capture_evidence');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 2: another amount never settles', pg_temp.c11_settle(:'c11b', :'c11ba'), 'payment_settlement_capture_evidence');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 2: another currency never settles', pg_temp.c11_settle(:'c11c', :'c11ca'), 'payment_settlement_capture_evidence');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 5: a contested fact never settles', pg_temp.c11_settle(:'c11d', :'c11da'), 'payment_settlement_capture_evidence');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 3: two capture facts never settle', pg_temp.c11_settle(:'c11e', :'c11ea'), 'payment_settlement_capture_evidence');
+SELECT pg_temp.expect_ok('S0-C11', 'item 2: one equal uncontested fact settles', pg_temp.c11_settle(:'c11f', :'c11fa'));
+SELECT pg_temp.expect_ok('S0-C11', 'item 7 (FC-4): a contradiction after settlement is recorded and reverses nothing', format($$INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", provider, amount, currency, source) VALUES (%L, %L, %L, 'test', 999, 'TND', 'status_check')$$, :'c11ff', :'c11f', :'c11fa'));
+SELECT pg_temp.assert_eq('S0-C11', 'item 7 (FC-4): the settled payment stays settled', (SELECT status FROM payment WHERE id = :'c11f'), 'succeeded');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 4: a late success names a fact', pg_temp.c11_late(:'c11b', :'c11ba', NULL), 'payment_late_success_fact_binding');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 6: a late success never states another amount than its fact', pg_temp.c11_late(:'c11b', :'c11ba', :'c11bf', 1000), 'payment_late_success_fact_binding');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 6: a late success never states another currency than its fact', pg_temp.c11_late(:'c11c', :'c11ca', :'c11cf', 1000, 'TND'), 'payment_late_success_fact_binding');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 5: a contested fact records no late success', pg_temp.c11_late(:'c11d', :'c11da', :'c11df'), 'payment_late_success_fact_binding');
+SELECT pg_temp.expect_constraint('S0-C11', 'item 6: never another attempt''s fact', pg_temp.c11_late(:'c11c', :'c11ca', :'c11bf', 1001), 'payment_late_success_fact_binding');
+SELECT pg_temp.expect_ok('S0-C11', 'item 6: a late success equal to its uncontested fact is recorded', pg_temp.c11_late(:'c11b', :'c11ba', :'c11bf', 1001));
 
 -- ---------------------------------------------------------------------------- verdict ----
 \o
