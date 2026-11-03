@@ -457,6 +457,120 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
     });
   });
 
+  /**
+   * Core V2 S0-C11 item 9 and acceptance 12(5) (EG-1 of the S0-C11 certification review): a capture contradiction blocks a NEW refund of that
+   * capture, but "doesn't block or undo … an authorized refund attempt (FC-2, FC-3)". The contradiction is the simulated provider's own signed
+   * notification of the settled attempt with another amount (`amount_mismatch`, through Payment's webhook pipeline); the refund worker is
+   * driven pass by pass, so the contradiction lands at a chosen point of the attempt's existing state machine (authorized, then submitted).
+   */
+  describe('S0-C11 item 9 / 12(5): a contradiction after authorization never stops the authorized refund', () => {
+    const settlingFact = async (pid: string) => (await admin.query(
+      `SELECT id, amount::int AS amount, trim(currency) AS currency, "providerTxnId", "attemptId" FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'capture'`, [pid])).rows;
+    const conflicts = async (factId: string) => (await admin.query(
+      `SELECT amount::int AS amount, "refundAttemptId" FROM provider_transaction_fact_conflict WHERE "factId" = $1 ORDER BY "observedAt", id`, [factId])).rows;
+    /** The provider's signed contradiction of the settled attempt's capture (another amount, the same provider transaction). */
+    const contradict = async (pid: string, attemptId: string) => (await sim(`payments/${pid}/attempts/${attemptId}/outcomes`, { commandId: cmd(), outcome: 'amount_mismatch' }).expect(201)).body as { commandId: string };
+    const authorizations = async (pid: string) => (await admin.query(
+      `SELECT id, "refundAttemptId", "receiptId", "approvedAmount"::int AS "approvedAmount", "allocatedIntended"::int AS allocated, "completedAt" FROM refund_authorization WHERE "paymentId" = $1`, [pid])).rows;
+    const completions = async (pid: string) => (await admin.query(`SELECT id FROM outbox WHERE name = 'refund.case_completed' AND payload->>'paymentId' = $1`, [pid])).rows.length;
+    const dispatches = async (attemptId: string) => (await admin.query(`SELECT received FROM simulation_refund_dispatch WHERE "idempotencyKey" = $1`, [attemptId])).rows;
+
+    it('A: contradicted BEFORE authorization: the refund is refused refund_capture_unverified before the receipt is consumed; no attempt, authorization, dispatch or completion', async () => {
+      const { payment, attempt } = await captured();
+      const [fact] = await settlingFact(payment.id);
+      await contradict(payment.id, attempt.id);
+      expect(await conflicts(fact.id)).toEqual([{ amount: 8999, refundAttemptId: null }]);
+      const caseId = randomUUID();
+      const r = receiptFor(payment.id, caseId);
+      const consumeCalls = auth.calls.consume;
+      const b = body(caseId, r.secret);
+      expect((await refund(payment.id, b).expect(409)).body.code).toBe('refund_capture_unverified');
+      expect(auth.calls.consume, 'the receipt is never presented to Auth').toBe(consumeCalls);
+      expect(auth.receipts.get(r.secret)!.status, 'the receipt stays issued').toBe('issued');
+      expect(await attemptRow(b.refundAttemptId)).toBeUndefined();
+      expect(await authorizations(payment.id)).toEqual([]);
+      await drain();
+      expect(await dispatches(b.refundAttemptId)).toEqual([]);
+      expect(await completions(payment.id)).toBe(0);
+      expect(await settlingFact(payment.id)).toEqual([fact]);
+      expect((await admin.query(`SELECT status FROM payment WHERE id = $1`, [payment.id])).rows[0].status).toBe('succeeded');
+    });
+
+    it('B + D: contradicted while AUTHORIZED and again while SUBMITTED: the same attempt dispatches once, succeeds and completes its authorization once; the capture fact never changes', async () => {
+      const { payment, attempt } = await captured();
+      const [fact] = await settlingFact(payment.id);
+      const { body: b, receipt } = await authorized(payment.id);
+      const a0 = await attemptRow(b.refundAttemptId);
+      expect(a0).toMatchObject({ status: 'authorized', receiptId: receipt.id, approvedByUserId: OWNER, captureFactId: fact.id, capturedAttemptId: attempt.id, amount: '9000' });
+      const [z0] = await authorizations(payment.id);
+      expect(z0).toMatchObject({ refundAttemptId: b.refundAttemptId, receiptId: receipt.id, approvedAmount: 9000, allocated: 0, completedAt: null });
+
+      // D (1): the provider contradicts the capture BETWEEN authorization and dispatch
+      const c1 = await contradict(payment.id, attempt.id);
+      expect(await conflicts(fact.id)).toEqual([{ amount: 8999, refundAttemptId: null }]);
+      expect(await settlingFact(payment.id), 'the original capture fact is immutable').toEqual([fact]);
+      expect(await attemptRow(b.refundAttemptId)).toMatchObject({ status: 'authorized', receiptId: receipt.id, authorizedAt: a0.authorizedAt });
+      // a NEW refund of the contested capture is refused (item 9: the contradiction blocks new refunds) while the authorized one continues
+      const c = randomUUID();
+      expect((await refund(payment.id, body(c, receiptFor(payment.id, c).secret)).expect(409)).body.code).toBe('refund_capture_unverified');
+
+      await drain();
+      expect(await attemptRow(b.refundAttemptId)).toMatchObject({ status: 'submitted', providerRefundId: `simr_${b.refundAttemptId}` });
+      expect(await dispatches(b.refundAttemptId)).toEqual([{ received: 1 }]);
+
+      // D (2): contradicted again (the same signed notification replayed, and a new one) BETWEEN dispatch and the provider's outcome
+      await sim(`commands/${c1.commandId}/deliver`, {}).expect(200);
+      expect((await conflicts(fact.id)).length, 'the same signed notification replayed adds nothing').toBe(1);
+      await contradict(payment.id, attempt.id);
+      expect((await conflicts(fact.id)).length, 'a distinct contradicting observation is kept, once').toBe(2);
+      const conflictsBefore = 2;
+      expect(await settlingFact(payment.id)).toEqual([fact]);
+
+      // B: the provider's verified refund completes the SAME authorized attempt
+      const out = (await sim(`refunds/${b.refundAttemptId}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201)).body;
+      expect(out.delivered).toEqual({ status: 200 });
+      const done = await attemptRow(b.refundAttemptId);
+      expect(done).toMatchObject({ status: 'succeeded', receiptId: receipt.id, authorizedAt: a0.authorizedAt, completedAt: expect.any(Date) });
+      expect(await refundFacts(payment.id)).toEqual([{ providerTxnId: `simr_${b.refundAttemptId}`, amount: 9000, currency: 'TND', source: 'webhook', refundAttemptId: b.refundAttemptId }]);
+      const [z] = await authorizations(payment.id);
+      expect(z).toMatchObject({ id: z0.id, refundAttemptId: b.refundAttemptId, receiptId: receipt.id, approvedAmount: 9000, allocated: 9000, completedAt: expect.any(Date) });
+      expect(await completions(payment.id)).toBe(1);
+      expect((await audits(b.refundAttemptId)).map((x) => x.action)).toEqual(['refund_attempt.authorized', 'refund_attempt.succeeded']);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM refund_fact_allocation_block WHERE "factId" = $1`, [done.succeededFactId])).rows[0].n, 'the refund fact itself is not blocked').toBe(0);
+
+      // C: replays and retries: the refund outcome redelivered, the worker run again, the request replayed with its key: nothing duplicates
+      await sim(`refund-commands/${out.commandId}/deliver`, {}).expect(200);
+      await drain();
+      await drain();
+      expect(await dispatches(b.refundAttemptId)).toEqual([{ received: 1 }]);
+      expect((await refundFacts(payment.id)).length).toBe(1);
+      expect(await authorizations(payment.id)).toEqual([z]);
+      expect(await completions(payment.id)).toBe(1);
+      expect((await conflicts(fact.id)).length).toBe(conflictsBefore);
+      expect(await settlingFact(payment.id)).toEqual([fact]);
+      expect((await admin.query(`SELECT status FROM payment WHERE id = $1`, [payment.id])).rows[0].status).toBe('succeeded');
+    });
+
+    it('C: the authorized refund request replayed with its key after the contradiction answers the same attempt; Auth is never asked again; no second attempt exists', async () => {
+      const { payment, attempt } = await captured();
+      const caseId = randomUUID();
+      const r = receiptFor(payment.id, caseId);
+      const b = body(caseId, r.secret);
+      const k = key();
+      const first = (await refund(payment.id, b, k).expect(201)).body;
+      const consumes = auth.calls.consume;
+      await contradict(payment.id, attempt.id);
+      const again = await refund(payment.id, b, k);
+      expect(again.status, 'the stored answer (an idempotent replay)').toBe(200);
+      expect(again.headers['idempotent-replayed']).toBe('true');
+      expect(again.body).toMatchObject({ refundAttemptId: first.refundAttemptId, status: 'authorized', receiptId: r.id });
+      expect(auth.calls.consume).toBe(consumes);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM refund_attempt WHERE "paymentId" = $1`, [payment.id])).rows[0].n).toBe(1);
+      await drain();
+      expect((await attemptRow(b.refundAttemptId)).status).toBe('submitted');
+    });
+  });
+
   describe('PAY-08 reads', () => {
     it('the producer reads attempts and refusals; the payer reads attempts only; anyone else gets the collapsed 404', async () => {
       const { payment } = await captured();
