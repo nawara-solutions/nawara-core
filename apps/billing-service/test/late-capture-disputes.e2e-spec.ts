@@ -746,6 +746,14 @@ describeWithEnv('late-capture dispute attribution, Billing consumer (Core V2 S0-
     it('a loss recorded while L-4 commits (the read is not a lock): either L-4 is refused and the loss has no purchase effect, or L-4 applied and the loss preserves that purchase with recovery; never both, never neither', async () => {
       const seen = new Set<string>();
       for (let i = 0; i < 5; i++) {
+        if (i > 0) {
+          // each round in its own Organization (as each test is): an 'applied' round opens a recovery obligation, whose T3 would correctly refuse
+          // the next round's new assistance request in the same Organization, whichever way the race went
+          ORG = randomUUID();
+          ORG2 = randomUUID();
+          resetIdentities();
+          auth.reset();
+        }
         const x = await ready();
         const d = lostEnvelope(x.s, { capture: lateCapture(x.l.factId) });
         const [a] = await Promise.all([apply(x.row.id, receipt(x.row, x.r)), t.bus.deliver(d.envelope)]);
