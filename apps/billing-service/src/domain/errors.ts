@@ -112,7 +112,8 @@ export type BillingErrorCode =
   | 'late_settlement_authorization_refused'
   | 'late_settlement_authorization_unresolved'
   | 'late_settlement_authorization_unavailable'
-  | 'late_settlement_dispute_unavailable'; // Core V2 S0-C9 (CB-3, BIL-32 H)
+  | 'late_settlement_dispute_unavailable' // Core V2 S0-C9 (CB-3, BIL-32 H)
+  | 'late_settlement_capture_unavailable'; // Core V2 S0-C11 (BIL-32 I)
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

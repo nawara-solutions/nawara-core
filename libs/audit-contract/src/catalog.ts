@@ -666,7 +666,7 @@ const SPEC = {
     changes: {
       case_type: { type: 'code', shape: 'value', required: true, values: ['late_assisted_settlement', 'recovery_surplus', 'late_success', 'unmatched_capture',
         'unrouted_settlement', 'over_return', 'refund_discrepancy', 'partial_chargeback', 'second_reversal_cause', 'contradictory_effect', 'authorization_pending',
-        'chargeback_refund_overlap'] },
+        'chargeback_refund_overlap', 'capture_contradiction'] },
       evidence_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: false, min: 1, max: 9007199254740991 },
     },

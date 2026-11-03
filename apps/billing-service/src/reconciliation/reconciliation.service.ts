@@ -12,6 +12,7 @@ import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authori
 import { RefundCommandIdempotency } from '../refunds/refund-idempotency.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { LateSuccessService } from './late-success.service.js';
+import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient } from '../refunds/payment-refund-client.js';
 import { PAYMENT_RECONCILIATION_CLIENT, type PaymentItem, type PaymentItemKind, type PaymentReconciliationClient } from './payment-reconciliation-client.js';
 import {
   ACKNOWLEDGEMENT_REASONS, CASE_TYPES, REVIEW_ONLY, ReconciliationCases, workerContext, type CaseType,
@@ -24,6 +25,15 @@ const iso = (d: Date | null) => (d ? new Date(d).toISOString() : null);
 const invalid = () => billingError(400, 'invalid_reconciliation_request', BILLING_MESSAGES.invalidReconciliationRequest);
 const pgConstraint = (e: unknown) => (e as { constraint?: string } | null)?.constraint;
 
+/**
+ * Core V2 S0-C11 item 8 (BIL-33 I): the identity of the `capture_contradiction` case of one contested fact as observed under one payment. One-way and
+ * stable: replays and retries open nothing twice, and it reveals neither input, so nothing correlates the cases of different Companies.
+ */
+export function captureContradictionKey(factId: string, observingPaymentId: string): string {
+  const h = createHash('sha256').update(`billing.capture_contradiction\0${factId}\0${observingPaymentId}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${(8 | (parseInt(h[16]!, 16) & 3)).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
 /** The deterministic Auth `consumeRef` of one write-off request: the same obligation and receipt are always the same consumption. */
 export function writeOffConsumeRef(obligationId: string, secret: string): string {
   const h = createHash('sha256').update(`billing.recovery_write_off\0${obligationId}\0${secret}`).digest('hex');
@@ -33,16 +43,23 @@ export function writeOffConsumeRef(obligationId: string, secret: string): string
 interface CaseRow {
   id: string; caseType: CaseType; evidenceKey: string; companyId: string; platformId: string | null; organizationId: string | null; paymentId: string | null;
   paymentRequestId: string | null; captureFactId: string | null; amount: string | null; currency: string | null; detail: string | null; openedAt: Date;
+  l4Purchase: boolean | null;
   kind: string | null; refundCaseId: string | null; lossId: string | null; recoveryPaymentId: string | null; resolvedByUserId: string | null; reason: string | null;
   resolvedAt: Date | null;
 }
 const CASE_SELECT = `SELECT c.id, c."caseType", c."evidenceKey", c."companyId", c."platformId", c."organizationId", c."paymentId", c."paymentRequestId", c."captureFactId",
-    c.amount, trim(c.currency) AS currency, c.detail, c."openedAt", r.kind, r."refundCaseId", r."lossId", r."recoveryPaymentId", r."resolvedByUserId", r.reason, r."resolvedAt"
+    c.amount, trim(c.currency) AS currency, c.detail, c."openedAt",
+    -- S0-C11 item 7b: whether an L-4 purchase rests on the contested capture, derived when read (the case itself is never rewritten); only where the
+    -- case may show its fact (the fact is the observing payment's own)
+    CASE WHEN c."caseType" = 'capture_contradiction' AND c."captureFactId" IS NOT NULL THEN EXISTS (SELECT 1 FROM payment_late_success s
+      JOIN subscription_purchase p ON p."lateSuccessId" = s."lateSuccessId" WHERE s."factId" = c."captureFactId" AND s."paymentId" = c."paymentId") END AS "l4Purchase",
+    r.kind, r."refundCaseId", r."lossId", r."recoveryPaymentId", r."resolvedByUserId", r.reason, r."resolvedAt"
   FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id`;
 const representCase = (c: CaseRow) => ({
   id: c.id, caseType: c.caseType, evidenceId: c.evidenceKey, companyId: c.companyId, platformId: c.platformId, organizationId: c.organizationId, paymentId: c.paymentId,
   paymentRequestId: c.paymentRequestId, captureFactId: c.captureFactId, amount: c.amount === null ? null : Number(c.amount), currency: c.currency, detail: c.detail,
   status: c.kind ? 'resolved' : 'open', reviewOnly: REVIEW_ONLY.includes(c.caseType), openedAt: iso(c.openedAt),
+  ...(c.caseType === 'capture_contradiction' ? { l4Purchase: c.l4Purchase } : {}),
   resolution: c.kind ? { kind: c.kind, refundCaseId: c.refundCaseId, lossId: c.lossId, recoveryPaymentId: c.recoveryPaymentId,
     resolvedBy: c.resolvedByUserId ? { userId: c.resolvedByUserId } : null, reason: c.reason, resolvedAt: iso(c.resolvedAt) } : null,
 });
@@ -80,6 +97,7 @@ export class ReconciliationService {
     private readonly lateSuccesses: LateSuccessService,
     private readonly idempotency: RefundCommandIdempotency,
     @Inject(PAYMENT_RECONCILIATION_CLIENT) private readonly payment: PaymentReconciliationClient,
+    @Inject(PAYMENT_REFUND_CLIENT) private readonly captures: PaymentRefundClient,
     @Inject(FRAUD_HOLD_RECEIPTS) private readonly receipts: FraudHoldReceipts,
     @Inject(OWNER_AUTHORITY) private readonly owners: OwnerAuthority,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
@@ -172,6 +190,29 @@ export class ReconciliationService {
       const disputeId = typeof i.detail.disputeId === 'string' && UUID.test(i.detail.disputeId) ? i.detail.disputeId : i.id;
       await this.db.tx(async (q) => this.caseFor(q, { caseType: 'partial_chargeback', evidenceKey: disputeId, paymentId: i.paymentId, amount: i.amount, currency: i.currency,
         detail: 'provider_partial_chargeback' }, tally));
+    });
+    // Core V2 S0-C11 item 8 (BIL-33 I, tenant-isolation clarification): one visibility-only case per contested capture fact AND per observing payment
+    // (a payment of Billing's own, as Payment's producer read is scoped), its Company from Billing's own payment request and invoice. Payment's
+    // capture read tells whether the fact is that payment's own: only then does the case carry the fact and its figures. Otherwise it carries
+    // only that payment's own observation (never the other payment, its Company, the fact's id or its figures). Refund contradictions are excluded.
+    // Payment unanswerable: nothing is inferred; Payment's own item stays visible and the next pass reads again.
+    await this.page('fact_conflict', async (i) => {
+      if (!i.factId || i.detail.refundAttemptId) return;
+      let read: CaptureReadOutcome;
+      try {
+        read = await this.captures.capture(i.paymentId, i.factId);
+      } catch {
+        read = { kind: 'unknown', reason: 'error' };
+      }
+      if (read.kind === 'unknown') return;
+      const own = read.kind === 'capture' && read.capture.paymentId === i.paymentId && read.capture.factId === i.factId;
+      if (read.kind === 'capture' && (!own || !read.capture.conflicted)) return; // Payment's answers disagree: proven nothing
+      const factId = i.factId;
+      await this.db.tx(async (q) => this.caseFor(q, own && read.kind === 'capture'
+        ? { caseType: 'capture_contradiction', evidenceKey: captureContradictionKey(factId, i.paymentId), paymentId: i.paymentId, captureFactId: factId,
+          amount: read.capture.amount, currency: read.capture.currency, detail: 'own_capture_contested' }
+        : { caseType: 'capture_contradiction', evidenceKey: captureContradictionKey(factId, i.paymentId), paymentId: i.paymentId,
+          amount: i.amount, currency: i.currency, detail: 'contradicts_capture_elsewhere' }, tally));
     });
     await this.page('capture_refund_unavailable', async (i) => {
       const reason = typeof i.detail.reason === 'string' ? i.detail.reason : '';

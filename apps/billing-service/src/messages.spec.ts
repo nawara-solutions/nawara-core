@@ -145,6 +145,7 @@ describe('BILLING_MESSAGES', () => {
       [en('lateSettlementAuthorizationRefused'), 'The authorization of this late settlement application was refused or has expired.'], // Core V2 S6g
       [en('lateSettlementAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6g
       [en('lateSettlementAuthorizationUnavailable'), 'The late settlement application is not available; nothing was changed.'], // Core V2 S6g
+      [en('lateSettlementCaptureUnavailable'), "The payment's capture evidence could not be verified; nothing was changed."],
       [en('lateSettlementDisputeUnavailable'), "The payment's dispute exposure could not be verified; nothing was changed."], // Core V2 S0-C9 (CB-3)
       [en('refundDisputeUnavailable'), 'The dispute status of this payment could not be verified; nothing was changed.'], // Core V2 S6e-D
       [en('refundCaseNotOpen'), 'The refund case is not open.'],

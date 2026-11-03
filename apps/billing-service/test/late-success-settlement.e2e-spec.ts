@@ -18,8 +18,8 @@ import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
-import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
-import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
+import type { CaptureReadOutcome, PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
+import { ReconciliationService, captureContradictionKey } from '../src/reconciliation/reconciliation.service.js';
 import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
 import { CashReturnSweep } from '../src/assistance/cash-return-sweep.js';
 import { createTestApp, type TestApp } from './support/app.js';
@@ -44,6 +44,8 @@ class FakePaymentClient implements PaymentClient {
   }
 }
 
+/** Core V2 S0-C11: Payment's capture read under test control (the default is the R6H-5 answer below); every call is kept. */
+const captureAt = { answer: null as null | ((paymentId: string, factId: string) => Promise<CaptureReadOutcome>), calls: [] as Array<[string, string]> };
 /** Payment's refund port, authorizing every relayed attempt; each relayed body is kept (BIL-23 H: the attempt names its capture). */
 const relayed: Array<Record<string, unknown>> = [];
 const refundsAtPayment: PaymentRefundClient = {
@@ -53,8 +55,13 @@ const refundsAtPayment: PaymentRefundClient = {
   },
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
   // R6H-5: Payment's evidence of a late capture, refundable on its own (the capture-specific route must still refuse it, S0-C8)
-  capture: async (paymentId, factId) => ({ kind: 'capture' as const, capture: { factId, paymentId, amount: 5600, currency: 'TND', basis: 'late_capture' as const, paymentStatus: 'expired',
-    conflicted: false, refundableOnItsOwn: true, refund: 'none' as const } }),
+  capture: async (paymentId, factId) => {
+    captureAt.calls.push([paymentId, factId]);
+    if (captureAt.answer) return captureAt.answer(paymentId, factId);
+    // the capture as Payment states it: the fixtures' late captures are of the channel invoice's total (5300; the Organization's fee is not captured)
+    return { kind: 'capture' as const, capture: { factId, paymentId, amount: 5300, currency: 'TND', basis: 'late_capture' as const, paymentStatus: 'expired',
+      conflicted: false, refundableOnItsOwn: true, refund: 'none' as const } };
+  },
 };
 
 /** Core V2 S6h-B: Payment's reconciliation read (PAY-12) under test control. */
@@ -348,6 +355,8 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
     paymentItems.items.clear();
     paymentItems.down = false;
     relayed.length = 0;
+    captureAt.answer = null;
+    captureAt.calls.length = 0;
   });
 
   describe('an eligible late success is the L-4 input, never a purchase (S0-C8 item 1 b, L-1, L-2; LS-2, LS-4)', () => {
@@ -751,6 +760,173 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
       expect(await one(`SELECT outcome FROM refund_case_effect WHERE "refundCaseId" = $1`, [c.body.id])).toEqual({ outcome: 'reversed_purchase_and_obligation_opened' });
       expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal v JOIN subscription_purchase p ON p.id = v."purchaseId" WHERE p."lateSuccessId" = $1`, [x.l.lateSuccessId])).toBe(1);
       expect((await obligationsOf(x.r.id)).map((o) => [o.origin, o.status])).toEqual([['refund_completion', 'open']]);
+    });
+
+    describe('S0-C11 capture evidence before the receipt (item 7; BIL-32 I)', () => {
+      const capture = (o: Partial<{ amount: number; currency: string; conflicted: boolean; factId: string; paymentId: string }> = {}) =>
+        async (paymentId: string, factId: string): Promise<CaptureReadOutcome> => ({ kind: 'capture', capture: { factId: o.factId ?? factId, paymentId: o.paymentId ?? paymentId,
+          amount: o.amount ?? 5300, currency: o.currency ?? 'TND', basis: 'late_capture', paymentStatus: 'expired', conflicted: o.conflicted ?? false,
+          refundableOnItsOwn: true, refund: 'none' } });
+
+      it('reads exactly the late success\'s capture, after the exposure read; contested refuses 409 capture_contested; nothing is spent or written', async () => {
+        const x = await ready();
+        captureAt.answer = capture({ conflicted: true });
+        const secret = receipt(x.row, x.r);
+        expect(refusal(await apply(x.row.id, secret))).toEqual([409, 'late_settlement_refused', 'capture_contested']);
+        expect(captureAt.calls).toEqual([[x.s.paymentId, x.l.factId]]);
+        expect(fraudAuth.issued.get(secret)!.consumeRef, 'the receipt is not spent').toBeUndefined();
+        await unchanged(x);
+        // an exposure refusal comes first: the capture is not even read
+        captureAt.calls.length = 0;
+        disputes.open.add(x.s.paymentId);
+        expect(refusal(await apply(x.row.id, secret))[2]).toBe('payment_dispute_open');
+        expect(captureAt.calls).toEqual([]);
+      });
+
+      it('missing or unequal evidence refuses 409 capture_unverified: no such capture, another amount, another currency, an invoice the late success does not equal', async () => {
+        for (const answer of [async (): Promise<CaptureReadOutcome> => ({ kind: 'not_found' }), capture({ amount: 5301 }), capture({ currency: 'EUR' })]) {
+          const x = await ready();
+          captureAt.answer = answer;
+          const secret = receipt(x.row, x.r);
+          expect(refusal(await apply(x.row.id, secret))).toEqual([409, 'late_settlement_refused', 'capture_unverified']);
+          expect(fraudAuth.issued.get(secret)!.consumeRef).toBeUndefined();
+          await unchanged(x);
+        }
+      });
+
+      it('Payment unanswerable, or an answer proving nothing, is 503 late_settlement_capture_unavailable; nothing is spent or written; it applies once Payment answers', async () => {
+        const x = await ready();
+        const secret = receipt(x.row, x.r);
+        for (const answer of [
+          async (): Promise<CaptureReadOutcome> => { throw new Error('payment-service unavailable'); },
+          async (): Promise<CaptureReadOutcome> => ({ kind: 'unknown', reason: 'status_500' }),
+          capture({ factId: randomUUID() }), // an answer about another capture
+          capture({ paymentId: randomUUID() }),
+        ]) {
+          captureAt.answer = answer;
+          expect(refusal(await apply(x.row.id, secret))).toEqual([503, 'late_settlement_capture_unavailable', undefined]);
+          expect(fraudAuth.issued.get(secret)!.consumeRef).toBeUndefined();
+          await unchanged(x);
+        }
+        captureAt.answer = null;
+        expect((await apply(x.row.id, secret)).status).toBe(201);
+      });
+
+      it('a contradiction recorded after the read (not a lock, item 7a): the application commits; the purchase stands; the contradiction becomes one visible case recording the L-4 purchase (7b)', async () => {
+        const x = await ready();
+        const conflictItem = asItem({ kind: 'fact_conflict', id: randomUUID(), paymentId: x.s.paymentId, factId: x.l.factId, amount: 5301, currency: 'TND', detail: { source: 'webhook' } });
+        // the client double answers "uncontested" (the state when it read) and, in the same moment, Payment records the contradiction
+        captureAt.answer = async (paymentId, factId) => {
+          paymentItems.items.set('fact_conflict', [conflictItem]);
+          return capture()(paymentId, factId);
+        };
+        const res = await apply(x.row.id, receipt(x.row, x.r));
+        expect(res.status, JSON.stringify(res.body)).toBe(201);
+        captureAt.answer = capture({ conflicted: true }); // Payment's state from now on
+        await reconcile();
+        const caseKey = captureContradictionKey(x.l.factId!, x.s.paymentId);
+        expect(await caseOf('capture_contradiction', caseKey)).toMatchObject({ paymentId: x.s.paymentId, captureFactId: x.l.factId, amount: '5300', detail: 'own_capture_contested', resolution: null });
+        const listed = (await send(request(server()).get('/billing/admin/reconciliation-cases?type=capture_contradiction'), 'owner-tok', null).expect(200)).body.items as Row[];
+        expect(listed.find((c) => c.evidenceId === caseKey)).toMatchObject({ l4Purchase: true, reviewOnly: false, status: 'open', captureFactId: x.l.factId });
+        // FC-4: nothing reversed; the purchase and the entitlement stand
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "lateSuccessId" = $1`, [x.l.lateSuccessId])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal r JOIN subscription_purchase p ON p.id = r."purchaseId" WHERE p."lateSuccessId" = $1`, [x.l.lateSuccessId])).toBe(0);
+        expect((await entitlement(U.b1, x.r.productId).expect(200)).body.valid).toBe(true);
+      });
+
+      it('a contradiction after an already committed L-4 purchase: the same visible case; no refund of that capture is opened', async () => {
+        const x = await ready();
+        expect((await apply(x.row.id, receipt(x.row, x.r))).status).toBe(201);
+        captureAt.answer = capture({ conflicted: true });
+        paymentItems.items.set('fact_conflict', [asItem({ kind: 'fact_conflict', id: randomUUID(), paymentId: x.s.paymentId, factId: x.l.factId, amount: 4500, currency: 'TND', detail: {} })]);
+        await reconcile();
+        expect(await caseOf('capture_contradiction', captureContradictionKey(x.l.factId!, x.s.paymentId))).toMatchObject({ captureFactId: x.l.factId, resolution: null });
+        const refundTry = await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: x.s.paymentId, captureFactId: x.l.factId, reason: 'customer_request' });
+        expect(refundTry.status, JSON.stringify(refundTry.body)).toBeGreaterThanOrEqual(400);
+        expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "paymentId" = $1`, [x.s.paymentId])).toBe(0);
+        expect(relayed).toEqual([]);
+      });
+    });
+
+    describe('S0-C11 capture_contradiction cases (item 8 with the tenant-isolation clarification; BIL-33 I)', () => {
+      const ownConflicted = async (paymentId: string, factId: string): Promise<CaptureReadOutcome> => ({ kind: 'capture', capture: { factId, paymentId, amount: 5300, currency: 'TND',
+        basis: 'late_capture', paymentStatus: 'expired', conflicted: true, refundableOnItsOwn: true, refund: 'none' } });
+      const conflictOf = (paymentId: string, factId: string, o: Partial<PaymentItem> = {}) =>
+        asItem({ kind: 'fact_conflict', id: randomUUID(), paymentId, factId, amount: 4500, currency: 'TND', detail: { source: 'webhook' }, ...o });
+      const contradictionCases = (paymentId: string) => admin.query(`SELECT * FROM reconciliation_case WHERE "caseType" = 'capture_contradiction' AND "paymentId" = $1`, [paymentId])
+        .then((r) => r.rows as Row[]);
+
+      it('one case per contested fact and observing payment, whatever the replays: several observations, redelivered pages, repeated and concurrent passes; one audit record', async () => {
+        const e = await ended('payment.expired');
+        const l = await late(e.s);
+        captureAt.answer = ownConflicted;
+        paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, l.factId!), conflictOf(e.s.paymentId, l.factId!, { amount: 4400 }), conflictOf(e.s.paymentId, l.factId!)]);
+        await Promise.all([reconcile(), reconcile()]);
+        await reconcile();
+        const cases = await contradictionCases(e.s.paymentId);
+        expect(cases).toHaveLength(1);
+        expect(cases[0]).toMatchObject({ evidenceKey: captureContradictionKey(l.factId!, e.s.paymentId), companyId: COMPANY, captureFactId: l.factId, detail: 'own_capture_contested' });
+        expect((await audit(cases[0]!.id)).map((v) => v.name)).toEqual(['audit.reconciliation_case.opened']);
+      });
+
+      it('a contradiction of a fact recorded elsewhere: the observing payment\'s own case, its Company from Billing\'s records, never the other fact\'s id, figures or owner; no authority over it', async () => {
+        const e = await ended('payment.expired');
+        const elsewhere = randomUUID(); // a capture fact of another payment, possibly another Company's: Payment's capture read answers 404 for this payment
+        captureAt.answer = async () => ({ kind: 'not_found' });
+        paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, elsewhere, { amount: 4500 })]);
+        await reconcile();
+        const [c] = await contradictionCases(e.s.paymentId);
+        const caseKey = captureContradictionKey(elsewhere, e.s.paymentId);
+        expect(c).toMatchObject({ evidenceKey: caseKey, companyId: COMPANY, captureFactId: null, amount: '4500', currency: 'TND', detail: 'contradicts_capture_elsewhere' });
+        expect(caseKey).not.toBe(elsewhere);
+        const mine = (await send(request(server()).get('/billing/admin/reconciliation-cases?type=capture_contradiction'), 'owner-tok', null).expect(200)).body;
+        const shown = (mine.items as Row[]).find((v) => v.evidenceId === caseKey);
+        expect(shown).toMatchObject({ captureFactId: null, l4Purchase: null, amount: 4500 });
+        expect(JSON.stringify(mine)).not.toContain(elsewhere);
+        // another Company's Owner sees nothing of it
+        const theirs = await send(request(server()).get('/billing/admin/reconciliation-cases?type=capture_contradiction'), 'foreign-owner-tok', null);
+        expect(JSON.stringify(theirs.body)).not.toContain(caseKey);
+        expect(JSON.stringify(theirs.body)).not.toContain(e.s.paymentId);
+        // a capture-specific refund naming that fact is refused for this payment
+        expect((await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: e.s.paymentId, captureFactId: elsewhere,
+          reason: 'customer_request' })).status).toBeGreaterThanOrEqual(400);
+        expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "captureFactId" = $1`, [elsewhere])).toBe(0);
+      });
+
+      it('nothing is invented: refund contradictions, a payment Billing does not hold, and an unanswerable Payment open no case (the next pass reads again)', async () => {
+        const e = await ended('payment.expired');
+        const l = await late(e.s);
+        captureAt.answer = ownConflicted;
+        paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, l.factId!, { detail: { refundAttemptId: randomUUID() } }), conflictOf(randomUUID(), randomUUID())]);
+        await reconcile();
+        expect(await contradictionCases(e.s.paymentId)).toEqual([]);
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'capture_contradiction'`, [])).toBeGreaterThanOrEqual(0);
+        captureAt.answer = async () => { throw new Error('payment-service unavailable'); };
+        paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, l.factId!)]);
+        await reconcile();
+        expect(await contradictionCases(e.s.paymentId)).toEqual([]);
+        captureAt.answer = ownConflicted;
+        await reconcile();
+        expect(await contradictionCases(e.s.paymentId)).toHaveLength(1);
+      });
+
+      it('visibility only: the Owner cannot acknowledge it, the database admits no resolution of it, and it reverses, refunds or sells nothing', async () => {
+        const e = await ended('payment.expired');
+        const l = await late(e.s);
+        captureAt.answer = ownConflicted;
+        paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, l.factId!)]);
+        await reconcile();
+        const [c] = await contradictionCases(e.s.paymentId);
+        const ack = await send(request(server()).post(`/billing/admin/reconciliation-cases/${c!.id}/acknowledgement`), 'owner-tok', key()).send({ reason: 'reviewed_no_financial_effect' });
+        expect([ack.status, ack.body.code]).toEqual([409, 'reconciliation_case_not_acknowledgeable']);
+        for (const kind of ['acknowledged', 'refund_completed', 'late_settlement_applied', 'effect_applied', 'chargeback_returned']) {
+          await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, $2, $3, $4)`,
+            [c!.id, kind, kind === 'acknowledged' ? U.owner : null, kind === 'acknowledged' ? 'reviewed_no_financial_effect' : null]), kind).rejects.toThrow();
+        }
+        await expect(admin.query(`UPDATE reconciliation_case SET detail = NULL WHERE id = $1`, [c!.id])).rejects.toThrow();
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "paymentRequestId" = $1`, [e.s.paymentRequestId])).toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "paymentId" = $1`, [e.s.paymentId])).toBe(0);
+      });
     });
   });
 
