@@ -303,8 +303,16 @@ status change still needs its own explicit owner authorization.
      - *Evidence.* In that case, the contradiction stays visible under item 8, and its `capture_contradiction` case records that an L-4 purchase rests on
        the contested capture.
   8. *Visibility.* A capture contradiction stays visible until an approved contract resolves it: as Payment's Owner-readable `fact_conflict` item; as a
-     commercial audit record written with the contradiction; and as one Billing `capture_contradiction` reconciliation case per contested fact. That
-     case can't be acknowledged or closed by an Owner and reverses nothing.
+     commercial audit record written with the contradiction; and as Billing `capture_contradiction` reconciliation cases. *(Tenant-isolation
+     clarification, owner-approved 2026-11-03.)* There is one case per contested fact **and** per payment whose attempt recorded the contradicting
+     observation, scoped to that payment's seller Company as Billing's own records of that payment establish it, never from provider data.
+     - If the contested fact belongs to that same payment, the case may show its evidence: the fact, its figures and the observation.
+     - If it belongs to another payment, the case shows only that payment's own observation and that it contradicts a fact recorded elsewhere. It
+       never shows the other payment, its Company, the other fact's id, amount or currency, or any other private evidence.
+     - Each case's identity is derived one-way from the contested fact and the observing payment. It is stable under replay and retry, and it can't be
+       used to correlate cases across Companies.
+     - A case is visibility only: it grants no authority over the fact, can't be acknowledged or closed by an Owner, and reverses, refunds or transfers
+       nothing. Refund-fact contradictions are excluded.
   9. *What a contradiction blocks,* for the contested capture only: settlement; a new late success; L-4; ordinary and capture-specific refunds; attribution
      of a new dispute to it (S0-C9 item 1); counting it as a new recovery payment. **It doesn't block or undo:** a purchase already made (FC-4); an authorized
      refund attempt (FC-2, FC-3); a recovery payment already counted; existing T1, T2 or T3 state; reads; or operations on another capture.
