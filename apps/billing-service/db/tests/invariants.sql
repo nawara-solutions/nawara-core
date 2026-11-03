@@ -1367,6 +1367,17 @@ SELECT pg_temp.assert_eq('S0-C11', 'the capture guard runs on insert, ordered af
 SELECT pg_temp.assert_eq('S0-C11', 'captureFactId is immutable (the append-only trigger covers every column)',
   (SELECT count(*)::text FROM pg_trigger WHERE tgrelid = 'late_settlement_application'::regclass AND tgname = 'late_settlement_application_10_append_only'), '1');
 
+-- S0-C12 D-1 and D-B (0048; BIL-28 G, BIL-23 I): behaviour in test/recovery.e2e-spec.ts "S0-C12 D-1 and D-B"
+SELECT pg_temp.assert_eq('S0-C12', 'D-1: a recovery payment from a late success requires exactly the recovery invoice''s total and currency (separate insert guard)',
+  (SELECT (EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'recovery_payment_06_late_success_equal' AND tgrelid = 'recovery_payment'::regclass)
+       AND (SELECT prosrc LIKE '%l.amount = i.total%' AND prosrc LIKE '%recovery_payment_late_success_equal%' FROM pg_proc
+             WHERE proname = 'billing_recovery_payment_late_success_equal_guard'))::text), 'true');
+SELECT pg_temp.assert_eq('S0-C12', 'D-B: a recovery payment''s capture-specific refund only through the narrow helper (an excluded, uncounted late capture, its own figures)',
+  (SELECT ((SELECT prosrc LIKE '%billing_recovery_capture_refundable%' AND prosrc NOT LIKE '%IN (''organization_subscription'', ''recovery_settlement'')%'
+              FROM pg_proc WHERE proname = 'billing_refund_case_insert_guard')
+       AND (SELECT prosrc LIKE '%late_capture%' AND prosrc LIKE '%l.amount <> i.total%' AND prosrc LIKE '%NOT EXISTS (SELECT 1 FROM recovery_payment%'
+              FROM pg_proc WHERE proname = 'billing_recovery_capture_refundable'))::text), 'true');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

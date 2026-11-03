@@ -3,6 +3,7 @@ import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-ki
 import { BillingAudit } from '../audit/billing-audit.js';
 import type { TransitionContext } from '../domain/actors.js';
 import { applyRecoveryPayment } from '../recovery/recovery-ledger.js';
+import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient } from '../refunds/payment-refund-client.js';
 import { ReconciliationCases } from './reconciliation-cases.js';
 
 /** Payment's verified late success, as its `payment.late_success.recorded` event (EVT-10) or its reconciliation read states it. */
@@ -18,6 +19,13 @@ export interface PaymentLateSuccess {
 
 export type LateSuccessOutcome = 'recorded' | 'duplicate' | 'binding_mismatch' | 'conflict';
 export type LateSuccessSource = { kind: 'event'; eventId: string } | { kind: 'reconciliation' };
+/**
+ * Core V2 S0-C12 D-1 with S0-C11 items 1 and 9: Payment's point-in-time statement about the capture an EQUAL recovery late success names, read
+ * outside any transaction (not a lock). `verified`: uncontested and equal, so it may count; `contested` or `unverified` (Payment states it is not
+ * that payment's capture, or states other figures): never counted, a refund-only case; absent (Payment unanswerable or an answer about something
+ * else): nothing is decided, the reconciliation worker reads again.
+ */
+export type RecoveryCaptureEvidence = 'verified' | 'contested' | 'unverified';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
@@ -50,7 +58,34 @@ const FINAL_REQUEST = ['paid', 'failed', 'cancelled', 'expired', 'rejected'];
 export class LateSuccessService {
   private readonly log = new Logger('BillingLateSuccesses');
 
-  constructor(private readonly db: DbService, private readonly audit: BillingAudit, @Inject(ReconciliationCases) private readonly cases: ReconciliationCases) {}
+  constructor(private readonly db: DbService, private readonly audit: BillingAudit, @Inject(ReconciliationCases) private readonly cases: ReconciliationCases,
+    @Inject(PAYMENT_REFUND_CLIENT) private readonly captures: PaymentRefundClient) {}
+
+  /**
+   * S0-C12 D-1: the evidence an EQUAL recovery late success needs before it may count; `undefined` for every other late success (none is read) and
+   * when Payment cannot answer. Called before the classifying transaction, never inside it. `l` is the late success as recorded or as stated.
+   */
+  async recoveryEvidence(l: { lateSuccessId?: string; paymentId: string; factId: string | null; amount: number; currency: string }): Promise<RecoveryCaptureEvidence | undefined> {
+    const r = (await this.db.query<{ purpose: string | null; total: string; currency: string }>(
+      `SELECT e.purpose, i.total, trim(i.currency) AS currency FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId"
+         LEFT JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId" WHERE pr."paymentId" = $1`, [l.paymentId])).rows[0];
+    if (!r || r.purpose !== 'recovery_settlement' || l.amount !== Number(r.total) || l.currency !== r.currency) return undefined;
+    if (!l.factId) return 'unverified'; // S0-C11 item 1: no fact names it, so nothing verifies it
+    let read: CaptureReadOutcome;
+    try {
+      read = await this.captures.capture(l.paymentId, l.factId);
+    } catch {
+      read = { kind: 'unknown', reason: 'error' };
+    }
+    if (read.kind === 'capture' && read.capture.paymentId === l.paymentId && read.capture.factId === l.factId) {
+      if (read.capture.conflicted) return 'contested';
+      return read.capture.amount === l.amount && read.capture.currency === l.currency ? 'verified' : 'unverified';
+    }
+    if (read.kind === 'not_found' && read.reason === 'capture_not_found') return 'unverified';
+    this.log.warn(`late_success_recovery_evidence_unavailable lateSuccess=${l.lateSuccessId ?? '-'} payment=${l.paymentId} outcome=${read.kind}`
+      + ' — nothing decided; the reconciliation worker reads Payment again');
+    return undefined;
+  }
 
   async record(l: PaymentLateSuccess, source: LateSuccessSource): Promise<LateSuccessOutcome> {
     if (![l.lateSuccessId, l.paymentId].every((v) => typeof v === 'string' && UUID.test(v)) || (l.factId !== null && (typeof l.factId !== 'string' || !UUID.test(l.factId)))
@@ -59,6 +94,7 @@ export class LateSuccessService {
     const ctx: TransitionContext = source.kind === 'event'
       ? { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: source.eventId }, correlationId: `late-success:${l.lateSuccessId}` }
       : { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: l.lateSuccessId }, correlationId: `late-success:${l.lateSuccessId}` };
+    const evidence = await this.recoveryEvidence(l); // S0-C12 D-1: outside the transaction (not a lock)
     try {
       return await this.db.tx(async (q) => {
         const pr = (await q.query<{ id: string }>(`SELECT id FROM payment_request WHERE "paymentId" = $1 FOR UPDATE`, [l.paymentId])).rows[0];
@@ -73,7 +109,7 @@ export class LateSuccessService {
           `INSERT INTO payment_late_success ("lateSuccessId", "paymentId", "paymentRequestId", "factId", amount, currency, "paymentStatus", "recordedAt", source, "eventId")
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [l.lateSuccessId, l.paymentId, pr.id, l.factId, l.amount, l.currency, l.paymentStatus, l.recordedAt, source.kind, source.kind === 'event' ? source.eventId : null]);
-        await this.classify(q, l.lateSuccessId, ctx);
+        await this.classify(q, l.lateSuccessId, ctx, evidence);
         this.log.log(`late_success_recorded lateSuccess=${l.lateSuccessId} payment=${l.paymentId} source=${source.kind}`);
         return 'recorded' as const;
       });
@@ -88,7 +124,7 @@ export class LateSuccessService {
    * `deferred` while its assisted payment request is not final. Idempotent, under the payment request's row lock (a crash between the record
    * and its classification, or a deferral, is completed by the reconciliation worker). The database re-checks every condition (0043).
    */
-  async classify(q: Queryable, lateSuccessId: string, ctx: TransitionContext): Promise<'recovery' | 'recovered' | 'case' | 'late_settlement' | 'deferred' | 'done'> {
+  async classify(q: Queryable, lateSuccessId: string, ctx: TransitionContext, evidence?: RecoveryCaptureEvidence): Promise<'recovery' | 'recovered' | 'case' | 'late_settlement' | 'deferred' | 'done'> {
     if ((await q.query(`SELECT 1 FROM recovery_payment WHERE "lateSuccessId" = $1 UNION ALL SELECT 1 FROM assistance_late_settlement WHERE "lateSuccessId" = $1`,
       [lateSuccessId])).rows.length > 0) return 'done';
     const l = (await q.query<{ paymentId: string; paymentRequestId: string; factId: string | null; amount: string; currency: string; invoiceId: string;
@@ -99,7 +135,13 @@ export class LateSuccessService {
          FROM payment_late_success l JOIN payment_request pr ON pr.id = l."paymentRequestId" JOIN invoice i ON i.id = pr."invoiceId"
          LEFT JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId"
         WHERE l."lateSuccessId" = $1 FOR UPDATE OF pr`, [lateSuccessId])).rows[0]!;
-    if (l.purpose === 'recovery_settlement' && l.obligationId) {
+    // Core V2 S0-C12 D-1 (BIL-28 G): a recovery late success counts only for exactly the recovery invoice's total and currency, and only on Payment's
+    // statement that its capture is uncontested (S0-C11 items 1, 9); an unequal, contested or unverified one is never counted: it falls through to a
+    // refund-only `late_success` case below (D-B returns an unequal one); Payment unanswerable: nothing is decided yet (the worker reads again)
+    const equalRecovery = l.purpose === 'recovery_settlement' && l.obligationId !== null
+      && Number(l.amount) === Number(l.invoiceTotal) && l.currency === l.invoiceCurrency;
+    if (equalRecovery && evidence === undefined) return 'deferred';
+    if (equalRecovery && evidence === 'verified' && l.obligationId) {
       return applyRecoveryPayment(q, this.audit, { obligationId: l.obligationId, invoiceId: l.invoiceId, paymentRequestId: l.paymentRequestId, lateSuccessId,
         amount: l.amount, currency: l.currency }, ctx);
     }
