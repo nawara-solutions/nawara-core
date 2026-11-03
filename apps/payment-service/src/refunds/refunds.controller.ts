@@ -2,7 +2,8 @@ import { Body, Controller, Get, Header, Headers, Inject, Param, ParseUUIDPipe, P
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import {
-  CallerService, RequireServiceOperation, ServiceOperationGuard, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest,
+  CallerService, RequireServiceOperation, SERVICE_OPERATION_POLICY, ServiceOperationGuard, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest,
+  type ServiceOperationPolicy,
 } from '@nawara/service-kit';
 import { AuthorizationService } from '../authorization/authorization.service.js';
 import { REFUND_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
@@ -116,6 +117,40 @@ const representCapture = (c: CaptureEvidence) => ({
   factId: c.factId, paymentId: c.paymentId, provider: c.provider, amount: c.amount, currency: c.currency, paymentStatus: c.paymentStatus, basis: c.basis,
   conflicted: c.conflicted, refund: c.refund, refundableOnItsOwn: c.refundableOnItsOwn, observedAt: iso(c.observedAt),
 });
+
+const UUID_PARAM = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * Core V2 S0-C11 item 7c (register PAY-16): the settling capture of a payment, for Billing's L-4 check of an E-7 record. Read-only (class R).
+ * Authority: a valid service token (401 otherwise); then `payment.read` and the payment's own producer are checked HERE, so a caller without the
+ * operation, an unknown, malformed or another producer's payment all receive ONE collapsed `404 not_found` that discloses nothing about the
+ * payment. It takes no capture reference: the fact is derived. Mounted exactly where refunds are (never production). DEVELOPMENT AND SIMULATION ONLY.
+ */
+@ApiTags('refunds')
+@Controller('payment/payments/:paymentId/settling-capture')
+export class SettlingCaptureController {
+  constructor(
+    @Inject(RefundAttemptService) private readonly refunds: RefundAttemptService,
+    @Inject(SERVICE_OPERATION_POLICY) private readonly policy: ServiceOperationPolicy,
+  ) {}
+
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  @UseGuards(ServiceTokenGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'PAY-16: the settling capture of the caller\'s own succeeded payment (the single capture fact of its succeeded attempt): its identity, '
+      + 'amount, currency and whether it is contested. Derived from Payment\'s committed records; no capture reference is accepted.',
+  })
+  @ApiResponse({ status: 200, description: '{ paymentId, attemptId, factId, amount, currency, conflicted }' })
+  @ApiResponse({ status: 401, description: 'no valid service token' })
+  @ApiResponse({ status: 404, description: 'not_found (collapsed: unknown, malformed, another producer\'s payment, or no payment.read) | settling_capture_not_found' })
+  @ApiResponse({ status: 409, description: 'settling_capture_ambiguous (more than one capture fact on the succeeded attempt)' })
+  async read(@Param('paymentId') paymentId: string, @CallerService() caller: string) {
+    if (!UUID_PARAM.test(paymentId) || !this.policy.allows(caller, 'payment.read')) throw notFound();
+    return this.refunds.settlingCapture(caller, paymentId.toLowerCase());
+  }
+}
 
 /**
  * Core V2 R6H-5 (the Owner's decision, 2026-10-30): Payment's evidence of ONE verified capture of a payment, for the payment's own producer

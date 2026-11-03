@@ -127,6 +127,7 @@ no production traffic can reach any of this (the test provider refuses to start 
   `captureBasis`. A dispute notification whose capture is not verified yet is held (its webhook event stays retryable, outcome
   `dispute_held:capture_pending`) within the webhook retrier's existing bound, then becomes the `capture_unverified` conflict; while held
   the payment's dispute exposure is `unresolved`. The simulation dispute command takes an optional `attemptId`.
+- Core V2 S0-C11 item 7c (PAY-16): `GET /payment/payments/:paymentId/settling-capture` answers Billing the settling capture of its own succeeded payment (the single capture fact of its succeeded attempt), derived from committed records; one collapsed `404` for anything not the caller's.
 - Core V2 S0-C11 (capture evidence): a capture has a commercial effect only when the observation equals its committed, uncontested fact; missing references, several references on an attempt and contradictions settle nothing and are enforced in the database too (`0024_capture_evidence.sql`). A contradiction is audited (`provider_fact_conflict.recorded`); nothing resolves it yet, so that capture stays non-refundable.
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
