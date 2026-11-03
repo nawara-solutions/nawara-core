@@ -166,9 +166,21 @@ describe('authorization receipts: central audit (S2-Audit.2)', () => {
       .flatMap((x) => [x.secretDigest, x.bindingDigest, x.requestHash]);
     const central = (await t.db.query(`SELECT payload FROM outbox WHERE name = ANY($1)`, [RECEIPT_ACTIONS])).rows;
     await until(() => central.length > 0 && bus.published.filter((e) => RECEIPT_ACTIONS.includes(e.name)).length >= 4, 'relayed');
-    const dump = JSON.stringify([central, bus.published.filter((e) => RECEIPT_ACTIONS.includes(e.name))]);
-    for (const needle of [r.secret, r2.secret, r.stepUpToken, r2.stepUpToken, r.binding.refundCaseId, r.binding.paymentId, r2.binding.paymentId, '7300', payment.token, ...digests]) {
+    const records = [central, bus.published.filter((e) => RECEIPT_ACTIONS.includes(e.name))];
+    const dump = JSON.stringify(records);
+    for (const needle of [r.secret, r2.secret, r.stepUpToken, r2.stepUpToken, r.binding.refundCaseId, r.binding.paymentId, r2.binding.paymentId, payment.token, ...digests]) {
       expect(dump).not.toContain(needle);
     }
+    // the amount (7300): never as a value or under an amount-like key anywhere, and never as text outside the records' own random identifiers and
+    // instants (a random UUID or timestamp may contain the digits "7300" by chance, which is not the amount)
+    const leaks: string[] = [];
+    const walk = (v: unknown, path: string): void => {
+      if (v === 7300 || v === '7300') leaks.push(path);
+      if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`));
+      else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { if (/amount/i.test(k)) leaks.push(`${path}.${k}`); walk(x, `${path}.${k}`); }
+    };
+    walk(records, '$');
+    expect(leaks).toEqual([]);
+    expect(dump.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>').replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<instant>')).not.toContain('7300');
   });
 });
