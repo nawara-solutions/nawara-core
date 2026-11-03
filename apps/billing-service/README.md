@@ -218,6 +218,10 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     purchase, a confirmed or reported return, an open dispute, another settlement in progress, any refund case, contrary evidence or an
     unknown instant. One transaction supersedes the open deadline obligation (kept), records the purchase (period from the application) and
     settles the request; T1 / T2 end for that request only. A request keeps its obligation history; at most one obligation is live.
+    Core V2 S0-C11 (BIL-32 I to K; `db/migrations/0047`): before the receipt is spent, both inputs are verified against Payment's capture
+    evidence: a late success's own fact (R6H-5 read) or, for an E-7 record, the payment's settling capture (PAY-16), uncontested and equal to
+    the payment request and the invoice (`capture_unverified`, `capture_contested`, `503 late_settlement_capture_unavailable`). The
+    application records the fact it relied on (`captureFactId`, immutable, one application per fact; earlier rows NULL).
 - **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
   `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
   live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription

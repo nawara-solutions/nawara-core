@@ -451,6 +451,65 @@ describeWithEnv(
       await ch.close();
     }, 240_000);
 
+    /**
+     * Core V2 S0-C11 item 7c (BIL-32 J; PAY-16): the REAL Payment process (refunds configured, as wherever assisted settlement and L-4 exist)
+     * answers the settling-capture read over real HTTP with Billing's own service credential, in exactly the shape Billing's
+     * `HttpPaymentRefundClient.settlingCapture` accepts (unit-tested in billing-service `src/refunds/payment-refund-client.spec.ts`): the same
+     * paymentId, uuid factId and attemptId, a safe positive integer amount, an ISO 4217 currency, a boolean `conflicted`, equal to Billing's own
+     * payment request and invoice and to Payment's own capture fact. Not succeeded is 404 `settling_capture_not_found`; unknown, malformed or
+     * unreadable is the collapsed 404 `not_found`; no token is 401. Billing's code is not imported (services talk over APIs only), and the E-7
+     * application itself is not reachable from real events (no obligation exists while a channel is in flight, F-SINT-1): its use of this
+     * answer is certified in Billing's S6g suite against the same shape.
+     */
+    it('S0-C11 7c: the real Payment answers PAY-16 to Billing\'s credential in the shape Billing verifies; 404s and 401 as contracted', async () => {
+      const { paymentId, invoiceId } = await purchase();
+      const asBilling = (id: string) => call(PAYMENT_URL, 'GET', billingToPaymentToken.token, `/payment/payments/${id}/settling-capture`);
+      const r = await asBilling(paymentId);
+      expect(r.status, `${JSON.stringify(r.json)}\n${tails()}`).toBe(200);
+      expect(Object.keys(r.json).sort()).toEqual(['amount', 'attemptId', 'conflicted', 'currency', 'factId', 'paymentId']);
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+      expect(r.json.paymentId).toBe(paymentId);
+      expect(r.json.factId).toMatch(uuid);
+      expect(r.json.attemptId).toMatch(uuid);
+      expect(Number.isSafeInteger(r.json.amount) && r.json.amount >= 1).toBe(true);
+      expect(r.json.currency).toMatch(/^[A-Z]{3}$/);
+      expect(r.json.conflicted).toBe(false);
+      // the exact equality Billing requires: its own payment request (the original settlement) and the invoice
+      const own = (await billingAdmin.query(`SELECT pr.amount::text AS pr, trim(pr.currency) AS "prCurrency", i.total::text AS invoice, trim(i.currency) AS "invoiceCurrency"
+        FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr."paymentId" = $1 AND i.id = $2`, [paymentId, invoiceId])).rows;
+      expect(own).toEqual([{ pr: String(r.json.amount), prCurrency: r.json.currency, invoice: String(r.json.amount), invoiceCurrency: r.json.currency }]);
+      // Payment's own record of that capture: Billing never infers one
+      expect((await paymentAdmin.query(`SELECT "paymentId", "attemptId", amount::text AS amount, currency FROM provider_transaction_fact WHERE id = $1 AND kind = 'capture'`,
+        [r.json.factId])).rows).toEqual([{ paymentId, attemptId: r.json.attemptId, amount: String(r.json.amount), currency: r.json.currency }]);
+      expect((await asBilling(paymentId)).json, 'the same read again: the same fact').toEqual(r.json);
+
+      // a payment Billing dispatched that has not succeeded: 404 settling_capture_not_found
+      const priceId = (await billingAdmin.query(`SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1`, [invoiceId])).rows[0].priceId;
+      const invoice = await call(BILLING_URL, 'POST', producerToken.token, '/billing/invoices', {
+        invoiceRequestId: randomUUID(), seller: { type: 'company', id: COMPANY }, payer: { type: 'user', id: PAYER },
+        sourceType: 'contract', sourceId: `src-${randomUUID()}`, issuerSnapshot: { schemaVersion: 1 }, billToSnapshot: { schemaVersion: 1 }, lines: [{ priceId, quantity: 1 }],
+      });
+      expect(invoice.status, JSON.stringify(invoice.json)).toBe(201);
+      expect((await call(BILLING_URL, 'POST', producerToken.token, `/billing/invoices/${invoice.json.id}/issue`)).status).toBe(200);
+      const created = await call(BILLING_URL, 'POST', producerToken.token, `/billing/invoices/${invoice.json.id}/payment-requests`);
+      expect(created.status, JSON.stringify(created.json)).toBe(201);
+      let open = '';
+      await waitFor(async () => {
+        open = (await billingAdmin.query(`SELECT "paymentId" FROM payment_request WHERE id = $1 AND status = 'requested'`, [created.json.id])).rows[0]?.paymentId ?? '';
+        return !!open;
+      }, 15_000, 'the dispatcher to create the payment at Payment');
+      const pending = await asBilling(open);
+      expect([pending.status, pending.json?.code]).toEqual([404, 'settling_capture_not_found']);
+      // unknown and malformed ids, and a caller without payment.read: the collapsed 404; no token: 401
+      for (const id of [randomUUID(), 'not-a-uuid']) {
+        const x = await asBilling(id);
+        expect([x.status, x.json?.code], id).toEqual([404, 'not_found']);
+      }
+      const harness = await call(PAYMENT_URL, 'GET', harnessToken.token, `/payment/payments/${paymentId}/settling-capture`);
+      expect([harness.status, harness.json?.code]).toEqual([404, 'not_found']);
+      expect((await fetch(`${PAYMENT_URL}/payment/payments/${paymentId}/settling-capture`)).status).toBe(401);
+    }, 90_000);
+
     it('S-INT G5: a forged refund.case_completed and a forged payment.dispute.lost (no broker-verified Payment identity) change nothing; both are refused and dead-lettered', async () => {
       const { paymentId, invoiceId } = await purchase();
       const c = await openCase(paymentId);
