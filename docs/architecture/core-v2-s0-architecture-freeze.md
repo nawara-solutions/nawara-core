@@ -343,6 +343,71 @@ status change still needs its own explicit owner authorization.
       paths are unchanged. (7) The contradiction is audited once, atomically. The register entries PAY-02, PAY-05, PAY-07, PAY-12, BIL-32, BIL-33 and EVT-10
       record its contract. **Current code does not yet meet this entry.** It implements and activates nothing; each Payment, Billing and certification PR needs
       a separate Owner authorization.
+- **S0-C12 Wrong-amount captures (2026-11-04, PROPOSED for Owner adoption: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with
+  owner-approved additions D-1 and D-B; logic-audit findings F-01, F-20; decisions A1 and N1, with N3 future-gated).** A *wrong-amount capture* is a capture
+  verified under S0-C11 item 1 whose amount or currency differs from its payment's. It is an immutable financial observation, never a sale. FC-1 to FC-5, S4c
+  F-1 to F-5, S0-C8, S0-C9 and S0-C11 are unchanged and govern except as stated here.
+  1. *No commercial effect by itself.* Recording it settles nothing, finalizes or reopens no payment, changes no attempt state, creates no purchase or
+     entitlement, never qualifies for L-4, counts toward no recovery obligation and authorizes no refund. FI-13 is unchanged: it never settles the payment.
+  2. *After finality (A1; F-01).* On a payment `failed`, `cancelled` or `expired`, an uncontested wrong-amount capture whose currency matches `^[A-Z]{3}$`
+     is a late success with the fact's exact amount and currency (EVT-10 v1, PAY-12 `late_success`). At Billing it is **refund-only**: a `late_success`
+     reconciliation case, resolved only by the capture-specific refund (R6H-5) of exactly that capture's amount, in its currency, never automatically, under
+     S0-C9 item 6 and every existing refund gate (Owner receipt, idempotency, dispute exposure, S0-C11 item 9). A `succeeded` payment's further capture
+     stays on its existing path (R6H-5).
+  3. *Recovery payments (D-1).* A late capture of a `recovery_settlement` payment counts toward its recovery obligation only when it meets the recovery
+     invoice's evidence requirements: its amount and currency equal the recovery invoice's total and currency exactly, and its fact is uncontested
+     (S0-C11 item 1). A wrong-amount late success never counts: it creates no `recovery_payment`, satisfies no principal, creates no surplus and changes no
+     T3. It stays an observable fact and a refund-only `late_success` case. A capture equal to the invoice's total keeps §3.5 unchanged, including
+     over-recovery when the outstanding amount has fallen. Any other use requires a separately approved recovery-allocation contract.
+  4. *Recovery refund exception (D-B).* For a `recovery_settlement` payment, and only for a capture that item 3 excluded, the capture-specific refund
+     (R6H-5, `late_capture`) is permitted when all hold: the capture is that payment's own verified, uncontested capture fact; no `recovery_payment` names
+     its late success; the refund returns exactly that capture's amount in its currency; and every existing refund gate is met. It never refunds another
+     capture, a counted recovery payment, a surplus or a principal, and it is no general recovery-payment refund route.
+  5. *Before finality (N1; F-20).* On a payment that is not final, a wrong-amount capture is **not** a late success. It is an Owner-readable Payment
+     reconciliation item of kind `capture_mismatch` (PAY-12), scoped through its payment's seller Company, with the fact's identity, amount, currency and a
+     reason (`amount_mismatch`, `currency_mismatch`). No Billing case opens for it (item 9). S4c F-1 to F-3 are unchanged: the payment may stay non-final,
+     no refund route exists while it does, and the item may stay unresolved until a separately approved finality policy exists (**documented limitation**).
+     *N3*, ending an attempt because of a wrong-amount capture, is not part of this entry: it needs separate Owner approval, per provider, after the
+     adapter's capture semantics are verified.
+  6. *Reaching finality, atomically.* When a payment becomes `failed`, `cancelled` or `expired` by an existing rule, the same transaction, under the payment
+     lock, records its state, event and audit and, for each uncontested capture fact of that payment that settled nothing, has a currency matching
+     `^[A-Z]{3}$` and has no late success, that late success with its EVT-10 and audit. A capture first processed on an already final payment records its
+     late success in the transaction that decides it. A final status is never reopened.
+  7. *Recovery of the only unavoidable window.* FC-1 and V-2 commit a fact on its own before its processing, so that step cannot share a transaction. A
+     durable, bounded, idempotent reconciliation pass completes a committed capture fact whose processing was interrupted: it selects from committed
+     records only (no queue to lose), works in bounded batches with backoff, and under the payment lock records the late success only where item 6 would
+     have and no late success names the fact, with a deterministic event id (`payment_late_success_once`). It never settles, never reopens a final status
+     and never duplicates a late success, event, audit record, refund authorization or reconciliation effect.
+  8. *Currencies.* Amounts and currencies are recorded exactly; never converted, rounded or normalized; no exchange rate is ever applied or assumed.
+     - *A valid, different three-letter code* (`^[A-Z]{3}$`): items 2 to 7 apply with the provider's currency. Balances stay per currency. A refund in that
+       currency proceeds only if the provider adapter supports it; otherwise it fails closed.
+     - *An unrecognized currency that a fact can hold* (1 to 16 characters, not `^[A-Z]{3}$`): the fact is kept as observed; **no late success and no
+       EVT-10** (Billing could not hold it), no Billing case, no settlement, allocation, entitlement or refund route. **[Owner confirmation required, O-1]**
+       It is visible as a `capture_mismatch` item with reason `unrecognized_currency`, whatever the payment's state.
+     - *A value no fact can hold* (empty, or over 16 characters): the authenticated notification stays stored as received and is not a fact, as under
+       S0-C11 item 4. **[Documented limitation, O-2]** No Owner API shows it today; making it Owner-visible or actionable needs a separately approved policy.
+  9. *Billing.* Under this entry only a late success opens a Billing case. Billing reads PAY-12 kinds it names; a kind or reason that no contract names
+     opens nothing and is logged. **Billing's D-1, D-B and allow-list implementation is certified before Payment emits a wrong-amount late success.**
+  10. *Audit.* Commercial actions (version 1, no trusted scope), each written in its record's own transaction, never before its catalog entry exists:
+      `payment_late_success.recorded` for every late success, and `payment_capture_mismatch.recorded` once per wrong-amount capture fact. Identifiers,
+      reason codes and integer amounts only; a currency only when it matches `^[A-Z]{3}$`; never raw provider text, secrets or notification bodies.
+  11. *Preserved.* S4c F-4 exactly (a matching capture during `closing` settles; on a final payment or against a confirmed failure it is recorded and
+      changes nothing). FI-13, FC-1 to FC-5, S0-C8, S0-C9 and S0-C11. ADR statuses are unchanged; no Accepted ADR is edited.
+  12. *Acceptance (later implementation; real events across processes, simulation only).* (1) After finality: one late success, a refund-only case, and the
+      capture-specific refund of exactly the fact's amount and currency, completed once. (2) Before finality: a `capture_mismatch` item, no late success, no
+      Billing case; when the payment later becomes final, one late success in that transaction. (3) **Recovery (D-1, the S0-C11 L3 obligation):** an equal
+      late recovery capture counts once (principal, surplus, T3 per §3.5); a wrong-amount one never counts (no `recovery_payment`, principal, surplus or
+      T3 change) and its D-B refund completes once; a contested one records no late success. (4) An interrupted window recovered once. (5) An unrecognized
+      currency: no late success and no case. (6) Replays and concurrency: one record, one event, one audit record. (7) S0-C8, S0-C9, S0-C11 and F-4 suites
+      unchanged. The register entries PAY-02, PAY-05, PAY-12, EVT-10, BIL-23, BIL-28 and BIL-33 record its contract. **Current code does not meet this
+      entry.** It implements and activates nothing; each Billing, audit, Payment and certification PR needs a separate Owner authorization.
+  13. *Implementation order and deployment compatibility.* (a) **Billing first:** D-1 (classification and database guard), D-B (the narrow
+      route) and the PAY-12 allow-list, certified while Payment still emits no wrong-amount late success; the change is additive and safe against today's
+      Payment (an equal late success still counts; no wrong-amount one exists yet). (b) **Audit catalog** entries for both actions and the reconciler
+      actor, before any emission. (c) **Payment** last: FI-13 placement, `capture_mismatch`, atomic finality, the recovery pass and the currency rule. EVT-10
+      stays v1 (no new field), so no consumer contract changes; an older Billing deployment is the one unsafe pairing (it would count a wrong-amount recovery
+      late success), so Payment's change is never deployed where Billing's step (a) is not. (d) Real-event cross-process tests, then certification. Each
+      step is reversible on its own: reverting Payment's step stops new wrong-amount late successes; Billing's guards stay safe either way.
 
 ## 2. ADR disposition
 
