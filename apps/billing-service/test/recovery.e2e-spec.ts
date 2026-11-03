@@ -60,6 +60,7 @@ const refundsAtPayment: PaymentRefundClient = {
   },
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
   capture: async () => ({ kind: 'not_found' as const }), // Core V2 R6H-5: no capture-specific case in this suite
+  settlingCapture: async () => ({ kind: 'unknown' as const, reason: 'not_used_in_this_suite' }), // Core V2 S0-C11 7c: no E-7 application here
 };
 
 /** Core V2 S6h-B: Payment's reconciliation read (PAY-12) under test control: items per kind, or Payment unavailable. */

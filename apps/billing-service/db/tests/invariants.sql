@@ -1351,6 +1351,22 @@ SELECT pg_temp.assert_eq('S6h-B', 'one ordinary recovery payment per request; on
 SELECT pg_temp.assert_eq('S6h-B', 'losses and adjustments are append-only',
   (SELECT count(*)::text FROM pg_trigger WHERE tgname IN ('financial_loss_10_append_only', 'financial_loss_adjustment_10_append_only', 'payment_late_success_10_append_only')), '3');
 
+-- S0-C11 item 7c capture provenance (0047; BIL-32 J/K): behaviour in test/late-settlements.e2e-spec.ts and test/late-success-settlement.e2e-spec.ts
+SELECT pg_temp.assert_eq('S0-C11', 'captureFactId: a nullable uuid with no foreign key (the fact is Payment''s; earlier rows stay NULL)',
+  (SELECT (format_type(a.atttypid, a.atttypmod) = 'uuid' AND NOT a.attnotnull
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid = a.attrelid AND c.contype = 'f' AND a.attnum = ANY (c.conkey)))::text
+     FROM pg_attribute a WHERE a.attrelid = 'late_settlement_application'::regclass AND a.attname = 'captureFactId'), 'true');
+SELECT pg_temp.assert_eq('S0-C11', 'one capture fact evidences at most one L-4 application (partial unique index)',
+  (SELECT (indexdef LIKE '%UNIQUE%captureFactId%WHERE%captureFactId%IS NOT NULL%')::text FROM pg_indexes WHERE indexname = 'late_settlement_application_capture_once'), 'true');
+SELECT pg_temp.assert_eq('S0-C11', 'a new application must name its capture; input (b) its late success''s own (insert guard, after the S6g guard)',
+  (SELECT (prosrc LIKE '%late_settlement_application_capture_required%' AND prosrc LIKE '%late_settlement_application_capture_mismatch%' AND prosrc LIKE '%payment_late_success%')::text
+     FROM pg_proc WHERE proname = 'billing_late_settlement_application_capture_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C11', 'the capture guard runs on insert, ordered after late_settlement_application_05_guard',
+  (SELECT string_agg(tgname, ',' ORDER BY tgname) FROM pg_trigger WHERE tgrelid = 'late_settlement_application'::regclass AND tgname IN ('late_settlement_application_05_guard', 'late_settlement_application_06_capture')),
+  'late_settlement_application_05_guard,late_settlement_application_06_capture');
+SELECT pg_temp.assert_eq('S0-C11', 'captureFactId is immutable (the append-only trigger covers every column)',
+  (SELECT count(*)::text FROM pg_trigger WHERE tgrelid = 'late_settlement_application'::regclass AND tgname = 'late_settlement_application_10_append_only'), '1');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

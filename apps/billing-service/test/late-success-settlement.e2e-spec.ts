@@ -62,6 +62,7 @@ const refundsAtPayment: PaymentRefundClient = {
     return { kind: 'capture' as const, capture: { factId, paymentId, amount: 5300, currency: 'TND', basis: 'late_capture' as const, paymentStatus: 'expired',
       conflicted: false, refundableOnItsOwn: true, refund: 'none' as const } };
   },
+  settlingCapture: async () => ({ kind: 'unknown' as const, reason: 'not_used_in_this_suite' }), // Core V2 S0-C11 7c: no E-7 application here
 };
 
 /** Core V2 S6h-B: Payment's reconciliation read (PAY-12) under test control. */
@@ -781,6 +782,27 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
         disputes.open.add(x.s.paymentId);
         expect(refusal(await apply(x.row.id, secret))[2]).toBe('payment_dispute_open');
         expect(captureAt.calls).toEqual([]);
+      });
+
+      it('provenance (BIL-32 J): the application records the late success\'s own capture fact, once and immutably; the database refuses any other or none', async () => {
+        const x = await ready();
+        const res = await apply(x.row.id, receipt(x.row, x.r));
+        expect(res.status, JSON.stringify(res.body)).toBe(201);
+        expect(res.body.application.captureFactId).toBe(x.l.factId);
+        expect(await one(`SELECT "captureFactId" FROM late_settlement_application WHERE "lateSettlementId" = $1`, [x.row.id])).toEqual({ captureFactId: x.l.factId });
+        await expect(admin.query(`UPDATE late_settlement_application SET "captureFactId" = $2 WHERE "lateSettlementId" = $1`, [x.row.id, randomUUID()])).rejects.toThrow();
+        // the database, for a second eligible late settlement: no capture, or a capture other than its late success's, is refused before anything else commits
+        const y = await ready();
+        const insert = (captureFactId: string | null) => admin.query(`INSERT INTO late_settlement_application ("lateSettlementId", "assistanceRequestId", "companyId", "platformId",
+            "organizationId", "beneficiaryUserId", "reasonCode", "attestationId", "appliedByUserId", "receiptId", "settledAt", "captureFactId")
+          SELECT l.id, l."assistanceRequestId", $2, a."platformId", a."organizationId", a."beneficiaryUserId", 'cash_not_returned_attested',
+                 (SELECT t.id FROM late_settlement_attestation t WHERE t."lateSettlementId" = l.id), $3, gen_random_uuid(), billing_late_settlement_settled_at(l.id), $4
+            FROM assistance_late_settlement l JOIN assistance_request a ON a.id = l."assistanceRequestId" WHERE l.id = $1`,
+          [y.row.id, COMPANY, U.owner, captureFactId]).then(() => null, (e: { constraint?: string }) => e.constraint);
+        expect(await insert(null)).toBe('late_settlement_application_capture_required');
+        expect(await insert(randomUUID())).toBe('late_settlement_application_capture_mismatch');
+        expect(await insert(x.l.factId), 'another late settlement\'s capture').toBe('late_settlement_application_capture_mismatch');
+        await unchanged(y);
       });
 
       it('missing or unequal evidence refuses 409 capture_unverified: no such capture, another amount, another currency, an invoice the late success does not equal', async () => {

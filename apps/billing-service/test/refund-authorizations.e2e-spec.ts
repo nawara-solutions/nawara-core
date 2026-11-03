@@ -14,7 +14,7 @@ import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
 import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
 import { HttpOwnerAuthority } from '../src/platforms/owner-authority.client.js';
 import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
-import type { CaptureReadOutcome, PaymentRefundClient, PaymentRefunds, RefundRelayBody, RefundRelayOutcome } from '../src/refunds/payment-refund-client.js';
+import type { CaptureReadOutcome, PaymentRefundClient, PaymentRefunds, RefundRelayBody, RefundRelayOutcome, SettlingCaptureOutcome } from '../src/refunds/payment-refund-client.js';
 import { RefundRelayReconciler } from '../src/refunds/refund-relay-reconciler.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -35,6 +35,10 @@ class ScriptedPaymentRefunds implements PaymentRefundClient {
   }
   /** Core V2 R6H-5: scripted captures (none unless a test puts one) */
   captures = new Map<string, CaptureReadOutcome>();
+  async settlingCapture(): Promise<SettlingCaptureOutcome> {
+    return { kind: 'unknown', reason: 'not_used_in_this_suite' }; // Core V2 S0-C11 7c: no E-7 application here
+  }
+
   async capture(paymentId: string, factId: string): Promise<CaptureReadOutcome> {
     return this.captures.get(`${paymentId}:${factId}`) ?? { kind: 'not_found' };
   }

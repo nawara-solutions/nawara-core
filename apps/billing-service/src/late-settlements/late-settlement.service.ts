@@ -14,7 +14,7 @@ import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { PAYMENT_LATE_SETTLEMENT_EXPOSURE, type LateSettlementExposure } from '../refunds/dispute-exposure.js';
-import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient } from '../refunds/payment-refund-client.js';
+import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient, type SettlingCaptureOutcome } from '../refunds/payment-refund-client.js';
 import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscription.repository.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -55,6 +55,8 @@ const CONSTRAINT_REFUSAL: Record<string, LateSettlementRefusal> = {
   late_settlement_chargeback_recorded: 'chargeback_recorded',
   late_settlement_application_lateSettlementId_key: 'already_applied',
   late_settlement_application_assistanceRequestId_key: 'purchase_exists',
+  // Core V2 S0-C11 provenance: the capture already evidences another L-4 application
+  late_settlement_application_capture_once: 'purchase_exists',
   subscription_purchase_assistance_unique: 'purchase_exists',
   cash_return_obligation_supersession: 'cash_return_reported',
 };
@@ -163,8 +165,9 @@ export class LateSettlementService {
     const [settled, attestation, application, evidence, refunds] = await Promise.all([
       q.query<{ v: Date | null }>(`SELECT billing_late_settlement_settled_at($1) AS v`, [l.id]).then((r) => r.rows[0]!.v),
       q.query<{ statement: string; attestedAt: Date }>(`SELECT statement, "attestedAt" FROM late_settlement_attestation WHERE "lateSettlementId" = $1`, [l.id]).then((r) => r.rows[0] ?? null),
-      q.query<{ id: string; reasonCode: string; obligationId: string | null; appliedAt: Date; appliedByUserId: string; receiptId: string; purchaseId: string | null }>(
-        `SELECT a.id, a."reasonCode", a."obligationId", a."appliedAt", a."appliedByUserId", a."receiptId",
+      q.query<{ id: string; reasonCode: string; obligationId: string | null; appliedAt: Date; appliedByUserId: string; receiptId: string; purchaseId: string | null;
+        captureFactId: string | null }>(
+        `SELECT a.id, a."reasonCode", a."obligationId", a."appliedAt", a."appliedByUserId", a."receiptId", a."captureFactId",
                 (SELECT p.id FROM subscription_purchase p WHERE p."invoiceId" = $2 AND p."assistanceRequestId" = a."assistanceRequestId") AS "purchaseId"
            FROM late_settlement_application a WHERE a."lateSettlementId" = $1`, [l.id, l.invoiceId]).then((r) => r.rows[0] ?? null),
       q.query<{ grantId: string; fileId: string; verifiedAt: Date }>(`SELECT "grantId", "fileId", "verifiedAt" FROM late_settlement_evidence WHERE "lateSettlementId" = $1 ORDER BY "verifiedAt", "grantId"`, [l.id]).then((r) => r.rows),
@@ -177,7 +180,7 @@ export class LateSettlementService {
       status: application ? 'applied' : 'unapplied',
       attestation: attestation ? { statement: attestation.statement, attestedAt: iso(attestation.attestedAt) } : null,
       application: application ? {
-        id: application.id, reasonCode: application.reasonCode, appliedAt: iso(application.appliedAt), appliedBy: { userId: application.appliedByUserId },
+        id: application.id, captureFactId: application.captureFactId, reasonCode: application.reasonCode, appliedAt: iso(application.appliedAt), appliedBy: { userId: application.appliedByUserId },
         receiptId: application.receiptId, purchaseId: application.purchaseId, supersededObligationId: application.obligationId,
       } : null,
       evidence: evidence.map((e) => ({ grantId: e.grantId, fileId: e.fileId, verifiedAt: iso(e.verifiedAt) })),
@@ -317,10 +320,10 @@ export class LateSettlementService {
     // Core V2 S0-C11 item 7 (BIL-32 I): Payment's capture evidence, read after the exposure and before the receipt is consumed; a refusal or a 503
     // spends no receipt and writes nothing. A point-in-time check, NOT a cross-service lock (item 7a): a contradiction recorded after this read is
     // made visible by the reconciliation worker's `capture_contradiction` case (item 7b) and reverses nothing (FC-4)
-    await this.captureEvidenceVerified(l);
+    const captureFactId = await this.captureEvidenceVerified(l);
     const consumption = await this.consume(binding, input.receiptSecret, lateSettlementConsumeRef(id, input.receiptSecret), owner);
     try {
-      return await this.idempotency.run(owner.userId, key, 'assistance_late_settlement.apply', command, (q) => this.applyIn(q, l, input, owner, consumption, ctx));
+      return await this.idempotency.run(owner.userId, key, 'assistance_late_settlement.apply', command, (q) => this.applyIn(q, l, input, owner, consumption, captureFactId, ctx));
     } catch (e) {
       const refused = CONSTRAINT_REFUSAL[pgConstraint(e) ?? ''];
       if (refused) throw lateSettlementRefused(refused);
@@ -329,7 +332,8 @@ export class LateSettlementService {
   }
 
   /** The one transaction (lock order Organization -> request -> live obligation -> payment request: the database guard takes them). */
-  private async applyIn(q: Queryable, l: LateRow, input: ApplicationInput, owner: VerifiedRefundOwner, consumption: ReceiptConsumption, ctx: TransitionContext): Promise<AssistanceCommandResult> {
+  private async applyIn(q: Queryable, l: LateRow, input: ApplicationInput, owner: VerifiedRefundOwner, consumption: ReceiptConsumption, captureFactId: string,
+    ctx: TransitionContext): Promise<AssistanceCommandResult> {
     await q.query(`SELECT billing_assistance_organization_lock($1)`, [l.organizationId]);
     await q.query(`SELECT 1 FROM assistance_request WHERE id = $1 FOR UPDATE`, [l.assistanceRequestId]);
     const live = (await q.query<{ id: string }>(
@@ -340,10 +344,10 @@ export class LateSettlementService {
     // the instants as text: exact to the microsecond (a JS Date would truncate them, and the database compares them exactly)
     const app = (await q.query<{ id: string; appliedAt: string; settledAt: string }>(
       `INSERT INTO late_settlement_application ("lateSettlementId", "assistanceRequestId", "companyId", "platformId", "organizationId", "beneficiaryUserId",
-                                                "reasonCode", "attestationId", "obligationId", "appliedByUserId", "receiptId", "settledAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, billing_late_settlement_settled_at($1)) RETURNING id, "appliedAt"::text AS "appliedAt", "settledAt"::text AS "settledAt"`,
+                                                "reasonCode", "attestationId", "obligationId", "appliedByUserId", "receiptId", "settledAt", "captureFactId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, billing_late_settlement_settled_at($1), $12) RETURNING id, "appliedAt"::text AS "appliedAt", "settledAt"::text AS "settledAt"`,
       [l.id, l.assistanceRequestId, l.companyId, l.platformId, l.organizationId, l.beneficiaryUserId, input.reasonCode, attestation, live?.id ?? null,
-        owner.userId, consumption.receiptId])).rows[0]!;
+        owner.userId, consumption.receiptId, captureFactId])).rows[0]!; // S0-C11 provenance: only Payment's verified answer in this application
     for (const ev of input.evidence) {
       await q.query(`INSERT INTO late_settlement_evidence ("applicationId", "lateSettlementId", "grantId", "fileId") VALUES ($1, $2, $3, $4)`, [app.id, l.id, ev.grantId, ev.fileId]);
     }
@@ -405,37 +409,62 @@ export class LateSettlementService {
   }
 
   /**
-   * S0-C11 item 7: the late success's capture fact exists, is uncontested, and equals the late success and the channel invoice's total, as Payment's
-   * capture read states it now. Contested: `409 capture_contested`. Missing or unequal: `409 capture_unverified`. Payment unanswerable or an answer
-   * that proves nothing: `503 late_settlement_capture_unavailable`.
+   * S0-C11 item 7 (BIL-32 I, J): the capture fact this application relies on, as Payment states it now, or a refusal. Both inputs, the same checks:
+   * the fact exists, is uncontested, and equals the channel invoice's total and currency. Input (b), a late success: its own fact through the R6H-5
+   * capture read, also equal to the late success. Input (a), the S5b E-7 record (item 7c): the payment Billing's OWN payment request names, through
+   * PAY-16, which derives the settling capture (no fact is named, inferred from an amount, or taken from the Owner); also equal to the payment request
+   * (the original settlement). Contested: `409 capture_contested`. Missing, legacy, ambiguous or unequal: `409 capture_unverified`. Payment
+   * unanswerable, or an answer about anything else: `503 late_settlement_capture_unavailable`. Nothing is written and no receipt is spent.
    */
-  private async captureEvidenceVerified(l: LateRow): Promise<void> {
-    // Input (a), the S5b E-7 receipt: Billing can name no capture fact, so no Payment statement can establish it. INTERIM fail-closed rule
-    // (the Owner's E-7 decision, 2026-11-03): refused until a certified Payment read of the settling capture exists; never bypassed
-    const ls = (await this.db.query<{ paymentId: string; factId: string | null; amount: string; currency: string; total: string; invoiceCurrency: string }>(
-      `SELECT s."paymentId", s."factId", s.amount, trim(s.currency) AS currency, i.total, trim(i.currency) AS "invoiceCurrency"
-         FROM payment_late_success s JOIN payment_request pr ON pr.id = s."paymentRequestId" JOIN invoice i ON i.id = pr."invoiceId"
-        WHERE s."lateSuccessId" = $1`, [l.lateSuccessId ?? null])).rows[0];
+  private async captureEvidenceVerified(l: LateRow): Promise<string> {
     let refusal: 'capture_contested' | 'capture_unverified' | 'unavailable' | null = null;
-    if (!l.lateSuccessId || !ls?.factId) refusal = 'capture_unverified';
-    else {
-      let read: CaptureReadOutcome;
-      try {
-        read = await this.captures.capture(ls.paymentId, ls.factId);
-      } catch {
-        read = { kind: 'unknown', reason: 'error' };
+    let factId: string | null = null;
+    if (l.lateSuccessId) {
+      const ls = (await this.db.query<{ paymentId: string; factId: string | null; amount: string; currency: string; total: string; invoiceCurrency: string }>(
+        `SELECT s."paymentId", s."factId", s.amount, trim(s.currency) AS currency, i.total, trim(i.currency) AS "invoiceCurrency"
+           FROM payment_late_success s JOIN payment_request pr ON pr.id = s."paymentRequestId" JOIN invoice i ON i.id = pr."invoiceId"
+          WHERE s."lateSuccessId" = $1`, [l.lateSuccessId])).rows[0];
+      if (!ls?.factId) refusal = 'capture_unverified';
+      else {
+        let read: CaptureReadOutcome;
+        try {
+          read = await this.captures.capture(ls.paymentId, ls.factId);
+        } catch {
+          read = { kind: 'unknown', reason: 'error' };
+        }
+        if (read.kind === 'unknown') refusal = 'unavailable';
+        else if (read.kind === 'not_found') refusal = 'capture_unverified';
+        else if (read.capture.paymentId !== ls.paymentId || read.capture.factId !== ls.factId) refusal = 'unavailable'; // an answer about something else proves nothing
+        else if (read.capture.conflicted) refusal = 'capture_contested';
+        else if (read.capture.amount !== Number(ls.amount) || read.capture.currency !== ls.currency
+          || read.capture.amount !== Number(ls.total) || read.capture.currency !== ls.invoiceCurrency) refusal = 'capture_unverified';
+        else factId = ls.factId;
       }
-      if (read.kind === 'unknown') refusal = 'unavailable';
-      else if (read.kind === 'not_found') refusal = 'capture_unverified';
-      else if (read.capture.paymentId !== ls.paymentId || read.capture.factId !== ls.factId) refusal = 'unavailable'; // an answer about something else proves nothing
-      else if (read.capture.conflicted) refusal = 'capture_contested';
-      else if (read.capture.amount !== Number(ls.amount) || read.capture.currency !== ls.currency
-        || read.capture.amount !== Number(ls.total) || read.capture.currency !== ls.invoiceCurrency) refusal = 'capture_unverified';
+    } else {
+      const pr = (await this.db.query<{ paymentId: string | null; amount: string; currency: string; total: string; invoiceCurrency: string }>(
+        `SELECT pr."paymentId", pr.amount, trim(pr.currency) AS currency, i.total, trim(i.currency) AS "invoiceCurrency"
+           FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1`, [l.paymentRequestId])).rows[0];
+      if (!pr?.paymentId) refusal = 'capture_unverified';
+      else {
+        let read: SettlingCaptureOutcome;
+        try {
+          read = await this.captures.settlingCapture(pr.paymentId);
+        } catch {
+          read = { kind: 'unknown', reason: 'error' };
+        }
+        if (read.kind === 'unknown') refusal = 'unavailable';
+        else if (read.kind === 'none' || read.kind === 'ambiguous') refusal = 'capture_unverified';
+        else if (read.capture.paymentId !== pr.paymentId) refusal = 'unavailable';
+        else if (read.capture.conflicted) refusal = 'capture_contested';
+        else if (read.capture.amount !== Number(pr.amount) || read.capture.currency !== pr.currency
+          || read.capture.amount !== Number(pr.total) || read.capture.currency !== pr.invoiceCurrency) refusal = 'capture_unverified';
+        else factId = read.capture.factId;
+      }
     }
-    if (!refusal) return;
-    this.log.warn(`late_settlement_capture_evidence lateSettlement=${l.id} lateSuccess=${l.lateSuccessId} outcome=${refusal} — refused before the receipt; nothing written`);
+    if (factId && !refusal) return factId;
+    this.log.warn(`late_settlement_capture_evidence lateSettlement=${l.id} input=${l.lateSuccessId ? 'late_success' : 'e7'} outcome=${refusal} — refused before the receipt; nothing written`);
     if (refusal === 'unavailable') throw billingError(503, 'late_settlement_capture_unavailable', BILLING_MESSAGES.lateSettlementCaptureUnavailable);
-    throw lateSettlementRefused(refusal);
+    throw lateSettlementRefused(refusal ?? 'capture_unverified');
   }
 
   private async consume(binding: FraudHoldBinding, secret: string, consumeRef: string, owner: VerifiedRefundOwner): Promise<ReceiptConsumption> {

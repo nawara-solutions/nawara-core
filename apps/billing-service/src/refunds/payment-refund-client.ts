@@ -83,12 +83,23 @@ export interface PaymentRefunds {
   authorizations: RefundAuthorizationSnapshot[];
 }
 
+/** Core V2 S0-C11 item 7c (PAY-16): a payment's settling capture, as Payment's committed records state it. */
+export interface SettlingCapture { paymentId: string; attemptId: string; factId: string; amount: number; currency: string; conflicted: boolean }
+/**
+ * What PAY-16 PROVES: the settling capture; `none` (Payment states this payment has none: not succeeded, no fact, or the collapsed answer for a
+ * payment it does not hold as Billing's); `ambiguous` (more than one capture fact on the succeeded attempt); anything else proves nothing.
+ */
+export type SettlingCaptureOutcome = { kind: 'capture'; capture: SettlingCapture } | { kind: 'none'; reason: string } | { kind: 'ambiguous' }
+  | { kind: 'unknown'; reason: string };
+
 export interface PaymentRefundClient {
   relay(paymentId: string, idempotencyKey: string, body: RefundRelayBody): Promise<RefundRelayOutcome>;
   /** PAY-08: null on 404; throws when Payment cannot answer (the reconciler isolates it per relay). */
   refunds(paymentId: string): Promise<PaymentRefunds | null>;
   /** Core V2 R6H-5: one verified capture of the payment, as Payment's evidence states it */
   capture(paymentId: string, factId: string): Promise<CaptureReadOutcome>;
+  /** Core V2 S0-C11 item 7c (PAY-16): the payment's settling capture; it names no fact: Payment derives it */
+  settlingCapture(paymentId: string): Promise<SettlingCaptureOutcome>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -150,6 +161,21 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
     }
     return { kind: 'capture', capture: { factId, paymentId, amount: b.amount, currency: b.currency, paymentStatus: b.paymentStatus, basis: b.basis as CaptureBasis,
       conflicted: b.conflicted, refund: b.refund as PaymentCapture['refund'], refundableOnItsOwn: b.refundableOnItsOwn } };
+  }
+
+  async settlingCapture(paymentId: string): Promise<SettlingCaptureOutcome> {
+    const r = await this.call('GET', `/payment/payments/${encodeURIComponent(paymentId)}/settling-capture`);
+    const code = typeof r.body?.code === 'string' ? r.body.code : null;
+    if (r.status === 404 && (code === 'settling_capture_not_found' || code === 'not_found')) return { kind: 'none', reason: code };
+    if (r.status === 409 && code === 'settling_capture_ambiguous') return { kind: 'ambiguous' };
+    const b = r.body;
+    if (r.status !== 200 || !b) return { kind: 'unknown', reason: code ?? `status_${r.status}` };
+    if (b.paymentId !== paymentId || typeof b.factId !== 'string' || !UUID.test(b.factId) || typeof b.attemptId !== 'string' || !UUID.test(b.attemptId)
+      || typeof b.amount !== 'number' || !Number.isSafeInteger(b.amount) || b.amount < 1 || typeof b.currency !== 'string' || !/^[A-Z]{3}$/.test(b.currency)
+      || typeof b.conflicted !== 'boolean') {
+      return { kind: 'unknown', reason: 'malformed_settling_capture' };
+    }
+    return { kind: 'capture', capture: { paymentId, attemptId: b.attemptId, factId: b.factId, amount: b.amount, currency: b.currency, conflicted: b.conflicted } };
   }
 
   async refunds(paymentId: string): Promise<PaymentRefunds | null> {

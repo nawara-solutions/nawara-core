@@ -19,7 +19,8 @@ import type { DisputeExposure } from '../src/refunds/dispute-exposure.js';
 import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
-import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
+import type { CaptureReadOutcome, PaymentRefundClient, SettlingCaptureOutcome } from '../src/refunds/payment-refund-client.js';
+import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
 import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
 import { LateSettlementModule } from '../src/late-settlements/late-settlement.module.js';
 import { createTestApp, type TestApp } from './support/app.js';
@@ -51,7 +52,15 @@ class FakePaymentClient implements PaymentClient {
 const refundsAtPayment: PaymentRefundClient = {
   relay: async (_paymentId, _key, body) => ({ kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } }),
   refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
-  capture: async (paymentId, factId) => { captureReads.push([paymentId, factId]); return { kind: 'not_found' as const }; }, // Core V2 R6H-5: no capture-specific case in this suite
+  capture: async (paymentId, factId) => {
+    captureReads.push([paymentId, factId]);
+    return captureAt.answer ? captureAt.answer(paymentId, factId) : { kind: 'not_found' as const }; // Core V2 R6H-5: no capture-specific case by default
+  },
+  // Core V2 S0-C11 7c (PAY-16): Payment's settling capture of an E-7 payment, under test control; every read is kept
+  settlingCapture: async (paymentId) => {
+    settlingAt.calls.push(paymentId);
+    return settlingAt.answer(paymentId);
+  },
 };
 
 /** Core V2 S6e-D: Payment's losses read under test control (a page of verified losses, or Payment unavailable). */
@@ -65,14 +74,20 @@ const paymentDisputes: PaymentDisputeClient = {
 
 /** Core V2 S6e-H: Auth's fraud-hold receipts (AUTH-02 / AUTH-03 semantics) and File's fraud_evidence grants, under test control. */
 type IssuedReceipt = { id: string; binding: Record<string, unknown>; issuer: string; consumeRef?: string };
-/**
- * Core V2 S0-C11 item 7, the Owner's interim E-7 rule (2026-11-03): an E-7 late settlement names no capture fact, so its L-4 application is refused
- * (`409 capture_unverified`) until a certified Payment read of the settling capture exists. These tests complete an E-7 application; they are
- * PAUSED, not rewritten, so that they return unchanged with that read. The refusal itself is certified below ('S0-C11 interim E-7 rule').
- */
-const pausedByInterimE7Rule = it.skip;
-/** Every capture read Billing makes (S0-C11): an E-7 application must make none, since it has no fact to name. */
+/** Every capture read Billing makes (S0-C11 item 7, R6H-5), and its answer under test control. */
 const captureReads: Array<[string, string]> = [];
+const captureAt = { answer: null as null | ((paymentId: string, factId: string) => Promise<CaptureReadOutcome>) };
+/**
+ * Core V2 S0-C11 7c: PAY-16 under test control; every read is kept. `answer` is set per suite run: by default it states, as Payment does, the one
+ * settling capture of the payment, of exactly the payment request's amount and currency (a stable fact id per payment).
+ */
+const settlingAt = { calls: [] as string[], answer: async (_paymentId: string): Promise<SettlingCaptureOutcome> => ({ kind: 'unknown', reason: 'unset' }) };
+const settlingFacts = new Map<string, string>();
+/** Core V2 S6h-B (PAY-12): Payment's reconciliation items under test control (S0-C11: a contradiction recorded after an application). */
+const paymentItems = { items: new Map<PaymentItemKind, PaymentItem[]>() };
+const paymentReconciliation: PaymentReconciliationClient = {
+  items: async (kind, after, limit) => (paymentItems.items.get(kind) ?? []).filter((i) => !after || i.id > after).sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, limit),
+};
 const canon = (b: Record<string, unknown>) => JSON.stringify(Object.keys(b).sort().map((k) => [k, b[k]]));
 const fraudAuth = { issued: new Map<string, IssuedReceipt>(), down: false };
 const fraudHoldReceipts: FraudHoldReceipts = {
@@ -263,6 +278,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
     auth.identities.set('member-tok', { userId: U.a1, kind: 'member', companyId: null });
     auth.platforms.set(PLATFORM, COMPANY);
     t = await createTestApp({
+      paymentReconciliationClient: paymentReconciliation, // Core V2 S0-C11: PAY-12 under test control (empty unless a test sets it)
       databaseUrl: db.url, authClient, organizationReference: reference, paymentClient: payment, disputeExposure, ownerAuthority: new HttpOwnerAuthority({ baseUrl: auth.url }),
       paymentRefundClient: refundsAtPayment, // Core V2 S6d: Payment authorizes every relay (S6b's own behaviour is certified elsewhere)
       paymentDisputeClient: paymentDisputes, // Core V2 S6e-D: Payment's losses read
@@ -278,7 +294,20 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
     auth.reset();
     disputes.open.clear();
     disputes.down = false;
+    // Core V2 S0-C11 7c: Payment, by default, states the payment's one uncontested settling capture of exactly the payment request's amount
+    settlingAt.calls.length = 0;
+    settlingAt.answer = verifiedSettlingCapture;
+    captureAt.answer = null;
+    paymentItems.items.clear();
   });
+  /** PAY-16 as Payment answers it for a payment Billing produced and that succeeded with one capture fact (a stable fact id per payment). */
+  const verifiedSettlingCapture = async (paymentId: string): Promise<SettlingCaptureOutcome> => {
+    const pr = await one(`SELECT amount, trim(currency) AS currency FROM payment_request WHERE "paymentId" = $1`, [paymentId]);
+    if (!pr) return { kind: 'none', reason: 'not_found' };
+    if (!settlingFacts.has(paymentId)) settlingFacts.set(paymentId, randomUUID());
+    return { kind: 'capture', capture: { paymentId, attemptId: randomUUID(), factId: settlingFacts.get(paymentId)!, amount: Number(pr.amount), currency: pr.currency,
+      conflicted: false } };
+  };
   afterAll(async () => {
     await t?.app.close();
     await auth.stop();
@@ -427,7 +456,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── L-4 application
 
   describe('the Owner\'s L-4 application (R6G-1, R6G-3 to R6G-7)', () => {
-    pausedByInterimE7Rule('attested: one transaction supersedes the deadline obligation, records the purchase (original instant kept, full period from now) and settles the request; T1/T2 end for it only', async () => {
+    it('attested: one transaction supersedes the deadline obligation, records the purchase (original instant kept, full period from now) and settles the request; T1/T2 end for it only', async () => {
       const [other, l_] = await lateFixtures('b2', 'b1'); // another request of the same Organization: untouched
       const l = l_!;
       await attest(l.lateId, 'cash_not_returned').expect(201);
@@ -466,7 +495,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(view.cashReturnObligations).toEqual([expect.objectContaining({ id: l.obligationId, status: 'superseded_by_settlement', supersededAt: expect.any(String) })]);
     });
 
-    pausedByInterimE7Rule('R6G-5 within K-3: an existing paid period of the same product is never overlapped; the applied period continues it at full duration', async () => {
+    it('R6G-5 within K-3: an existing paid period of the same product is never overlapped; the applied period continues it at full duration', async () => {
       const l = await lateFixture();
       const direct = await directPurchase('b1', { productId: l.productId, priceId: l.priceId }); // the beneficiary already pays for this product
       await attest(l.lateId, 'cash_not_returned').expect(201);
@@ -512,7 +541,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(await periodEnd(nov30, octAnchor, 'month')).toEqual(new Date('2026-12-31T00:03:14.921Z'));
     });
 
-    pausedByInterimE7Rule('evidenced (Path B): live settlement_evidence grants plus the Owner\'s explicit determination; a file reference alone proves nothing', async () => {
+    it('evidenced (Path B): live settlement_evidence grants plus the Owner\'s explicit determination; a file reference alone proves nothing', async () => {
       const l = await lateFixture();
       const { ownerDetermination: _d, ...noDetermination } = evidenced(l);
       expect((await applyLate(l.lateId, noDetermination)).body.code).toBe('invalid_late_settlement_request');
@@ -533,7 +562,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect((await audit(l.lateId)).find((x) => x.name === 'audit.assistance_late_settlement.applied')!.payload.changes.evidence_count).toBe(2);
     });
 
-    pausedByInterimE7Rule('authority and receipts: another Company\'s Owner, an operator, a member; a receipt of another Owner, reason or late settlement; Auth unresolved is repeated', async () => {
+    it('authority and receipts: another Company\'s Owner, an operator, a member; a receipt of another Owner, reason or late settlement; Auth unresolved is repeated', async () => {
       const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
       expect((await applyLate(l.lateId, attested(l), 'foreign-owner-tok')).status).toBe(404);
@@ -575,7 +604,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" IN ($1, $2, $3)`, [a.requestId, b.requestId, c.requestId])).toBe(0);
     });
 
-    pausedByInterimE7Rule('Core V2 S0-C9 (CB-3, both inputs): Payment\'s dispute exposure of an E-7 late payment is read before the receipt; open refuses, unresolved is 503; neither spends it', async () => {
+    it('Core V2 S0-C9 (CB-3, both inputs): Payment\'s dispute exposure of an E-7 late payment is read before the receipt; open refuses, unresolved is 503; neither spends it', async () => {
       const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
       const body = attested(l);
@@ -592,7 +621,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect((await applyLate(l.lateId, body, 'owner-tok', idem)).status).toBe(201);
     });
 
-    pausedByInterimE7Rule('R6G-7: a refund case on the late payment refuses the application; a cancelled case that never relayed does not', async () => {
+    it('R6G-7: a refund case on the late payment refuses the application; a cancelled case that never relayed does not', async () => {
       const [l, m] = (await lateFixtures('b1', 'b2')) as [Late, Late];
       await attest(l.lateId, 'cash_not_returned').expect(201);
       const open = await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: l.paymentId, reason: 'late_settlement_unapplied' });
@@ -607,7 +636,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(refusal(await applyLate(m.lateId, attested(m)))).toEqual([409, 'late_settlement_refused', 'refund_exists']);
     });
 
-    pausedByInterimE7Rule('historical late records: Payment\'s trusted envelope supplies the instant; without any trusted instant the application is refused, never invented', async () => {
+    it('historical late records: Payment\'s trusted envelope supplies the instant; without any trusted instant the application is refused, never invented', async () => {
       const [l, u] = (await lateFixtures('b1', 'b2')) as [Late, Late];
       await attest(l.lateId, 'cash_not_returned').expect(201);
       await backdate(l.lateId, `UPDATE assistance_late_settlement SET "settledAt" = NULL WHERE id = $1`); // as recorded before S6g
@@ -621,7 +650,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       expect(refusal(await applyLate(u.lateId, attested(u)))).toEqual([409, 'late_settlement_refused', 'settlement_time_unavailable']);
     });
 
-    pausedByInterimE7Rule('concurrency: duplicate applications and two late successes of one request give one purchase; a racing return report and application never both win', async () => {
+    it('concurrency: duplicate applications and two late successes of one request give one purchase; a racing return report and application never both win', async () => {
       const [l, ...racers] = (await lateFixtures('b1', 'b2', 'm1', 'admin-beneficiary')) as Late[];
       await attest(l!.lateId, 'cash_not_returned').expect(201);
       const outs = await Promise.all(Array.from({ length: 6 }, () => applyLate(l!.lateId, attested(l!))));
@@ -646,51 +675,146 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── Option A: refund after application
 
-  describe('S0-C11 interim E-7 rule (the Owner\'s decision, 2026-11-03): no E-7 L-4 application without verified capture evidence', () => {
-    it('attested or evidenced, with a valid receipt and every other condition met: 409 capture_unverified; the receipt is unspent and nothing financial changes', async () => {
-      const [l, m] = (await lateFixtures('b1', 'b2')) as [Late, Late];
+  describe('S0-C11 item 7c: E-7 applications verified through Payment\'s settling capture (PAY-16; BIL-32 J)', () => {
+    const settling = (o: Partial<{ amount: number; currency: string; conflicted: boolean; paymentId: string; factId: string }> = {}) =>
+      async (paymentId: string): Promise<SettlingCaptureOutcome> => {
+        const base = await verifiedSettlingCapture(paymentId);
+        if (base.kind !== 'capture') return base;
+        return { kind: 'capture', capture: { ...base.capture, ...o } };
+      };
+    const ready = async () => {
+      const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
-      captureReads.length = 0;
-      for (const body of [attested(l), evidenced(l)]) {
-        expect(refusal(await applyLate(l.lateId, body))).toEqual([409, 'late_settlement_refused', 'capture_unverified']);
-        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef, 'the receipt is not spent').toBeUndefined();
-      }
-      expect(captureReads, 'no fact is invented or guessed: nothing is read').toEqual([]);
+      return l;
+    };
+    const untouched = async (l: Late) => {
       expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [l.lateId])).toBe(0);
       expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(0);
-      expect((await entitlement(U.b1, l.productId).expect(200)).body.valid).toBe(false);
-      expect((await obligationsOf(l.requestId)).map((o) => o.status), 'the deadline obligation is not superseded').toEqual(['open']);
+      expect((await obligationsOf(l.requestId)).map((o) => o.status)).toEqual(['open']);
       expect((await readLate(l.lateId)).body).toMatchObject({ status: 'unapplied', application: null });
-      // the earlier refusals keep their order: they come before the capture check
-      expect(refusal(await applyLate(m.lateId, attested(m)))).toEqual([409, 'late_settlement_refused', 'evidence_insufficient']);
+    };
+
+    it('verified: the payment named by Billing\'s own payment request is read; the application commits and records the capture it relied on, once', async () => {
+      const l = await ready();
+      const r = await applyLate(l.lateId, attested(l));
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(settlingAt.calls).toEqual([l.paymentId]);
+      expect(captureReads, 'input (a) names no fact: the late-success read is not used').toEqual([]);
+      const factId = settlingFacts.get(l.paymentId)!;
+      expect(await one(`SELECT "captureFactId" FROM late_settlement_application WHERE "lateSettlementId" = $1`, [l.lateId])).toEqual({ captureFactId: factId });
+      expect(r.body.application.captureFactId).toBe(factId);
+      await expect(admin.query(`UPDATE late_settlement_application SET "captureFactId" = $2 WHERE "lateSettlementId" = $1`, [l.lateId, randomUUID()])).rejects.toThrow();
     });
 
-    it('the same key replayed, and concurrent applications: every one refused, no purchase, no receipt spent', async () => {
-      const l = await lateFixture();
-      await attest(l.lateId, 'cash_not_returned').expect(201);
+    it('missing, legacy, ambiguous, unequal and contested evidence refuse before the receipt; nothing is written', async () => {
+      const cases: Array<[string, (p: string) => Promise<SettlingCaptureOutcome>, string]> = [
+        ['no settling capture (not succeeded or legacy)', async () => ({ kind: 'none', reason: 'settling_capture_not_found' }), 'capture_unverified'],
+        ['the collapsed answer', async () => ({ kind: 'none', reason: 'not_found' }), 'capture_unverified'],
+        ['two capture facts', async () => ({ kind: 'ambiguous' }), 'capture_unverified'],
+        ['another amount', settling({ amount: 5301 }), 'capture_unverified'],
+        ['another currency', settling({ currency: 'EUR' }), 'capture_unverified'],
+        ['contested', settling({ conflicted: true }), 'capture_contested'],
+      ];
+      // one late settlement, every refusal in turn: nothing is written, so each case meets the same untouched state (a second unapplied request of the
+      // Organization would itself be refused by T1, correctly)
+      const l = await ready();
+      for (const [label, answer, reason] of cases) {
+        settlingAt.answer = answer;
+        const body = attested(l);
+        expect(refusal(await applyLate(l.lateId, body)), label).toEqual([409, 'late_settlement_refused', reason]);
+        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef, `${label}: the receipt is not spent`).toBeUndefined();
+        await untouched(l);
+      }
+    });
+
+    it('Payment unavailable, a malformed answer, or an answer about another payment: 503 late_settlement_capture_unavailable; it applies once Payment answers', async () => {
+      const l = await ready();
       const body = attested(l);
-      const idem = key();
-      expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem))[2]).toBe('capture_unverified');
-      expect(refusal(await applyLate(l.lateId, body, 'owner-tok', idem))[2]).toBe('capture_unverified');
-      const all = await Promise.all(Array.from({ length: 6 }, () => applyLate(l.lateId, attested(l))));
-      expect(all.map((r) => refusal(r))).toEqual(Array.from({ length: 6 }, () => [409, 'late_settlement_refused', 'capture_unverified']));
-      expect([...fraudAuth.issued.values()].filter((r) => r.consumeRef)).toEqual([]);
-      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(0);
+      for (const answer of [
+        async (): Promise<SettlingCaptureOutcome> => { throw new Error('payment-service unavailable'); },
+        async (): Promise<SettlingCaptureOutcome> => ({ kind: 'unknown', reason: 'malformed_settling_capture' }),
+        settling({ paymentId: randomUUID() }),
+      ]) {
+        settlingAt.answer = answer;
+        expect(refusal(await applyLate(l.lateId, body))).toEqual([503, 'late_settlement_capture_unavailable', undefined]);
+        expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef).toBeUndefined();
+        await untouched(l);
+      }
+      settlingAt.answer = verifiedSettlingCapture;
+      expect((await applyLate(l.lateId, body)).status).toBe(201);
     });
 
-    it('the unapplied E-7 late settlement stays a visible, unresolved reconciliation case', async () => {
+    it('order: the earlier refusals and the dispute exposure refusal come first and read no capture; a replay answers the stored application with no new read', async () => {
       const l = await lateFixture();
+      // an earlier (pre-receipt) refusal comes before Payment is asked anything
+      expect(refusal(await applyLate(l.lateId, attested(l)))).toEqual([409, 'late_settlement_refused', 'evidence_insufficient']);
+      expect(settlingAt.calls).toEqual([]);
       await attest(l.lateId, 'cash_not_returned').expect(201);
-      expect(refusal(await applyLate(l.lateId, attested(l)))[2]).toBe('capture_unverified');
+      disputes.open.add(l.paymentId);
+      expect(refusal(await applyLate(l.lateId, attested(l)))[2]).toBe('payment_dispute_open');
+      expect(settlingAt.calls).toEqual([]);
+      disputes.open.clear();
+      const idem = key();
+      const body = attested(l);
+      expect((await applyLate(l.lateId, body, 'owner-tok', idem)).status).toBe(201);
+      settlingAt.calls.length = 0;
+      expect((await applyLate(l.lateId, body, 'owner-tok', idem)).status).toBe(201);
+      expect(settlingAt.calls, 'the replay reads nothing').toEqual([]);
+      expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [l.lateId])).toBe(1);
+    });
+
+    it('concurrent applications give one purchase and one recorded capture; one capture never evidences two applications (the database refuses it)', async () => {
+      const l = await ready();
+      const all = await Promise.all(Array.from({ length: 6 }, () => applyLate(l.lateId, attested(l))));
+      expect(all.filter((r) => r.status === 201)).toHaveLength(1);
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(1);
+      expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "captureFactId" = $1`, [settlingFacts.get(l.paymentId)!])).toBe(1);
+      // another E-7 request whose Payment answer names the SAME capture: refused (the payment request's own amount still matches)
+      const m = await ready();
+      settlingAt.answer = settling({ factId: settlingFacts.get(l.paymentId)! });
+      const second = await applyLate(m.lateId, attested(m));
+      expect(refusal(second)).toEqual([409, 'late_settlement_refused', 'purchase_exists']);
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [m.requestId])).toBe(0);
+    });
+
+    it('a contradiction recorded before the read refuses; one recorded after it keeps the purchase and opens the case that records it (not a lock)', async () => {
+      // both requests are prepared first: once a deadline has passed, T1 refuses new requests of the Organization (correctly)
+      const [l, before] = (await lateFixtures('b1', 'b2')) as [Late, Late];
+      await attest(l.lateId, 'cash_not_returned').expect(201);
+      await attest(before.lateId, 'cash_not_returned', 'b2').expect(201);
+      settlingAt.answer = settling({ conflicted: true });
+      expect(refusal(await applyLate(before.lateId, attested(before)))[2]).toBe('capture_contested');
+      await untouched(before);
+      settlingAt.answer = verifiedSettlingCapture;
+      expect((await applyLate(l.lateId, attested(l))).status).toBe(201);
+      const factId = settlingFacts.get(l.paymentId)!;
+      // Payment records the contradiction afterwards; the reconciliation worker reads its item and Payment's capture read of the payment's own fact
+      paymentItems.items.set('fact_conflict', [{ kind: 'fact_conflict', id: randomUUID(), paymentId: l.paymentId, factId, amount: 4500, currency: 'TND', detail: {},
+        at: new Date().toISOString() }]);
+      captureAt.answer = async (paymentId, f) => ({ kind: 'capture', capture: { factId: f, paymentId, amount: 5300, currency: 'TND', basis: 'settling_capture',
+        paymentStatus: 'succeeded', conflicted: true, refundableOnItsOwn: true, refund: 'none' } });
       await t.app.get(ReconciliationService).drainOnce();
-      await t.app.get(ReconciliationService).drainOnce();
-      expect((await admin.query(`SELECT r.kind FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
-        WHERE c."caseType" = 'late_assisted_settlement' AND c."evidenceKey" = $1`, [l.lateId])).rows).toEqual([{ kind: null }]);
+      const listed = (await send(request(server()).get('/billing/admin/reconciliation-cases?type=capture_contradiction'), 'owner-tok', null).expect(200)).body.items as Row[];
+      expect(listed.find((c) => c.paymentId === l.paymentId)).toMatchObject({ captureFactId: factId, l4Purchase: true, status: 'open' });
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(1);
+      expect((await entitlement(U.b1, l.productId).expect(200)).body.valid).toBe(true);
+    });
+
+    it('the database: a new application must name the verified capture it relies on (no Billing-side inference)', async () => {
+      const l = await ready();
+      const insert = (captureFactId: string | null) => admin.query(`INSERT INTO late_settlement_application ("lateSettlementId", "assistanceRequestId", "companyId", "platformId",
+          "organizationId", "beneficiaryUserId", "reasonCode", "attestationId", "obligationId", "appliedByUserId", "receiptId", "settledAt", "captureFactId")
+        SELECT l.id, l."assistanceRequestId", $2, a."platformId", a."organizationId", a."beneficiaryUserId", 'cash_not_returned_attested',
+               (SELECT t.id FROM late_settlement_attestation t WHERE t."lateSettlementId" = l.id), $3, $4, gen_random_uuid(), billing_late_settlement_settled_at(l.id), $5
+          FROM assistance_late_settlement l JOIN assistance_request a ON a.id = l."assistanceRequestId" WHERE l.id = $1`,
+        [l.lateId, COMPANY, l.obligationId, U.owner, captureFactId]).then(() => null, (e: { constraint?: string }) => e.constraint);
+      expect(await insert(null)).toBe('late_settlement_application_capture_required');
+      expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [l.lateId])).toBe(0);
     });
   });
 
   describe('obligation history (Option A): a refund after the application', () => {
-    pausedByInterimE7Rule('the refund reverses the applied purchase once and opens a NEW refund-origin obligation; the superseded one is kept; T2 returns; discharge works', async () => {
+    it('the refund reverses the applied purchase once and opens a NEW refund-origin obligation; the superseded one is kept; T2 returns; discharge works', async () => {
       const l = await lateFixture();
       await attest(l.lateId, 'cash_not_returned').expect(201);
       await applyLate(l.lateId, attested(l)).expect(201);
@@ -740,7 +864,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── the database
 
   describe('the database (migration 0040)', () => {
-    pausedByInterimE7Rule('supersession only by an application; superseded is terminal; an application commits with its purchase, settled request and superseded obligation', async () => {
+    it('supersession only by an application; superseded is terminal; an application commits with its purchase, settled request and superseded obligation', async () => {
       const l = await lateFixture();
       await expect(admin.query(`UPDATE cash_return_obligation SET status = 'superseded_by_settlement', "supersededByApplicationId" = gen_random_uuid() WHERE id = $1`, [l.obligationId]))
         .rejects.toThrow();
@@ -750,9 +874,10 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       try {
         await cl.query('BEGIN');
         await cl.query(`INSERT INTO late_settlement_application ("lateSettlementId", "assistanceRequestId", "companyId", "platformId", "organizationId", "beneficiaryUserId",
-            "reasonCode", "attestationId", "obligationId", "appliedByUserId", "receiptId", "settledAt")
+            "reasonCode", "attestationId", "obligationId", "appliedByUserId", "receiptId", "settledAt", "captureFactId")
           SELECT l.id, l."assistanceRequestId", $2, a."platformId", a."organizationId", a."beneficiaryUserId", 'cash_not_returned_attested',
-                 (SELECT t.id FROM late_settlement_attestation t WHERE t."lateSettlementId" = l.id), $3, $4, gen_random_uuid(), billing_late_settlement_settled_at(l.id)
+                 (SELECT t.id FROM late_settlement_attestation t WHERE t."lateSettlementId" = l.id), $3, $4, gen_random_uuid(), billing_late_settlement_settled_at(l.id),
+                 gen_random_uuid() -- S0-C11 provenance: every application now names a capture (an E-7 one has no Billing-side copy to compare)
             FROM assistance_late_settlement l JOIN assistance_request a ON a.id = l."assistanceRequestId" WHERE l.id = $1`, [l.lateId, COMPANY, l.obligationId, U.owner]);
         await expect(cl.query('COMMIT')).rejects.toMatchObject({ constraint: 'late_settlement_application_atomic' });
       } finally {
@@ -777,7 +902,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
     });
   });
 
-  pausedByInterimE7Rule('Core V2 S6h-B (L-2, R6H-1): an unapplied late settlement is a reconciliation case, found again by every pass; the L-4 application resolves it, once', async () => {
+  it('Core V2 S6h-B (L-2, R6H-1): an unapplied late settlement is a reconciliation case, found again by every pass; the L-4 application resolves it, once', async () => {
     const l = await lateFixture({ beneficiary: 'b2' });
     const reconcile = () => t.app.get(ReconciliationService).drainOnce();
     const caseOf = () => one(`SELECT c.id, c."companyId", c."organizationId", r.kind FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id

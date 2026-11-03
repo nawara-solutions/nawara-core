@@ -51,8 +51,13 @@ const CASE_SELECT = `SELECT c.id, c."caseType", c."evidenceKey", c."companyId", 
     c.amount, trim(c.currency) AS currency, c.detail, c."openedAt",
     -- S0-C11 item 7b: whether an L-4 purchase rests on the contested capture, derived when read (the case itself is never rewritten); only where the
     -- case may show its fact (the fact is the observing payment's own)
-    CASE WHEN c."caseType" = 'capture_contradiction' AND c."captureFactId" IS NOT NULL THEN EXISTS (SELECT 1 FROM payment_late_success s
-      JOIN subscription_purchase p ON p."lateSuccessId" = s."lateSuccessId" WHERE s."factId" = c."captureFactId" AND s."paymentId" = c."paymentId") END AS "l4Purchase",
+    -- both L-4 inputs through the application's recorded capture (S0-C11 provenance, BIL-32 J), and an earlier late-success purchase with no
+    -- recorded provenance through its late success
+    CASE WHEN c."caseType" = 'capture_contradiction' AND c."captureFactId" IS NOT NULL THEN (
+      EXISTS (SELECT 1 FROM late_settlement_application a JOIN assistance_late_settlement l ON l.id = a."lateSettlementId" JOIN payment_request pr ON pr.id = l."paymentRequestId"
+               WHERE a."captureFactId" = c."captureFactId" AND pr."paymentId" = c."paymentId")
+      OR EXISTS (SELECT 1 FROM payment_late_success s JOIN subscription_purchase p ON p."lateSuccessId" = s."lateSuccessId"
+                  WHERE s."factId" = c."captureFactId" AND s."paymentId" = c."paymentId")) END AS "l4Purchase",
     r.kind, r."refundCaseId", r."lossId", r."recoveryPaymentId", r."resolvedByUserId", r.reason, r."resolvedAt"
   FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id`;
 const representCase = (c: CaseRow) => ({
