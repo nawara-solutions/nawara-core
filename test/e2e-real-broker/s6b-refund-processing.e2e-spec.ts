@@ -451,6 +451,105 @@ describeWithEnv(
       await ch.close();
     }, 240_000);
 
+    // ─────────────── Core V2 S0-C11 item 9 / acceptance 12(5) (EG-1): refund continuity across a capture contradiction, real processes
+    /** The provider's signed contradiction of the payment's settled capture (`amount_mismatch` of the settled attempt, through Payment's webhooks). */
+    const contradictCapture = async (paymentId: string) => {
+      const attemptId = (await paymentAdmin.query(`SELECT "succeededAttemptId" FROM payment WHERE id = $1`, [paymentId])).rows[0].succeededAttemptId as string;
+      const r = await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/payments/${paymentId}/attempts/${attemptId}/outcomes`, { commandId: `eg1-${randomUUID()}`, outcome: 'amount_mismatch' });
+      expect(r.json?.delivered, JSON.stringify(r.json)).toEqual({ status: 200 });
+      return r.json.commandId as string;
+    };
+    const captureOf = async (paymentId: string) => (await paymentAdmin.query(
+      `SELECT id, amount::int AS amount, trim(currency) AS currency, "providerTxnId", "attemptId" FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'capture'`, [paymentId])).rows;
+    const conflictsOf = async (factId: string) => (await paymentAdmin.query(`SELECT count(*)::int AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [factId])).rows[0].n as number;
+    /** Payment's Owner-readable `fact_conflict` items (PAY-12 G), with the Owner's own bearer verified live by the real Auth. */
+    const ownerConflictItems = async (paymentId: string) => {
+      const r = await call(PAYMENT_URL, 'GET', ownerToken, '/payment/admin/reconciliation-items?kind=fact_conflict&limit=200');
+      expect(r.status, JSON.stringify(r.json)).toBe(200);
+      return (r.json.items as Array<Record<string, any>>).filter((i) => i.paymentId === paymentId);
+    };
+
+    it('S0-C11 EG-1 (A), REAL AUTH: a capture contradicted BEFORE authorization: Payment rejects the new refund (refund_capture_unverified) before the Owner receipt is consumed; nothing is refunded or reversed', async () => {
+      const { paymentId, invoiceId } = await purchase();
+      const [fact] = await captureOf(paymentId);
+      await contradictCapture(paymentId);
+      expect(await conflictsOf(fact.id)).toBe(1);
+      const c = await openCase(paymentId);
+      const r = await receipt(bindingOf(c, paymentId));
+      const relayed = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${c.id}/authorizations`, { receiptSecret: r.secret });
+      expect([relayed.status, relayed.json?.code], `${JSON.stringify(relayed.json)}\n${tails()}`).toEqual([409, 'refund_rejected_by_payment']);
+      expect((await billingAdmin.query(`SELECT "attemptStatus", refusal FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [c.id])).rows)
+        .toEqual([{ attemptStatus: 'rejected', refusal: 'refund_capture_unverified' }]);
+      expect(await receiptRow(r.receiptId), 'the Owner receipt is never consumed').toEqual({ status: 'issued', consumeRef: null, consumedBy: null });
+      expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM refund_attempt WHERE "paymentId" = $1`, [paymentId])).rows[0].n).toBe(0);
+      expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM refund_authorization WHERE "paymentId" = $1`, [paymentId])).rows[0].n).toBe(0);
+      await new Promise((res) => setTimeout(res, 3_000));
+      expect(await captureOf(paymentId)).toEqual([fact]);
+      expect((await billingAdmin.query(`SELECT status FROM refund_case WHERE id = $1`, [c.id])).rows[0].status).not.toBe('completed');
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows[0].n).toBe(0);
+      expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [paymentId])).rows[0].status).toBe('succeeded');
+    }, 180_000);
+
+    it('S0-C11 EG-1 (B, C), REAL AUTH: a capture contradicted AFTER the Owner authorized its refund: the same attempt dispatches once, the provider refunds it, Payment completes the authorization once and Billing reverses the purchase once; the capture fact never changes', async () => {
+      const { paymentId, invoiceId } = await purchase();
+      const [fact] = await captureOf(paymentId);
+      const c = await openCase(paymentId);
+      const r = await receipt(bindingOf(c, paymentId));
+      const idem = `idem-${randomUUID()}`;
+      const relayed = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${c.id}/authorizations`, { receiptSecret: r.secret }, idem);
+      expect(relayed.status, `${JSON.stringify(relayed.json)}\n${tails()}`).toBe(201);
+      const attemptId = relayed.json.attempts[0].refundAttemptId as string;
+      const authorized = await attemptRow(attemptId);
+      expect(authorized).toMatchObject({ receiptId: r.receiptId, approvedByUserId: OWNER, captureFactId: fact.id, authorizedAt: expect.any(Date) });
+      expect(await receiptRow(r.receiptId)).toEqual({ status: 'consumed', consumeRef: attemptId, consumedBy: 'payment-service' });
+
+      // the provider contradicts the refunded capture AFTER authorization (whether the worker has dispatched yet or not)
+      const cmd1 = await contradictCapture(paymentId);
+      expect(await conflictsOf(fact.id)).toBe(1);
+      expect(await captureOf(paymentId), 'the original capture fact is immutable').toEqual([fact]);
+      const items = await ownerConflictItems(paymentId);
+      expect(items, 'visible to the Owner as Payment\'s fact_conflict item').toEqual([expect.objectContaining({ kind: 'fact_conflict', paymentId, factId: fact.id })]);
+      // a NEW refund of the contested capture is refused at Payment (item 9), while the authorized attempt continues
+      expect((await call(PAYMENT_URL, 'POST', billingToPaymentToken.token, `/payment/payments/${paymentId}/refunds`, {
+        refundAttemptId: randomUUID(), refundCaseId: randomUUID(), amount: c.amount, currency: c.currency, reason: 'customer_request', legalOverride: false,
+        receiptSecret: randomBytes(32).toString('base64url') })).json.code).toBe('refund_capture_unverified');
+
+      await waitFor(async () => (await attemptRow(attemptId)).status === 'submitted', 20_000, 'the refund worker to dispatch the authorized attempt');
+      // replays (C): the contradiction notification redelivered, and the Owner's relay replayed with its key: nothing new
+      expect((await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/commands/${cmd1}/deliver`, {})).status).toBe(200);
+      expect(await conflictsOf(fact.id)).toBe(1);
+      const replay = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${c.id}/authorizations`, { receiptSecret: r.secret }, idem);
+      expect([replay.status, replay.json.attempts?.map((x: { refundAttemptId: string }) => x.refundAttemptId)]).toEqual([200, [attemptId]]);
+
+      const out = await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/refunds/${attemptId}/outcomes`, { commandId: `eg1-${randomUUID()}`, outcome: 'succeeded' });
+      expect(out.json?.delivered, JSON.stringify(out.json)).toEqual({ status: 200 });
+      expect(await attemptRow(attemptId)).toMatchObject({ status: 'succeeded', receiptId: r.receiptId, authorizedAt: authorized.authorizedAt });
+      const z = (await paymentAdmin.query(`SELECT id, "allocatedIntended"::int AS allocated, "completedAt" FROM refund_authorization WHERE "refundAttemptId" = $1`, [attemptId])).rows;
+      expect(z).toEqual([{ id: expect.any(String), allocated: c.amount, completedAt: expect.any(Date) }]);
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM refund_case_effect WHERE "refundCaseId" = $1`, [c.id])).rowCount === 1,
+        45_000, `Billing to complete the case and apply its effect\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT status FROM refund_case WHERE id = $1`, [c.id])).rows[0].status).toBe('completed');
+      expect((await billingAdmin.query(`SELECT outcome FROM refund_case_effect WHERE "refundCaseId" = $1`, [c.id])).rows[0].outcome).toBe('reversed_purchase');
+
+      // the provider's refund notification redelivered, and time for any duplicate to arrive: exactly once everywhere
+      expect((await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/refund-commands/${out.json.commandId}/deliver`, {})).status).toBe(200);
+      await new Promise((res) => setTimeout(res, 3_000));
+      expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM refund_attempt WHERE "paymentId" = $1`, [paymentId])).rows[0].n).toBe(1);
+      expect((await paymentAdmin.query(`SELECT received FROM simulation_refund_dispatch WHERE "idempotencyKey" = $1`, [attemptId])).rows).toEqual([{ received: 1 }]);
+      expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund'`, [paymentId])).rows[0].n).toBe(1);
+      expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'refund.case_completed' AND payload->>'paymentId' = $1`, [paymentId])).rows[0].n).toBe(1);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_case_completion WHERE "refundCaseId" = $1`, [c.id])).rows[0].n).toBe(1);
+      expect((await billingAdmin.query(`SELECT count(*)::int AS n FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [c.id])).rows[0].n).toBe(1);
+      expect((await billingAdmin.query(`SELECT v.cause FROM subscription_purchase_reversal v JOIN subscription_purchase s ON s.id = v."purchaseId" WHERE s."invoiceId" = $1`, [invoiceId])).rows)
+        .toEqual([{ cause: 'refund_completion' }]);
+      expect(await conflictsOf(fact.id)).toBe(1);
+      expect(await captureOf(paymentId)).toEqual([fact]);
+      expect((await paymentAdmin.query(`SELECT status FROM payment WHERE id = $1`, [paymentId])).rows[0].status).toBe('succeeded');
+      const ch = await amqpConn.createChannel();
+      expect((await ch.checkQueue(BILLING_DEAD_QUEUE)).messageCount).toBe(0);
+      await ch.close();
+    }, 240_000);
+
     /**
      * Core V2 S0-C11 item 7c (BIL-32 J; PAY-16): the REAL Payment process (refunds configured, as wherever assisted settlement and L-4 exist)
      * answers the settling-capture read over real HTTP with Billing's own service credential, in exactly the shape Billing's
