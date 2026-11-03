@@ -302,6 +302,20 @@ status change still needs its own explicit owner authorization.
        purchase (FC-4).
      - *Evidence.* In that case, the contradiction stays visible under item 8, and its `capture_contradiction` case records that an L-4 purchase rests on
        the contested capture.
+     - *7c, input (a), the S5b E-7 record (owner-approved 2026-11-03).* An E-7 late settlement's capture is its payment's **settling capture**: the
+       single capture fact Payment holds on the payment's committed succeeded attempt, identified only from Payment's committed records and stated
+       through the verified service read PAY-16. Billing names the payment from its own payment request, never from a request value. An E-7
+       application is applied only when, at the last read before the receipt is consumed, Payment states that the payment is `succeeded`, that its
+       succeeded attempt holds exactly one capture fact, that the fact is uncontested, and that its amount and currency equal the payment's, the
+       original settlement's (the payment request) and the channel invoice's total. Missing, legacy-unverifiable (no fact, as for a settlement
+       recorded before S4d) or unequal evidence: `409 capture_unverified`; ambiguous (more than one capture fact on that attempt): `409
+       capture_unverified`; contested: `409 capture_contested`; Payment unanswerable or an answer about anything else: `503`. None spends the
+       receipt or writes anything. No fact is inferred from the payment amount, a request value, provider metadata or an arbitrary capture
+       reference. The two sub-items above apply unchanged. Until PAY-16 is implemented and certified, every E-7 application is refused
+       `409 capture_unverified` (the Owner's interim rule): E-7 eligibility is restricted, not removed.
+     - *Capture provenance.* Every L-4 application, of either input, records the capture fact id it relied on, taken only from Payment's verified
+       answer in that application, immutable, and never backfilled; an application recorded before this item keeps none. One capture fact
+       evidences at most one L-4 application.
   8. *Visibility.* A capture contradiction stays visible until an approved contract resolves it: as Payment's Owner-readable `fact_conflict` item; as a
      commercial audit record written with the contradiction; and as Billing `capture_contradiction` reconciliation cases. *(Tenant-isolation
      clarification, owner-approved 2026-11-03.)* There is one case per contested fact **and** per payment whose attempt recorded the contradicting
