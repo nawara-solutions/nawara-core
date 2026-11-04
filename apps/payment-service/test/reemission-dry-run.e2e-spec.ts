@@ -70,6 +70,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0022_capture_specific_refunds.sql', // Core V2 R6H-5: capture-specific refunds, per-capture refund uniqueness
       '0023_late_capture_disputes.sql', // Core V2 S0-C9: payment_dispute.captureBasis, late-capture attribution guard, held-notification index
       '0024_capture_evidence.sql', // Core V2 S0-C11: guards only, no table
+      '0025_late_success_one_per_fact.sql', // Core V2 S0-C12 correction: one late success per capture fact (constraint only, no table)
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

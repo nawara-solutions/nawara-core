@@ -946,6 +946,38 @@ SELECT pg_temp.expect_constraint('S0-C11', 'item 5: a contested fact records no 
 SELECT pg_temp.expect_constraint('S0-C11', 'item 6: never another attempt''s fact', pg_temp.c11_late(:'c11c', :'c11ca', :'c11bf', 1001), 'payment_late_success_fact_binding');
 SELECT pg_temp.expect_ok('S0-C11', 'item 6: a late success equal to its uncontested fact is recorded', pg_temp.c11_late(:'c11b', :'c11ba', :'c11bf', 1001));
 
+-- ======================================== Core V2 S0-C12 correction: one late success per capture fact (0025) ----
+\o /dev/null
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c12a \gset
+SELECT pg_temp.c11(:'c12a') AS c12aa \gset
+SELECT pg_temp.capture_fact(:'c12a', :'c12aa') AS c12af \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-c12-1', 'payment.succeeded', '\x7b7d') RETURNING id AS c12w1 \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-c12-2', 'payment.succeeded', '\x7b7d') RETURNING id AS c12w2 \gset
+-- Records a PASS only when the statement fails as a unique violation (23505) on exactly the named constraint.
+CREATE FUNCTION pg_temp.expect_unique(tid text, tname text, stmt text, want text) RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE cn text;
+BEGIN
+  BEGIN
+    EXECUTE stmt;
+    INSERT INTO results VALUES (tid, tname, false, 'the statement succeeded');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS cn = CONSTRAINT_NAME;
+    INSERT INTO results VALUES (tid, tname, SQLSTATE = '23505' AND cn = want, CASE WHEN SQLSTATE = '23505' AND cn = want THEN NULL ELSE SQLSTATE||' '||coalesce(cn, '-')||': '||SQLERRM END);
+  END;
+END $f$;
+CREATE FUNCTION pg_temp.c12_late(pid uuid, aid uuid, fid uuid, wid uuid) RETURNS text LANGUAGE sql AS $f$
+  SELECT CASE WHEN wid IS NULL
+    THEN format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, pid, aid, fid)
+    ELSE format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'webhook', %L, 1000, 'TND', 'created', %L)$$, pid, aid, wid, fid) END;
+$f$;
+\o
+SELECT pg_temp.expect_ok('S0-C12', 'correction: the first observation records the fact''s late success', pg_temp.c12_late(:'c12a', :'c12aa', :'c12af', :'c12w1'));
+SELECT pg_temp.expect_unique('S0-C12', 'correction: another notification of the same fact records no second late success', pg_temp.c12_late(:'c12a', :'c12aa', :'c12af', :'c12w2'), 'payment_late_success_one_per_fact');
+SELECT pg_temp.expect_unique('S0-C12', 'correction: a status read of the same fact records no second late success', pg_temp.c12_late(:'c12a', :'c12aa', :'c12af', NULL), 'payment_late_success_one_per_fact');
+SELECT pg_temp.assert_eq('S0-C12', 'correction: one late success of the fact, with the first observation''s provenance',
+  (SELECT count(*)::text || ':' || min("webhookEventId"::text) FROM payment_late_success WHERE "factId" = :'c12af'), '1:' || :'c12w1');
+SELECT pg_temp.assert_eq('S0-C12', 'correction: both notifications stay stored', (SELECT count(*)::text FROM webhook_event WHERE "providerEventId" IN ('evt-c12-1', 'evt-c12-2')), '2');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

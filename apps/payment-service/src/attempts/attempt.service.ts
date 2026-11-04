@@ -285,6 +285,8 @@ export class AttemptService {
    * the attempt's failure was provider-confirmed). Written in its own transaction once the deciding one has ended, once per (attempt, source,
    * webhook event): the payment is not reopened, no payment.succeeded is emitted, and the evidence stays for S4d facts and S6h
    * reconciliation. Surfaced as a stable warning for the operator (the existing alert channel).
+   * Core V2 S0-C12 correction (`0025`): once per capture FACT as well. Another authenticated observation of a fact that already has its late
+   * success (a new notification id, or a status read) records nothing (no row, no EVT-10, no audit record); its notification stays stored.
    */
   private async recordLateSuccess(attemptId: string, f: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string }, ctx: EventContext, factId: string | null): Promise<void> {
     const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
@@ -292,7 +294,7 @@ export class AttemptService {
     const rowCount = await this.db.tx(async (q) => {
       const { rows } = await q.query<{ id: string; attemptId: string; factId: string | null; amount: string; currency: string; paymentStatus: string; recordedAt: Date }>(
         `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT ON CONSTRAINT payment_late_success_once DO NOTHING RETURNING id, "attemptId", "factId", amount, currency, "paymentStatus", "recordedAt"`,
+         ON CONFLICT DO NOTHING RETURNING id, "attemptId", "factId", amount, currency, "paymentStatus", "recordedAt"`, // either key: the observation (`payment_late_success_once`) or the fact (`payment_late_success_one_per_fact`)
         [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus, factId],
       );
       if (!rows[0]) return 0;

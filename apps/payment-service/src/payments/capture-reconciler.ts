@@ -15,7 +15,8 @@ export const CAPTURE_RECONCILE_BATCH = 100;
  *   - Durable: it selects from committed records only (no queue to lose); an interrupted pass is simply re-run.
  *   - Bounded: at most `CAPTURE_RECONCILE_BATCH` facts per pass, oldest first; a payment another transaction holds is skipped (`SKIP LOCKED`).
  *   - Idempotent: under the payment lock, through the same helper as the finality writers (no late success for a fact that has one; the fact's
- *     own observation key, `payment_late_success_once`; the event and audit ids derived from the row). Concurrent passes serialize per payment.
+ *     own observation key, `payment_late_success_once`, and its fact's key, `payment_late_success_one_per_fact`; the event and audit ids derived from
+ *     the row). Concurrent passes serialize per payment.
  * It never settles, never reopens a final status, and never touches a contested fact, a non-ISO currency or a payment that is not final.
  */
 @Injectable()

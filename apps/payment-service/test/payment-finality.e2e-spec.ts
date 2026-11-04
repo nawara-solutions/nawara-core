@@ -167,10 +167,13 @@ describeWithEnv('payment closing and finality (Core V2 S4c) — real PostgreSQL'
       expect((await sync(p.id, a.id)).status).toBe(409); // the status check finds the success
       await webhook(signed('payment.succeeded', a.id)).expect(200); // and so does the provider's notification (recorded conflict)
       await webhook(signed('payment.succeeded', a.id)).expect(200); // redelivered: nothing more
+      // Core V2 S0-C12 correction (0025): both observations are of ONE capture fact, so one late success, with the first observation's provenance;
+      // the webhook notification stays stored (its recorded conflict, below). Until 0025 each observation recorded its own late success.
       expect(await late(a.id)).toEqual([
         { source: 'status_check', webhook: false, amount: 9000, paymentStatus: 'failed' },
-        { source: 'webhook', webhook: true, amount: 9000, paymentStatus: 'failed' },
       ]);
+      expect((await one(`SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "attemptId" = $1 AND kind = 'capture'`, [a.id])).n).toBe(1);
+      expect(await events('payment.late_success.recorded', p.id)).toHaveLength(1);
       expect((await read(p.id).expect(200)).body).toMatchObject({ status: 'failed', finality: 'final' });
       expect(await events('payment.succeeded', p.id)).toHaveLength(0); // no automatic purchase downstream
       expect((await one(`SELECT state FROM webhook_event WHERE "providerEventId" = $1`, [`evt_payment.succeeded_${a.id}`])).state).toBe('conflict');
