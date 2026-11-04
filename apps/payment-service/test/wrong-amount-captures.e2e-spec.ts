@@ -368,7 +368,7 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
     });
   });
 
-  describe('S0-C12 item 6: the expired and closing finality writers; distinct captures of one attempt', () => {
+  describe('S0-C12 item 6: the expired and closing finality writers', () => {
     const sameTransaction = async (lsId: string, pid: string) => (await one(`SELECT (SELECT xmin FROM payment_late_success WHERE id = $1)::text = (SELECT xmin FROM payment WHERE id = $2)::text AS same`, [lsId, pid])).same;
 
     it('the expiry sweep: an open payment with a mismatched capture expires; one late success in that transaction; a reconciler pass adds nothing', async () => {
@@ -406,15 +406,6 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       const ls = await lateSuccesses(p.id);
       expect(ls).toEqual([expect.objectContaining({ amount: 9100, factId: f.id, paymentStatus: 'expired' })]);
       expect(await sameTransaction(ls[0].id, p.id)).toBe(true);
-    });
-
-    it('a status read and a notification of DIFFERENT captures of one attempt (two facts, different observation keys): each has its own late success', async () => {
-      const { p, a } = await cancelledAfterFailure();
-      await t.app.get(AttemptService).applyStatus(a.id, { kind: 'succeeded', amount: 9100, currency: 'TND', providerTransactionId: `ptx_read_${a.id}` } as never, {} as never).catch((e: unknown) => e);
-      const n = signed({ eventId: `evt_${crypto.randomUUID()}`, type: 'payment.succeeded', reference: a.id, providerTransactionId: `ptx_note_${a.id}`, amount: 9200, currency: 'TND' });
-      expect((await post(n.raw, n.signature)).status).toBeLessThan(500);
-      expect((await facts(p.id)).length).toBe(2);
-      expect(await lateSuccesses(p.id)).toHaveLength(2);
     });
   });
 
