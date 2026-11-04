@@ -159,7 +159,10 @@ describeWithEnv('provider transaction facts (Core V2 S4d) — real PostgreSQL', 
       const [fact] = await admin.query(`SELECT id FROM provider_transaction_fact WHERE "attemptId" = $1`, [a.id]).then((r) => r.rows);
       expect(fact).toBeDefined();
       const lateRows = (await admin.query(`SELECT source, "factId" FROM payment_late_success WHERE "attemptId" = $1 ORDER BY "recordedAt"`, [a.id])).rows;
-      expect(lateRows).toEqual([{ source: 'status_check', factId: fact.id }, { source: 'webhook', factId: fact.id }]); // one fact, two observations
+      // one fact, two observations: since the S0-C12 correction (0025) one late success of the fact (the first observation's), and the second
+      // observation stays stored as its notification (until 0025 each observation recorded its own late success)
+      expect(lateRows).toEqual([{ source: 'status_check', factId: fact.id }]);
+      expect((await admin.query(`SELECT state FROM webhook_event WHERE "providerEventId" = $1`, [`evt_ok_${a.id}`])).rows).toEqual([{ state: expect.any(String) }]);
       expect((await read(p.id).expect(200)).body.status).toBe('failed');
       expect(await succeededEvents(p.id)).toBe(0); // no automatic purchase downstream
     });

@@ -15,7 +15,8 @@ export const ISO_CURRENCY = /^[A-Z]{3}$/;
  *   - settled nothing (the payment never succeeded with it: the payment is final unsuccessful);
  *   - has no late success yet (never a second record of the same fact).
  * The row reuses the fact's own source and webhook event, so it is the very row the observation's own processing would have written: the
- * `payment_late_success_once` key turns any concurrent or later write of it into a no-op. The database re-checks the fact binding (`0024`).
+ * `payment_late_success_once` key, and the fact's own `payment_late_success_one_per_fact` key (`0025`), turn any concurrent or later write of it, by
+ * whichever observation, into a no-op. The database re-checks the fact binding (`0024`).
  * A final status is never reopened, and nothing is settled, sold or refunded here. `onlyFactId` limits the pass to one fact (the reconciler).
  */
 export async function recordQualifyingLateSuccesses(
@@ -34,10 +35,10 @@ export async function recordQualifyingLateSuccesses(
   for (const f of facts) {
     const { rows } = await q.query<{ id: string; attemptId: string; factId: string; amount: string; currency: string; paymentStatus: string; recordedAt: Date }>(
       `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT ON CONSTRAINT payment_late_success_once DO NOTHING RETURNING id, "attemptId", "factId", amount, currency, "paymentStatus", "recordedAt"`,
+       ON CONFLICT DO NOTHING RETURNING id, "attemptId", "factId", amount, currency, "paymentStatus", "recordedAt"`,
       [payment.id, f.attemptId, f.source, f.webhookEventId, f.amount, f.currency, payment.status, f.id]);
     const row = rows[0];
-    if (!row) continue; // that observation's own row already exists
+    if (!row) continue; // the fact's late success already exists (this observation's own row, or another observation's)
     await deps.outbox.enqueue(q, lateSuccessEvent(row, payment, ctx));
     await deps.audit.recordLateSuccess(q, { id: row.id, factId: row.factId, attemptId: row.attemptId, amount: Number(row.amount), paymentStatus: row.paymentStatus }, payment,
       opts.actor ?? observationActor(f.source), ctx);

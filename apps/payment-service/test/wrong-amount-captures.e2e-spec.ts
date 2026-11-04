@@ -52,6 +52,7 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
     return { eventId, send: () => post(n.raw, n.signature) };
   };
   const one = async (sql: string, p: unknown[] = []) => (await admin.query(sql, p)).rows[0];
+  const count = async (sql: string, p: unknown[] = []) => (await admin.query(sql, p)).rows[0].n as number;
   const status = async (id: string) => (await one(`SELECT status FROM payment WHERE id = $1`, [id])).status as string;
   const facts = async (pid: string) => (await admin.query(`SELECT id, amount::int AS amount, trim(currency) AS currency, source FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'capture' ORDER BY "observedAt"`, [pid])).rows;
   const lateSuccesses = async (pid: string) => (await admin.query(
@@ -241,6 +242,128 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       expect(await status(p.id)).toBe('failed');
       expect(await lateSuccesses(p.id)).toEqual([expect.objectContaining({ amount: 9050, paymentStatus: 'failed' })]);
       expect(await outboxOf('payment.late_success.recorded', 'paymentId', p.id)).toHaveLength(1);
+    });
+  });
+
+  describe('S0-C12 correction (0025): one capture fact, at most one late success, whichever observation', () => {
+    /** Every row of the fact, exactly as stored (immutability is checked against it). */
+    const factRow = async (id: string) => one(`SELECT * FROM provider_transaction_fact WHERE id = $1`, [id]);
+    const effects = async (pid: string) => ({
+      lateSuccesses: (await lateSuccesses(pid)).length,
+      events: (await outboxOf('payment.late_success.recorded', 'paymentId', pid)).length,
+      audits: (await audits('audit.payment_late_success.recorded', pid)).length,
+      mismatchAudits: (await audits('audit.payment_capture_mismatch.recorded', pid)).length,
+      succeeded: await succeededEvents(pid),
+    });
+
+    it('two DISTINCT authenticated notifications of one capture: one fact, one late success (the first observation\'s provenance), one EVT-10, one audit; both notifications stay stored; the same notification replayed adds nothing', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const first = capture(a.id, 9100);
+      expect((await first.send()).status).toBe(200);
+      const [f] = await facts(p.id);
+      const stored = await factRow(f.id);
+      const firstHook = await one(`SELECT id FROM webhook_event WHERE "providerEventId" = $1`, [first.eventId]);
+      const second = capture(a.id, 9100); // the same provider transaction (ptx_<attempt>), a NEW notification id
+      expect((await second.send()).status).toBeLessThan(500);
+      expect((await first.send()).status).toBe(200); // and the first one replayed
+      expect(await facts(p.id)).toEqual([f]);
+      expect(await factRow(f.id), 'the fact is immutable').toEqual(stored);
+      expect(await one(`SELECT source, "webhookEventId", "factId" FROM payment_late_success WHERE "paymentId" = $1`, [p.id]))
+        .toEqual({ source: 'webhook', webhookEventId: firstHook.id, factId: f.id });
+      expect(await effects(p.id)).toEqual({ lateSuccesses: 1, events: 1, audits: 1, mismatchAudits: 1, succeeded: 0 });
+      expect(await webhookState(second.eventId), 'the second notification is stored as received').toBeDefined();
+      expect(await items('late_success')).toEqual(expect.arrayContaining([expect.objectContaining({ paymentId: p.id, factId: f.id })]));
+      expect((await items('late_success')).filter((i) => i.factId === f.id)).toHaveLength(1);
+      expect(await status(p.id)).toBe('cancelled');
+    });
+
+    it('an EQUAL capture observed twice on a failed payment (the unchanged correct-amount late success): one record matching the payment, one event, one audit', async () => {
+      const { p, a } = await openAfterFailure();
+      const b = await start(p.id, 'failure');
+      expect(await status(p.id)).toBe('failed');
+      await capture(b.id, 9000).send();
+      await capture(b.id, 9000).send();
+      expect(await effects(p.id)).toEqual({ lateSuccesses: 1, events: 1, audits: 1, mismatchAudits: 0, succeeded: 0 });
+      expect((await audits('audit.payment_late_success.recorded', p.id))[0].changes).toMatchObject({ matches_payment: true, observed_amount: 9000 });
+      expect(a.id).not.toBe(b.id);
+    });
+
+    it('concurrent distinct notifications of one capture cannot bypass the database: exactly one late success, one event, one audit', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const notes = Array.from({ length: 6 }, () => capture(a.id, 9100));
+      const res = await Promise.all(notes.map((n) => n.send()));
+      expect(res.every((r) => r.status < 500), JSON.stringify(res.map((r) => r.status))).toBe(true);
+      expect(await facts(p.id)).toHaveLength(1);
+      expect(await effects(p.id)).toEqual({ lateSuccesses: 1, events: 1, audits: 1, mismatchAudits: 1, succeeded: 0 });
+      expect(await count(`SELECT count(*)::int AS n FROM webhook_event WHERE "providerEventId" = ANY($1)`, [notes.map((n) => n.eventId)])).toBe(6);
+    });
+
+    it('the observation path racing the CaptureReconciler: a lost first processing, then a second notification and reconciler passes at once: one late success', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const svc = t.app.get(AttemptService);
+      const spy = vi.spyOn(svc as unknown as { recordLateSuccess: () => Promise<void> }, 'recordLateSuccess').mockRejectedValueOnce(new Error('simulated crash after the fact committed'));
+      expect((await capture(a.id, 9100).send()).status).toBe(500);
+      spy.mockRestore();
+      const [f] = await facts(p.id);
+      const stored = await factRow(f.id);
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      const [, ...passes] = await Promise.all([capture(a.id, 9100).send(), reconcile(), reconcile()]);
+      await reconcile();
+      expect(await effects(p.id)).toEqual({ lateSuccesses: 1, events: 1, audits: 1, mismatchAudits: 1, succeeded: 0 });
+      expect(passes.reduce((n, r) => n + r.recorded, 0)).toBeLessThanOrEqual(1);
+      expect(await factRow(f.id)).toEqual(stored);
+    });
+
+    it('the reconciler and an observation\'s open insert of the fact\'s late success never interleave: the pass skips the locked payment, then finds the late success: nothing recorded, no failure', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const svc = t.app.get(AttemptService);
+      const spy = vi.spyOn(svc as unknown as { recordLateSuccess: () => Promise<void> }, 'recordLateSuccess').mockRejectedValueOnce(new Error('simulated crash after the fact committed'));
+      expect((await capture(a.id, 9100).send()).status).toBe(500);
+      spy.mockRestore();
+      const [f] = await facts(p.id);
+      // LABELLED: the observation path's own insert for a second notification, held open in a test transaction (the row only: what that path writes first)
+      const held = await admin.connect();
+      let open = false;
+      try {
+        await held.query('BEGIN');
+        open = true;
+        const hook = (await held.query(`INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', $1, 'payment.succeeded', '\\x7b7d') RETURNING id`,
+          [`evt_${crypto.randomUUID()}`])).rows[0].id;
+        await held.query(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId")
+          VALUES ($1, $2, 'webhook', $3, 9100, 'TND', 'cancelled', $4)`, [p.id, a.id, hook, f.id]);
+        // the open insert holds its payment row (foreign key): the pass skips that payment (SKIP LOCKED), it never writes beside it
+        expect(await reconcile()).toEqual({ recorded: 0 });
+        await held.query('COMMIT');
+        open = false;
+      } finally {
+        if (open) await held.query('ROLLBACK');
+        held.release();
+      }
+      expect(await reconcile(), 'after the commit the fact has its late success').toEqual({ recorded: 0 });
+      expect(await lateSuccesses(p.id)).toHaveLength(1);
+      expect((await outboxOf('payment.late_success.recorded', 'paymentId', p.id)).length, 'the reconciler wrote no event').toBe(0);
+      expect((await audits('audit.payment_late_success.recorded', p.id)).length, 'the reconciler wrote no audit').toBe(0);
+    });
+
+    it('the finality writer racing a second observation: a mismatched capture on an open payment, then the cancel and another notification of it at once: one late success', async () => {
+      const { p, a } = await openAfterFailure();
+      await capture(a.id, 9100).send();
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      await Promise.all([cancel(p.id), capture(a.id, 9100).send()]);
+      expect(await status(p.id)).toBe('cancelled');
+      expect(await effects(p.id)).toEqual({ lateSuccesses: 1, events: 1, audits: 1, mismatchAudits: 1, succeeded: 0 });
+    });
+
+    it('the database refuses a second late success of a fact under another observation key (payment_late_success_one_per_fact)', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const second = capture(a.id, 9100);
+      await capture(a.id, 9100).send();
+      await second.send();
+      const [f] = await facts(p.id);
+      const hook = await one(`SELECT id FROM webhook_event WHERE "providerEventId" = $1`, [second.eventId]);
+      await expect(admin.query(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId")
+        VALUES ($1, $2, 'webhook', $3, 9100, 'TND', 'cancelled', $4)`, [p.id, a.id, hook.id, f.id])).rejects.toMatchObject({ code: '23505', constraint: 'payment_late_success_one_per_fact' });
+      expect(await lateSuccesses(p.id)).toHaveLength(1);
     });
   });
 
