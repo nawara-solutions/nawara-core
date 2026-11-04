@@ -55,6 +55,7 @@ const ORG_R = randomUUID(); // G4: the refusals (a deadline obligation restricts
 const ORG_O = randomUUID(); // G6: the outage and its recovery
 const ORG_F = randomUUID(); // G4 (8): the refund of an L-4 purchase opens a real obligation, and its T2 restricts only this Organization
 const ORG_K = randomUUID(); // S0-C11 C-4: capture contradictions before and after L-4
+const ORG_W = randomUUID(); // S0-C12: wrong-amount captures (F-01, F-20) and recovery classification (L3)
 const OWNER = randomUUID(); // the Owner of the seller Company (L-4), with a real TOTP factor at the real Auth
 const OWNER_EMAIL = `owner-${randomUUID().slice(0, 8)}@s-int.e2e.test`;
 const PASSWORD = 's-int assisted certification password';
@@ -128,7 +129,12 @@ describeWithEnv(
     const adminK = actor(ORG_K, true);
     const benBefore = actor(ORG_K, false);
     const benAfter = actor(ORG_K, false);
-    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter];
+    const adminW = actor(ORG_W, true);
+    const benF01 = actor(ORG_W, false);
+    const benF20 = actor(ORG_W, false);
+    const benWL3 = actor(ORG_W, false);
+    const benDup = actor(ORG_W, false);
+    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter, adminW, benF01, benF20, benWL3, benDup];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -187,7 +193,7 @@ describeWithEnv(
       const hash = await bcrypt.hash(PASSWORD, 4);
       await authAdmin.query(`INSERT INTO company(id, name) VALUES ($1, 'S-INT')`, [COMPANY]);
       await authAdmin.query(`INSERT INTO platform(id, "companyId", name) VALUES ($1, $2, 'S-INT platform')`, [TEST_PLATFORM, COMPANY]);
-      for (const org of [ORG_S, ORG_X, ORG_R, ORG_O, ORG_F, ORG_K]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
+      for (const org of [ORG_S, ORG_X, ORG_R, ORG_O, ORG_F, ORG_K, ORG_W]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
       const oc = await authAdmin.connect();
       try {
         await oc.query('BEGIN');
@@ -883,6 +889,285 @@ describeWithEnv(
         [ORG_K])).rows as Array<{ paymentId: string; captureFactId: string }>;
       expect(cases.map((x) => x.paymentId)).toContain(s.paymentId);
       for (const x of cases) expect((await factOf(x.captureFactId)).paymentId, 'a case names its own payment\'s fact').toBe(x.paymentId);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    // ─────────────── S0-C12 (S0 §1.5 S0-C12; register PAY-02 H, PAY-05 J, PAY-12 I, BIL-23 I, BIL-28 G, BIL-33 J): real-event wrong-amount captures
+    /**
+     * Every capture below is the simulated provider's SIGNED notification through Payment's webhook pipeline; Billing learns of it only through
+     * Payment's broker-verified EVT-10 (or Payment's own PAY-12 read). The one labelled step (Billing stopped while the provider's capture and its
+     * contradiction arrive) is the existing delivery control of this suite, used only to order a contradiction before Billing classifies.
+     */
+    /** One signed capture of `attemptId` under a provider transaction (new unless given); its fact and the late successes naming it. */
+    async function wrongCapture(paymentId: string, attemptId: string, amount: number, currency = 'TND', txn = `sim_w_${randomUUID()}`, eventId = `sint_${randomUUID()}`) {
+      expect(await signed({ eventId, type: 'payment.succeeded', reference: attemptId, providerTransactionId: txn, amount, currency })).toBeLessThan(500);
+      const fact = (await paymentAdmin.query(`SELECT id, amount::int AS amount, trim(currency) AS currency FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'capture'`, [txn])).rows[0];
+      expect(fact, `Payment records the fact as observed\n${tails()}`).toMatchObject({ amount, currency });
+      return { factId: fact.id as string, txn, eventId, paymentId };
+    }
+    const paymentLateOf = async (factId: string) => (await paymentAdmin.query(
+      `SELECT id, amount::int AS amount, trim(currency) AS currency, "paymentStatus" FROM payment_late_success WHERE "factId" = $1 ORDER BY "recordedAt"`, [factId])).rows;
+    /** Billing's own record of Payment's late success of a fact (one per fact, BIL-33), once the verified consumer or the PAY-12 read recorded it. */
+    async function billingLateOf(factId: string) {
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM payment_late_success WHERE "factId" = $1`, [factId])).rowCount === 1,
+        45_000, `Billing to record Payment's late success over the broker\n${tails()}`);
+      return (await billingAdmin.query(`SELECT "lateSuccessId", amount::int AS amount, trim(currency) AS currency FROM payment_late_success WHERE "factId" = $1`, [factId])).rows[0] as
+        { lateSuccessId: string; amount: number; currency: string };
+    }
+    /** The Owner's own reads, with the Owner's bearer verified live by the real Auth: Payment's PAY-12 items, Billing's reconciliation cases. */
+    async function ownerPaymentItems(kind: string) {
+      const r = await call(PAYMENT_URL, 'GET', ownerToken, `/payment/admin/reconciliation-items?kind=${kind}&limit=200`);
+      expect(r.status, JSON.stringify(r.json)).toBe(200);
+      return r.json.items as Array<Record<string, any>>;
+    }
+    async function ownerCases(type: string) {
+      const r = await call(BILLING_URL, 'GET', ownerToken, `/billing/admin/reconciliation-cases?type=${type}&limit=200`);
+      expect(r.status, JSON.stringify(r.json)).toBe(200);
+      return r.json.items as Array<Record<string, any>>;
+    }
+    /** The capture-specific refund of exactly one capture, for exactly its own figures: the Owner's case, Auth's real receipt, Payment's attempt, the provider's refund. */
+    async function refundExactly(paymentId: string, captureFactId: string, amount: number, currency: string, reason: string) {
+      const opened = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId, captureFactId, reason });
+      expect(opened.status, `${JSON.stringify(opened.json)}\n${tails()}`).toBe(201);
+      expect(opened.json).toMatchObject({ amount, currency, capture: { captureFactId, basis: 'late_capture' } });
+      const caseId = opened.json.id as string;
+      await nextTotpStep();
+      const su = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/step-up', { purpose: 'refund.authorize', method: 'totp', code: totp(totpSecret) }, null);
+      expect(su.status, JSON.stringify(su.json)).toBe(200);
+      const r = await call(AUTH_URL, 'POST', ownerToken, '/auth/admin/authorization-receipts', { stepUpToken: su.json.stepUpToken, binding: { operation: 'refund', audience: 'payment-service',
+        companyId: COMPANY, refundCaseId: caseId, paymentId, amount, currency, reason, legalOverride: false, captureFactId } });
+      expect(r.status, JSON.stringify(r.json)).toBe(201);
+      const relayed = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/refund-cases/${caseId}/authorizations`, { receiptSecret: r.json.secret });
+      expect(relayed.status, `${JSON.stringify(relayed.json)}\n${tails()}`).toBe(201);
+      const attemptId = relayed.json.attempts[0].refundAttemptId as string;
+      expect((await paymentAdmin.query(`SELECT amount::int AS amount, trim(currency) AS currency, "captureFactId" FROM refund_attempt WHERE id = $1`, [attemptId])).rows[0])
+        .toEqual({ amount, currency, captureFactId });
+      await waitFor(async () => (await paymentAdmin.query(`SELECT status FROM refund_attempt WHERE id = $1`, [attemptId])).rows[0].status === 'submitted', 30_000, `the refund worker to dispatch\n${tails()}`);
+      const out = await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/refunds/${attemptId}/outcomes`, { commandId: `sint-${randomUUID()}`, outcome: 'succeeded' });
+      expect(out.json?.delivered, JSON.stringify(out.json)).toEqual({ status: 200 });
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM refund_case_effect WHERE "refundCaseId" = $1`, [caseId])).rowCount === 1,
+        45_000, `Billing to complete the case and apply its effect\n${tails()}`);
+      expect(await receiptStatus(r.json.receiptId)).toBe('consumed');
+      return { caseId, attemptId, commandId: out.json.commandId as string };
+    }
+    const financial = async (s: { requestId: string; invoiceId: string; paymentRequestId: string; paymentId: string }, beneficiary: Actor) => ({
+      purchases: await purchasesOf(s.requestId),
+      invoice: await invoiceStatus(s.invoiceId),
+      paymentRequest: (await billingAdmin.query(`SELECT status FROM payment_request WHERE id = $1`, [s.paymentRequestId])).rows[0].status,
+      lateSettlements: await lateSettlementsOf(s.requestId),
+      recoveryPayments: await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "paymentRequestId" = $1`, [s.paymentRequestId]),
+      entitlement: await b6(beneficiary.id),
+      payment: await paymentStatus(s.paymentId),
+      succeededEvents: await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.succeeded' AND payload->>'paymentId' = $1`, [s.paymentId]),
+    });
+
+    it('S0-C12 F-01 (A1): a wrong-amount capture after finality is an immutable fact and ONE refund-only late success the Owner sees; nothing settles, sells or recovers; its capture-specific refund returns exactly 5300+100 TND once; replays add nothing', async () => {
+      const s = await failedAtPayment(benF01, adminW);
+      const before = await financial(s, benF01);
+      expect(before).toMatchObject({ purchases: 0, paymentRequest: 'failed', lateSettlements: 0, recoveryPayments: 0, payment: 'failed', succeededEvents: 0 });
+      const w = await wrongCapture(s.paymentId, s.attempts[0]!, BASE + 100);
+      const original = (await paymentAdmin.query(`SELECT * FROM provider_transaction_fact WHERE id = $1`, [w.factId])).rows[0];
+      expect(await paymentLateOf(w.factId)).toEqual([{ id: expect.any(String), amount: BASE + 100, currency: 'TND', paymentStatus: 'failed' }]);
+      const b = await billingLateOf(w.factId);
+      expect(b).toMatchObject({ amount: BASE + 100, currency: 'TND' });
+      // refund-only at Billing: a late_success case (never an L-4 input: the amount is not the invoice's), visible to the Owner on both services
+      await waitFor(async () => (await caseOf(s.paymentId, 'late_success')).length === 1, 30_000, `the refund-only case\n${tails()}`);
+      expect(await ownerCases('late_success')).toContainEqual(expect.objectContaining({ paymentId: s.paymentId, captureFactId: w.factId, amount: BASE + 100, currency: 'TND', status: 'open' }));
+      expect(await ownerPaymentItems('late_success')).toContainEqual(expect.objectContaining({ paymentId: s.paymentId, factId: w.factId, amount: BASE + 100, currency: 'TND' }));
+      expect(await financial(s, benF01), 'nothing settles, sells, recovers or entitles').toEqual(before);
+      // the audit trail at Payment: one late-success record (not matching the payment) and one mismatch record
+      expect((await paymentAdmin.query(`SELECT payload->'changes' AS c FROM outbox WHERE name = 'audit.payment_late_success.recorded' AND payload->'changes'->>'fact_id' = $1`, [w.factId])).rows)
+        .toEqual([{ c: expect.objectContaining({ observed_amount: BASE + 100, matches_payment: false, payment_status: 'failed' }) }]);
+      expect((await paymentAdmin.query(`SELECT payload->'changes'->>'reason' AS r FROM outbox WHERE name = 'audit.payment_capture_mismatch.recorded' AND payload->'resource'->>'id' = $1`, [w.factId])).rows)
+        .toEqual([{ r: 'amount_mismatch' }]);
+      // the refund: exactly that capture, for exactly its own figures, under the Owner's real receipt
+      const { caseId, commandId } = await refundExactly(s.paymentId, w.factId, BASE + 100, 'TND', 'customer_request');
+      await reconciliationPass();
+      expect((await ownerCases('late_success')).find((c) => c.captureFactId === w.factId)).toMatchObject({ status: 'resolved', resolution: expect.objectContaining({ kind: 'refund_completed', refundCaseId: caseId }) });
+      // replays: the provider's capture notification and its refund notification again, and another reconciliation pass: nothing new anywhere
+      expect(await signed({ eventId: w.eventId, type: 'payment.succeeded', reference: s.attempts[0], providerTransactionId: w.txn, amount: BASE + 100, currency: 'TND' })).toBeLessThan(500);
+      expect((await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/refund-commands/${commandId}/deliver`, {})).status).toBe(200);
+      await reconciliationPass();
+      expect(await paymentLateOf(w.factId)).toHaveLength(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [w.factId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case WHERE "captureFactId" = $1`, [w.factId])).toBe(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM refund_attempt WHERE "captureFactId" = $1`, [w.factId])).toBe(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund'`, [s.paymentId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case_completion WHERE "refundCaseId" = $1`, [caseId])).toBe(1);
+      expect((await paymentAdmin.query(`SELECT * FROM provider_transaction_fact WHERE id = $1`, [w.factId])).rows[0], 'the fact is immutable').toEqual(original);
+      expect(await financial(s, benF01)).toEqual(before);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    it('S0-C12 F-20 (N1): a wrong-amount capture before finality is a capture_mismatch item the Owner sees, settles and finalizes nothing; the payment\'s real failure then records ONE late success of that fact, with its figures, in that transition; retries add nothing', async () => {
+      const s = await settlementAtPayment(benF20, adminW);
+      // the first attempt really fails at the provider (1 of 3: the payment stays open), then the provider reports a capture of it for another amount
+      const a1 = await attemptOf(s.paymentId, adminW);
+      await outcome(s.paymentId, a1.id, { outcome: 'failed', failureCode: 'declined' });
+      const open = await paymentStatus(s.paymentId);
+      expect(['created', 'pending']).toContain(open); // not final: 1 of 3 attempts failed
+      const w = await wrongCapture(s.paymentId, a1.id, BASE + 100);
+      expect(await paymentStatus(s.paymentId), 'the capture neither settles nor finalizes').toBe(open);
+      expect(await paymentLateOf(w.factId)).toEqual([]);
+      expect(await ownerPaymentItems('capture_mismatch')).toContainEqual(expect.objectContaining({ id: w.factId, paymentId: s.paymentId, factId: w.factId, amount: BASE + 100, currency: 'TND',
+        detail: expect.objectContaining({ reason: 'amount_mismatch', attemptId: a1.id }) }));
+      await reconciliationPass();
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [w.factId])).toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM reconciliation_case WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
+      expect((await billingAdmin.query(`SELECT status FROM payment_request WHERE id = $1`, [s.paymentRequestId])).rows[0].status).toBe('requested');
+      // the payment's own, existing finality: the provider fails every attempt (S4c; no N3, no new rule)
+      for (let i = 0; i < 2; i++) await outcome(s.paymentId, (await attemptOf(s.paymentId, adminW)).id, { outcome: 'failed', failureCode: 'declined' });
+      expect(await paymentStatus(s.paymentId)).toBe('failed');
+      const [ls] = await paymentLateOf(w.factId);
+      expect(ls).toMatchObject({ amount: BASE + 100, currency: 'TND', paymentStatus: 'failed' });
+      expect((await paymentAdmin.query(`SELECT (SELECT xmin FROM payment_late_success WHERE id = $1)::text = (SELECT xmin FROM payment WHERE id = $2)::text AS same`, [ls.id, s.paymentId])).rows[0])
+        .toEqual({ same: true }); // the failure transition's own transaction recorded it
+      const b = await billingLateOf(w.factId);
+      expect(b).toMatchObject({ lateSuccessId: ls.id, amount: BASE + 100 });
+      await waitFor(async () => (await caseOf(s.paymentId, 'late_success')).length === 1, 30_000, `the refund-only case\n${tails()}`);
+      expect(await ownerPaymentItems('capture_mismatch')).not.toContainEqual(expect.objectContaining({ id: w.factId }));
+      // retries: the provider's notification again, and passes: one record, one event
+      expect(await signed({ eventId: w.eventId, type: 'payment.succeeded', reference: a1.id, providerTransactionId: w.txn, amount: BASE + 100, currency: 'TND' })).toBeLessThan(500);
+      await reconciliationPass();
+      expect(await paymentLateOf(w.factId)).toHaveLength(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.late_success.recorded' AND payload->>'factId' = $1`, [w.factId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [w.factId])).toBe(1);
+      expect(await purchasesOf(s.requestId)).toBe(0);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    it('S0-C12 L3 (D-1, D-B): on a real recovery obligation, a wrong amount, a wrong currency and a contested capture never count; an equal, uncontested capture counts once (T3 clears once); the wrong-amount capture is refunded exactly without touching principal, T3, surplus or entitlement', async () => {
+      // a real recovery obligation: the beneficiary's assisted purchase, then the provider's final chargeback (as G3)
+      const p = await settlementAtPayment(benWL3, adminW);
+      const pa = await attemptOf(p.paymentId, adminW);
+      await outcome(p.paymentId, pa.id, { outcome: 'succeeded' });
+      await waitFor(async () => (await purchasesOf(p.requestId)) === 1, 30_000, `the assisted purchase\n${tails()}`);
+      const entitled = await b6(benWL3.id);
+      const lossRef = `sint-w-${randomUUID()}`;
+      await dispute(p.paymentId, pa.id, lossRef, { event: 'lost' });
+      const lost = (await paymentDispute(lossRef))!;
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM recovery_obligation WHERE "disputeId" = $1`, [lost.id])).rowCount === 1, 45_000, `the recovery obligation\n${tails()}`);
+      const obligationId = (await billingAdmin.query(`SELECT id FROM recovery_obligation WHERE "disputeId" = $1`, [lost.id])).rows[0].id as string;
+      expect(await restrictions(ORG_W)).toEqual(['T3']);
+      // the Organization's recovery channel really fails at the provider (its attempt limit)
+      const c = await call(BILLING_URL, 'POST', adminW.token, `/billing/recovery-obligations/${obligationId}/settlement`);
+      expect(c.status, JSON.stringify(c.json)).toBe(201);
+      const paymentA = await requestedAt(c.json.paymentRequestId as string);
+      const attemptsA: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const x = await attemptOf(paymentA, adminW);
+        await outcome(paymentA, x.id, { outcome: 'failed', failureCode: 'declined' });
+        attemptsA.push(x.id);
+      }
+      await waitFor(async () => (await billingAdmin.query(`SELECT status FROM payment_request WHERE id = $1`, [c.json.paymentRequestId])).rows[0].status === 'failed', 30_000, `the channel's failure\n${tails()}`);
+      const open = { baseAmount: BASE, recovered: 0, outstanding: BASE, status: 'open' };
+      const read = async () => (await call(BILLING_URL, 'GET', adminW.token, `/billing/recovery-obligations/${obligationId}`)).json;
+      const counted = () => count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "obligationId" = $1`, [obligationId]);
+      const surpluses = () => count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_surplus WHERE "obligationId" = $1`, [obligationId]);
+      const recoveredAudits = () => count(billingAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.recovery_obligation.recovered' AND payload->'resource'->>'id' = $1`, [obligationId]);
+      const notCounted = async (factId: string, label: string) => {
+        const l = await billingLateOf(factId);
+        await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'late_success' AND "evidenceKey" = $1`, [l.lateSuccessId])).rowCount === 1,
+          45_000, `${label}: its refund-only case\n${tails()}`);
+        expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "lateSuccessId" = $1`, [l.lateSuccessId]), label).toBe(0);
+        expect(await read(), label).toMatchObject(open);
+        expect(await restrictions(ORG_W), label).toEqual(['T3']);
+        expect(await surpluses(), label).toBe(0);
+      };
+      // (1) a wrong amount, (2) a wrong (valid) currency: never principal
+      const wrongAmount = await wrongCapture(paymentA, attemptsA[0]!, BASE + 100);
+      await notCounted(wrongAmount.factId, 'wrong amount');
+      const wrongCurrency = await wrongCapture(paymentA, attemptsA[1]!, BASE, 'EUR');
+      expect(await paymentLateOf(wrongCurrency.factId)).toEqual([expect.objectContaining({ amount: BASE, currency: 'EUR' })]);
+      await notCounted(wrongCurrency.factId, 'wrong currency');
+      // (3) LABELLED delivery control: Billing stopped while the provider reports an EQUAL capture and then contradicts it; Billing classifies after
+      await stopBilling();
+      let contested: { factId: string; txn: string };
+      try {
+        contested = await wrongCapture(paymentA, attemptsA[2]!, BASE);
+        expect(await paymentLateOf(contested.factId)).toHaveLength(1); // Payment recorded it uncontested
+        expect(await signed({ eventId: `sint_${randomUUID()}`, type: 'payment.succeeded', reference: attemptsA[2], providerTransactionId: contested.txn, amount: BASE + 7, currency: 'TND' }))
+          .toBeLessThan(500);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [contested.factId])).toBe(1);
+      } finally {
+        await startBilling();
+      }
+      await notCounted(contested.factId, 'contested');
+      expect(await recoveredAudits()).toBe(0);
+      // (4) an equal, uncontested capture (a distinct provider transaction): counts once; T3 clears once
+      const equal = await wrongCapture(paymentA, attemptsA[0]!, BASE);
+      const le = await billingLateOf(equal.factId);
+      await waitFor(async () => (await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "lateSuccessId" = $1`, [le.lateSuccessId])) === 1, 45_000, `the recovery\n${tails()}`);
+      const recovered = { baseAmount: BASE, recovered: BASE, outstanding: 0, status: 'recovered' };
+      expect(await read()).toMatchObject(recovered);
+      expect(await restrictions(ORG_W)).toEqual([]);
+      expect(await recoveredAudits()).toBe(1);
+      expect(await counted()).toBe(1);
+      // (5) D-B: the excluded wrong-amount capture is refunded for exactly its own figures; the counted capture is never refundable that way
+      const refusedCounted = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId: paymentA, captureFactId: equal.factId, reason: 'customer_request' });
+      expect(refusedCounted.status, JSON.stringify(refusedCounted.json)).toBeGreaterThanOrEqual(400);
+      await refundExactly(paymentA, wrongAmount.factId, BASE + 100, 'TND', 'customer_request');
+      await reconciliationPass();
+      expect(await read(), 'principal unchanged').toMatchObject(recovered);
+      expect(await counted()).toBe(1);
+      expect(await surpluses(), 'no surplus').toBe(0);
+      expect(await restrictions(ORG_W), 'T3 unchanged').toEqual([]);
+      expect(await recoveredAudits()).toBe(1);
+      expect(await b6(benWL3.id), 'entitlement unchanged').toEqual(entitled);
+      expect(await paymentStatus(paymentA)).toBe('failed');
+      expect(await deadLettered()).toBe(0);
+    }, 420_000);
+
+    it('S0-C12 duplicate observations (correction 0025): DISTINCT signed notifications of one capture, sequential, concurrent and replayed: one fact, one Payment late success, one EVT-10, one audit record; one Billing record and case; one refund; the database refuses a second late success of the fact', async () => {
+      const s = await failedAtPayment(benDup, adminW);
+      const w = await wrongCapture(s.paymentId, s.attempts[0]!, BASE + 100);
+      const stored = (await paymentAdmin.query(`SELECT * FROM provider_transaction_fact WHERE id = $1`, [w.factId])).rows[0];
+      const firstHook = (await paymentAdmin.query(`SELECT id FROM webhook_event WHERE "providerEventId" = $1`, [w.eventId])).rows[0].id as string;
+      await billingLateOf(w.factId);
+      const note = (eventId: string) => signed({ eventId, type: 'payment.succeeded', reference: s.attempts[0], providerTransactionId: w.txn, amount: BASE + 100, currency: 'TND' });
+      // the provider reports the SAME capture under new notification ids: once more, then three at once; and the first notification is replayed
+      const later = [`sint_${randomUUID()}`, `sint_${randomUUID()}`, `sint_${randomUUID()}`, `sint_${randomUUID()}`];
+      expect(await note(later[0]!)).toBeLessThan(500);
+      expect((await Promise.all(later.slice(1).map(note))).every((c) => c < 500)).toBe(true);
+      expect(await note(w.eventId)).toBeLessThan(500);
+      await reconciliationPass();
+      const effects = async () => ({
+        notifications: await count(paymentAdmin, `SELECT count(*)::int AS n FROM webhook_event WHERE "providerEventId" = ANY($1)`, [[w.eventId, ...later]]),
+        facts: await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [w.txn]),
+        paymentLateSuccesses: (await paymentLateOf(w.factId)).length,
+        events: await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.late_success.recorded' AND payload->>'factId' = $1`, [w.factId]),
+        lateSuccessAudits: await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.payment_late_success.recorded' AND payload->'changes'->>'fact_id' = $1`, [w.factId]),
+        mismatchAudits: await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.payment_capture_mismatch.recorded' AND payload->'resource'->>'id' = $1`, [w.factId]),
+        ownerItems: (await ownerPaymentItems('late_success')).filter((x) => x.factId === w.factId).length,
+        billingRecords: await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [w.factId]),
+        billingCases: await count(billingAdmin, `SELECT count(*)::int AS n FROM reconciliation_case WHERE "captureFactId" = $1`, [w.factId]),
+      });
+      const one = { notifications: 5, facts: 1, paymentLateSuccesses: 1, events: 1, lateSuccessAudits: 1, mismatchAudits: 1, ownerItems: 1, billingRecords: 1, billingCases: 1 };
+      expect(await effects()).toEqual(one); // every notification is stored as received; the fact's effects exist once
+      expect(await paymentLateOf(w.factId)).toEqual([expect.objectContaining({ amount: BASE + 100, currency: 'TND', paymentStatus: 'failed' })]);
+      expect((await paymentAdmin.query(`SELECT "webhookEventId" FROM payment_late_success WHERE "factId" = $1`, [w.factId])).rows, 'the first observation\'s provenance')
+        .toEqual([{ webhookEventId: firstHook }]);
+      expect((await paymentAdmin.query(`SELECT * FROM provider_transaction_fact WHERE id = $1`, [w.factId])).rows[0], 'the fact is immutable').toEqual(stored);
+      // DATABASE INVARIANT (not service behaviour): a direct second late success of the fact, under another stored notification, is refused
+      const otherHook = (await paymentAdmin.query(`SELECT id FROM webhook_event WHERE "providerEventId" = $1`, [later[0]])).rows[0].id as string;
+      await expect(paymentAdmin.query(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId")
+        VALUES ($1, $2, 'webhook', $3, $4, 'TND', 'failed', $5)`, [s.paymentId, s.attempts[0], otherHook, BASE + 100, w.factId]))
+        .rejects.toMatchObject({ code: '23505', constraint: 'payment_late_success_one_per_fact' });
+      // refunds: one case (a second open refused, while the first is active and after it completed), one authorization, one attempt, one provider refund
+      const { caseId, commandId } = await refundExactly(s.paymentId, w.factId, BASE + 100, 'TND', 'customer_request');
+      const again = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId: s.paymentId, captureFactId: w.factId, reason: 'customer_request' });
+      expect(again.status, JSON.stringify(again.json)).toBeGreaterThanOrEqual(400);
+      expect((await call(PAYMENT_URL, 'POST', harnessToken.token, `/payment/simulation/refund-commands/${commandId}/deliver`, {})).status).toBe(200); // the provider's refund notification replayed
+      expect(await note(`sint_${randomUUID()}`)).toBeLessThan(500); // and the capture once more, after its refund
+      await reconciliationPass();
+      expect(await effects(), 'after the refund, its replay and another notification of the capture').toEqual(one);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case WHERE "captureFactId" = $1`, [w.factId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case_completion WHERE "refundCaseId" = $1`, [caseId])).toBe(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM refund_authorization WHERE "refundCaseId" = $1`, [caseId])).toBe(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM refund_attempt WHERE "captureFactId" = $1`, [w.factId])).toBe(1);
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'refund'`, [s.paymentId])).toBe(1);
+      expect(await invoiceStatus(s.invoiceId)).not.toBe('paid');
+      expect(await purchasesOf(s.requestId)).toBe(0);
       expect(await deadLettered()).toBe(0);
     }, 300_000);
 
