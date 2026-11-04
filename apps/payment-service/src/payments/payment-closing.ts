@@ -2,6 +2,7 @@ import type { OutboxService, Queryable } from '@nawara/service-kit';
 import type { PaymentAudit } from '../audit/payment-audit.js';
 import { paymentEvent, type EventContext } from '../events/payment-events.js';
 import type { PaymentRow } from './payment.types.js';
+import { recordQualifyingLateSuccesses } from './late-success-at-finality.js';
 
 /**
  * Core V2 S4c (F-2): whether an attempt may still produce a verified financial result for the payment — an `initiated`, `submitted` or
@@ -38,5 +39,7 @@ export async function completeClosingIfResolved(
     await deps.outbox.enqueue(q, paymentEvent('payment.expired', closed, ctx, { expiresAt: closed.expiresAt?.toISOString() }));
     await deps.audit.record(q, 'payment.expired', closed, ctx);
   }
+  // Core V2 S0-C12 item 6: the late success of every qualifying capture fact, in this same transaction (the payment is locked)
+  await recordQualifyingLateSuccesses(q, deps, closed, ctx);
   return closed;
 }

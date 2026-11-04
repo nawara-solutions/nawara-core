@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AttemptResolver, AttemptResolverService } from './attempts/attempt-resolver.js';
 import { ExpirySweeper, ExpirySweeperService } from './payments/expiry-sweeper.js';
+import { CaptureReconciler, CaptureReconcilerService } from './payments/capture-reconciler.js';
 import { WebhookRetrierService, WebhookRetriever } from './webhooks/webhook-retrier.js';
 
 /**
@@ -18,6 +19,8 @@ const workers = [
   { name: 'ExpirySweeper', make: () => { const w = new ExpirySweeper({} as never, {} as never, {} as never); return { w, pass: 'sweepOnce', svc: new ExpirySweeperService(w) }; } },
   { name: 'AttemptResolver', make: () => { const w = new AttemptResolver({} as never, {} as never, {} as never); return { w, pass: 'drainOnce', svc: new AttemptResolverService(w) }; } },
   { name: 'WebhookRetriever', make: () => { const w = new WebhookRetriever({} as never, {} as never, {} as never); return { w, pass: 'drainOnce', svc: new WebhookRetrierService(w) }; } },
+  // Core V2 S0-C12 item 7
+  { name: 'CaptureReconciler', make: () => { const w = new CaptureReconciler({} as never, {} as never, {} as never); return { w, pass: 'reconcileOnce', svc: new CaptureReconcilerService(w) }; } },
 ];
 
 describe.each(workers)('$name shutdown', ({ make }) => {

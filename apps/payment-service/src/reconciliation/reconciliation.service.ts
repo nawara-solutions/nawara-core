@@ -24,7 +24,7 @@ export const AUTHORIZATION_PENDING_ITEM_AFTER_MINUTES = 15;
  */
 export const ITEM_KINDS = [
   'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
-  'association', 'capture_refund_unavailable',
+  'association', 'capture_refund_unavailable', 'capture_mismatch',
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS;
@@ -102,6 +102,18 @@ const ITEM_SQL: Record<ItemKind, string> = {
     JOIN payment p ON p.id = coalesce(f."paymentId", s."paymentId")
    WHERE f.kind = 'capture' AND (f."paymentId" IS NULL OR p.status <> 'succeeded' OR f."attemptId" IS DISTINCT FROM p."succeededAttemptId"
       OR (SELECT count(*) FROM provider_transaction_fact g WHERE g."paymentId" = p.id AND g."attemptId" = p."succeededAttemptId" AND g.kind = 'capture') > 1)`,
+  // Core V2 S0-C12 items 5 and 8 (register PAY-12 I): a capture fact whose amount or currency differs from its payment and that is no late success:
+  // while the payment is not final (N1; F-20), and, with an unrecognized currency, whatever its state (O-1). Read-only: it settles, finalizes,
+  // reopens, refunds and grants nothing, and no Billing case reads it.
+  capture_mismatch: `SELECT f.id, f."paymentId", f.id AS "factId", f.amount, f.currency, f."observedAt" AS at,
+      jsonb_build_object('attemptId', f."attemptId", 'source', f.source, 'reason', CASE
+        WHEN trim(f.currency) !~ '^[A-Z]{3}$' THEN 'unrecognized_currency'
+        WHEN trim(f.currency) <> trim(p.currency) THEN 'currency_mismatch'
+        ELSE 'amount_mismatch' END) AS detail
+    FROM provider_transaction_fact f JOIN payment p ON p.id = f."paymentId"
+   WHERE f.kind = 'capture' AND (f.amount <> p.amount OR trim(f.currency) <> trim(p.currency))
+     AND NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id)
+     AND (p.status NOT IN ('succeeded', 'failed', 'cancelled', 'expired') OR trim(f.currency) !~ '^[A-Z]{3}$')`,
 };
 
 /**
