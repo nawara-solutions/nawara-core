@@ -3485,10 +3485,11 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
   test('S1d-1 Payment: its five ordinary events and five audit actions (+ the refund actions of S6b and S6c, and refund.case_completed); not the re-emission allow-list; no unregistered action', () => {
     const p = gen().identities['payment-service'];
     assert.deepEqual(p.write.keys, ['audit.payment.cancelled', 'audit.payment.created', 'audit.payment.expired', 'audit.payment.failed', 'audit.payment.succeeded',
+      'audit.payment_capture_mismatch.recorded', // Core V2 S0-C12 item 10
       'audit.payment_dispute.closed', 'audit.payment_dispute.decided', 'audit.payment_dispute.evidence_added', 'audit.payment_dispute.opened', // Core V2 S6e-D (R6E-8)
+      'audit.payment_late_success.recorded', // Core V2 S0-C12 item 10
       'audit.provider_fact.associated', // Core V2 S6h-P (R6H-3)
       'audit.provider_fact_conflict.recorded', // Core V2 S0-C11 item 8
-      'audit.payment_late_success.recorded', 'audit.payment_capture_mismatch.recorded', // Core V2 S0-C12 item 10
       'audit.refund_attempt.authorized', 'audit.refund_attempt.failed', 'audit.refund_attempt.succeeded', // Core V2 S6b (R6B-7)
       'audit.refund_authorization.completed', // Core V2 S6c (R6C-11)
       'payment.cancelled', 'payment.created', 'payment.dispute.lost', 'payment.dispute.opened', 'payment.expired', 'payment.failed', // + S6e-D (R6E-6)
