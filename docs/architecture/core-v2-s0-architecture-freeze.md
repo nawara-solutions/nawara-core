@@ -287,7 +287,7 @@ status change still needs its own explicit owner authorization.
   3. *Several references.* Distinct provider references on one attempt are distinct facts. None is merged, netted, preferred or discarded, and none
      settles automatically. Payment may report that facts share an attempt, amount and currency as *potentially equivalent*: a derived observation, never
      stored as a determination and with no financial effect. Only a separately approved contract may determine equivalence. A further capture of an
-     already `succeeded` payment stays on its existing path (R6H-5).
+     already `succeeded` payment stays on its existing path (R6H-5), and a new refund authorization on that path is subject to S0-C12 item 14(d).
   4. *Missing evidence.* An observation that can't be keyed to a fact creates no settlement, late success or L-4 eligibility. A stored notification,
      where one exists, is kept and stays visible.
   5. *Contradiction.* An observation contradicting a recorded fact is kept once and changes nothing: it never overwrites the fact, settles, grants or
@@ -297,6 +297,7 @@ status change still needs its own explicit owner authorization.
   7. *L-4.* A late assisted settlement is applied only when, at the last read before the receipt is consumed, Payment states that its capture fact exists,
      is uncontested and equals the late success and the channel invoice's total. Contested, missing or mismatched: `409`. Payment unavailable or an
      invalid answer: `503`. Neither spends the receipt or writes anything.
+     - *Several captures (S0-C12 item 14).* A capture of an attempt holding more than one capture fact at that read: `409 capture_unverified`, as under 7c.
      - *Not a lock.* This read is a point-in-time check and **not a cross-service lock**: no guarantee extends between it and Billing's commit. A
        contradiction recorded before the read refuses. One recorded after it doesn't refuse, doesn't undo the commit, and doesn't reverse the committed
        purchase (FC-4).
@@ -329,7 +330,8 @@ status change still needs its own explicit owner authorization.
        nothing. Refund-fact contradictions are excluded.
   9. *What a contradiction blocks,* for the contested capture only: settlement; a new late success; L-4; ordinary and capture-specific refunds; attribution
      of a new dispute to it (S0-C9 item 1); counting it as a new recovery payment. **It doesn't block or undo:** a purchase already made (FC-4); an authorized
-     refund attempt (FC-2, FC-3); a recovery payment already counted; existing T1, T2 or T3 state; reads; or operations on another capture.
+     refund attempt (FC-2, FC-3); a recovery payment already counted; existing T1, T2 or T3 state; reads; or operations on another capture, except
+     that a capture fact of the same attempt makes that attempt ambiguous under S0-C12 item 14.
   10. *Reading with existing text.* "Verified success" in L-1, S4c F-4, S0-C8 item 1 and §3.5 means, for commercial effect, a capture verified under
       item 1. L-1 stays satisfied for a contradiction: the fact and the conflict are the record, and nothing is discarded. L-3 and S0-C8 item 4 keep the
       refund as the default, but while the capture is contested that refund waits and the case stays in reconciliation (L-4's closing rule). FC-1 is
@@ -343,8 +345,10 @@ status change still needs its own explicit owner authorization.
       paths are unchanged. (7) The contradiction is audited once, atomically. The register entries PAY-02, PAY-05, PAY-07, PAY-12, BIL-32, BIL-33 and EVT-10
       record its contract. **Current code does not yet meet this entry.** It implements and activates nothing; each Payment, Billing and certification PR needs
       a separate Owner authorization.
-- **S0-C12 Wrong-amount captures (2026-11-04, PROPOSED for Owner adoption: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with
-  owner-approved additions D-1 and D-B; logic-audit findings F-01, F-20; decisions A1 and N1, with N3 future-gated).** A *wrong-amount capture* is a capture
+- **S0-C12 Wrong-amount captures (2026-11-04, ADOPTED #467: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with owner-approved
+  additions D-1 and D-B; logic-audit findings F-01, F-20, FN-1; decisions A1 and N1, with N3 future-gated). Items 1 to 13: implemented and CONDITIONALLY
+  certified for development and simulation only (Owner, 2026-11-04, at `b775ff3`), open for final closure review. Items 14 to 20 and the references to them
+  (the Owner's FN-1 contract GO, 2026-11-04): ADOPTED CONTRACT, NOT IMPLEMENTED (item 20).** A *wrong-amount capture* is a capture
   verified under S0-C11 item 1 whose amount or currency differs from its payment's. It is an immutable financial observation, never a sale. FC-1 to FC-5, S4c
   F-1 to F-5, S0-C8, S0-C9 and S0-C11 are unchanged and govern except as stated here.
   1. *No commercial effect by itself.* Recording it settles nothing, finalizes or reopens no payment, changes no attempt state, creates no purchase or
@@ -352,16 +356,16 @@ status change still needs its own explicit owner authorization.
   2. *After finality (A1; F-01).* On a payment `failed`, `cancelled` or `expired`, an uncontested wrong-amount capture whose currency matches `^[A-Z]{3}$`
      is a late success with the fact's exact amount and currency (EVT-10 v1, PAY-12 `late_success`). At Billing it is **refund-only**: a `late_success`
      reconciliation case, resolved only by the capture-specific refund (R6H-5) of exactly that capture's amount, in its currency, never automatically, under
-     S0-C9 item 6 and every existing refund gate (Owner receipt, idempotency, dispute exposure, S0-C11 item 9). A `succeeded` payment's further capture
-     stays on its existing path (R6H-5).
+     S0-C9 item 6 and every existing refund gate (Owner receipt, idempotency, dispute exposure, S0-C11 item 9, item 14(d)). A `succeeded` payment's further
+     capture stays on its existing path (R6H-5), subject to item 14(d).
   3. *Recovery payments (D-1).* A late capture of a `recovery_settlement` payment counts toward its recovery obligation only when it meets the recovery
-     invoice's evidence requirements: its amount and currency equal the recovery invoice's total and currency exactly, and its fact is uncontested
-     (S0-C11 item 1). A wrong-amount late success never counts: it creates no `recovery_payment`, satisfies no principal, creates no surplus and changes no
+     invoice's evidence requirements: its amount and currency equal the recovery invoice's total and currency exactly, its fact is uncontested
+     (S0-C11 item 1), and its attempt is not ambiguous (item 14). A wrong-amount late success never counts: it creates no `recovery_payment`, satisfies no principal, creates no surplus and changes no
      T3. It stays an observable fact and a refund-only `late_success` case. A capture equal to the invoice's total keeps §3.5 unchanged, including
      over-recovery when the outstanding amount has fallen. Any other use requires a separately approved recovery-allocation contract.
   4. *Recovery refund exception (D-B).* For a `recovery_settlement` payment, and only for a capture that item 3 excluded, the capture-specific refund
      (R6H-5, `late_capture`) is permitted when all hold: the capture is that payment's own verified, uncontested capture fact; no `recovery_payment` names
-     its late success; the refund returns exactly that capture's amount in its currency; and every existing refund gate is met. It never refunds another
+     its late success; the refund returns exactly that capture's amount in its currency; and every existing refund gate, item 14(d) included, is met. It never refunds another
      capture, a counted recovery payment, a surplus or a principal, and it is no general recovery-payment refund route.
   5. *Before finality (N1; F-20).* On a payment that is not final, a wrong-amount capture is **not** a late success. It is an Owner-readable Payment
      reconciliation item of kind `capture_mismatch` (PAY-12), scoped through its payment's seller Company, with the fact's identity, amount, currency and a
@@ -371,21 +375,23 @@ status change still needs its own explicit owner authorization.
      adapter's capture semantics are verified.
   6. *Reaching finality, atomically.* When a payment becomes `failed`, `cancelled` or `expired` by an existing rule, the same transaction, under the payment
      lock, records its state, event and audit and, for each uncontested capture fact of that payment that settled nothing, has a currency matching
-     `^[A-Z]{3}$` and has no late success, that late success with its EVT-10 and audit. A capture first processed on an already final payment records its
+     `^[A-Z]{3}$`, has no late success and whose attempt is not ambiguous (item 14), that late success with its EVT-10 and audit. A capture first processed on an already final payment records its
      late success in the transaction that decides it. A final status is never reopened.
   7. *Recovery of the only unavoidable window.* FC-1 and V-2 commit a fact on its own before its processing, so that step cannot share a transaction. A
      durable, bounded, idempotent reconciliation pass completes a committed capture fact whose processing was interrupted: it selects from committed
-     records only (no queue to lose), works in bounded batches with backoff, and under the payment lock records the late success only where item 6 would
-     have and no late success names the fact, with a deterministic event id (`payment_late_success_once`). It never settles, never reopens a final status
-     and never duplicates a late success, event, audit record, refund authorization or reconciliation effect.
+     records only (no queue to lose), works in bounded batches with the backoff of item 15, and under the payment lock records the late success only where
+     item 6 would have and no late success names the fact (`payment_late_success_one_per_fact`, `0025`), with a deterministic event id derived from the row.
+     It never settles, never reopens a final status and never duplicates a late success, event, audit record, refund authorization or reconciliation effect.
   8. *Currencies.* Amounts and currencies are recorded exactly; never converted, rounded or normalized; no exchange rate is ever applied or assumed.
      - *A valid, different three-letter code* (`^[A-Z]{3}$`): items 2 to 7 apply with the provider's currency. Balances stay per currency. A refund in that
        currency proceeds only if the provider adapter supports it; otherwise it fails closed.
      - *An unrecognized currency that a fact can hold* (1 to 16 characters, not `^[A-Z]{3}$`): the fact is kept as observed; **no late success and no
-       EVT-10** (Billing could not hold it), no Billing case, no settlement, allocation, entitlement or refund route. **[Owner confirmation required, O-1]**
-       It is visible as a `capture_mismatch` item with reason `unrecognized_currency`, whatever the payment's state.
-     - *A value no fact can hold* (empty, or over 16 characters): the authenticated notification stays stored as received and is not a fact, as under
-       S0-C11 item 4. **[Documented limitation, O-2]** No Owner API shows it today; making it Owner-visible or actionable needs a separately approved policy.
+       EVT-10** (Billing could not hold it), no Billing case, no settlement, allocation, entitlement or refund route. **[O-1, confirmed by the Owner,
+       2026-11-04; not an authorization for new financial behaviour]** It is visible as a `capture_mismatch` item with reason `unrecognized_currency`, whatever
+       the payment's state.
+     - *A value no fact can hold* (item 16 lists the shapes): the authenticated evidence stays stored as received and is not a fact, as under S0-C11 item 4,
+       and item 16 governs its quarantine. **[Documented limitation, O-2: approved for development and simulation only; a real-provider blocker, item 19]** No
+       Owner API shows it; making it Owner-visible or actionable needs a separately approved policy.
   9. *Billing.* Under this entry only a late success opens a Billing case. Billing reads PAY-12 kinds it names; a kind or reason that no contract names
      opens nothing and is logged. **Billing's D-1, D-B and allow-list implementation is certified before Payment emits a wrong-amount late success.**
   10. *Audit.* Commercial actions (version 1, no trusted scope), each written in its record's own transaction, never before its catalog entry exists:
@@ -395,12 +401,14 @@ status change still needs its own explicit owner authorization.
       changes nothing). FI-13, FC-1 to FC-5, S0-C8, S0-C9 and S0-C11. ADR statuses are unchanged; no Accepted ADR is edited.
   12. *Acceptance (later implementation; real events across processes, simulation only).* (1) After finality: one late success, a refund-only case, and the
       capture-specific refund of exactly the fact's amount and currency, completed once. (2) Before finality: a `capture_mismatch` item, no late success, no
-      Billing case; when the payment later becomes final, one late success in that transaction. (3) **Recovery (D-1, the S0-C11 L3 obligation):** an equal
+      Billing case; when the payment later becomes final, one late success in that transaction. (3) **Recovery (D-1, the S0-C11 L3 obligation, which the Owner
+     recorded as discharged for development and simulation on 2026-11-04, real-provider limitations retained):** an equal
       late recovery capture counts once (principal, surplus, T3 per §3.5); a wrong-amount one never counts (no `recovery_payment`, principal, surplus or
       T3 change) and its D-B refund completes once; a contested one records no late success. (4) An interrupted window recovered once. (5) An unrecognized
       currency: no late success and no case. (6) Replays and concurrency: one record, one event, one audit record. (7) S0-C8, S0-C9, S0-C11 and F-4 suites
-      unchanged. The register entries PAY-02, PAY-05, PAY-12, EVT-10, BIL-23, BIL-28 and BIL-33 record its contract. **Current code does not meet this
-      entry.** It implements and activates nothing; each Billing, audit, Payment and certification PR needs a separate Owner authorization.
+      unchanged. The register entries PAY-02, PAY-05, PAY-12, EVT-10, BIL-23, BIL-28 and BIL-33 record its contract. **Evidence for items 1 to 13:** real-event
+      and service suites merged in #471 and #472 (main `31effb6`, Core CI 41915287149). Each further Billing, audit, Payment and certification PR needs a
+      separate Owner authorization.
   13. *Implementation order and deployment compatibility.* (a) **Billing first:** D-1 (classification and database guard), D-B (the narrow
       route) and the PAY-12 allow-list, certified while Payment still emits no wrong-amount late success; the change is additive and safe against today's
       Payment (an equal late success still counts; no wrong-amount one exists yet). (b) **Audit catalog** entries for both actions and the reconciler
@@ -408,6 +416,79 @@ status change still needs its own explicit owner authorization.
       stays v1 (no new field), so no consumer contract changes; an older Billing deployment is the one unsafe pairing (it would count a wrong-amount recovery
       late success), so Payment's change is never deployed where Billing's step (a) is not. (d) Real-event cross-process tests, then certification. Each
       step is reversible on its own: reverting Payment's step stops new wrong-amount late successes; Billing's guards stay safe either way.
+  14. *Several capture facts on one attempt (FN-1).* Every authenticated capture stays its own immutable fact with its provenance. A different provider
+      reference does not prove a different movement of money. An attempt is **ambiguous** while it holds more than one capture fact, contested or not. A
+      contradiction of a fact (S0-C11 item 5) is not another fact. Ambiguity is per attempt: captures of different attempts keep the existing rules.
+      (a) *Committed effects stand.* A settlement, late success, case, recovery allocation, entitlement or refund authorization committed before the ambiguity
+      was known is not changed, reversed or reinterpreted. Payment and Billing finality are unchanged, and nothing historical is deleted or backfilled.
+      (b) *No new late success.* While an attempt is ambiguous, no fact of it records a late success. A fact without one stays in exceptional review, derived
+      from the facts, never a determination of equivalence. L-1 stays satisfied: the fact is the record and nothing is discarded. No provider may create a late
+      success from ambiguous evidence; future authorization needs a separate Owner-approved policy with verified reference semantics.
+      (c) *No new commercial effect.* An ambiguous attempt authorizes no new settlement, recovery allocation, L-4 eligibility or entitlement, whatever the
+      amount of any fact and whichever arrived first, including an equal capture following a wrong-amount one. "Every verified success" in §3.5 is read with
+      items 3 and 14. A late success already recorded stays refund-only evidence.
+      (d) *No new refund without permission.* A new refund authorization for any fact of an ambiguous attempt requires an explicit provider permission,
+      default-deny, checked before a receipt is consumed. Without it: refused, no receipt spent. Nothing is ever refunded automatically. A refund authorized
+      before the ambiguity was known stands.
+      (e) *Provider permissions.* Recorded per named provider, append-only, never inferred from a reference, amount or timing. The existing `simulation` and
+      `test` providers hold refund permission only, preserving the certified R6H-5 simulation behaviour, because the simulator defines its own references. It
+      never authorizes a settlement, recovery allocation, L-4 or entitlement, and no real provider adapter holds it.
+      (f) *`multiple_captures`.* A PAY-12 kind: one row per capture fact of an ambiguous attempt, in any payment state, identified by the fact's id, with its
+      payment, amount, currency as stored, attempt, sibling count, whether contested, its late success if any, whether in review, and the derived "potentially
+      equivalent" observation. Owner only, own bearer verified live, scoped to the seller Company through the fact's own payment; no service or producer read;
+      unmatched facts never appear. Read-only and derived at read: nothing is stored, a replay adds no row, existing facts appear with no backfill, and paging
+      is the existing keyset by id. It authorizes no settlement, refund, case closure, recovery or entitlement, and opens no Billing case.
+      (g) *Progress.* Facts in review are excluded from recovery selection before its batch limit, so they consume no attempts and hold back no other fact.
+      (h) *No exit yet.* Exceptional review has no automatic exit. This is accepted for development and simulation only (item 19).
+  15. *Bounded recovery (item 7).* Per fact: at most **12 processing attempts**, durable state, waits of 2^n seconds after attempt n, for n = 1 to 11. The
+      cumulative theoretical wait is 4,094 seconds, about **68 minutes**. The longest is 2,048 seconds, so no cap applies. The effective schedule follows the
+      recovery pass, every 30 seconds: a fact is taken at the first pass after its wait.
+      - *Counted:* a transient per-fact failure, an unknown failure, and a pass that wrote nothing for a fact still eligible. *Not counted:* success; a fact that
+        became ineligible; a payment another transaction holds. The count is written in its own transaction after the failed one rolls back; a lost write
+        under-counts, and evidence is never lost.
+      - *Infrastructure failure* (the database or its connections unavailable) ends the pass and **consumes no fact's attempt**. The worker pauses, doubling from
+        30 seconds to at most **15 minutes**, and resets on success. A paused tick does no database work, so resource use stays bounded; failures are logged with
+        their consecutive count and monitored, and recovery resumes by itself.
+      - *Permanent refusal* (a database guard refusing a fact that selection still finds eligible) stops retrying at once and is recorded as refused, because
+        a retry can't change it. *Transient unavailability* is everything that may succeed unchanged.
+      - *Fairness:* each fact has its own transaction; a failure never ends the pass for other facts. Due, non-terminal, eligible facts are selected before the
+        batch limit, never-tried first, then oldest due.
+      - *Exhaustion is not abandonment:* the fact stays, durably marked and visible to the Owner through PAY-12 and to operators through logs. A provider
+        redelivery still processes normally.
+      - *Reactivation is NOT authorized.* The intended direction is an Owner-requested reactivation that only retries existing rules, keeping full history; it
+        can't authorize a financial effect or remove an ambiguity. **R6H-2 does not support it:** R6H-2 acknowledges three named review-only Billing case types, and
+        this would be a Payment action able to lead to a new financial record. It requires a **separate security contract decision**. No new receipt purpose,
+        step-up operation or route is created here.
+  16. *Quarantine of invalid currency evidence (D4).* Shapes: a missing or `null` currency, a non-string value, an empty string, over 16 characters, or a string
+      PostgreSQL text can't hold. A 1 to 16 character storable value stays under item 8. Only after the source is authenticated, and only for a permanent shape
+      failure, never a database error: the evidence is durably quarantined, append-only, in one transaction, with the original value preserved exactly, without
+      truncation or normalization, and the stored notification unchanged. **A successful acknowledgement is returned only after that commit**, in the form the
+      provider's approved adapter contract defines. It means "authenticated evidence durably held", never "processed". HTTP 200 is not a statement of financial
+      success. `simulation` and `test` answer `{ received: true }` with 200. If persistence fails, the answer stays retryable and reprocessing can't duplicate the
+      record; the same event is a no-op, and a new event is its own record. A status read, having no stored notification, leaves the quarantine record as its
+      evidence. Quarantine has no financial effect: no fact, settlement, capture normalization, attempt or payment change, and no Owner-visible monetary
+      reconciliation. Logs and audit carry identifiers and reason codes only. Eventual reconciliation needs a separately approved policy (item 19).
+  17. *Refund of an ineligible currency (D5).* When Payment's read for the same payment and fact is well-formed and states a 1 to 16 character currency not
+      matching `^[A-Z]{3}$`, Billing answers `409 refund_not_eligible`. Unavailable, invalid or inconsistent Payment evidence: `503`. Owner verification, Company
+      scope, the collapsed `404`, capture identity, receipts and financial finality are unchanged: nothing is written, no receipt is spent, and the answer carries
+      no currency value.
+  18. *Other malformed evidence (separately gated).* A verified notification with a **missing amount**, and an authenticated body that **cannot be parsed**, are
+      outside this entry. As implemented, they are stored and answered HTTP 200 with state `ignored` or `failed` / `malformed_body`. That is recorded as an
+      **unresolved risk**, not an approved real-provider acknowledgement policy.
+  19. *Real-provider blockers.* No real provider may be activated until each is separately authorized and certified. **B1** FN-1: items 14 and 15 implemented
+      and certified. **B2** a per-adapter provider permission with verified reference semantics: one reference per capture or per attempt, stability across
+      channels, partial capture and correction. **B3** an approved reconciliation or return route for facts in exceptional review. **B4** O-2: Owner visibility and
+      reconciliation of quarantined monetary evidence. **B5** a per-adapter acknowledgement contract, and bodies over the service's body limit, refused before
+      authentication and storage. **B6** refunds in another currency: adapter support or failing closed. **B7** item 18. **B8** N3, S0-C11's L2 two-Company
+      evidence, and production readiness.
+  20. *Status and implementation requirements.* Items 14 to 19 implement and activate nothing; each implementation needs a separate Owner authorization. They will
+      require, in Payment only and expand-only with no backfill and no existing row changed: a provider
+      permission record, with `simulation` and `test` entries; recovery state; a quarantine record; and the late-success insert guard (`0024`) extended to
+      refuse a late success of an ambiguous attempt, so direct SQL can't bypass item 14(b). It runs on insert only, so existing rows are untouched.
+      `payment_late_success_once` stays as it is while no provider may create such late successes. Additive: an attempt's capture count on Payment's capture
+      read, for Billing's D-1 and L-4 checks; EVT-10 stays v1. Acceptance (real events across processes, simulation only): each case of items 14, 15, 16 and 17 on
+      every channel, with replay and concurrency; both orders of a status read and a notification; R6H-5 simulation behaviour unchanged; tenant isolation of
+      `multiple_captures`; the recovery test's equal capture moved to its own attempt, keeping what it proves. Reactivation stays out until its decision.
 
 ## 2. ADR disposition
 
