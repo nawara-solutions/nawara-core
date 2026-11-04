@@ -181,9 +181,17 @@ export class RefundCaseService {
         `SELECT pr.id, pr.status, i."organizationId", e.purpose, e."invoiceId" IS NOT NULL AS routed
            FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" LEFT JOIN invoice_entitlement e ON e."invoiceId" = pr."invoiceId"
           WHERE pr.id = $1 FOR UPDATE OF pr`, [facts.paymentRequestId])).rows[0]!;
-      if (pr.purpose === 'organization_subscription' || pr.purpose === 'recovery_settlement') throw notEligible();
+      if (pr.purpose === 'organization_subscription') throw notEligible();
       const basis = await this.captureBasis(q, capture, pr, facts);
       if (!basis) throw notEligible();
+      // Core V2 S0-C12 D-B (BIL-23 I): a recovery payment's capture only as the late capture S0-C12 item 3 excluded from recovery (Billing's own
+      // record of Payment's verified late success names it, it differs from the recovery invoice, no recovery payment names it), for exactly its
+      // own amount and currency; never a counted recovery payment, a surplus, a principal or another capture. The database re-checks it (0048).
+      if (pr.purpose === 'recovery_settlement') {
+        const refundable = (await q.query<{ ok: boolean }>(`SELECT billing_recovery_capture_refundable($1, $2, $3, $4, $5) AS ok`,
+          [pr.id, factId, basis.basis, capture.amount, capture.currency])).rows[0]!.ok;
+        if (!refundable) throw notEligible();
+      }
       // Core V2 S0-C8 (LS-6): the capture that evidences a late assisted settlement is refunded by that settlement's own case (L-3)
       if ((await q.query(`SELECT 1 FROM assistance_late_settlement l JOIN payment_late_success s ON s."lateSuccessId" = l."lateSuccessId" WHERE s."factId" = $1`,
         [factId])).rows.length > 0) throw notEligible();

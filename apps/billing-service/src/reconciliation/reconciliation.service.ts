@@ -143,7 +143,14 @@ export class ReconciliationService {
     let after: string | undefined;
     for (;;) {
       const items = await this.payment.items(kind, after, PAGE);
-      for (const i of items) await each(i);
+      for (const i of items) {
+        // Core V2 S0-C12 item 9: an item of a kind no contract names for this read opens nothing; it is logged and stays at Payment
+        if (i.otherKind !== undefined) {
+          this.log.warn(`payment_item_other_kind requested=${kind} stated=${i.otherKind} item=${i.id} — no contract names it here; nothing opened`);
+          continue;
+        }
+        await each(i);
+      }
       if (items.length < PAGE) return;
       after = items[items.length - 1]!.id;
     }
@@ -246,13 +253,17 @@ export class ReconciliationService {
     const fresh = (type: CaseType, key: string) => `NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = '${type}' AND k."evidenceKey" = ${key})`;
     // late successes recorded but never classified (a crash between the record and its classification), or deferred until their assisted
     // payment request is final (Core V2 S0-C8, LS-5: retried on every pass, never inferred)
-    for (const r of (await this.db.query<{ lateSuccessId: string }>(
-      `SELECT l."lateSuccessId" FROM payment_late_success l WHERE NOT EXISTS (SELECT 1 FROM recovery_payment p WHERE p."lateSuccessId" = l."lateSuccessId")
+    for (const r of (await this.db.query<{ lateSuccessId: string; paymentId: string; factId: string | null; amount: string; currency: string }>(
+      `SELECT l."lateSuccessId", l."paymentId", l."factId", l.amount, trim(l.currency) AS currency FROM payment_late_success l
+        WHERE NOT EXISTS (SELECT 1 FROM recovery_payment p WHERE p."lateSuccessId" = l."lateSuccessId")
           AND NOT EXISTS (SELECT 1 FROM assistance_late_settlement s WHERE s."lateSuccessId" = l."lateSuccessId")
           AND ${fresh('late_success', 'l."lateSuccessId"')}`)).rows) {
       const ctx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: r.lateSuccessId }, correlationId: `late-success:${r.lateSuccessId}` };
+      // Core V2 S0-C12 D-1: an equal recovery late success needs Payment's capture evidence, read before the transaction (not a lock)
+      const evidence = await this.lateSuccesses.recoveryEvidence({ lateSuccessId: r.lateSuccessId, paymentId: r.paymentId, factId: r.factId, amount: Number(r.amount),
+        currency: r.currency });
       await this.db.tx(async (q) => {
-        if (['case', 'late_settlement'].includes(await this.lateSuccesses.classify(q, r.lateSuccessId, ctx))) tally.opened++;
+        if (['case', 'late_settlement'].includes(await this.lateSuccesses.classify(q, r.lateSuccessId, ctx, evidence))) tally.opened++;
       });
     }
     // Core V2 S0-C8: a late settlement from Payment's late success names its capture (its refund is exactly that captured movement, BIL-23 H)

@@ -17,6 +17,11 @@ export interface PaymentItem {
   currency: string | null;
   detail: Record<string, unknown>;
   at: string | null;
+  /**
+   * Core V2 S0-C12 item 9: set when the item states a kind other than the one Billing asked for. Such an item is never processed (no contract names
+   * it for this read): the reader logs it and opens nothing, while keyset paging still moves past it.
+   */
+  otherKind?: string;
 }
 
 export interface PaymentReconciliationClient {
@@ -29,12 +34,15 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function item(kind: PaymentItemKind, v: unknown): PaymentItem | null {
   const r = v as Record<string, unknown> | null;
   if (!r || typeof r.id !== 'string' || !UUID.test(r.id) || typeof r.paymentId !== 'string' || !UUID.test(r.paymentId)) return null;
+  if (typeof r.kind === 'string' && r.kind !== kind) {
+    return { kind, id: r.id, paymentId: r.paymentId, factId: null, amount: null, currency: null, detail: {}, at: null, otherKind: r.kind.slice(0, 64) };
+  }
   const amount = r.amount === null || r.amount === undefined ? null : r.amount;
   if (amount !== null && (typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount < 1)) return null;
   const currency = typeof r.currency === 'string' && /^[A-Z]{3}$/.test(r.currency) ? r.currency : null;
   // Core V2 S0-C11: a contradicting observation states whatever the provider sent; one unusable currency is kept with no figures rather than
   // blocking every later contradiction of the pass (a malformed page throws)
-  if (kind === 'fact_conflict' && (amount === null) !== (currency === null)) return item('fact_conflict', { ...r, amount: null, currency: null });
+  if (kind === 'fact_conflict' && (amount === null) !== (currency === null)) return item('fact_conflict', { ...r, kind, amount: null, currency: null });
   if ((amount === null) !== (currency === null)) return null;
   const factId = typeof r.factId === 'string' && UUID.test(r.factId) ? r.factId : null;
   const detail = r.detail && typeof r.detail === 'object' && !Array.isArray(r.detail) ? (r.detail as Record<string, unknown>) : {};
