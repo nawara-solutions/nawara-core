@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AttemptResolver } from './attempts/attempt-resolver.js';
 import { ExpirySweeper } from './payments/expiry-sweeper.js';
+import { CaptureReconciler } from './payments/capture-reconciler.js';
 import { WebhookRetriever } from './webhooks/webhook-retrier.js';
 
 /**
@@ -33,6 +34,10 @@ const jobs: Array<{ name: string; event: string; make: (db: unknown) => Job }> =
   {
     name: 'WebhookRetriever', event: 'webhook_retrier_pass_failure',
     make: (db) => { const j = new WebhookRetriever(db as never, {} as never, {} as never); return { start: (i) => j.start(i), stop: () => j.stop(), run: () => j.drainOnce() }; },
+  },
+  {
+    name: 'CaptureReconciler', event: 'capture_reconcile_pass_failure', // Core V2 S0-C12 item 7
+    make: (db) => { const j = new CaptureReconciler(db as never, {} as never, {} as never); return { start: (i) => j.start(i), stop: () => j.stop(), run: () => j.reconcileOnce() }; },
   },
 ];
 

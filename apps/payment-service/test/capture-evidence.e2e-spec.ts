@@ -270,7 +270,15 @@ describeWithEnv('capture evidence (Core V2 S0-C11) — real PostgreSQL', ['TEST_
       await capture(a.id, 9001, txn).send().expect(200);
       await capture(a.id, 9000, txn).send().expect(200);
       expect((await facts(a.id)).map((f) => f.amount)).toEqual([9001]);
-      await noCommercialEffect(p.id);
+      // Core V2 S0-C12 item 2 (A1, adopted #467; supersedes this test's earlier FI-13 expectation of no late success at all): the first, uncontested
+      // observation of a final payment is ONE refund-only late success with ITS OWN figures (9001). The correction (9000) is a contradiction: it
+      // never settles, never names that fact with the corrected figure, and records no second late success
+      const factId = (await admin.query(`SELECT id FROM provider_transaction_fact WHERE "attemptId" = $1`, [a.id])).rows[0].id as string;
+      expect(await lateSuccesses(p.id)).toEqual([{ amount: 9001, factId, paymentStatus: 'cancelled' }]);
+      expect((await lateSuccesses(p.id)).some((l) => l.amount === 9000)).toBe(false);
+      expect(await lateEvents(p.id)).toBe(1);
+      expect(await conflicts(a.id)).toEqual([expect.objectContaining({ amount: 9000 })]);
+      expect(await succeededEvents(p.id)).toBe(0);
       expect(await status(p.id)).toBe('cancelled');
     });
   });

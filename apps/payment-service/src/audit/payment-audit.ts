@@ -22,6 +22,13 @@ export type RefundAuditAction = 'refund_attempt.authorized' | 'refund_attempt.fa
 export type DisputeAuditAction = 'payment_dispute.opened' | 'payment_dispute.closed' | 'payment_dispute.evidence_added' | 'payment_dispute.decided';
 /** Core V2 S6h (R6H-11): the Owner's association of an unmatched provider fact (version 1, no trusted scope). */
 export type ReconciliationAuditAction = 'provider_fact.associated' | 'provider_fact_conflict.recorded';
+/** Core V2 S0-C12 item 10: late successes and wrong-amount capture facts (version 1, no trusted scope). */
+export type CaptureAuditAction = 'payment_late_success.recorded' | 'payment_capture_mismatch.recorded';
+/** S0-C12 item 10: the reason a capture fact differs from its payment (a code; the observed currency text never enters the audit record). */
+export type CaptureMismatchReason = 'amount_mismatch' | 'currency_mismatch' | 'unrecognized_currency';
+/** The system actor of a provider observation recorded by Payment: its channel, never whoever asked for a status read; or the reconciler. */
+export type ObservationActor = 'payment_webhook' | 'payment_status_read' | 'payment_capture_reconciler';
+export const observationActor = (source: string): ObservationActor => (source === 'webhook' ? 'payment_webhook' : 'payment_status_read');
 
 /**
  * The catalog actor of a Payment transition, from Payment's own verified attribution (never a request value). A service caller is the
@@ -115,6 +122,32 @@ export class PaymentAudit {
    * Core V2 S6h (R6H-3, R6H-11): the association of an unmatched provider fact, in the association's transaction. Identifiers only (the fact, its
    * destination and the association); never an amount, a provider reference, a receipt or its secret. The event id is derived from the association.
    */
+  /** Core V2 S0-C12 item 10: a recorded late success, in its row's transaction, once (its id keys the event). */
+  async recordLateSuccess(q: Queryable, l: { id: string; factId: string; attemptId: string; amount: number; paymentStatus: string }, payment: PaymentRow,
+    actor: ObservationActor, ctx: EventContext): Promise<void> {
+    const matches = l.amount === Number(payment.amount);
+    await this.writer.write(
+      q,
+      { action: 'payment_late_success.recorded' satisfies CaptureAuditAction, actor: { type: 'system', id: actor }, organizationId: payment.organizationId,
+        resource: { type: 'payment_late_success', id: l.id }, outcome: 'succeeded',
+        changes: { payment_id: payment.id, attempt_id: l.attemptId, fact_id: l.factId, observed_amount: l.amount, payment_status: l.paymentStatus,
+          matches_payment: matches } } as never,
+      { eventId: deterministicEventId(l.id, 'audit.payment_late_success.recorded'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /** Core V2 S0-C12 items 5, 8, 10: a wrong-amount capture fact, in the fact's own transaction, once (the fact's id keys the event). */
+  async recordCaptureMismatch(q: Queryable, f: { factId: string; paymentId: string; attemptId: string; source: 'webhook' | 'status_check'; amount: number },
+    reason: CaptureMismatchReason, organizationId: string | null, ctx: EventContext): Promise<void> {
+    await this.writer.write(
+      q,
+      { action: 'payment_capture_mismatch.recorded' satisfies CaptureAuditAction, actor: { type: 'system', id: observationActor(f.source) }, organizationId,
+        resource: { type: 'provider_transaction_fact', id: f.factId }, outcome: 'succeeded',
+        changes: { payment_id: f.paymentId, attempt_id: f.attemptId, source: f.source, observed_amount: f.amount, reason } } as never,
+      { eventId: deterministicEventId(f.factId, 'audit.payment_capture_mismatch.recorded'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
   /** Core V2 S0-C11 item 8: a contradiction of a recorded capture fact, in the conflict row's transaction, once (its id keys the event). */
   async recordFactConflict(q: Queryable, c: { id: string; factId: string; paymentId: string; attemptId: string; source: 'webhook' | 'status_check'; amount: number },
     organizationId: string | null, ctx: EventContext): Promise<void> {

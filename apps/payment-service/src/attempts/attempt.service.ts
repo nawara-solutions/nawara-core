@@ -14,6 +14,8 @@ import type { FetchStatusResult, PaymentProvider } from '../providers/provider.p
 import type { AttemptRow } from './attempt.types.js';
 import type { StartAttemptDto } from './dto/start-attempt.dto.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
+import { FINAL_UNSUCCESSFUL, ISO_CURRENCY, recordQualifyingLateSuccesses } from '../payments/late-success-at-finality.js';
+import { observationActor, type CaptureMismatchReason } from '../audit/payment-audit.js';
 
 export interface StartAttemptResult {
   attempt: AttemptRow;
@@ -187,7 +189,15 @@ export class AttemptService {
       if (status.kind === 'succeeded') {
         if (current.status === 'succeeded') return current; // idempotent replay of the same fact
         if (Number(payment.amount) !== status.amount || payment.currency !== status.currency) {
-          // FI-13: never applied silently. No new state is introduced for this — it is refused outright.
+          // Core V2 S0-C12 item 2 (A1; F-01): on a payment whose workflow ended unsuccessfully, an uncontested wrong-amount capture (ISO currency)
+          // equal to its own committed fact is a late success with the fact's exact figures: recorded below, refund-only, never a settlement.
+          if ((FINAL_UNSUCCESSFUL as readonly string[]).includes(payment.status) && ISO_CURRENCY.test(status.currency)
+            && (await this.captureEvidence(q, payment.id, attemptId, status, factId)).verified) {
+            lateSuccess = { paymentId: payment.id, paymentStatus: payment.status, amount: status.amount, currency: status.currency, conflict: 'final' };
+            return current;
+          }
+          // FI-13: never applied silently. No new state is introduced for this — it is refused outright (S0-C12 items 1, 5: the fact stays, visible
+          // as a `capture_mismatch` item while the payment is not final; a `succeeded` payment's further capture keeps its R6H-5 path)
           throw paymentError(502, 'provider_error', PAYMENT_MESSAGES.amountCurrencyMismatch);
         }
         // Core V2 S0-C11 (items 1, 4, 5): only an authenticated observation equal to its committed, uncontested fact has a commercial effect. The
@@ -288,6 +298,11 @@ export class AttemptService {
       if (!rows[0]) return 0;
       const payment = (await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [f.paymentId])).rows[0]!;
       await this.outbox.enqueue(q, lateSuccessEvent(rows[0], payment, ctx));
+      // Core V2 S0-C12 item 10: every late success has its commercial audit record, in its row's transaction
+      if (rows[0].factId) {
+        await this.audit.recordLateSuccess(q, { id: rows[0].id, factId: rows[0].factId, attemptId: rows[0].attemptId, amount: Number(rows[0].amount),
+          paymentStatus: rows[0].paymentStatus }, payment, observationActor(webhookEventId ? 'webhook' : 'status_check'), ctx);
+      }
       return 1;
     });
     this.logger.warn(`payment_late_success_recorded payment=${f.paymentId} attempt=${attemptId} paymentStatus=${f.paymentStatus} reason=${f.conflict} ${rowCount ? 'new' : 'already_recorded'} — needs reconciliation; nothing was settled`);
@@ -338,7 +353,16 @@ export class AttemptService {
          VALUES ($1, $2, 'capture', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT ON CONSTRAINT provider_transaction_fact_identity DO NOTHING RETURNING id`,
         [attempt.provider, txn, attempt.paymentId, attemptId, status.amount, status.currency, liveMode, source, webhookEventId, status.providerOccurredAt ?? null],
       );
-      if (rows[0]) return rows[0].id;
+      if (rows[0]) {
+        // Core V2 S0-C12 items 5, 8, 10: a capture whose amount or currency differs from its payment is audited once, with the fact, in this transaction
+        const p = (await q.query<{ amount: string; currency: string; organizationId: string | null }>(
+          `SELECT amount, trim(currency) AS currency, "organizationId" FROM payment WHERE id = $1`, [attempt.paymentId])).rows[0];
+        if (p && (Number(p.amount) !== status.amount || p.currency !== status.currency)) {
+          const reason: CaptureMismatchReason = !ISO_CURRENCY.test(status.currency) ? 'unrecognized_currency' : p.currency !== status.currency ? 'currency_mismatch' : 'amount_mismatch';
+          await this.audit.recordCaptureMismatch(q, { factId: rows[0].id, paymentId: attempt.paymentId, attemptId, source, amount: status.amount }, reason, p.organizationId, ctx);
+        }
+        return rows[0].id;
+      }
       const { rows: existing } = await q.query<{ id: string; paymentId: string; attemptId: string; amount: string; currency: string }>(
         `SELECT id, "paymentId", "attemptId", amount, currency FROM provider_transaction_fact WHERE provider = $1 AND "providerTxnId" = $2 AND kind = 'capture'`,
         [attempt.provider, txn],
@@ -388,6 +412,8 @@ export class AttemptService {
     if (nextStatus === 'failed') {
       await this.outbox.enqueue(q, paymentEvent('payment.failed', updated[0], ctx, { failureCode }));
       await this.audit.record(q, 'payment.failed', updated[0], ctx); // Stage 18.7.1 (G1); the provider failure code stays out of central audit
+      // Core V2 S0-C12 item 6: the late success of every qualifying capture fact, in this same transaction (the payment is locked)
+      await recordQualifyingLateSuccesses(q, { outbox: this.outbox, audit: this.audit }, updated[0]!, ctx);
     }
   }
 }

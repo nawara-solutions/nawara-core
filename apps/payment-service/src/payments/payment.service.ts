@@ -13,6 +13,7 @@ import type { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { ASSISTED_SETTLEMENT_CREATE_OPERATION, ORGANIZATION_PAYER_CREATE_OPERATION, RECOVERY_SETTLEMENT_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
+import { recordQualifyingLateSuccesses } from './late-success-at-finality.js';
 
 export interface CreatePaymentResult {
   payment: PaymentRow;
@@ -189,6 +190,8 @@ export class PaymentService {
       );
       await this.outbox.enqueue(q, paymentEvent('payment.cancelled', updated[0], ctx));
       await this.audit.record(q, 'payment.cancelled', updated[0], ctx);
+      // Core V2 S0-C12 item 6: the late success of every qualifying capture fact, in this same transaction (the payment is locked)
+      await recordQualifyingLateSuccesses(q, { outbox: this.outbox, audit: this.audit }, updated[0]!, ctx);
       return { payment: updated[0], replayed: false };
     });
   }

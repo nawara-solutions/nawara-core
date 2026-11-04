@@ -3,6 +3,7 @@ import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnAppl
 import { DbService, OutboxService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
 import { isPaymentUncertain } from './payment-closing.js';
+import { recordQualifyingLateSuccesses } from './late-success-at-finality.js';
 import type { PaymentRow } from './payment.types.js';
 
 /**
@@ -77,6 +78,8 @@ export class ExpirySweeper {
       const { rows: updated } = await q.query<PaymentRow>(`UPDATE payment SET status = 'expired', "closedAt" = now() WHERE id = $1 RETURNING *`, [paymentId]);
       await this.outbox.enqueue(q, paymentEvent('payment.expired', updated[0], ctx, { expiresAt: payment.expiresAt.toISOString() }));
       await this.audit.record(q, 'payment.expired', updated[0], ctx); // Stage 18.7.1
+      // Core V2 S0-C12 item 6: the late success of every qualifying capture fact, in this same transaction (the payment is locked)
+      await recordQualifyingLateSuccesses(q, { outbox: this.outbox, audit: this.audit }, updated[0]!, ctx);
       return true;
     });
   }

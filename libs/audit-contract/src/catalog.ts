@@ -860,6 +860,38 @@ const SPEC = {
     },
     purpose: 'An authenticated provider observation contradicted a recorded capture fact: the fact stays as first reported and is contested, with no commercial effect.',
   },
+  // Core V2 S0-C12 item 10: a verified late success of any kind (S4c F-4, S0-C11 item 6, S0-C12 items 2, 6, 7), in its row's transaction, once. Identifiers, the
+  // observed integer amount and the payment's status at recording only; the currency stays on the row (S0-C12 item 10: never a non-ISO value here).
+  // Version 1, no trusted scope (S2-Audit D3). Attributed to the observation's channel, or to the reconciliation pass that completed it.
+  'payment_late_success.recorded': {
+    producer: 'payment-service', category: 'commercial', since: 1,
+    actors: { system: ['payment_webhook', 'payment_status_read', 'payment_capture_reconciler'] }, organization: 'optional',
+    resource: ['payment_late_success'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      attempt_id: { type: 'uuid', shape: 'value', required: true },
+      fact_id: { type: 'uuid', shape: 'value', required: true },
+      observed_amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+      payment_status: { type: 'code', shape: 'value', required: true, values: ['failed', 'cancelled', 'expired', 'succeeded', 'created', 'pending', 'closing'] },
+      matches_payment: { type: 'boolean', shape: 'value', required: true },
+    },
+    purpose: 'Payment recorded a verified late success: an uncontested capture of a payment whose workflow had ended. It settles nothing and sells nothing; when its figures differ from the payment it is refund-only.',
+  },
+  // Core V2 S0-C12 items 5, 8, 10: a capture whose amount or currency differs from its payment was recorded as a fact, once, in the fact's own transaction.
+  // It settles nothing. Identifiers, the observed integer amount and a reason code only; never the observed currency text or provider data.
+  'payment_capture_mismatch.recorded': {
+    producer: 'payment-service', category: 'commercial', since: 1,
+    actors: { system: ['payment_webhook', 'payment_status_read'] }, organization: 'optional',
+    resource: ['provider_transaction_fact'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      attempt_id: { type: 'uuid', shape: 'value', required: true },
+      source: { type: 'code', shape: 'value', required: true, values: ['webhook', 'status_check'] },
+      observed_amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+      reason: { type: 'code', shape: 'value', required: true, values: ['amount_mismatch', 'currency_mismatch', 'unrecognized_currency'] },
+    },
+    purpose: 'An authenticated capture whose amount or currency differs from its payment was recorded as an immutable fact: no settlement, entitlement or refund follows from it.',
+  },
   'refund_authorization.completed': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_authorization'], subject: NO_SUBJECT, outcomes: OK,
