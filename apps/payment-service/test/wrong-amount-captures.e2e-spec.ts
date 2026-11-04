@@ -7,6 +7,7 @@ import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient,
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptService } from '../src/attempts/attempt.service.js';
 import { CaptureReconciler } from '../src/payments/capture-reconciler.js';
+import { ExpirySweeper } from '../src/payments/expiry-sweeper.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
 import { describeWithEnv } from './support/env.js';
@@ -364,6 +365,47 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       await expect(admin.query(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId")
         VALUES ($1, $2, 'webhook', $3, 9100, 'TND', 'cancelled', $4)`, [p.id, a.id, hook.id, f.id])).rejects.toMatchObject({ code: '23505', constraint: 'payment_late_success_one_per_fact' });
       expect(await lateSuccesses(p.id)).toHaveLength(1);
+    });
+  });
+
+  describe('S0-C12 item 6: the expired and closing finality writers', () => {
+    const sameTransaction = async (lsId: string, pid: string) => (await one(`SELECT (SELECT xmin FROM payment_late_success WHERE id = $1)::text = (SELECT xmin FROM payment WHERE id = $2)::text AS same`, [lsId, pid])).same;
+
+    it('the expiry sweep: an open payment with a mismatched capture expires; one late success in that transaction; a reconciler pass adds nothing', async () => {
+      const p = await create({ expiresAt: new Date(Date.now() + 1200).toISOString() });
+      const a = await start(p.id, 'failure');
+      await capture(a.id, 9100).send();
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      await new Promise((r) => setTimeout(r, 1500));
+      await t.app.get(ExpirySweeper).sweepOnce();
+      expect(await status(p.id)).toBe('expired');
+      const ls = await lateSuccesses(p.id);
+      expect(ls).toEqual([expect.objectContaining({ amount: 9100, paymentStatus: 'expired' })]);
+      expect(await sameTransaction(ls[0].id, p.id)).toBe(true);
+      expect(await outboxOf('payment.late_success.recorded', 'paymentId', p.id)).toHaveLength(1);
+      await reconcile();
+      expect(await lateSuccesses(p.id)).toHaveLength(1);
+    });
+
+    it('closing: a mismatched capture of its open attempt leaves the payment closing and the attempt unchanged (N1, a visible item); the provider\'s failure ends it expired with one late success in that transaction', async () => {
+      const p = await create({ expiresAt: new Date(Date.now() + 1500).toISOString() });
+      const a = await start(p.id, 'timeout_after_accept');
+      await new Promise((r) => setTimeout(r, 1700));
+      await t.app.get(ExpirySweeper).sweepOnce();
+      expect(await status(p.id)).toBe('closing');
+      const attemptBefore = (await one(`SELECT status FROM payment_attempt WHERE id = $1`, [a.id])).status;
+      await capture(a.id, 9100).send();
+      expect(await status(p.id)).toBe('closing');
+      expect((await one(`SELECT status FROM payment_attempt WHERE id = $1`, [a.id])).status, 'item 1: no attempt state changes').toBe(attemptBefore);
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      const [f] = await facts(p.id);
+      expect(await items('capture_mismatch')).toContainEqual(expect.objectContaining({ id: f.id, detail: expect.objectContaining({ reason: 'amount_mismatch' }) }));
+      const failed = signed({ eventId: `evt_fail_${crypto.randomUUID()}`, type: 'payment.failed', reference: a.id, data: { failureCode: 'card_declined' } });
+      expect((await post(failed.raw, failed.signature)).status).toBe(200);
+      expect(await status(p.id)).toBe('expired');
+      const ls = await lateSuccesses(p.id);
+      expect(ls).toEqual([expect.objectContaining({ amount: 9100, factId: f.id, paymentStatus: 'expired' })]);
+      expect(await sameTransaction(ls[0].id, p.id)).toBe(true);
     });
   });
 
