@@ -3,10 +3,11 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
+import { DbService, OutboxService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptService } from '../src/attempts/attempt.service.js';
-import { CaptureReconciler } from '../src/payments/capture-reconciler.js';
+import { PaymentAudit } from '../src/audit/payment-audit.js';
+import { CAPTURE_RECOVERY_MAX_ATTEMPTS, CaptureReconciler, captureInfrastructurePauseMs, captureRecoveryWaitSeconds, classifyCaptureRecoveryFailure } from '../src/payments/capture-reconciler.js';
 import { ExpirySweeper } from '../src/payments/expiry-sweeper.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
@@ -450,6 +451,375 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       const r = await request(server()).get(`/payment/payments/${p.id}/captures/${factId}`).set('authorization', `Bearer ${generateServiceToken().token}`);
       expect(r.status).toBeGreaterThanOrEqual(401);
       expect(JSON.stringify(r.body)).not.toContain('attemptCaptures');
+    });
+  });
+
+  describe('S0-C12 FN-2: a capture seen while the payment is non-final stays a fact; its late success is decided at terminal finality, once', () => {
+    const lateEventsOf = async (pid: string) => (await outboxOf('payment.late_success.recorded', 'paymentId', pid)).length;
+    const same = async (lsId: string, pid: string) => (await one(`SELECT (SELECT xmin FROM payment_late_success WHERE id = $1)::text = (SELECT xmin FROM payment WHERE id = $2)::text AS same`, [lsId, pid])).same;
+    const failedNote = (aid: string) => { const n = signed({ eventId: `evt_fail_${crypto.randomUUID()}`, type: 'payment.failed', reference: aid, data: { failureCode: 'card_declined' } }); return post(n.raw, n.signature); };
+    const statusRead = (aid: string, amount = 9000, txn?: string) => t.app.get(AttemptService)
+      .applyStatus(aid, { kind: 'succeeded', amount, currency: 'TND', ...(txn ? { providerTransactionId: txn } : {}) } as never, {} as never).catch((e: unknown) => e);
+    /** Deferred: the fact, the conflict answer, nothing else, while the Owner can already see it. */
+    const deferred = async (pid: string, st: string) => {
+      expect(await status(pid)).toBe(st);
+      const fs = await facts(pid);
+      expect(fs).toHaveLength(1);
+      expect(await lateSuccesses(pid), 'no late success while non-final').toEqual([]);
+      expect(await lateEventsOf(pid), 'no premature EVT-10').toBe(0);
+      expect(await audits('audit.payment_late_success.recorded', pid)).toEqual([]);
+      expect(await succeededEvents(pid)).toBe(0);
+      expect((await items('capture_refund_unavailable')).filter((i) => i.factId === fs[0].id), 'visible meanwhile').toEqual([expect.objectContaining({ detail: { reason: 'late_capture' } })]);
+      return fs[0];
+    };
+    const decided = async (pid: string, factId: string, st: string) => {
+      expect(await status(pid)).toBe(st);
+      const ls = await lateSuccesses(pid);
+      expect(ls).toEqual([expect.objectContaining({ factId, amount: 9000, currency: 'TND', paymentStatus: st })]);
+      expect(await same(ls[0].id, pid), 'in the finality transaction itself').toBe(true);
+      expect(await lateEventsOf(pid)).toBe(1);
+      expect(await audits('audit.payment_late_success.recorded', pid)).toHaveLength(1);
+      expect(await succeededEvents(pid)).toBe(0);
+    };
+
+    it('created, then failed by the attempt limit: decided at that finality; replays and a status read add nothing', async () => {
+      const { p, a } = await openAfterFailure();
+      const note = capture(a.id, 9000);
+      expect((await note.send()).status).toBe(200);
+      expect(await webhookState(note.eventId), 'the same recorded conflict as before').toMatchObject({ state: 'conflict', outcome: 'invalid_state_transition' });
+      const f = await deferred(p.id, 'created');
+      await start(p.id, 'failure');
+      await decided(p.id, f.id, 'failed');
+      expect((await note.send()).status).toBe(200);
+      await capture(a.id, 9000).send();
+      await statusRead(a.id);
+      await reconcile();
+      await decided(p.id, f.id, 'failed');
+    });
+
+    it('created, then cancelled: decided in the cancel; a status read first, then the notification of the same capture: one fact, first provenance', async () => {
+      const { p, a } = await openAfterFailure();
+      await statusRead(a.id, 9000, `ptx_${a.id}`);
+      const f = await deferred(p.id, 'created');
+      expect(f.source).toBe('status_check');
+      await capture(a.id, 9000).send();
+      expect(await facts(p.id)).toHaveLength(1);
+      expect((await cancel(p.id)).status).toBe(200);
+      await decided(p.id, f.id, 'cancelled');
+    });
+
+    it('pending: another attempt is open; a provider-confirmed failure of it ends the payment failed and decides the earlier capture', async () => {
+      const { p, a } = await openAfterFailure();
+      const b = await start(p.id, 'timeout_before_accept');
+      const during = await status(p.id);
+      expect(['pending', 'created']).toContain(during);
+      await capture(a.id, 9000).send();
+      const f = await deferred(p.id, during);
+      expect((await failedNote(b.id)).status).toBe(200);
+      await decided(p.id, f.id, 'failed');
+    });
+
+    it('expired by the sweep, and closing then expired: decided in each writer', async () => {
+      const p = await create({ expiresAt: new Date(Date.now() + 1200).toISOString() });
+      const a = await start(p.id, 'failure');
+      await capture(a.id, 9000).send();
+      const f = await deferred(p.id, 'created');
+      await new Promise((r) => setTimeout(r, 1500));
+      await t.app.get(ExpirySweeper).sweepOnce();
+      await decided(p.id, f.id, 'expired');
+
+      const q = await create({ expiresAt: new Date(Date.now() + 2500).toISOString() });
+      const a1 = await start(q.id, 'failure');
+      const a2 = await start(q.id, 'timeout_before_accept');
+      await new Promise((r) => setTimeout(r, 2700));
+      await t.app.get(ExpirySweeper).sweepOnce();
+      expect(await status(q.id)).toBe('closing');
+      await capture(a1.id, 9000).send();
+      const g = await deferred(q.id, 'closing');
+      expect((await failedNote(a2.id)).status).toBe(200);
+      await decided(q.id, g.id, 'expired');
+    });
+
+    it('another attempt settles: no late success, the capture stays other_attempt_capture; nothing is emitted for it', async () => {
+      const { p, a } = await openAfterFailure();
+      const b = await start(p.id, 'timeout_before_accept');
+      await capture(a.id, 9000).send();
+      const [f] = await facts(p.id);
+      await capture(b.id, 9000).send();
+      expect(await status(p.id)).toBe('succeeded');
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      expect(await lateEventsOf(p.id)).toBe(0);
+      expect(await succeededEvents(p.id)).toBe(1);
+      expect((await items('capture_refund_unavailable')).filter((i) => i.factId === f.id)).toEqual([expect.objectContaining({ detail: { reason: 'other_attempt_capture' } })]);
+      await reconcile();
+      expect(await lateSuccesses(p.id)).toEqual([]);
+    });
+
+    it('crash recovery from committed state only: a fact whose processing died before finality is decided by the finality; one committed after finality and lost is recovered by the reconciler; neither is stranded', async () => {
+      const { p, a } = await openAfterFailure();
+      const svc = t.app.get(AttemptService);
+      // LABELLED: the process dies after FC-1: the fact is committed and nothing else happened (no in-memory state survives)
+      await admin.query(`INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source) VALUES ('test', $1, 'capture', $2, $3, 9000, 'TND', false, 'status_check')`, [`ptx_${a.id}`, p.id, a.id]);
+      const [f] = await facts(p.id);
+      await start(p.id, 'failure');
+      await decided(p.id, f.id, 'failed');
+      const late = await cancelledAfterFailure();
+      const spy = vi.spyOn(svc as unknown as { recordLateSuccess: () => Promise<void> }, 'recordLateSuccess').mockRejectedValueOnce(new Error('simulated crash after the fact committed'));
+      expect((await capture(late.a.id, 9000).send()).status).toBe(500);
+      spy.mockRestore();
+      expect(await lateSuccesses(late.p.id)).toEqual([]);
+      expect((await reconcile()).recorded).toBe(1);
+      expect(await lateSuccesses(late.p.id)).toEqual([expect.objectContaining({ amount: 9000, paymentStatus: 'cancelled' })]);
+      expect(await lateEventsOf(late.p.id)).toBe(1);
+    });
+  });
+
+  describe('S0-C12 item 14: several capture facts on one attempt', () => {
+    const lateEventsOf = async (pid: string) => (await outboxOf('payment.late_success.recorded', 'paymentId', pid)).length;
+    const sibling = (aid: string, txn: string, amount: number) => t.app.get(AttemptService).applyStatus(aid, { kind: 'succeeded', amount, currency: 'TND', providerTransactionId: txn } as never, {} as never).catch((e: unknown) => e);
+
+    it('before finality: both facts stay; neither has a late success at finality, whatever the amounts; both remain visible', async () => {
+      const { p, a } = await openAfterFailure();
+      await capture(a.id, 9100).send();
+      await sibling(a.id, `ptx_s_${a.id}`, 9000);
+      expect((await cancel(p.id)).status).toBe(200);
+      expect(await facts(p.id)).toHaveLength(2);
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      expect(await lateEventsOf(p.id)).toBe(0);
+      expect((await reconcile()).recorded).toBe(0);
+      expect(await lateSuccesses(p.id)).toEqual([]);
+    });
+
+    it('a second capture after a committed late success: the first stands; the second has none, on either channel, whichever amount; an equal capture after a wrong amount gets nothing', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      await capture(a.id, 9100).send();
+      const [first] = await lateSuccesses(p.id);
+      const stored = await one(`SELECT * FROM payment_late_success WHERE id = $1`, [first.id]);
+      await sibling(a.id, `ptx_s_${a.id}`, 9000); // the equal amount, after the wrong one
+      const n = signed({ eventId: `evt_${crypto.randomUUID()}`, type: 'payment.failed', reference: a.id, data: { failureCode: 'x' } });
+      await post(n.raw, n.signature);
+      expect(await facts(p.id)).toHaveLength(2);
+      expect(await lateSuccesses(p.id)).toEqual([first]);
+      expect(await one(`SELECT * FROM payment_late_success WHERE id = $1`, [first.id]), 'the committed record is untouched').toEqual(stored);
+      expect(await lateEventsOf(p.id)).toBe(1);
+      expect(await succeededEvents(p.id)).toBe(0);
+      expect((await reconcile()).recorded).toBe(0);
+      expect(await lateSuccesses(p.id)).toEqual([first]);
+    });
+
+    it('a contested sibling makes the attempt ambiguous too; different attempts of one payment are not ambiguous', async () => {
+      const c = await cancelledAfterFailure();
+      await capture(c.a.id, 9100).send();
+      await capture(c.a.id, 9200).send(); // contradiction: contested, not a second fact
+      expect(await facts(c.p.id)).toHaveLength(1);
+      const other = await create();
+      const x = await start(other.id, 'failure');
+      const y = await start(other.id, 'failure');
+      await capture(x.id, 9000).send();
+      await capture(y.id, 9000).send();
+      expect((await lateSuccesses(other.id)).map((l) => l.paymentStatus)).toEqual(['failed', 'failed']);
+      const z = await openAfterFailure();
+      await capture(z.a.id, 9100).send();
+      await capture(z.a.id, 9200).send();
+      await sibling(z.a.id, `ptx_t_${z.a.id}`, 9000);
+      expect((await cancel(z.p.id)).status).toBe(200);
+      expect(await lateSuccesses(z.p.id)).toEqual([]);
+    });
+
+    it('the lock: a fact insert waits for a decision holding the payment, and a decision waits for a fact being inserted; neither deadlocks nor aborts', async () => {
+      const { p, a } = await openAfterFailure();
+      const held = await admin.connect();
+      const waiting = async () => (await admin.query(`SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT 1 FROM payment WHERE id = $1 FOR KEY SHARE%'`)).rowCount;
+      let observed = false;
+      let open = false;
+      try {
+        await held.query('BEGIN');
+        open = true;
+        await held.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [p.id]);
+        const note = capture(a.id, 9000).send().then((r) => r);
+        const deadline = Date.now() + 10_000;
+        while (!observed && Date.now() < deadline) { observed = Number(await waiting()) > 0; if (!observed) await new Promise((r) => setTimeout(r, 25)); }
+        expect(observed, 'the fact insert waits for the decision').toBe(true);
+        expect(await facts(p.id), 'not committed under the decision').toEqual([]);
+        await held.query('COMMIT');
+        open = false;
+        expect((await note).status).toBeLessThan(500);
+      } finally {
+        if (open) await held.query('ROLLBACK');
+        held.release();
+      }
+      expect(await facts(p.id)).toHaveLength(1);
+      expect((await cancel(p.id)).status).toBe(200);
+      expect(await lateSuccesses(p.id)).toEqual([expect.objectContaining({ amount: 9000, paymentStatus: 'cancelled' })]);
+    });
+
+    it('fact insertion racing every finality, many times: finality is never aborted, at most one late success per attempt, every late success has its event and audit, and no ambiguous attempt gains one', async () => {
+      for (let i = 0; i < 12; i++) {
+        const { p, a } = await openAfterFailure();
+        await capture(a.id, 9000).send();
+        const [cancelled, , ] = await Promise.all([cancel(p.id), sibling(a.id, `ptx_r_${a.id}`, 9100), capture(a.id, 9000).send()]);
+        expect(cancelled.status, `round ${i}`).toBe(200);
+        expect(await status(p.id)).toBe('cancelled');
+        const ls = await lateSuccesses(p.id);
+        expect(ls.length, `round ${i}`).toBeLessThanOrEqual(1);
+        expect(await lateEventsOf(p.id)).toBe(ls.length);
+        expect(await audits('audit.payment_late_success.recorded', p.id)).toHaveLength(ls.length);
+        expect(await facts(p.id)).toHaveLength(2);
+        await reconcile();
+        expect(await lateSuccesses(p.id)).toHaveLength(ls.length);
+      }
+    });
+  });
+
+  describe('S0-C12 item 15: bounded, fair recovery with durable state', () => {
+    const lost = async () => {
+      const x = await cancelledAfterFailure();
+      const spy = vi.spyOn(t.app.get(AttemptService) as unknown as { recordLateSuccess: () => Promise<void> }, 'recordLateSuccess').mockRejectedValueOnce(new Error('simulated crash after the fact committed'));
+      expect((await capture(x.a.id, 9100).send()).status).toBe(500);
+      spy.mockRestore();
+      return { ...x, factId: (await facts(x.p.id))[0].id as string };
+    };
+    const state = async (factId: string) => one(`SELECT attempts, status, "lastFailure", "workAfter" IS NOT NULL AS due, "endedAt" IS NOT NULL AS ended FROM capture_recovery_state WHERE "factId" = $1`, [factId]);
+    const makeDue = (factId: string) => admin.query(`UPDATE capture_recovery_state SET "workAfter" = now() WHERE "factId" = $1 AND status = 'active'`, [factId]);
+    /** The next `n` fact transactions fail as `e`; the selection and everything else stay real. */
+    const failing = (e: unknown, match: (i: number) => boolean = () => true) => {
+      const db = t.app.get(DbService);
+      const tx = db.tx.bind(db);
+      let i = 0;
+      return vi.spyOn(db, 'tx').mockImplementation((async (work: never) => { if (match(i++)) throw e; return tx(work); }) as never);
+    };
+
+    it('the schedule: 2^n seconds for attempts 1 to 11, about 68 minutes, no cap reached; infrastructure pause 30 s doubling to 15 minutes; classes', () => {
+      expect(CAPTURE_RECOVERY_MAX_ATTEMPTS).toBe(12);
+      expect(Array.from({ length: 11 }, (_, i) => captureRecoveryWaitSeconds(i + 1))).toEqual([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]);
+      expect(Array.from({ length: 11 }, (_, i) => captureRecoveryWaitSeconds(i + 1)).reduce((a, b) => a + b, 0)).toBe(4094);
+      expect([1, 2, 3, 4, 5, 6, 7, 40].map(captureInfrastructurePauseMs)).toEqual([30_000, 60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]);
+      for (const [code, cls] of [['08006', 'infrastructure'], ['53300', 'infrastructure'], ['57P01', 'infrastructure'], ['ECONNREFUSED', 'infrastructure'], ['40001', 'transient'], ['40P01', 'transient'], ['55P03', 'transient'], ['57014', 'transient'], ['23514', 'permanent'], ['23505', 'permanent'], ['42P01', 'unknown']] as const) {
+        expect(classifyCaptureRecoveryFailure(Object.assign(new Error('x'), { code })), code).toBe(cls);
+      }
+      expect(classifyCaptureRecoveryFailure(new Error('boom'))).toBe('unknown');
+    });
+
+    it('a transient failure counts once and waits; at 12 it is durably exhausted, visible to the Owner kind, the fact kept; no more attempts; a provider redelivery still completes it', async () => {
+      const { p, a, factId } = await lost();
+      const spy = failing(Object.assign(new Error('x'), { code: '40001' }));
+      try {
+        await reconcile();
+        expect(await state(factId)).toMatchObject({ attempts: 1, status: 'active', lastFailure: 'transient_failure', due: true, ended: false });
+        await reconcile();
+        expect((await state(factId)).attempts, 'not due: not attempted').toBe(1);
+        for (let n = 2; n <= 12; n++) {
+          await makeDue(factId);
+          await reconcile();
+          expect((await state(factId)).attempts).toBe(n);
+        }
+        expect(await state(factId)).toMatchObject({ attempts: 12, status: 'exhausted', due: false, ended: true });
+        await makeDue(factId);
+        await reconcile();
+        expect((await state(factId)).attempts, 'no 13th').toBe(12);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      expect((await reconcile()).recorded, 'exhausted facts are no longer selected').toBe(0);
+      const exhausted = await admin.query(`SELECT s.status FROM capture_recovery_state s WHERE s."factId" = $1`, [factId]);
+      expect(exhausted.rows).toEqual([{ status: 'exhausted' }]);
+      expect((await facts(p.id))[0].id).toBe(factId);
+      expect((await capture(a.id, 9100).send()).status).toBe(200);
+      expect(await lateSuccesses(p.id)).toEqual([expect.objectContaining({ amount: 9100 })]);
+    });
+
+    it('a guard refusing an eligible fact is permanent: refused at once, visible, not retried; state survives a new worker instance', async () => {
+      const { factId } = await lost();
+      const spy = failing(Object.assign(new Error('x'), { code: '23514' }));
+      try {
+        await reconcile();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await state(factId)).toMatchObject({ attempts: 1, status: 'refused', lastFailure: 'permanent_refusal', ended: true });
+      const fresh = new CaptureReconciler(t.app.get(DbService), t.app.get(OutboxService), t.app.get(PaymentAudit));
+      expect((await fresh.reconcileOnce()).recorded, 'a restarted worker reads the same durable state').toBe(0);
+    });
+
+    it('fairness: one fact failing never holds another; 100 older ambiguous facts consume no attempt and hold nothing back', async () => {
+      const amb = await cancelledAfterFailure();
+      await admin.query(`INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "observedAt")
+        SELECT 'test', 'ptx_old_' || i || '_' || $3::text, 'capture', $1::uuid, $2::uuid, 9100, 'TND', false, 'status_check', now() - interval '1 day' FROM generate_series(1, 100) i`, [amb.p.id, amb.a.id, amb.a.id]);
+      const one1 = await lost();
+      const two = await lost();
+      const spy = failing(Object.assign(new Error('x'), { code: '40001' }), (i) => i === 0);
+      try {
+        expect((await reconcile()).recorded, 'the second fact proceeds in the same pass').toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await lateSuccesses(one1.p.id)).length + (await lateSuccesses(two.p.id)).length).toBe(1);
+      expect(Number((await one(`SELECT count(*) AS n FROM capture_recovery_state s JOIN provider_transaction_fact f ON f.id = s."factId" WHERE f."paymentId" = $1`, [amb.p.id])).n), 'ambiguous facts consume nothing').toBe(0);
+      await admin.query(`UPDATE capture_recovery_state SET "workAfter" = now() WHERE status = 'active'`);
+      await reconcile();
+      expect(await lateSuccesses(one1.p.id)).toHaveLength(1);
+      expect(await lateSuccesses(two.p.id)).toHaveLength(1);
+    });
+
+    it('competing passes count one attempt and record one late success', async () => {
+      const { p, factId } = await lost();
+      const mine = t.app.get(CaptureReconciler);
+      const other = new CaptureReconciler(t.app.get(DbService), t.app.get(OutboxService), t.app.get(PaymentAudit));
+      const passes = await Promise.all([mine.reconcileOnce(), other.reconcileOnce()]);
+      expect(passes.reduce((n, r) => n + r.recorded, 0)).toBe(1);
+      expect(await lateSuccesses(p.id)).toHaveLength(1);
+      expect(await one(`SELECT count(*)::int AS n FROM capture_recovery_state WHERE "factId" = $1`, [factId])).toEqual({ n: 0 });
+    });
+
+    it('an infrastructure failure consumes no attempt; the worker pauses, doubling, doing no database work while paused; it recovers by itself', async () => {
+      const { p, factId } = await lost();
+      const worker = new CaptureReconciler(t.app.get(DbService), t.app.get(OutboxService), t.app.get(PaymentAudit));
+      let clock = Date.now();
+      const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      const db = t.app.get(DbService);
+      const down = Object.assign(new Error('x'), { code: '08006' });
+      const query = vi.spyOn(db, 'query').mockRejectedValue(down);
+      try {
+        expect(await worker.reconcileOnce()).toEqual({ recorded: 0 });
+        const calls = query.mock.calls.length;
+        expect(await worker.reconcileOnce(), 'paused').toEqual({ recorded: 0, paused: true });
+        expect(query.mock.calls.length, 'no database work while paused').toBe(calls);
+        clock += 29_000;
+        expect((await worker.reconcileOnce()).paused).toBe(true);
+        clock += 1_001;
+        await worker.reconcileOnce(); // second failure: 60 s
+        clock += 59_000;
+        expect((await worker.reconcileOnce()).paused).toBe(true);
+        clock += 1_001;
+        await worker.reconcileOnce();
+        for (let i = 0; i < 8; i++) { clock += 900_001; await worker.reconcileOnce(); }
+        clock += 899_000;
+        expect((await worker.reconcileOnce()).paused, 'capped at 15 minutes').toBe(true);
+        query.mockRestore();
+        clock += 1_001;
+        expect((await worker.reconcileOnce()).recorded, 'recovery resumes by itself').toBe(1);
+        expect(await one(`SELECT count(*)::int AS n FROM capture_recovery_state WHERE "factId" = $1`, [factId]), 'no attempt was consumed').toEqual({ n: 0 });
+        expect(await lateSuccesses(p.id)).toHaveLength(1);
+        expect((await worker.reconcileOnce()).paused, 'the pause is over').toBeUndefined();
+      } finally {
+        query.mockRestore();
+        now.mockRestore();
+      }
+    });
+
+    it('a mid-pass infrastructure failure stops the pass and charges no fact', async () => {
+      const a = await lost();
+      const spy = failing(Object.assign(new Error('x'), { code: '53300' }));
+      const worker = new CaptureReconciler(t.app.get(DbService), t.app.get(OutboxService), t.app.get(PaymentAudit));
+      try {
+        expect(await worker.reconcileOnce()).toEqual({ recorded: 0 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await one(`SELECT count(*)::int AS n FROM capture_recovery_state WHERE "factId" = $1`, [a.factId])).toEqual({ n: 0 });
+      await reconcile();
+      expect(await lateSuccesses(a.p.id)).toHaveLength(1);
     });
   });
 

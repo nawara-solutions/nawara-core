@@ -316,14 +316,20 @@ describeWithEnv('capture evidence (Core V2 S0-C11) — real PostgreSQL', ['TEST_
       expect(await succeededEvents(ended.id)).toBe(0);
     });
 
-    it('a verified capture against a confirmed failure on an open payment is recorded, changes nothing and emits no settlement', async () => {
+    it('a verified capture against a confirmed failure on an open payment is recorded as a fact, changes nothing and emits no settlement or late success (FN-2); the payment\'s own finality then records its late success', async () => {
       const p = await create();
       const a = await start(p.id, 'failure'); // a provider-confirmed failure; one attempt of two: the payment stays open
       expect(await status(p.id)).toBe('created');
       await capture(a.id, 9000, `ptx_late_${a.id}`).send().expect(200);
-      expect(await lateSuccesses(p.id)).toMatchObject([{ amount: 9000, paymentStatus: 'created' }]);
+      expect(await facts(a.id)).toHaveLength(1);
+      expect(await lateSuccesses(p.id)).toEqual([]); // S0-C12 FN-2: until 0026 this recorded a late success stating `created`, which Billing could never hold
+      expect(await lateEvents(p.id)).toBe(0);
       expect(await status(p.id)).toBe('created');
       expect(await succeededEvents(p.id)).toBe(0);
+      await start(p.id, 'failure');
+      expect(await status(p.id)).toBe('failed');
+      expect(await lateSuccesses(p.id)).toMatchObject([{ amount: 9000, paymentStatus: 'failed' }]);
+      expect(await lateEvents(p.id)).toBe(1);
     });
 
     it('a verified capture after an inferred failure settles', async () => {
@@ -401,6 +407,8 @@ describeWithEnv('capture evidence (Core V2 S0-C11) — real PostgreSQL', ['TEST_
       await expect(lateRow(p, a, others)).rejects.toMatchObject(lateRefused);
       await expect(lateRow(p, a, mine, 4500)).rejects.toMatchObject(lateRefused);
       await expect(lateRow(p, a, mine, 9000, 'EUR')).rejects.toMatchObject(lateRefused);
+      await expect(lateRow(p, a, mine), 'S0-C12 FN-2: the payment is not final').rejects.toMatchObject({ constraint: 'payment_late_success_not_final' });
+      await admin.query(`UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = $1`, [p.id]);
       await lateRow(p, a, mine);
       const { p: p3, a: a3 } = await rigged();
       const contested = await fact(a3, p3);

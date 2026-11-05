@@ -360,6 +360,34 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
   // ─────────────────────────────────────────────────────────────────────────────────────────────── captures, items, balances
 
   describe('captures without a refund path, Q8 items and balances (R6H-5, R6H-9, R6H-12)', () => {
+    it('S0-C12 item 14(f): multiple_captures is the Owner\'s alone, Company-scoped, read-only and derived: stable by fact, no row added by a replay, paged, no service read, nothing it can authorize', async () => {
+      const { payment, attempt } = await captured();
+      const txn = `sim_dup_${randomUUID()}`;
+      const note = { eventId: `x_${randomUUID()}`, type: 'payment.succeeded', reference: attempt.id, providerTransactionId: txn, amount: 9000, currency: 'TND' };
+      await signed(note).expect(200);
+      const mine = async (bearer = 'owner-jwt') => (await itemsOf('multiple_captures', bearer)).filter((i) => i.paymentId === payment.id);
+      const rows = await mine();
+      expect(rows).toHaveLength(2);
+      const facts = (await admin.query(`SELECT id FROM provider_transaction_fact WHERE "paymentId" = $1 AND kind = 'capture'`, [payment.id])).rows.map((r) => r.id as string).sort();
+      expect(rows.map((r) => r.id).sort(), 'keyed by the fact').toEqual(facts);
+      expect(rows[0]).toMatchObject({ kind: 'multiple_captures', amount: 9000, currency: 'TND', detail: { attemptId: attempt.id, attemptCaptures: 2, contested: false, lateSuccessId: null, inReview: true, potentiallyEquivalent: true } });
+      await signed(note).expect(200); // a replay
+      await signed({ ...note, eventId: `x_${randomUUID()}` }).expect(200); // the same capture under a new notification id
+      expect((await mine()).map((r) => r.id).sort(), 'no row added').toEqual(facts);
+      expect(await mine('owner2-jwt'), 'another Company\'s Owner sees nothing').toEqual([]);
+      for (const k of ['multiple_captures', 'capture_recovery_exhausted']) {
+        const service = await serviceItems(k);
+        expect([service.status, service.body.code], 'a service read never reaches it').toEqual([400, 'invalid_reconciliation_request']);
+      }
+      expect((await serviceItems('late_success')).status, 'its other kinds are unchanged').toBe(200);
+      const first = (await ownerGet('/reconciliation-items?kind=multiple_captures&limit=1').expect(200)).body.items as Row[];
+      const next = (await ownerGet(`/reconciliation-items?kind=multiple_captures&limit=1&after=${first[0]!.id}`).expect(200)).body.items as Row[];
+      expect(first).toHaveLength(1);
+      if (next[0]) expect(next[0].id > first[0]!.id, 'keyset by id').toBe(true);
+      expect((await request(server()).post('/payment/admin/reconciliation-items').set('authorization', 'Bearer owner-jwt').send({})).status, 'read-only').toBe(404);
+      expect((await one(`SELECT status FROM payment WHERE id = $1`, [payment.id])).status).toBe('succeeded');
+    });
+
     it('a distinct second capture of a succeeded attempt is kept as its own fact; neither capture is refundable by the original path; both are visible', async () => {
       const { payment, attempt } = await captured();
       await signed({ eventId: `x_${randomUUID()}`, type: 'payment.succeeded', reference: attempt.id, providerTransactionId: `sim_dup_${randomUUID()}`, amount: 9000, currency: 'TND' }).expect(200);

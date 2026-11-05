@@ -24,10 +24,12 @@ export const AUTHORIZATION_PENDING_ITEM_AFTER_MINUTES = 15;
  */
 export const ITEM_KINDS = [
   'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
-  'association', 'capture_refund_unavailable', 'capture_mismatch',
+  'association', 'capture_refund_unavailable', 'capture_mismatch', 'multiple_captures', 'capture_recovery_exhausted',
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
-export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS;
+/** Core V2 S0-C12 items 14(f), 15: `multiple_captures` and `capture_recovery_exhausted` are the Owner's alone; a service read never reaches them. */
+const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted'];
+export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS.filter((k) => !OWNER_ONLY_ITEM_KINDS.includes(k));
 
 export type ItemScope = { kind: 'owner'; companyId: string } | { kind: 'producer'; producer: string };
 
@@ -114,6 +116,23 @@ const ITEM_SQL: Record<ItemKind, string> = {
    WHERE f.kind = 'capture' AND (f.amount <> p.amount OR trim(f.currency) <> trim(p.currency))
      AND NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id)
      AND (p.status NOT IN ('succeeded', 'failed', 'cancelled', 'expired') OR trim(f.currency) !~ '^[A-Z]{3}$')`,
+  // Core V2 S0-C12 item 14(f): visibility only, derived at read: one row per capture fact of an ambiguous attempt, keyed by the fact. Nothing is stored, so a
+  // replay adds no row and existing facts appear with no backfill. "Potentially equivalent" is S0-C11 item 3's derived observation, never a determination.
+  multiple_captures: `SELECT f.id, f."paymentId", f.id AS "factId", f.amount, f.currency, f."observedAt" AS at,
+      jsonb_build_object('attemptId', f."attemptId", 'source', f.source,
+        'attemptCaptures', (SELECT count(*) FROM provider_transaction_fact g WHERE g."attemptId" = f."attemptId" AND g.kind = 'capture'),
+        'contested', EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id),
+        'lateSuccessId', (SELECT l.id FROM payment_late_success l WHERE l."factId" = f.id),
+        'inReview', NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id),
+        'potentiallyEquivalent', EXISTS (SELECT 1 FROM provider_transaction_fact g WHERE g."attemptId" = f."attemptId" AND g.kind = 'capture' AND g.id <> f.id
+          AND g.amount = f.amount AND trim(g.currency) = trim(f.currency))) AS detail
+    FROM provider_transaction_fact f JOIN payment p ON p.id = f."paymentId"
+   WHERE f.kind = 'capture' AND EXISTS (SELECT 1 FROM provider_transaction_fact g WHERE g."attemptId" = f."attemptId" AND g.kind = 'capture' AND g.id <> f.id)`,
+  // Core V2 S0-C12 item 15: a fact the recovery pass stopped retrying, until a late success names it: the fact is kept, and this is its visibility
+  capture_recovery_exhausted: `SELECT f.id, f."paymentId", f.id AS "factId", f.amount, f.currency, s."endedAt" AS at,
+      jsonb_build_object('attemptId', f."attemptId", 'status', s.status, 'attempts', s.attempts, 'lastFailure', s."lastFailure", 'firstFailedAt', s."firstFailedAt") AS detail
+    FROM capture_recovery_state s JOIN provider_transaction_fact f ON f.id = s."factId" JOIN payment p ON p.id = f."paymentId"
+   WHERE s.status <> 'active' AND NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id)`,
 };
 
 /**
@@ -150,6 +169,7 @@ export class ReconciliationService {
   /** One kind's items for a scope, by id (keyset). */
   async items(scope: ItemScope, kind: string, after: string | undefined, limit: number): Promise<ReconciliationItem[]> {
     if (!(ITEM_KINDS as readonly string[]).includes(kind) || (after !== undefined && !UUID.test(after)) || !Number.isInteger(limit) || limit < 1 || limit > 200) throw invalid();
+    if (scope.kind === 'producer' && !PRODUCER_ITEM_KINDS.includes(kind as ItemKind)) throw invalid(); // the same answer as a kind that does not exist
     const base = ITEM_SQL[kind as ItemKind];
     const scopeSql = scope.kind === 'owner' ? `p."sellerType" = 'company' AND p."sellerId" = $1` : `p.producer = $1`;
     const { rows } = await this.db.query<Record<string, any>>(
