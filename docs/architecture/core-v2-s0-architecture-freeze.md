@@ -248,13 +248,15 @@ status change still needs its own explicit owner authorization.
      exactly that capture (`late_capture`) whose chargeback fact equals the capture's full amount, in its currency; no purchase exists
      from that late success; and no refund case of that capture is live or completed. It creates no refund case, no provider refund, no
      purchase, no entitlement and no obligation change (the request keeps its cash-return obligation, violations and restrictions, as
-     under L-3). The loss, its chargeback fact and the case are kept; `chargeback_returned` (the provider's reversal) is distinct from
+     under L-3). The loss, its chargeback fact and the case are kept; `chargeback_returned` (the provider's reversal; *corrected by S0-C10 item 9: the captured money returned to the payer by a chargeback, never a
+     provider reversal of a chargeback*) is distinct from
      `refund_completed` (a refund executed through Payment). A partial chargeback never resolves the case: it stays open with a review
      case, and no remainder is refunded or sold automatically.
   6. *Mutual exclusion.* One captured movement has at most one return: a refund case is refused while the payment's exposure is not
      `clear` (FC-5, R6A-3, unchanged); a chargeback after a completed refund of that capture is `chargeback_refund_overlap` (S6h,
      unchanged), never `chargeback_returned`; L-4 is refused once a loss is recorded (S0-C8 item 8) and, per item 4, while a dispute is
-     open; a chargeback of an L-4 purchase never reverses it (FC-4) and opens one base-only recovery obligation per loss (S6f).
+     open; a chargeback of an L-4 purchase never reverses it (FC-4) and opens one base-only recovery obligation per loss (S6f) *(amended by S0-C10 item 5: at most one per assisted purchase, for the first
+     qualifying loss)*.
   7. *Ordering outcomes (no synchronous guarantee).* Dispute recorded before the exposure read: refused (item 4). Loss already at Billing:
      refused (`chargeback_recorded`). Dispute recorded at Payment after the read, before the commit: the application commits; a later
      loss follows item 2 for that L-4 purchase (preserved, base-only recovery, T3), exactly as an assisted purchase charged back after
@@ -275,9 +277,98 @@ status change still needs its own explicit owner authorization.
       dispute notifications and events give no second effect; (7) capture or amount mismatches fail safe; (8) Payment's final state and
       provider evidence are unchanged. The register entries PAY-09 G, PAY-14 H, EVT-03, BIL-32 H and BIL-33 H record its contract.
       Implements and activates nothing; each Billing, Payment, harness and certification PR needs a separate Owner authorization.
+- **S0-C10 Repeated and excess chargeback losses (2026-11-05, ADOPTED CONTRACT, the Owner's S0-C10 contract GO: decisions C10-1 to C10-7;
+  clarification of FC-4, FC-6, B10, R6F-3, R6F-8 and S0-C9 item 6, with an Owner-approved amendment of R6F-8's per-loss obligation in item 5;
+  logic-audit findings F-03, F-07; F-26 as a scope limit). NOT IMPLEMENTED: the Billing implementation and its certification each need a separate
+  Owner authorization.** Assigns no liability. FC-1, FC-5, S0-C9, S0-C11 to S0-C13 and every recovery invariant not named here are unchanged and
+  govern. Before this entry a second full loss of an assisted purchase could open a second recovery obligation (`recovery_obligation` is unique per
+  dispute), a second full chargeback of a direct purchase could record a second write-off (`financial_loss` is unique per chargeback fact), and an
+  assisted chargeback above the payment failed on every recovery pass with no review.
+  1. *Facts (C10-1).* Every authenticated provider debit stays recorded, whatever follows: as Payment's chargeback fact when Payment binds it
+     (FC-1), otherwise as Payment's preserved conflict observation (S0-C9, S0-C13 Part A). At Billing every verified loss stays a
+     `payment_dispute_loss`. A refusal of an automatic effect never removes, clamps or rewrites a fact, a loss or its provider-stated amount.
+  2. *Recognition is not liability (C10-1, C10-4).* **Accounting recognition** states that a provider debit occurred: every chargeback fact is
+     included at once in FC-5 payment and Company balances and listed in Payment's chargeback reconciliation items, never clamped, with
+     `netRetained` free to go negative, whether or not any liability is assigned. **Liability** states who bears it. Recognition never assigns
+     liability and never by itself creates an obligation, T3, purchase reversal, write-off or `FinancialLoss`. A recognized debit with no assigned
+     bearer is an **unassigned provider debit**: it stays unassigned and visible (item 7), and is never assigned to Nawara, the Organization or the
+     beneficiary without a separately adopted liability policy.
+  3. *The capture and its loss cap (C10-2, Constraint A).* A loss is bound to one capture: for `settling_capture`, the payment's settling capture,
+     whether or not the loss names its fact; for `late_capture`, the fact it names (S0-C9 item 2). The capture's **gross** is that fact's amount (for
+     a settling capture, the payment request's amount, which equals it). Its **cumulative loss** is the sum of the chargeback amounts of every
+     verified Billing loss bound to it, in its currency. An automatic loss effect applies only to a loss in the capture's currency for which the
+     cumulative loss, including that loss, does not exceed the gross. No reversal, win or later fact reduces the cumulative loss under this entry
+     (item 9).
+  4. *First automatic effect.* Only a verified FULL loss (its chargeback equals the gross) within the cap has an automatic effect, once per
+     capture, and only as already approved: for an assisted purchase, one base-only recovery obligation and T3 (S6f, D5; item 5); for a direct
+     purchase, its reversal (FC-4) and one `direct_chargeback_write_off` (FC-6). The write-off is recognized only for the loss whose effect
+     reversed the purchase, at most one per capture. This entry widens neither effect.
+  5. *One obligation per assisted purchase (C10-2, Constraint B; amends R6F-8 and S0-C9 item 6).* An assisted purchase has at most ONE automated
+     Organization recovery obligation across its whole capture and dispute history, in any state: recovering it, writing it off or settling it never
+     permits another. A second dispute, another capture reference or another loss never opens a second obligation. R6F-8's "a FULL chargeback ...
+     opens `recovery_obligation`" and S0-C9 item 6's "one base-only recovery obligation per loss" read: for the first loss that qualifies under
+     item 4; every later loss of that purchase goes to review (item 6). When two full losses arrive, the first recorded by Billing opens it; the
+     amount is the same base either way.
+  6. *Repeated, excess and contradictory losses (C10-2, C10-3).* No automatic effect, and no obligation, T3, reversal, write-off or `FinancialLoss`,
+     for: a further loss of a purchase that already has its obligation or reversal; a loss that takes its capture's cumulative loss above the
+     gross, or whose own chargeback exceeds it; a loss in another currency; a loss bound to a capture that is not the purchase's. Each goes to
+     review: for an assisted purchase in the adopted `recovery_review`, with the new reasons `repeated_loss` (Constraint B) and
+     `chargeback_exceeds_capture` (Constraint A), alongside `partial_chargeback` and `refund_completed`; for a direct purchase in the existing
+     dispute-loss review (`reversed_by_another_chargeback`, `chargeback_exceeds_payment`, `currency_mismatch`, and `chargeback_exceeds_capture` for
+     a partial that takes the cumulative loss above the gross). When a loss meets both an excess condition and a partial one, the excess reason
+     applies. A review is a classification, never a retry: it ends F-07's repeated failure.
+  7. *Monitored, visible, fail-closed (C10-3, C10-4).* Each review keeps the loss, its chargeback fact, its dispute, payment, capture and purchase,
+     and the Organization and Company it belongs to. An assisted `repeated_loss` or `chargeback_exceeds_capture` review is listed for the Owner as a
+     BIL-33 reconciliation case of the new type `chargeback_loss_review` (evidence the loss's dispute; amount and currency the loss's), which is not
+     review-only and has no resolution kind under this entry: it stays open. A direct one stays the existing non-acknowledgeable
+     `contradictory_effect` case. No acknowledgement, dismissal, liability assignment or automatic closure is added. While open nothing is released:
+     the capture's exposure stays as recorded, so refunds and L-4 of that capture remain refused by their existing rules.
+  8. *Committed effects stand.* A loss arriving after an obligation, reversal or write-off never undoes, reduces or duplicates it; it is reviewed
+     under item 6.
+  9. *Provider reversals (C10-5, F-26; scope limit).* A `won` notification or any reversal statement does not prove that funds were restored.
+     Under this entry nothing clears exposure, reduces a cumulative loss, adjusts an obligation, write-off or `FinancialLoss`, or reassigns liability
+     because of one. Unchanged: a `won` after a `lost` stays a `terminal_contradiction` conflict (S0-C9, S0-C13 Part A), and a `won` of a dispute
+     with no chargeback fact clears that dispute's exposure as before (S6e), since no money left. S0-C9 item 5's gloss of `chargeback_returned` is
+     corrected: it means the provider returned the captured money to the payer by a chargeback, never a provider reversal of a chargeback.
+     Reversal-based clearance stays separately gated.
+  10. *Partial chargebacks.* R6F-3 stands: a partial within the cap is review only (`partial_chargeback`), and its existing case and Owner
+      acknowledgement are unchanged. A full loss after a partial, or partials summing above the gross, exceed the cap (item 6).
+  11. *Idempotency, crash, replay and concurrency.* Unchanged safeguards keep one record per provider event (one observation per webhook event,
+      unique chargeback fact identity, one Billing loss and one effect per dispute, deterministic event and audit ids, verified-only consumption).
+      The recovery and dispute-loss workers decide under the existing Organization and payment request locks, and the database re-derives every
+      condition, so a crash or concurrent pass commits either the whole effect or nothing and a retry finds the committed decision.
+  12. *Database boundary (C10-2).* Billing enforces at the database: one `recovery_obligation` per `purchaseId`, in any state (beside the
+      existing per-dispute key); its insert guard re-derives the cap (item 3) from recorded losses; one `direct_chargeback_write_off` per capture;
+      `recovery_review` reasons widened by item 6 only, still append-only and one per loss.
+  13. *Historical records (C10-6).* Existing obligations, write-offs, losses, reviews and provider facts are never backfilled, rewritten, deleted
+      or compensated. The implementation's migration first looks for an assisted purchase with more than one obligation, or a capture with more
+      than one direct write-off; if any exist it refuses to apply and reports them, changing nothing, for the Owner's decision. Losses recorded
+      before the implementation are classified under item 6 only when first visited after it; a loss already visited keeps its recorded outcome.
+  14. *Scenarios (expected outcomes).*
+
+      | Scenario | Outcome |
+      |---|---|
+      | First full chargeback of an assisted purchase | One base-only obligation and T3; entitlement preserved (B10) |
+      | Second full chargeback of the same capture | Recorded; `recovery_review` `repeated_loss`; `chargeback_loss_review` case; no second obligation or T3 |
+      | Two partials whose sum exceeds the gross | First: `partial_chargeback`. Second: `chargeback_exceeds_capture`, open case; no effect from either |
+      | Repeated notification or event, same identity | One observation, fact, loss and effect; replays change nothing |
+      | Different verified debit facts on one capture | Each recorded; the first full within the cap applies; the others reviewed under item 6. A second chargeback statement of the same dispute stays a Payment conflict and is refused by Billing, as today |
+      | Several capture references on one assisted purchase | A loss of a capture that is not the purchase's has no purchase effect (S0-C9 item 2); at most one obligation for the purchase in any case |
+      | Direct purchase charged back again | One reversal (FC-4) and one write-off per capture; the second loss is reviewed (`reversed_by_another_chargeback`), no second write-off |
+      | Excess loss with no assigned bearer | Recognized in balances (negative `netRetained` allowed); unassigned; open review case |
+      | Reversal with no authenticated funds-restoration evidence | No clearance or adjustment (item 9) |
+      | Crash, replay, concurrent visits | One decision per loss; at most one obligation per purchase; the database refuses a second |
+      | Historical duplicate obligations or write-offs | Kept as recorded; the migration refuses and reports them (item 13) |
+
+  15. *Acceptance (later implementation, simulation only; separate Owner authorization).* Service and database tests prove Constraint A and
+      Constraint B independently: a second obligation for the same purchase under another dispute is refused by the database even when the cap would
+      allow it, and a loss above the cap is refused an effect even when the purchase has no obligation. Real events across processes cover the first
+      full loss, the second full loss and partials above the gross for an assisted purchase, and the second full loss of a direct purchase; refunds and
+      L-4 of that capture stay refused. Existing tests that protect valid behaviour stay; the register entries BIL-28 G, BIL-33 L and BIL-34 G record
+      this contract. ADR-0035, ADR-0044 Part B and ADR-0069 stay Proposed; no Accepted ADR is edited.
 - **S0-C11 Capture evidence for commercial effect (2026-11-03, owner-approved clarification of FC-1, FI-13, S4c F-4 and S0-C8 item 1, with
   owner-approved additions in items 2, 3, 7 and 8; logic-audit findings F-27, F-28).** The number S0-C10 is reserved for a separate draft that is not
-  adopted. FC-1 to FC-5, S0-C8 and S0-C9 are unchanged and govern except as stated here. The first recorded fact under an identity
+  adopted. *(S0-C10 was adopted on 2026-11-05; see above.)* FC-1 to FC-5, S0-C8 and S0-C9 are unchanged and govern except as stated here. The first recorded fact under an identity
   `(provider, providerTxnId, 'capture')` is the only evidence of what was captured under that identity.
   1. *Verified capture.* A capture is **verified for commercial effect** only when all hold: it reached Payment through an authenticated provider
      channel; it is committed as a `provider_transaction_fact`; the observation equals that fact in amount, currency, payment and attempt; and the
@@ -502,7 +593,9 @@ status change still needs its own explicit owner authorization.
       `multiple_captures`; the recovery test's equal capture moved to its own attempt, keeping what it proves. Reactivation stays out until its decision.
 
 - **S0-C13 Part A Terminal dispute conflicts: visibility and recording audit (2026-11-05, ADOPTED CONTRACT, the Owner's Part A GO: clarification of S0-C9 items 3
-  and 8; logic-audit finding F-02; register PAY-09 J, PAY-12 K). IMPLEMENTED for development and simulation only, not certified.** Parts B and C are not adopted and
+  and 8; logic-audit finding F-02; register PAY-09 J, PAY-12 K). IMPLEMENTED (#479) and PASS FOR DEVELOPMENT AND SIMULATION ONLY (the Owner's decision, 2026-11-05, at `069da1f`, main CI 42102155049 24 of 24): not
+  production-certified and not real-money ready.** Retained: S0-C11 L2 (two-Company cross-process isolation); a mandatory security review of provider-reference
+  correlation and cross-tenant disclosure before real-provider certification; items 8 and 9's exclusions; exposure `unresolved` until Part B. Parts B and C are not adopted and
   are not authorized. S0-C9, S0-C11 and S0-C12 are unchanged and govern. Before this entry a conflict was stored and counted as `unresolved` exposure, but no Owner
   API listed it and no audit record was written for it.
   1. *Owner item.* Every `payment_dispute_observation` with disposition `conflict`, exactly the rows the exposure's `conflicts` field counts, of a payment whose
@@ -593,7 +686,7 @@ ADR number 0066 is skipped: a draft ADR-0066 exists on an unmerged branch. Numbe
   chargebackNet` may become negative. `available = max(0, netRetained − inFlight − disputeExposure)` is used only to admit a new
   attempt, with `disputeExposure` net of chargeback facts already linked to the dispute. No new refund case while a dispute is open.
 - **FC-6 Losses.** A `FinancialLoss` only from recorded facts showing money not retained (an over-return; a direct final-lost
-  chargeback write-off) or an owner write-off of an unrecoverable recovery obligation; keyed per evidence fact and kind; corrected by
+  chargeback write-off, at most one per capture under S0-C10 item 4) or an owner write-off of an unrecoverable recovery obligation; keyed per evidence fact and kind; corrected by
   append-only adjustments. A cause alone opens reconciliation, not a loss.
 - **FC-7 Receipts.** As [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md).
 
