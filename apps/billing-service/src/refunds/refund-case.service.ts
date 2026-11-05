@@ -171,7 +171,8 @@ export class RefundCaseService {
     ctx: TransitionContext) {
     const read = await this.payment.capture(input.paymentId, factId);
     if (read.kind === 'unknown') throw billingError(503, 'refund_payment_unavailable', BILLING_MESSAGES.refundPaymentUnavailable);
-    if (read.kind === 'not_found') throw notEligible();
+    // S0-C12 item 17: a currency ineligibility Payment states about this very fact is known and permanent; the answer carries no value
+    if (read.kind === 'not_found' || read.kind === 'ineligible_currency') throw notEligible();
     const capture = read.capture;
     // S6 certification: never a case Payment would definitively refuse (the last capture backing the sale, R6H-5)
     if (capture.conflicted || !capture.refundableOnItsOwn) throw notEligible();

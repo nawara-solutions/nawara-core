@@ -348,7 +348,7 @@ status change still needs its own explicit owner authorization.
 - **S0-C12 Wrong-amount captures (2026-11-04, ADOPTED #467: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with owner-approved
   additions D-1 and D-B; logic-audit findings F-01, F-20, FN-1; decisions A1 and N1, with N3 future-gated). Items 1 to 13: implemented and CONDITIONALLY
   certified for development and simulation only (Owner, 2026-11-04, at `b775ff3`), open for final closure review. Items 14 to 20 and the references to them
-  (the Owner's FN-1 contract GO, 2026-11-04): ADOPTED CONTRACT, NOT IMPLEMENTED (item 20).** A *wrong-amount capture* is a capture
+  (the Owner's FN-1 contract GO, 2026-11-04): ADOPTED CONTRACT, PARTLY IMPLEMENTED (item 20).** A *wrong-amount capture* is a capture
   verified under S0-C11 item 1 whose amount or currency differs from its payment's. It is an immutable financial observation, never a sale. FC-1 to FC-5, S4c
   F-1 to F-5, S0-C8, S0-C9 and S0-C11 are unchanged and govern except as stated here.
   1. *No commercial effect by itself.* Recording it settles nothing, finalizes or reopens no payment, changes no attempt state, creates no purchase or
@@ -392,8 +392,9 @@ status change still needs its own explicit owner authorization.
      - *A value no fact can hold* (item 16 lists the shapes): the authenticated evidence stays stored as received and is not a fact, as under S0-C11 item 4,
        and item 16 governs its quarantine. **[Documented limitation, O-2: approved for development and simulation only; a real-provider blocker, item 19]** No
        Owner API shows it; making it Owner-visible or actionable needs a separately approved policy.
-  9. *Billing.* Under this entry only a late success opens a Billing case. Billing reads PAY-12 kinds it names; a kind or reason that no contract names
-     opens nothing and is logged. **Billing's D-1, D-B and allow-list implementation is certified before Payment emits a wrong-amount late success.**
+  9. *Billing.* Under this entry only a late success opens a Billing case. R6H-5's existing `unmatched_capture` case, for a further capture of a `succeeded`
+     payment (`duplicate_capture`, `other_attempt_capture`), is outside this sentence and stays; this entry adds no other case. Billing reads PAY-12 kinds it
+     names; a kind or reason that no contract names opens nothing and is logged. **Billing's D-1, D-B and allow-list implementation is certified before Payment emits a wrong-amount late success.**
   10. *Audit.* Commercial actions (version 1, no trusted scope), each written in its record's own transaction, never before its catalog entry exists:
       `payment_late_success.recorded` for every late success, and `payment_capture_mismatch.recorded` once per wrong-amount capture fact. Identifiers,
       reason codes and integer amounts only; a currency only when it matches `^[A-Z]{3}$`; never raw provider text, secrets or notification bodies.
@@ -432,7 +433,9 @@ status change still needs its own explicit owner authorization.
       before the ambiguity was known stands.
       (e) *Provider permissions.* Recorded per named provider, append-only, never inferred from a reference, amount or timing. The existing `simulation` and
       `test` providers hold refund permission only, preserving the certified R6H-5 simulation behaviour, because the simulator defines its own references. It
-      never authorizes a settlement, recovery allocation, L-4 or entitlement, and no real provider adapter holds it.
+      never authorizes a settlement, recovery allocation, L-4 or entitlement, and no real provider adapter holds it. It does not override item 4 or its database
+      guard: a recovery capture with no eligible recorded late success stays in review and has no refund route; no recovery allocation, principal reduction, T3
+      clearance, surplus or entitlement results from an ambiguous capture.
       (f) *`multiple_captures`.* A PAY-12 kind: one row per capture fact of an ambiguous attempt, in any payment state, identified by the fact's id, with its
       payment, amount, currency as stored, attempt, sibling count, whether contested, its late success if any, whether in review, and the derived "potentially
       equivalent" observation. Owner only, own bearer verified live, scoped to the seller Company through the fact's own payment; no service or producer read;
@@ -481,8 +484,9 @@ status change still needs its own explicit owner authorization.
       reconciliation of quarantined monetary evidence. **B5** a per-adapter acknowledgement contract, and bodies over the service's body limit, refused before
       authentication and storage. **B6** refunds in another currency: adapter support or failing closed. **B7** item 18. **B8** N3, S0-C11's L2 two-Company
       evidence, and production readiness.
-  20. *Status and implementation requirements.* Items 14 to 19 implement and activate nothing; each implementation needs a separate Owner authorization. They will
-      require, in Payment only and expand-only with no backfill and no existing row changed: a provider
+  20. *Status and implementation requirements.* Implemented for development and simulation only: Payment's additive `attemptCaptures` read, Billing's D-1 and L-4
+      refusal of an ambiguous attempt (item 14(c)), and item 17. Payment still records a late success per fact until its own item 14 change. Otherwise items 14 to 19
+      implement and activate nothing; each implementation needs a separate Owner authorization. They will require, in Payment only and expand-only with no backfill and no existing row changed: a provider
       permission record, with `simulation` and `test` entries; recovery state; a quarantine record; and the late-success insert guard (`0024`) extended to
       refuse a late success of an ambiguous attempt, so direct SQL can't bypass item 14(b). It runs on insert only, so existing rows are untouched.
       `payment_late_success_once` stays as it is while no provider may create such late successes. Additive: an attempt's capture count on Payment's capture

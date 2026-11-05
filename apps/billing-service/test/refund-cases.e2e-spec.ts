@@ -1227,7 +1227,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     /** Payment's evidence of one capture of `paymentId` (what GET /payment/payments/:id/captures/:factId would answer). */
     const atPayment = (paymentId: string, over: Partial<PaymentCapture> = {}) => {
       const capture: PaymentCapture = { factId: randomUUID(), paymentId, amount: 2500, currency: 'TND', paymentStatus: 'succeeded', basis: 'duplicate_capture',
-        conflicted: false, refund: 'none', refundableOnItsOwn: true, ...over };
+        conflicted: false, refund: 'none', refundableOnItsOwn: true, attemptCaptures: 2, ...over };
       capturesAtPayment.items.set(`${paymentId}:${capture.factId}`, { kind: 'capture', capture });
       return capture;
     };
@@ -1292,6 +1292,19 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(capturesAtPayment.relayed.at(-1)).toMatchObject({ refundCaseId: r.body.id, amount: 2500, captureFactId: cap.factId });
       expect(effect).toEqual({ outcome: 'none', purchaseId: null, obligationId: null, reason: 'capture_refunded' });
       expect(await untouched()).toEqual(before);
+    });
+
+    it('S0-C12 item 17: a currency ineligibility Payment states about this fact is 409 refund_not_eligible, nothing written; a read that proves nothing stays 503', async () => {
+      const p = await directPurchase('b2');
+      const factId = randomUUID();
+      capturesAtPayment.items.set(`${p.paymentId}:${factId}`, { kind: 'ineligible_currency' });
+      const refused = await openCapture(p.paymentId, factId);
+      expect([refused.status, refused.body.code], JSON.stringify(refused.body)).toEqual([409, 'refund_not_eligible']);
+      expect(JSON.stringify(refused.body), 'the answer carries no currency value').not.toMatch(/XY1/);
+      capturesAtPayment.items.set(`${p.paymentId}:${factId}`, { kind: 'unknown', reason: 'malformed_capture' });
+      const unavailable = await openCapture(p.paymentId, factId);
+      expect([unavailable.status, unavailable.body.code], JSON.stringify(unavailable.body)).toEqual([503, 'refund_payment_unavailable']);
+      expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "captureFactId" = $1`, [factId])).toBe(0);
     });
 
     it('3, 5, 16, 17. a duplicate capture of a purchase: refunded on its own, the purchase and its entitlement stand; the ordinary case waits while it is open', async () => {

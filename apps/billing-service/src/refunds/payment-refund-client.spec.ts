@@ -88,7 +88,7 @@ describe('HttpPaymentRefundClient.capture (Core V2 S0-C11 BIL-32 M, R6H-5)', () 
     return new HttpPaymentRefundClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 200 }).capture(PAYMENT, FACT);
   };
   const capture = { factId: FACT, paymentId: PAYMENT, provider: 'simulation', amount: 5300, currency: 'TND', paymentStatus: 'failed', basis: 'late_capture',
-    conflicted: false, refund: 'none', refundableOnItsOwn: true, observedAt: '2026-11-03T10:00:00.000Z' };
+    conflicted: false, refund: 'none', refundableOnItsOwn: true, attemptCaptures: 1, observedAt: '2026-11-03T10:00:00.000Z' };
 
   it('404 capture_not_found and the collapsed 404 not_found are both not_found, each with its own reason; any other 404 is unrecognized', async () => {
     expect(await read(404, { message: 'No verified capture of this payment has this identifier.', code: 'capture_not_found' }))
@@ -104,5 +104,27 @@ describe('HttpPaymentRefundClient.capture (Core V2 S0-C11 BIL-32 M, R6H-5)', () 
       [400, { code: 'bad_request' }], [503, { code: 'x' }], [200, { ...capture, factId: ATTEMPT }], [200, { ...capture, amount: '5300' }], [200, undefined]] as const) {
       expect(await read(status, body), JSON.stringify([status, body])).toMatchObject({ kind: 'unknown' });
     }
+  });
+
+  it('S0-C12 item 14: attemptCaptures reaches the consumer; a missing, malformed or inconsistent count proves nothing (fails closed)', async () => {
+    expect(await read(200, { ...capture, attemptCaptures: 2 })).toMatchObject({ kind: 'capture', capture: { attemptCaptures: 2 } });
+    expect(await read(200, { ...capture, basis: 'settling_capture', attemptCaptures: 1 })).toMatchObject({ kind: 'capture' });
+    expect(await read(200, { ...capture, basis: 'duplicate_capture', attemptCaptures: 2 })).toMatchObject({ kind: 'capture' });
+    expect(await read(200, { ...capture, basis: 'associated_capture', attemptCaptures: 0 })).toMatchObject({ kind: 'capture' });
+    const { attemptCaptures: _omitted, ...withoutCount } = capture;
+    for (const body of [withoutCount, { ...capture, attemptCaptures: '1' }, { ...capture, attemptCaptures: 1.5 }, { ...capture, attemptCaptures: -1 }, { ...capture, attemptCaptures: null },
+      { ...capture, attemptCaptures: 0 }, { ...capture, basis: 'settling_capture', attemptCaptures: 2 }, { ...capture, basis: 'duplicate_capture', attemptCaptures: 1 },
+      { ...capture, basis: 'associated_capture', attemptCaptures: 1 }]) {
+      expect(await read(200, body), JSON.stringify(body)).toEqual({ kind: 'unknown', reason: 'inconsistent_capture_count' });
+    }
+  });
+
+  it('S0-C12 item 17: a well-formed read of this fact in a 1 to 16 character non-ISO currency is known ineligible, carrying no value; other shapes and another fact prove nothing', async () => {
+    for (const currency of ['XY1', 'A', 'ABCDEFGHIJKLMNOP', 'tnd', 'ÉÉÉÉ']) expect(await read(200, { ...capture, currency }), currency).toEqual({ kind: 'ineligible_currency' });
+    for (const currency of ['', 'ABCDEFGHIJKLMNOPQ']) expect(await read(200, { ...capture, currency }), currency).toEqual({ kind: 'unknown', reason: 'malformed_capture' });
+    expect(await read(200, { ...capture, currency: 5300 })).toEqual({ kind: 'unknown', reason: 'malformed_capture' });
+    expect(await read(200, { ...capture, currency: 'XY1', factId: ATTEMPT })).toMatchObject({ kind: 'unknown' });
+    expect(await read(200, { ...capture, currency: 'XY1', attemptCaptures: 0 })).toEqual({ kind: 'unknown', reason: 'inconsistent_capture_count' });
+    expect(await read(503, { ...capture, currency: 'XY1' })).toMatchObject({ kind: 'unknown' });
   });
 });

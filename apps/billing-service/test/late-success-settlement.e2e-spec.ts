@@ -61,7 +61,7 @@ const refundsAtPayment: PaymentRefundClient = {
     if (captureAt.answer) return captureAt.answer(paymentId, factId);
     // the capture as Payment states it: the fixtures' late captures are of the channel invoice's total (5300; the Organization's fee is not captured)
     return { kind: 'capture' as const, capture: { factId, paymentId, amount: 5300, currency: 'TND', basis: 'late_capture' as const, paymentStatus: 'expired',
-      conflicted: false, refundableOnItsOwn: true, refund: 'none' as const } };
+      conflicted: false, refundableOnItsOwn: true, attemptCaptures: 1, refund: 'none' as const } };
   },
   settlingCapture: async () => ({ kind: 'unknown' as const, reason: 'not_used_in_this_suite' }), // Core V2 S0-C11 7c: no E-7 application here
 };
@@ -765,10 +765,10 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
     });
 
     describe('S0-C11 capture evidence before the receipt (item 7; BIL-32 I)', () => {
-      const capture = (o: Partial<{ amount: number; currency: string; conflicted: boolean; factId: string; paymentId: string }> = {}) =>
+      const capture = (o: Partial<{ amount: number; currency: string; conflicted: boolean; factId: string; paymentId: string; attemptCaptures: number }> = {}) =>
         async (paymentId: string, factId: string): Promise<CaptureReadOutcome> => ({ kind: 'capture', capture: { factId: o.factId ?? factId, paymentId: o.paymentId ?? paymentId,
           amount: o.amount ?? 5300, currency: o.currency ?? 'TND', basis: 'late_capture', paymentStatus: 'expired', conflicted: o.conflicted ?? false,
-          refundableOnItsOwn: true, refund: 'none' } });
+          refundableOnItsOwn: true, attemptCaptures: o.attemptCaptures ?? 1, refund: 'none' } });
 
       it('reads exactly the late success\'s capture, after the exposure read; contested refuses 409 capture_contested; nothing is spent or written', async () => {
         const x = await ready();
@@ -783,6 +783,55 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
         disputes.open.add(x.s.paymentId);
         expect(refusal(await apply(x.row.id, secret))[2]).toBe('payment_dispute_open');
         expect(captureAt.calls).toEqual([]);
+      });
+
+      it('S0-C12 item 14(c), input (b): an ambiguous attempt refuses 409 capture_unverified after the existing refusals, no receipt spent, nothing written; inconsistent or absent evidence is 503; a single capture then applies', async () => {
+        const x = await ready();
+        const secret = receipt(x.row, x.r);
+        for (const [label, answer, expected] of [
+          ['two capture facts', capture({ attemptCaptures: 2 }), [409, 'late_settlement_refused', 'capture_unverified']],
+          ['three, the amount equal', capture({ attemptCaptures: 3, amount: 5300 }), [409, 'late_settlement_refused', 'capture_unverified']],
+          ['contested stays first', capture({ attemptCaptures: 2, conflicted: true }), [409, 'late_settlement_refused', 'capture_contested']],
+          ['a non-ISO answer about an ISO late success is inconsistent', async (): Promise<CaptureReadOutcome> => ({ kind: 'ineligible_currency' }), [503, 'late_settlement_capture_unavailable', undefined]],
+          ['an inconsistent count', async (): Promise<CaptureReadOutcome> => ({ kind: 'unknown', reason: 'inconsistent_capture_count' }), [503, 'late_settlement_capture_unavailable', undefined]],
+          ['Payment unavailable', async (): Promise<CaptureReadOutcome> => { throw new Error('payment-service unavailable'); }, [503, 'late_settlement_capture_unavailable', undefined]],
+        ] as const) {
+          captureAt.answer = answer;
+          expect(refusal(await apply(x.row.id, secret)), label).toEqual(expected);
+          expect(fraudAuth.issued.get(secret)!.consumeRef, `${label}: the receipt is not spent`).toBeUndefined();
+          await unchanged(x);
+        }
+        // S0-C9 item 4's exposure refusal stays first: the capture is not even read
+        captureAt.answer = capture({ attemptCaptures: 2 });
+        captureAt.calls.length = 0;
+        disputes.open.add(x.s.paymentId);
+        expect(refusal(await apply(x.row.id, secret))[2]).toBe('payment_dispute_open');
+        expect(captureAt.calls).toEqual([]);
+        disputes.open.delete(x.s.paymentId);
+        // another Company's Owner reaches nothing: no read of Payment, no refusal that says anything about the capture
+        const foreign = await apply(x.row.id, secret, 'foreign-owner-tok');
+        expect(foreign.status).toBe(404);
+        expect(captureAt.calls).toEqual([]);
+        captureAt.answer = null;
+        expect((await apply(x.row.id, secret)).status).toBe(201);
+      });
+
+      it('S0-C12 item 14(a), input (b): a committed application stands: a sibling arriving later changes nothing, and its replay answers the stored result without reading Payment or spending again', async () => {
+        const x = await ready();
+        const secret = receipt(x.row, x.r);
+        const idem = key();
+        const first = await apply(x.row.id, secret, 'owner-tok', idem);
+        expect(first.status).toBe(201);
+        const consumeRef = fraudAuth.issued.get(secret)!.consumeRef;
+        captureAt.answer = capture({ attemptCaptures: 2 });
+        captureAt.calls.length = 0;
+        const replay = await apply(x.row.id, secret, 'owner-tok', idem);
+        expect(replay.status).toBe(201);
+        expect(replay.body.application.id).toBe(first.body.application.id);
+        expect(captureAt.calls, 'a replay reads nothing').toEqual([]);
+        expect(fraudAuth.issued.get(secret)!.consumeRef).toBe(consumeRef);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [x.r.id])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [x.row.id])).toBe(1);
       });
 
       it('provenance (BIL-32 J): the application records the late success\'s own capture fact, once and immutably; the database refuses any other or none', async () => {
@@ -906,7 +955,7 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
       const contradictionCases = (paymentId: string) => admin.query(`SELECT * FROM reconciliation_case WHERE "caseType" = 'capture_contradiction' AND "paymentId" = $1`, [paymentId])
         .then((r) => r.rows as Row[]);
       const verified = (paymentId: string, factId: string) => ({ status: 200, body: { factId, paymentId, provider: 'simulation', amount: 5300, currency: 'TND',
-        paymentStatus: 'expired', basis: 'late_capture', conflicted: false, refund: 'none', refundableOnItsOwn: true, observedAt: new Date().toISOString() } });
+        paymentStatus: 'expired', basis: 'late_capture', conflicted: false, refund: 'none', refundableOnItsOwn: true, attemptCaptures: 1, observedAt: new Date().toISOString() } });
 
       it('404 capture_not_found stays 409 capture_unverified; the receipt is unspent and nothing changes', async () => {
         const x = await ready();
@@ -971,7 +1020,7 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
 
     describe('S0-C11 capture_contradiction cases (item 8 with the tenant-isolation clarification; BIL-33 I)', () => {
       const ownConflicted = async (paymentId: string, factId: string): Promise<CaptureReadOutcome> => ({ kind: 'capture', capture: { factId, paymentId, amount: 5300, currency: 'TND',
-        basis: 'late_capture', paymentStatus: 'expired', conflicted: true, refundableOnItsOwn: true, refund: 'none' } });
+        basis: 'late_capture', paymentStatus: 'expired', conflicted: true, refundableOnItsOwn: true, attemptCaptures: 1, refund: 'none' } });
       const conflictOf = (paymentId: string, factId: string, o: Partial<PaymentItem> = {}) =>
         asItem({ kind: 'fact_conflict', id: randomUUID(), paymentId, factId, amount: 4500, currency: 'TND', detail: { source: 'webhook' }, ...o });
       const contradictionCases = (paymentId: string) => admin.query(`SELECT * FROM reconciliation_case WHERE "caseType" = 'capture_contradiction' AND "paymentId" = $1`, [paymentId])
@@ -988,6 +1037,19 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
         expect(cases).toHaveLength(1);
         expect(cases[0]).toMatchObject({ evidenceKey: captureContradictionKey(l.factId!, e.s.paymentId), companyId: COMPANY, captureFactId: l.factId, detail: 'own_capture_contested' });
         expect((await audit(cases[0]!.id)).map((v) => v.name)).toEqual(['audit.reconciliation_case.opened']);
+      });
+
+      it('S0-C12 item 17: a contradiction of a fact Payment reads as a non-ISO currency opens nothing, as any read that proves nothing; the next pass reads again', async () => {
+        const e = await ended('payment.expired');
+        const l = await late(e.s);
+        captureAt.answer = async () => ({ kind: 'ineligible_currency' });
+        paymentItems.items.set('fact_conflict', [conflictOf(e.s.paymentId, l.factId!)]);
+        await reconcile();
+        expect(await contradictionCases(e.s.paymentId)).toEqual([]);
+        captureAt.answer = ownConflicted;
+        await reconcile();
+        expect(await contradictionCases(e.s.paymentId)).toHaveLength(1);
+        paymentItems.items.delete('fact_conflict');
       });
 
       it('a contradiction of a fact recorded elsewhere: the observing payment\'s own case, its Company from Billing\'s records, never the other fact\'s id, figures or owner; no authority over it', async () => {
