@@ -219,6 +219,76 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
     expect(dispatches.filter((d) => d.refundAttemptId === res.body.refundAttemptId).every((d) => d.idempotencyKey === res.body.refundAttemptId)).toBe(true);
   });
 
+  describe('S0-C12 item 14(d), (e): a new refund of an ambiguous attempt needs the provider\'s permission; the simulator holds it, R6H-5 stays as certified', () => {
+    const permission = (effect: 'grant' | 'withdraw') => admin.query(`INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('simulation', 'refund_independent', $1, 'test', 'simulation')`, [effect]);
+    const withdrawn = async <T>(work: () => Promise<T>): Promise<T> => {
+      await permission('withdraw');
+      try {
+        return await work();
+      } finally {
+        await permission('grant');
+      }
+    };
+
+    it('withdrawn: neither capture is refundable, the read says so, no receipt is spent, and direct SQL is refused; granted again it refunds as certified; a refund already authorized stands', async () => {
+      const { payment, attempt } = await captured();
+      const dup = await duplicate(attempt.id);
+      await withdrawn(async () => {
+        expect((await captureRead(payment.id, dup.id).expect(200)).body).toMatchObject({ attemptCaptures: 2, refundableOnItsOwn: false });
+        expect(JSON.stringify((await captureRead(payment.id, dup.id).expect(200)).body), 'the permission never leaves Payment').not.toContain('refundPermitted');
+        const caseId = randomUUID();
+        const { secret } = auth.issue(binding(payment.id, caseId, { captureFactId: dup.id }), OWNER);
+        const refused = await refund(payment.id, { captureFactId: dup.id, caseId, secret });
+        expect([refused.status, refused.body.code]).toEqual([409, 'refund_capture_not_eligible']);
+        expect(auth.receipts.get(secret)!.status, 'no receipt is spent').toBe('issued');
+        await expect(admin.query(`INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId", provider, "liveMode", "receiptDigest", "captureSpecific")
+          VALUES (gen_random_uuid(), $1, 'billing-service', gen_random_uuid(), $2, 9000, 'TND', 'duplicate_charge', false, $3, $4, 'simulation', false, repeat('a', 64), true)`, [payment.id, COMPANY, dup.id, attempt.id]))
+          .rejects.toMatchObject({ constraint: 'refund_attempt_ambiguous_capture' });
+      });
+      const res = await refund(payment.id, { captureFactId: dup.id });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      // S0-C11 item 9: authorized, then the permission goes: the attempt continues
+      await withdrawn(async () => {
+        await complete(res.body.refundAttemptId);
+        expect((await captureRead(payment.id, dup.id).expect(200)).body.refund).toBe('refunded');
+      });
+    });
+
+    it('C-3: an intent that waited, with a sibling since: with nothing consumed under its binding and reference it is refused, the receipt unspent; a consumption Auth already recorded under them stands', async () => {
+      const waited = await lateCaptured();
+      const caseId = randomUUID();
+      const attemptId = randomUUID();
+      const k = key();
+      const { secret } = auth.issue(binding(waited.payment.id, caseId, { captureFactId: waited.capture.id }), OWNER);
+      auth.unavailable.consume = 1; // Auth doesn't answer and doesn't consume: the intent stays pending
+      expect((await refund(waited.payment.id, { captureFactId: waited.capture.id, caseId, attemptId, secret, k })).status).toBe(503);
+      expect((await one(`SELECT status FROM refund_attempt WHERE id = $1`, [attemptId])).status).toBe('authorization_pending');
+      await duplicate(waited.attempt.id, 9100);
+      await withdrawn(async () => {
+        const retried = await refund(waited.payment.id, { captureFactId: waited.capture.id, caseId, attemptId, secret, k });
+        expect([retried.status, retried.body.code], JSON.stringify(retried.body)).toEqual([409, 'refund_authorization_invalid']);
+      });
+      expect(await one(`SELECT status, "authorizationRefusal" FROM refund_attempt WHERE id = $1`, [attemptId])).toEqual({ status: 'authorization_refused', authorizationRefusal: 'refund_capture_not_eligible' });
+      expect(auth.receipts.get(secret)!.status, 'the receipt stays unspent').toBe('issued');
+
+      const spent = await lateCaptured();
+      const case2 = randomUUID();
+      const attempt2 = randomUUID();
+      const k2 = key();
+      const r2 = auth.issue(binding(spent.payment.id, case2, { captureFactId: spent.capture.id }), OWNER);
+      auth.loseResponse.consume = 1; // Auth consumes under this binding and reference, and the answer is lost
+      auth.unavailable.lookup = 1;
+      expect((await refund(spent.payment.id, { captureFactId: spent.capture.id, caseId: case2, attemptId: attempt2, secret: r2.secret, k: k2 })).status).toBe(503);
+      expect(auth.receipts.get(r2.secret)!.status).toBe('consumed');
+      await duplicate(spent.attempt.id, 9100);
+      await withdrawn(async () => {
+        const retried = await refund(spent.payment.id, { captureFactId: spent.capture.id, caseId: case2, attemptId: attempt2, secret: r2.secret, k: k2 });
+        expect(retried.status, JSON.stringify(retried.body)).toBeLessThan(300);
+      });
+      expect((await one(`SELECT status FROM refund_attempt WHERE id = $1`, [attempt2])).status, 'the authorization Auth recorded stands').toBe('authorized');
+    });
+  });
+
   it('5. two valid captures of one payment (another attempt\'s late capture): the sale\'s ordinary refund and the other capture\'s refund run independently', async () => {
     const p = await createPayment();
     const a1 = await startAttempt(p.id);

@@ -271,8 +271,11 @@ export class AttemptService {
       return rows[0];
     });
     if (lateSuccess) {
-      await this.recordLateSuccess(attemptId, lateSuccess, ctx, factId);
-      const ls = lateSuccess as { paymentStatus: string; conflict: string };
+      const ls = lateSuccess as { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string };
+      // Core V2 S0-C12 FN-2: on a payment still open, the committed fact is the record. The finality writers read committed facts, and the capture reconciler
+      // reads them again after any crash, so nothing here has to survive in memory: its late success, EVT-10 and audit are decided at terminal finality
+      if (ls.conflict === 'final') await this.recordLateSuccess(attemptId, ls, ctx, factId);
+      else this.logger.warn(`payment_late_success_deferred payment=${ls.paymentId} attempt=${attemptId} paymentStatus=${ls.paymentStatus} reason=${ls.conflict} — the fact is kept; decided at finality`);
       throw ls.conflict === 'final'
         ? paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.providerSuccessConflicts, { status: ls.paymentStatus })
         : paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.lateSuccessConflicts);
@@ -287,18 +290,25 @@ export class AttemptService {
    * reconciliation. Surfaced as a stable warning for the operator (the existing alert channel).
    * Core V2 S0-C12 correction (`0025`): once per capture FACT as well. Another authenticated observation of a fact that already has its late
    * success (a new notification id, or a status read) records nothing (no row, no EVT-10, no audit record); its notification stays stored.
+   * Core V2 S0-C12 item 14(b): under the payment lock, an ambiguous attempt records nothing: `recordCaptureFact` takes that payment's key-share lock, so a
+   * sibling is committed either before this check or after this transaction. The database refuses the same (`0026`).
    */
   private async recordLateSuccess(attemptId: string, f: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string }, ctx: EventContext, factId: string | null): Promise<void> {
     const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
     // Core V2 S6h (R6H-4): with its `payment.late_success.recorded` event, in the same transaction, only when newly recorded
     const rowCount = await this.db.tx(async (q) => {
+      const payment = (await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [f.paymentId])).rows[0]!;
+      const { rows: siblings } = await q.query(`SELECT 1 FROM provider_transaction_fact WHERE "attemptId" = $1 AND kind = 'capture' AND id IS DISTINCT FROM $2 LIMIT 1`, [attemptId, factId]);
+      if (siblings.length > 0) {
+        this.logger.warn(`payment_late_success_ambiguous payment=${f.paymentId} attempt=${attemptId} fact=${factId ?? 'none'} — several capture facts on this attempt: nothing recorded (S0-C12 item 14)`);
+        return 0;
+      }
       const { rows } = await q.query<{ id: string; attemptId: string; factId: string | null; amount: string; currency: string; paymentStatus: string; recordedAt: Date }>(
         `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT DO NOTHING RETURNING id, "attemptId", "factId", amount, currency, "paymentStatus", "recordedAt"`, // either key: the observation (`payment_late_success_once`) or the fact (`payment_late_success_one_per_fact`)
-        [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus, factId],
+        [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, payment.status, factId],
       );
       if (!rows[0]) return 0;
-      const payment = (await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [f.paymentId])).rows[0]!;
       await this.outbox.enqueue(q, lateSuccessEvent(rows[0], payment, ctx));
       // Core V2 S0-C12 item 10: every late success has its commercial audit record, in its row's transaction
       if (rows[0].factId) {
@@ -350,6 +360,9 @@ export class AttemptService {
     const source = webhookEventId ? 'webhook' : 'status_check';
     const liveMode = attempt.liveMode ?? CORE_V2_LIVE_MODE;
     return this.db.tx(async (q) => {
+      // Core V2 S0-C12 item 14: serialized with every finality and late-success decision, which hold this payment `FOR UPDATE`: this fact commits wholly before
+      // such a decision or wholly after it, so a decision can't meet a sibling appearing under it (its foreign key names the attempt, not the payment)
+      await q.query('SELECT 1 FROM payment WHERE id = $1 FOR KEY SHARE', [attempt.paymentId]);
       const { rows } = await q.query<{ id: string }>(
         `INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "webhookEventId", "providerOccurredAt")
          VALUES ($1, $2, 'capture', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT ON CONSTRAINT provider_transaction_fact_identity DO NOTHING RETURNING id`,

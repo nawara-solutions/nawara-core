@@ -456,9 +456,15 @@ SELECT pg_temp.expect_error('S4d', 'a contradiction is never edited', $$UPDATE p
 SELECT pg_temp.expect_error('S4d', 'a contradiction is never deleted', $$DELETE FROM provider_transaction_fact_conflict$$, '23514');
 SELECT pg_temp.assert_eq('S4d', 'a contradiction never changes its fact', (SELECT amount::text FROM provider_transaction_fact WHERE id = :'fact1'), '1000');
 \o /dev/null
-SELECT pg_temp.capture_fact(:'f1', :'f1a') AS fact1b \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS f9 \gset
+SELECT pg_temp.new_attempt(:'f9', 1) AS f9a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'f9';
+UPDATE payment_attempt SET status = 'submitted' WHERE id = :'f9a';
+UPDATE payment_attempt SET status = 'succeeded' WHERE id = :'f9a';
+SELECT pg_temp.capture_fact(:'f9', :'f9a') AS fact9 \gset
+UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = :'f9';
 \o
-SELECT pg_temp.expect_ok('S4d', 'C2: a late success references its own fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f1', :'f1a', :'fact1b'));
+SELECT pg_temp.expect_ok('S4d', 'C2: a late success references its own fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'cancelled', %L)$$, :'f9', :'f9a', :'fact9'));
 SELECT pg_temp.expect_error('S4d', 'C2: a late success never references another attempt''s fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f2', :'f2a', :'fact1'), '23514');
 SELECT pg_temp.assert_eq('S4d', 'the runtime grants: no UPDATE or DELETE on facts for anyone but the owner',
   (SELECT count(*)::text FROM information_schema.role_table_grants g JOIN pg_tables t ON t.tablename = g.table_name
@@ -909,7 +915,7 @@ CREATE FUNCTION pg_temp.c11_settle(pid uuid, aid uuid) RETURNS text LANGUAGE sql
   SELECT format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = %L WHERE id = %L$$, aid, pid);
 $f$;
 CREATE FUNCTION pg_temp.c11_late(pid uuid, aid uuid, fid uuid, amt bigint DEFAULT 1000, cur text DEFAULT 'TND') RETURNS text LANGUAGE sql AS $f$
-  SELECT format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', %s, %L, 'created', %L)$$, pid, aid, amt, cur, fid);
+  SELECT format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', %s, %L, 'cancelled', %L)$$, pid, aid, amt, cur, fid);
 $f$;
 SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS c11a \gset
 SELECT pg_temp.c11(:'c11a') AS c11aa \gset
@@ -944,6 +950,9 @@ SELECT pg_temp.expect_constraint('S0-C11', 'item 6: a late success never states 
 SELECT pg_temp.expect_constraint('S0-C11', 'item 6: a late success never states another currency than its fact', pg_temp.c11_late(:'c11c', :'c11ca', :'c11cf', 1000, 'TND'), 'payment_late_success_fact_binding');
 SELECT pg_temp.expect_constraint('S0-C11', 'item 5: a contested fact records no late success', pg_temp.c11_late(:'c11d', :'c11da', :'c11df'), 'payment_late_success_fact_binding');
 SELECT pg_temp.expect_constraint('S0-C11', 'item 6: never another attempt''s fact', pg_temp.c11_late(:'c11c', :'c11ca', :'c11bf', 1001), 'payment_late_success_fact_binding');
+\o /dev/null
+UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = :'c11b';
+\o
 SELECT pg_temp.expect_ok('S0-C11', 'item 6: a late success equal to its uncontested fact is recorded', pg_temp.c11_late(:'c11b', :'c11ba', :'c11bf', 1001));
 
 -- ======================================== Core V2 S0-C12 correction: one late success per capture fact (0025) ----
@@ -967,9 +976,12 @@ BEGIN
 END $f$;
 CREATE FUNCTION pg_temp.c12_late(pid uuid, aid uuid, fid uuid, wid uuid) RETURNS text LANGUAGE sql AS $f$
   SELECT CASE WHEN wid IS NULL
-    THEN format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, pid, aid, fid)
-    ELSE format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'webhook', %L, 1000, 'TND', 'created', %L)$$, pid, aid, wid, fid) END;
+    THEN format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'cancelled', %L)$$, pid, aid, fid)
+    ELSE format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'webhook', %L, 1000, 'TND', 'cancelled', %L)$$, pid, aid, wid, fid) END;
 $f$;
+\o
+\o /dev/null
+UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = :'c12a';
 \o
 SELECT pg_temp.expect_ok('S0-C12', 'correction: the first observation records the fact''s late success', pg_temp.c12_late(:'c12a', :'c12aa', :'c12af', :'c12w1'));
 SELECT pg_temp.expect_unique('S0-C12', 'correction: another notification of the same fact records no second late success', pg_temp.c12_late(:'c12a', :'c12aa', :'c12af', :'c12w2'), 'payment_late_success_one_per_fact');
@@ -977,6 +989,49 @@ SELECT pg_temp.expect_unique('S0-C12', 'correction: a status read of the same fa
 SELECT pg_temp.assert_eq('S0-C12', 'correction: one late success of the fact, with the first observation''s provenance',
   (SELECT count(*)::text || ':' || min("webhookEventId"::text) FROM payment_late_success WHERE "factId" = :'c12af'), '1:' || :'c12w1');
 SELECT pg_temp.assert_eq('S0-C12', 'correction: both notifications stay stored', (SELECT count(*)::text FROM webhook_event WHERE "providerEventId" IN ('evt-c12-1', 'evt-c12-2')), '2');
+
+-- ================================= Core V2 S0-C12 items 14, 15 and FN-2 (0026): guards, permission, recovery state ----
+\o /dev/null
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS i14a \gset
+SELECT pg_temp.c11(:'i14a') AS i14aa \gset
+SELECT pg_temp.capture_fact(:'i14a', :'i14aa') AS i14af \gset
+SELECT pg_temp.capture_fact(:'i14a', :'i14aa') AS i14ag \gset
+UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = :'i14a';
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS i14b \gset
+SELECT pg_temp.c11(:'i14b') AS i14ba \gset
+SELECT pg_temp.capture_fact(:'i14b', :'i14ba') AS i14bf \gset
+CREATE FUNCTION pg_temp.i14_late(pid uuid, aid uuid, fid uuid, st text) RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', %L, %L)$$, pid, aid, st, fid);
+$f$;
+\o
+SELECT pg_temp.expect_constraint('S0-C12', 'item 14(b): a late success of an ambiguous attempt is refused, by direct SQL too', pg_temp.i14_late(:'i14a', :'i14aa', :'i14af', 'cancelled'), 'payment_late_success_ambiguous_attempt');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 14(b): and of its sibling', pg_temp.i14_late(:'i14a', :'i14aa', :'i14ag', 'cancelled'), 'payment_late_success_ambiguous_attempt');
+SELECT pg_temp.expect_constraint('S0-C12', 'FN-2: no late success stating a non-final status', pg_temp.i14_late(:'i14b', :'i14ba', :'i14bf', 'pending'), 'payment_late_success_not_final');
+SELECT pg_temp.expect_constraint('S0-C12', 'FN-2: no late success claiming finality the payment does not hold', pg_temp.i14_late(:'i14b', :'i14ba', :'i14bf', 'failed'), 'payment_late_success_not_final');
+SELECT pg_temp.assert_eq('S0-C12', 'item 14(e): no row is no permission (default-deny)', payment_provider_refund_permitted('flouci')::text, 'false');
+SELECT pg_temp.assert_eq('S0-C12', 'item 14(e): the simulator holds refund permission', payment_provider_refund_permitted('simulation')::text, 'true');
+SELECT pg_temp.assert_eq('S0-C12', 'item 14(e): the test provider holds refund permission', payment_provider_refund_permitted('test')::text, 'true');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 14(e): a real provider can''t be granted anything without a reviewed migration', $$INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('flouci', 'refund_independent', 'grant', 'x', 'simulation')$$, 'provider_capture_permission_provider');
+SELECT pg_temp.expect_constraint('S0-C12', 'P3: a late-success permission can''t even be written', $$INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('simulation', 'late_success_independent', 'grant', 'x', 'simulation')$$, 'provider_capture_permission_kind');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 14(e): the scope is simulation', $$INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('simulation', 'refund_independent', 'grant', 'x', 'production')$$, 'provider_capture_permission_scope');
+SELECT pg_temp.expect_error('S0-C12', 'item 14(e): a permission is never edited', $$UPDATE provider_capture_permission SET effect = 'withdraw'$$, '23514');
+SELECT pg_temp.expect_error('S0-C12', 'item 14(e): a permission is never deleted', $$DELETE FROM provider_capture_permission$$, '23514');
+\o /dev/null
+INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('test', 'refund_independent', 'withdraw', 'invariant', 'simulation');
+\o
+SELECT pg_temp.assert_eq('S0-C12', 'item 14(e): the latest row governs: withdrawn', payment_provider_refund_permitted('test')::text, 'false');
+SELECT pg_temp.assert_eq('S0-C12', 'item 14(e): withdrawing one provider leaves the other', payment_provider_refund_permitted('simulation')::text, 'true');
+\o /dev/null
+INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('test', 'refund_independent', 'grant', 'invariant', 'simulation');
+INSERT INTO capture_recovery_state ("factId", attempts, "workAfter", "lastFailure") VALUES (:'i14bf', 1, now(), 'transient_failure');
+\o
+SELECT pg_temp.expect_constraint('S0-C12', 'item 15: at most 12 attempts', format($$UPDATE capture_recovery_state SET attempts = 13 WHERE "factId" = %L$$, :'i14bf'), 'capture_recovery_state_attempts');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 15: attempts never move back', format($$UPDATE capture_recovery_state SET attempts = 0 WHERE "factId" = %L$$, :'i14bf'), 'capture_recovery_state_kept');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 15: an ended state has no next try', format($$UPDATE capture_recovery_state SET status = 'exhausted' WHERE "factId" = %L$$, :'i14bf'), 'capture_recovery_state_shape');
+SELECT pg_temp.expect_ok('S0-C12', 'item 15: exhaustion is recorded', format($$UPDATE capture_recovery_state SET status = 'exhausted', "workAfter" = NULL, "endedAt" = now(), attempts = 12 WHERE "factId" = %L$$, :'i14bf'));
+SELECT pg_temp.expect_constraint('S0-C12', 'item 15: exhaustion is not reset: reactivation is not authorized', format($$UPDATE capture_recovery_state SET status = 'active', "workAfter" = now(), "endedAt" = NULL, attempts = 1 WHERE "factId" = %L$$, :'i14bf'), 'capture_recovery_state_kept');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 15: its history is never deleted', format($$DELETE FROM capture_recovery_state WHERE "factId" = %L$$, :'i14bf'), 'capture_recovery_state_kept');
+SELECT pg_temp.assert_eq('S0-C12', 'item 15: the fact itself is untouched', (SELECT count(*)::text FROM provider_transaction_fact WHERE id = :'i14bf'), '1');
 
 -- ---------------------------------------------------------------------------- verdict ----
 \o

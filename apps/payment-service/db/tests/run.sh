@@ -103,6 +103,9 @@ c12_late() { # one late success of the fact under notification evt-c12-<n> (the 
     SELECT '00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000ca1', 'webhook', id, 1100, 'TND', 'cancelled', $2 FROM webhook_event WHERE \"providerEventId\" = 'evt-c12-$1';"
 }
 c12_fixture "$db" 8
+# FN-2 (0026): a late success needs the payment's own terminal status
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE payment_attempt SET status = 'submitted' WHERE id = '00000000-0000-0000-0000-000000000ca1'" -c "UPDATE payment SET status = 'pending' WHERE id = '00000000-0000-0000-0000-000000000c12'" \
+  -c "UPDATE payment_attempt SET status = 'failed', \"failureCode\" = 'x', \"failureClass\" = 'terminal', \"completedAt\" = now() WHERE id = '00000000-0000-0000-0000-000000000ca1'" -c "UPDATE payment SET status = 'cancelled', \"closedAt\" = now() WHERE id = '00000000-0000-0000-0000-000000000c12'"
 outdir="$(mktemp -d)"
 for i in $(seq 1 8); do ( psql -q -d "$db" >"$outdir/$i.out" 2>&1 -c "$(c12_late "$i" "'00000000-0000-0000-0000-000000000cf1'")" ) & done
 wait
@@ -125,7 +128,7 @@ con=$(psql -Atq -d "$db" -c "SELECT count(*) FROM pg_constraint WHERE conname = 
 echo "PASS: 0025 refuses existing per-fact duplicates; both historical rows kept, no constraint added"
 # (b) fact-less rows written before S4d (NULL factId, the 0024 guard was not yet there): 0025 applies; they stay exactly as recorded
 newdb lsnull; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0024_*|0025_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0024_*|0025_*|0026_*|0027_*|0028_*|0029_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 c12_fixture "$db" 2
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "$(c12_late 1 NULL)" -c "$(c12_late 2 NULL)"
 before=$(psql -Atq -d "$db" -c "SELECT md5(string_agg(to_jsonb(l)::text, ',' ORDER BY id)) FROM payment_late_success l")
@@ -133,3 +136,20 @@ psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0024_capture_evidence.sql" -f "$mig
 after=$(psql -Atq -d "$db" -c "SELECT md5(string_agg(to_jsonb(l)::text, ',' ORDER BY id)) FROM payment_late_success l")
 [ "$before" = "$after" ] || fail "0025 changed fact-less history"
 echo "PASS: 0025 applies over fact-less historical rows and leaves them exactly as recorded"
+
+echo "== migration: Core V2 S0-C12 items 14, 15, FN-2 — 0026 leaves history exactly as recorded and rewrites nothing =="
+newdb ls26; db="$DBNAME"
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0026_*|0027_*|0028_*|0029_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+c12_fixture "$db" 2
+# a late success recorded before 0026 with a non-final status, and a sibling that made its attempt ambiguous afterwards: both legal then, both kept
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "$(c12_late 1 "'00000000-0000-0000-0000-000000000cf1'" | sed "s/'cancelled'/'created'/")" \
+  -c "INSERT INTO provider_transaction_fact (provider, \"providerTxnId\", kind, \"paymentId\", \"attemptId\", amount, currency, \"liveMode\", source) VALUES ('test', 'ptx-c12-b', 'capture', '00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000ca1', 1200, 'TND', false, 'status_check')"
+before=$(psql -Atq -d "$db" -c "SELECT md5(string_agg(to_jsonb(l)::text, ',' ORDER BY id)) FROM payment_late_success l")
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0026_multiple_captures_and_recovery.sql"
+after=$(psql -Atq -d "$db" -c "SELECT md5(string_agg(to_jsonb(l)::text, ',' ORDER BY id)) FROM payment_late_success l")
+[ "$before" = "$after" ] || fail "0026 changed a historical late success"
+state=$(psql -Atq -d "$db" -c "SELECT count(*) FROM capture_recovery_state")
+[ "$state" -eq 0 ] || fail "0026 backfilled recovery state: $state"
+perm=$(psql -Atq -d "$db" -c "SELECT string_agg(provider, ',' ORDER BY provider) FROM provider_capture_permission")
+[ "$perm" = "simulation,test" ] || fail "0026 seeded another permission: $perm"
+echo "PASS: 0026 applies over a non-final and an ambiguous historical record, leaves them exactly as recorded, backfills nothing, seeds only simulation and test"

@@ -55,6 +55,8 @@ export interface CaptureEvidence {
    * contested or not; a contradiction is not a fact. 0 for an associated fact, which has no attempt. Derived here, never from a provider or a caller.
    */
   attemptCaptures: number;
+  /** S0-C12 item 14(e): the provider's explicit refund permission for several captures on one attempt; default-deny, never leaves Payment. */
+  refundPermitted: boolean;
   observedAt: Date;
 }
 
@@ -263,6 +265,8 @@ export class RefundAttemptService {
     if (!c || c.conflicted || !c.capturedAttemptId) return { refusal: 'refund_capture_unverified' };
     // F-29 (PAY-13 H): an association names no authority over the money it attached; no refund returns it until an approved basis exists
     if (c.basis === 'associated_capture') return { refusal: 'refund_capture_unverified' };
+    // Core V2 S0-C12 item 14(d): a different reference does not prove different money: a new refund of an ambiguous attempt needs the provider's permission
+    if (c.attemptCaptures > 1 && !c.refundPermitted) return { refusal: 'refund_capture_not_eligible' };
     if (c.basis === 'duplicate_capture' && !(await this.anotherCaptureRemains(q, p, factId))) return { refusal: 'refund_capture_not_eligible' };
     const exposure = await disputeExposure(q, p.id);
     if (exposure.state === 'unresolved') throw paymentError(503, 'refund_dispute_unavailable', PAYMENT_MESSAGES.refundDisputeUnavailable);
@@ -299,12 +303,13 @@ export class RefundAttemptService {
    */
   async captureEvidence(q: Queryable, p: PaymentRow, factId: string): Promise<CaptureEvidence | null> {
     const { rows } = await q.query<{ id: string; paymentId: string | null; attemptId: string | null; provider: string; providerTxnId: string; amount: string;
-      currency: string; observedAt: Date; conflicted: boolean; associated: boolean; siblings: number }>(
+      currency: string; observedAt: Date; conflicted: boolean; associated: boolean; siblings: number; refundPermitted: boolean }>(
       `SELECT f.id, f."paymentId", f."attemptId", f.provider, f."providerTxnId", f.amount, trim(f.currency) AS currency, f."observedAt",
               EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id) AS conflicted,
               EXISTS (SELECT 1 FROM provider_fact_association s WHERE s."factId" = f.id AND s.status = 'associated' AND s."targetType" = 'payment'
                         AND s."paymentId" = $2) AS associated,
-              (SELECT count(*)::int FROM provider_transaction_fact g WHERE g."paymentId" = f."paymentId" AND g."attemptId" = f."attemptId" AND g.kind = 'capture') AS siblings
+              (SELECT count(*)::int FROM provider_transaction_fact g WHERE g."paymentId" = f."paymentId" AND g."attemptId" = f."attemptId" AND g.kind = 'capture') AS siblings,
+              payment_provider_refund_permitted(f.provider) AS "refundPermitted"
          FROM provider_transaction_fact f WHERE f.id = $1 AND f.kind = 'capture' AND f."liveMode" = false`, [factId, p.id]);
     const f = rows[0];
     if (!f || (f.paymentId !== p.id && !(f.paymentId === null && f.associated))) return null;
@@ -325,10 +330,11 @@ export class RefundAttemptService {
       `SELECT EXISTS (SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND NOT "captureSpecific" AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed')) AS live,
               EXISTS (SELECT 1 FROM refund_authorization WHERE "paymentId" = $1 AND NOT "captureSpecific" AND "completedAt" IS NOT NULL) AS done`, [p.id])).rows[0]!
       : { live: false, done: false };
-    const refundableOnItsOwn = basis !== 'associated_capture' && (basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id)));
+    const refundableOnItsOwn = basis !== 'associated_capture' && (f.siblings <= 1 || f.refundPermitted) // S0-C12 item 14(d)
+      && (basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id)));
     return {
       factId: f.id, paymentId: p.id, provider: f.provider, providerTxnId: f.providerTxnId, amount: Number(f.amount), currency: f.currency, paymentStatus: p.status,
-      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn, attemptCaptures: f.siblings,
+      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn, attemptCaptures: f.siblings, refundPermitted: f.refundPermitted,
       refund: refunded || ordinary.done ? 'refunded' : live.length > 0 || ordinary.live ? 'in_progress' : 'none',
     };
   }
@@ -375,6 +381,14 @@ export class RefundAttemptService {
     if (a.status !== 'authorization_pending') return this.answer(a);
     if (a.receiptDigest !== digest) throw attemptConflict(); // never another receipt for this attempt (R6B-9)
     const binding = bindingOf(a);
+    // Core V2 S0-C12 item 14(d), S0-C11 item 9: checked again before the receipt is consumed, for an intent that waited. An authorization Auth already recorded
+    // under THIS binding and reference stands, whatever arrived since; only with none is the intent refused, the receipt unspent
+    if (a.captureSpecific && (await this.ambiguousWithoutPermission(a))) {
+      const prior = await this.receipts.lookup({ binding, consumeRef: a.id });
+      if (prior.kind === 'consumed') return this.answer(await this.commitAuthorized(a.id, prior.consumption, ctx));
+      if (prior.kind === 'absent') return this.answer(await this.commitUnauthorized(a.id, 'authorization_refused', 'refund_capture_not_eligible'));
+      throw paymentError(503, 'refund_authorization_unresolved', PAYMENT_MESSAGES.refundAuthorizationUnresolved);
+    }
     const outcome = await this.receipts.consume({ secret, binding, consumeRef: a.id });
     switch (outcome.kind) {
       case 'consumed':
@@ -391,6 +405,13 @@ export class RefundAttemptService {
         throw paymentError(503, 'refund_authorization_unresolved', PAYMENT_MESSAGES.refundAuthorizationUnresolved);
       }
     }
+  }
+
+  private async ambiguousWithoutPermission(a: RefundAttemptRow): Promise<boolean> {
+    const { rows } = await this.db.query<{ blocked: boolean }>(
+      `SELECT (SELECT count(*) FROM provider_transaction_fact g WHERE g."attemptId" = $1 AND g."paymentId" = $2 AND g.kind = 'capture') > 1
+              AND NOT payment_provider_refund_permitted($3) AS blocked`, [a.capturedAttemptId, a.paymentId, a.provider]);
+    return rows[0]!.blocked;
   }
 
   /** A terminal authorization outcome is answered as the error it is, on every replay too; any other state is the attempt itself. */

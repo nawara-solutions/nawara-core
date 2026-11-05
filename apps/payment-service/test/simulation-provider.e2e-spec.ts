@@ -140,13 +140,13 @@ describeWithEnv('simulation provider and harness (Core V2 S4f) — real PostgreS
       await start(p.id);
     });
 
-    it('a late verified success after a provider expiry is recorded for reconciliation, never applied', async () => {
+    it('a late verified success after a provider expiry is kept as a fact, never applied; its late success waits for finality (S0-C12 FN-2)', async () => {
       const p = await create();
       const a = await start(p.id);
       await outcome(p.id, a.id, { outcome: 'expired' });
       const late = await outcome(p.id, a.id, { outcome: 'succeeded' });
       expect(late.delivered).toEqual({ status: 200 });
-      expect(await lateSuccesses(a.id)).toEqual([{ paymentStatus: 'created', source: 'webhook' }]);
+      expect(await lateSuccesses(a.id)).toEqual([]);
       expect(await facts(a.id)).toHaveLength(1); // the money movement is still a fact
       expect((await read(p.id)).status).toBe('created');
       expect(await events(p.id, 'payment.succeeded')).toBe(0);

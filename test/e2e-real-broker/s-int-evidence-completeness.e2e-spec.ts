@@ -58,6 +58,8 @@ const ORG_K = randomUUID(); // S0-C11 C-4: capture contradictions before and aft
 const ORG_W = randomUUID(); // S0-C12: wrong-amount captures (F-01, F-20) and recovery classification (L3)
 const ORG_U = randomUUID(); // S0-C12 item 14: an ambiguous attempt refuses L-4 (a refused request's Organization stays restricted)
 const ORG_T = randomUUID(); // S0-C12 item 14: a committed L-4 stands when a sibling arrives
+const ORG_N = randomUUID(); // S0-C12 FN-2: an assisted capture before finality, with a real Payment crash
+const ORG_P = randomUUID(); // S0-C12 FN-2: an equal recovery capture before finality
 const ORG_Q = randomUUID(); // S0-C12 item 14: several capture facts on a recovery channel (T3 stays on this Organization)
 const ORG_V = randomUUID(); // S0-C12 acceptance: a recovery channel whose obligation stays open (T3 stays on this Organization)
 const OWNER = randomUUID(); // the Owner of the seller Company (L-4), with a real TOTP factor at the real Auth
@@ -110,6 +112,7 @@ describeWithEnv(
     let totpSecret = '';
     let tap: Awaited<ReturnType<typeof tapPaymentEvents>>;
     let authEnv: NodeJS.ProcessEnv = {};
+    let paymentEnv: NodeJS.ProcessEnv = {};
     let billingEnv: NodeJS.ProcessEnv = {};
     const actor = (organizationId: string, admin: boolean): Actor => ({ id: randomUUID(), email: `${randomUUID().slice(0, 8)}@s-int.e2e.test`, organizationId, admin, token: '' });
     const adminS = actor(ORG_S, true);
@@ -145,11 +148,15 @@ describeWithEnv(
     const benU = actor(ORG_U, false);
     const adminT = actor(ORG_T, true);
     const benT = actor(ORG_T, false);
+    const adminN = actor(ORG_N, true);
+    const benN = actor(ORG_N, false);
+    const adminP = actor(ORG_P, true);
+    const benP = actor(ORG_P, false);
     const adminQ = actor(ORG_Q, true);
     const benQ = actor(ORG_Q, false);
     const adminV = actor(ORG_V, true);
     const benContested = actor(ORG_V, false);
-    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter, adminW, benF01, benF20, benWL3, benDup, benUnrecognized, benSubmitted, benInterrupted, adminV, benContested, adminU, benU, adminT, benT, adminQ, benQ];
+    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter, adminW, benF01, benF20, benWL3, benDup, benUnrecognized, benSubmitted, benInterrupted, adminV, benContested, adminU, benU, adminT, benT, adminQ, benQ, adminN, benN, adminP, benP];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -208,7 +215,7 @@ describeWithEnv(
       const hash = await bcrypt.hash(PASSWORD, 4);
       await authAdmin.query(`INSERT INTO company(id, name) VALUES ($1, 'S-INT')`, [COMPANY]);
       await authAdmin.query(`INSERT INTO platform(id, "companyId", name) VALUES ($1, $2, 'S-INT platform')`, [TEST_PLATFORM, COMPANY]);
-      for (const org of [ORG_S, ORG_X, ORG_R, ORG_O, ORG_F, ORG_K, ORG_W, ORG_V, ORG_U, ORG_T, ORG_Q]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
+      for (const org of [ORG_S, ORG_X, ORG_R, ORG_O, ORG_F, ORG_K, ORG_W, ORG_V, ORG_U, ORG_T, ORG_Q, ORG_N, ORG_P]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
       const oc = await authAdmin.connect();
       try {
         await oc.query('BEGIN');
@@ -266,7 +273,7 @@ describeWithEnv(
       } catch (e) {
         throw new Error(`${String(e)}\n${auth.tail()}`);
       }
-      payment = spawnService('payment', PAYMENT_DIR, {
+      paymentEnv = {
         NODE_ENV: 'test',
         PORT: String(PAYMENT_PORT),
         DATABASE_URL: paymentDb.url,
@@ -287,7 +294,8 @@ describeWithEnv(
           'simulation-harness': { operations: ['payment.simulation.resolve'], allowedPlatforms: [] },
         } }),
         ...refStub.env,
-      });
+      };
+      payment = spawnService('payment', PAYMENT_DIR, paymentEnv);
       billingEnv = {
         NODE_ENV: 'test',
         PORT: String(BILLING_PORT),
@@ -509,6 +517,12 @@ describeWithEnv(
       await ch.waitForConfirms();
       await ch.close();
       if (o.asPayment) await conn.close();
+    }
+    /** A real crash: SIGKILL, no shutdown hook; whatever survives is what PostgreSQL committed. */
+    async function crashAndRestartPayment() {
+      await payment.kill();
+      payment = spawnService('payment', PAYMENT_DIR, paymentEnv);
+      await waitForHealth(`${PAYMENT_URL}/health`, 60_000);
     }
     const stopBilling = () => billing.stop();
     async function startBilling() {
@@ -1312,7 +1326,7 @@ describeWithEnv(
     }, 420_000);
 
     // ─────────────── S0-C12 item 14, Billing's side (BIL-28 H, BIL-32 N): several capture facts on one attempt, as Payment's real capture read states them
-    /** The sibling's own refund-only case: Billing has finished with it (Payment still records a late success per fact until its own item 14 change). */
+    /** A late success's own refund-only case: Billing has finished with it. */
     const siblingClassified = async (factId: string) => {
       const l = await billingLateOf(factId);
       await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'late_success' AND "evidenceKey" = $1`, [l.lateSuccessId])).rowCount === 1,
@@ -1347,8 +1361,21 @@ describeWithEnv(
       // after finality: a wrong amount, then an equal capture, on another attempt
       const wrongAfter = await wrongCapture(paymentA, a2.id, BASE + 5);
       const equalAfter = await wrongCapture(paymentA, a2.id, BASE);
-      // Payment still records a late success per fact until its own item 14 change; Billing must already refuse to count them
-      for (const f of [wrongBefore, equalBefore, wrongAfter, equalAfter]) await siblingClassified(f.factId);
+      // item 14(b): both facts present before finality: no late success for either, so Billing has nothing to classify. The wrong amount after finality was its
+      // attempt's only capture when decided: it has its refund-only case. The equal one after it is on an ambiguous attempt: none
+      await siblingClassified(wrongAfter.factId);
+      for (const f of [wrongBefore, equalBefore, equalAfter]) {
+        expect(await paymentLateOf(f.factId), 'in review').toEqual([]);
+        expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [f.factId])).toBe(0);
+      }
+      await reconciliationPass();
+      // item 14(f): every one visible to the Owner, keyed by its fact; never through a service read
+      const review = (await ownerPaymentItems('multiple_captures')).filter((i) => i.paymentId === paymentA);
+      expect(review.map((i) => i.factId).sort()).toEqual([wrongBefore.factId, equalBefore.factId, wrongAfter.factId, equalAfter.factId].sort());
+      expect(review.find((i) => i.factId === equalAfter.factId)!.detail).toMatchObject({ inReview: true, attemptCaptures: 2 });
+      expect(review.find((i) => i.factId === wrongAfter.factId)!.detail).toMatchObject({ inReview: false });
+      const service = await call(PAYMENT_URL, 'GET', billingToPaymentToken.token, '/payment/reconciliation/items?kind=multiple_captures&limit=10');
+      expect([service.status, service.json?.code]).toEqual([400, 'invalid_reconciliation_request']);
       expect((await paymentAdmin.query(`SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "attemptId" = $1 AND kind = 'capture'`, [a1.id])).rows[0].n).toBe(2);
       expect((await call(BILLING_URL, 'GET', adminQ.token, `/billing/recovery-obligations/${obligationId}`)).json).toMatchObject({ baseAmount: BASE, recovered: 0, outstanding: BASE, status: 'open' });
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "obligationId" = $1`, [obligationId])).toBe(0);
@@ -1361,7 +1388,7 @@ describeWithEnv(
     it('S0-C12 item 14(c), L-4 input (b): a sibling capture on the late success\'s attempt refuses 409 capture_unverified with the real Owner receipt unspent; no purchase or entitlement', async () => {
       const { s, ls } = await attestedLateSettlement(benU, adminU);
       const sibling = await wrongCapture(s.paymentId, s.attempts[0]!, BASE);
-      await siblingClassified(sibling.factId);
+      expect(await paymentLateOf(sibling.factId), 'item 14(b)').toEqual([]);
       const r = await ownerReceipt(ls.id, s.requestId, benU);
       expect(refusal(await applyL4(ls.id, r.secret))).toEqual([409, 'late_settlement_refused', 'capture_unverified']);
       expect(await receiptStatus(r.receiptId), 'the receipt is not spent').not.toBe('consumed');
@@ -1382,7 +1409,7 @@ describeWithEnv(
       const entitled = await b6(benT.id);
       expect(entitled.valid).toBe(true);
       const sibling = await wrongCapture(s.paymentId, s.attempts[0]!, BASE);
-      await siblingClassified(sibling.factId);
+      expect(await paymentLateOf(sibling.factId), 'item 14(b)').toEqual([]);
       const replay = await call(BILLING_URL, 'POST', ownerToken, `/billing/admin/late-settlements/${ls.id}/application`, body, idem);
       expect(replay.status, JSON.stringify(replay.json)).toBe(201);
       expect(replay.json.application.id).toBe(first.json.application.id);
@@ -1392,6 +1419,77 @@ describeWithEnv(
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM late_settlement_application WHERE "lateSettlementId" = $1`, [ls.id])).toBe(1);
       expect(await deadLettered()).toBe(0);
     }, 240_000);
+
+    // ─────────────── S0-C12 FN-2 (Option A): a capture seen while the payment is non-final. Before the correction this very sequence dead-lettered EVT-10 at Billing.
+    it('S0-C12 FN-2, assisted: an equal capture of a confirmed-failed attempt on an open payment is a fact only: no late success, no EVT-10, nothing dead-lettered; after a real Payment crash (SIGKILL) the genuine finality decides it from committed state, once, and Billing holds its late settlement', async () => {
+      const s = await settlementAtPayment(benN, adminN);
+      const a1 = await attemptOf(s.paymentId, adminN);
+      await outcome(s.paymentId, a1.id, { outcome: 'failed', failureCode: 'declined' });
+      const open = await paymentStatus(s.paymentId);
+      expect(['created', 'pending']).toContain(open);
+      const w = await wrongCapture(s.paymentId, a1.id, BASE); // the equal amount: this is what used to record `created`
+      const noEvent = async () => count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.late_success.recorded' AND payload->>'paymentId' = $1`, [s.paymentId]);
+      expect(await paymentLateOf(w.factId)).toEqual([]);
+      expect(await noEvent(), 'no premature EVT-10').toBe(0);
+      expect(await paymentStatus(s.paymentId)).toBe(open);
+      await reconciliationPass();
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
+      expect(await deadLettered(), 'nothing dead-lettered').toBe(0);
+      expect((await ownerPaymentItems('capture_refund_unavailable')).filter((i) => i.factId === w.factId), 'the Owner sees it meanwhile').toEqual([expect.objectContaining({ detail: { reason: 'late_capture' } })]);
+      await crashAndRestartPayment();
+      for (let i = 0; i < 2; i++) await outcome(s.paymentId, (await attemptOf(s.paymentId, adminN)).id, { outcome: 'failed', failureCode: 'declined' });
+      expect(await paymentStatus(s.paymentId)).toBe('failed');
+      const [ls] = await paymentLateOf(w.factId);
+      expect(ls).toMatchObject({ amount: BASE, currency: 'TND', paymentStatus: 'failed' });
+      expect((await paymentAdmin.query(`SELECT (SELECT xmin FROM payment_late_success WHERE id = $1)::text = (SELECT xmin FROM payment WHERE id = $2)::text AS same`, [ls.id, s.paymentId])).rows[0]).toEqual({ same: true });
+      expect(await noEvent()).toBe(1);
+      const b = await billingLateOf(w.factId);
+      expect(b).toMatchObject({ lateSuccessId: ls.id, amount: BASE });
+      await lateSettlementOf(ls.id);
+      expect(await purchasesOf(s.requestId)).toBe(0);
+      // the provider's notification again, under the same and a new id; another pass: one record, one event; Billing one
+      expect(await signed({ eventId: w.eventId, type: 'payment.succeeded', reference: a1.id, providerTransactionId: w.txn, amount: BASE, currency: 'TND' })).toBeLessThan(500);
+      expect(await signed({ eventId: `sint_${randomUUID()}`, type: 'payment.succeeded', reference: a1.id, providerTransactionId: w.txn, amount: BASE, currency: 'TND' })).toBeLessThan(500);
+      await reconciliationPass();
+      expect(await paymentLateOf(w.factId)).toHaveLength(1);
+      expect(await noEvent()).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [w.factId])).toBe(1);
+      expect(await lateSettlementsOf(s.requestId)).toBe(1);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    it('S0-C12 FN-2, recovery: an equal capture before finality counts nothing while the channel is open; the channel\'s genuine failure decides it; Billing counts it exactly once and T3 clears once', async () => {
+      const p = await settlementAtPayment(benP, adminP);
+      const pa = await attemptOf(p.paymentId, adminP);
+      await outcome(p.paymentId, pa.id, { outcome: 'succeeded' });
+      await waitFor(async () => (await purchasesOf(p.requestId)) === 1, 30_000, `the assisted purchase\n${tails()}`);
+      const lossRef = `sint-p-${randomUUID()}`;
+      await dispute(p.paymentId, pa.id, lossRef, { event: 'lost' });
+      const lost = (await paymentDispute(lossRef))!;
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM recovery_obligation WHERE "disputeId" = $1`, [lost.id])).rowCount === 1, 45_000, `the recovery obligation\n${tails()}`);
+      const obligationId = (await billingAdmin.query(`SELECT id FROM recovery_obligation WHERE "disputeId" = $1`, [lost.id])).rows[0].id as string;
+      const c = await call(BILLING_URL, 'POST', adminP.token, `/billing/recovery-obligations/${obligationId}/settlement`);
+      expect(c.status, JSON.stringify(c.json)).toBe(201);
+      const paymentA = await requestedAt(c.json.paymentRequestId as string);
+      const a1 = await attemptOf(paymentA, adminP);
+      await outcome(paymentA, a1.id, { outcome: 'failed', failureCode: 'declined' });
+      const equal = await wrongCapture(paymentA, a1.id, BASE);
+      await reconciliationPass();
+      expect(await paymentLateOf(equal.factId)).toEqual([]);
+      expect((await call(BILLING_URL, 'GET', adminP.token, `/billing/recovery-obligations/${obligationId}`)).json).toMatchObject({ recovered: 0, outstanding: BASE, status: 'open' });
+      expect(await restrictions(ORG_P)).toEqual(['T3']);
+      for (let i = 0; i < 2; i++) await outcome(paymentA, (await attemptOf(paymentA, adminP)).id, { outcome: 'failed', failureCode: 'declined' });
+      expect(await paymentStatus(paymentA)).toBe('failed');
+      const l = await billingLateOf(equal.factId);
+      await waitFor(async () => (await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "lateSuccessId" = $1`, [l.lateSuccessId])) === 1, 45_000, `the recovery\n${tails()}`);
+      expect((await call(BILLING_URL, 'GET', adminP.token, `/billing/recovery-obligations/${obligationId}`)).json).toMatchObject({ recovered: BASE, outstanding: 0, status: 'recovered' });
+      expect(await restrictions(ORG_P)).toEqual([]);
+      await reconciliationPass();
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_payment WHERE "obligationId" = $1`, [obligationId])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_surplus WHERE "obligationId" = $1`, [obligationId])).toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.recovery_obligation.recovered' AND payload->'resource'->>'id' = $1`, [obligationId])).toBe(1);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
 
     it('G5 per family: payment.succeeded, payment.failed, refund.case_completed, payment.dispute.lost, payment.late_success.recorded: default-exchange injection without a stored row, tampered bodies and a verified contradiction are refused before any state change; a verified duplicate applies nothing', async () => {
       const fingerprint = async () => JSON.stringify((await billingAdmin.query(`SELECT

@@ -13,7 +13,9 @@ export const ISO_CURRENCY = /^[A-Z]{3}$/;
  * success (with its EVT-10 and its audit record) of every capture fact of a payment that is `failed`, `cancelled` or `expired` and that:
  *   - is uncontested (S0-C11 item 1) and has a currency matching `^[A-Z]{3}$` (S0-C12 item 8);
  *   - settled nothing (the payment never succeeded with it: the payment is final unsuccessful);
- *   - has no late success yet (never a second record of the same fact).
+ *   - has no late success yet (never a second record of the same fact);
+ *   - is its attempt's only capture fact (S0-C12 item 14(b)): an ambiguous attempt records none, and such a fact stays in review (`multiple_captures`).
+ * A capture seen while the payment was non-final (FN-2) is decided here, from committed records, in the finality transaction itself.
  * The row reuses the fact's own source and webhook event, so it is the very row the observation's own processing would have written: the
  * `payment_late_success_once` key, and the fact's own `payment_late_success_one_per_fact` key (`0025`), turn any concurrent or later write of it, by
  * whichever observation, into a no-op. The database re-checks the fact binding (`0024`).
@@ -29,6 +31,7 @@ export async function recordQualifyingLateSuccesses(
       WHERE f."paymentId" = $1 AND f.kind = 'capture' AND trim(f.currency) ~ '^[A-Z]{3}$'
         AND NOT EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id)
         AND NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id)
+        AND NOT EXISTS (SELECT 1 FROM provider_transaction_fact g WHERE g."attemptId" = f."attemptId" AND g.kind = 'capture' AND g.id <> f.id)
         AND ($2::uuid IS NULL OR f.id = $2)
       ORDER BY f."observedAt", f.id`, [payment.id, opts.onlyFactId ?? null]);
   let recorded = 0;
