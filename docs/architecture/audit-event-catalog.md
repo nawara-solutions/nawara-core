@@ -110,7 +110,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `assistance_late_settlement.applied` | commercial | user (owner) | required | assistance_late_settlement | — | succeeded | `assistance_request_id`: uuid<br>`reason_code`: cash_not_returned_attested \| cash_not_returned_evidenced<br>`purchase_id`: uuid<br>`superseded_obligation_id`?: uuid<br>`evidence_count`: integer 0–5 | The Owner applied a verified late assisted settlement as its request's single purchase (L-4), with the beneficiary's attestation or evidence that the cash was not returned. |
 | `cash_return_obligation.superseded` | commercial | user (owner) | required | cash_return_obligation | — | succeeded | `assistance_request_id`: uuid<br>`late_settlement_id`: uuid | An open deadline cash-return obligation closed as superseded_by_settlement by the Owner's L-4 application; it is kept as history. |
 
-## payment-service (17)
+## payment-service (18)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -125,6 +125,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `payment_dispute.closed` | commercial | system (`payment_webhook`) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`outcome`: won \| lost | The provider's final outcome of a dispute, once (a later contradictory notification never replaces it). |
 | `payment_dispute.evidence_added` | commercial | user (owner) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`file_id`: uuid<br>`grant_id`: uuid | The Owner of the seller Company added a reference to a file File granted Payment as evidence of this open dispute. |
 | `payment_dispute.decided` | commercial | user (owner) | as recorded (UUID or null) | payment_dispute | — | succeeded | `payment_id`: uuid<br>`decision`: contest \| accept | The Owner's contest-or-accept decision on a dispute, authorized by a consumed Auth dispute-decision receipt (the provider still decides the outcome). |
+| `payment_dispute.conflict_recorded` | commercial | system (`payment_webhook`) | as recorded (UUID or null) | payment_dispute_observation | — | succeeded | `payment_id`: uuid<br>`attempt_id`: uuid<br>`reason`: capture_unverified \| exposure_mismatch \| payment_mismatch \| terminal_contradiction \| chargeback_mismatch \| chargeback_unverifiable<br>`notification_kind`: opened \| won \| lost<br>`dispute_id`?: uuid | A verified provider dispute notification Payment could not apply was preserved as a conflict: it changes nothing, resolves nothing, and the payment's exposure stays unresolved. |
 | `provider_fact.associated` | commercial | user (owner) | as recorded (UUID or null) | provider_transaction_fact | — | succeeded | `target_type`: payment \| refund_authorization<br>`target_id`: uuid<br>`payment_id`: uuid<br>`association_id`: uuid | The Owner associated an unmatched verified provider money fact with one payment or refund authorization of their Company (append-only; the fact never changes). |
 | `provider_fact_conflict.recorded` | commercial | system (`payment_webhook`, `payment_status_read`) | as recorded (UUID or null) | provider_transaction_fact | — | succeeded | `conflict_id`: uuid<br>`payment_id`: uuid<br>`attempt_id`: uuid<br>`source`: webhook \| status_check<br>`observed_amount`: integer 1–9007199254740991 | An authenticated provider observation contradicted a recorded capture fact: the fact stays as first reported and is contested, with no commercial effect. |
 | `payment_late_success.recorded` | commercial | system (`payment_webhook`, `payment_status_read`, `payment_capture_reconciler`) | as recorded (UUID or null) | payment_late_success | — | succeeded | `payment_id`: uuid<br>`attempt_id`: uuid<br>`fact_id`: uuid<br>`observed_amount`: integer 1–9007199254740991<br>`payment_status`: failed \| cancelled \| expired \| succeeded \| created \| pending \| closing<br>`matches_payment`: boolean | Payment recorded a verified late success: an uncontested capture of a payment whose workflow had ended. It settles nothing and sells nothing; when its figures differ from the payment it is refund-only. |
@@ -166,4 +167,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 113 actions.**
+**Total: 114 actions.**

@@ -502,9 +502,9 @@ status change still needs its own explicit owner authorization.
       `multiple_captures`; the recovery test's equal capture moved to its own attempt, keeping what it proves. Reactivation stays out until its decision.
 
 - **S0-C13 Part A Terminal dispute conflicts: visibility and recording audit (2026-11-05, ADOPTED CONTRACT, the Owner's Part A GO: clarification of S0-C9 items 3
-  and 8; logic-audit finding F-02; register PAY-09 J, PAY-12 K). NOT IMPLEMENTED: this entry adopts the contract only.** Parts B and C are not adopted and are not
-  authorized. S0-C9, S0-C11 and S0-C12 are unchanged and govern. Today a conflict is stored and counts as `unresolved` exposure, but no Owner API lists it and no
-  audit record is written for it.
+  and 8; logic-audit finding F-02; register PAY-09 J, PAY-12 K). IMPLEMENTED for development and simulation only, not certified.** Parts B and C are not adopted and
+  are not authorized. S0-C9, S0-C11 and S0-C12 are unchanged and govern. Before this entry a conflict was stored and counted as `unresolved` exposure, but no Owner
+  API listed it and no audit record was written for it.
   1. *Owner item.* Every `payment_dispute_observation` with disposition `conflict`, exactly the rows the exposure's `conflicts` field counts, of a payment whose
      seller is a Company, is readable by that Company's active Owner through PAY-12 kind `dispute_conflict`, whether or not Payment holds a dispute record for it.
      Read-only and derived at read from committed evidence, with no new storage. A provider dispute reference is always stated on such a row; what can be missing is
@@ -536,6 +536,8 @@ status change still needs its own explicit owner authorization.
   7. *Financial safeguards.* Visibility and evidence only. Reading changes and clears nothing, and an item never means exposure has cleared: `unresolved` stays
      `unresolved`, and the exposure read stays the authority. Refund and L-4 refusals, capture and payment finality, Organization obligations, recovery allocation
      and every immutable record are unchanged. No clearance, dismissal, refund, compensation or event follows from it.
+     *PAY-09 isolation (the Owner's Part A implementation GO; ADR-0050).* A dispute's detail lists an observation naming it only when that observation's payment is
+     sold by the same Company. A notification of another Company's payment that names the dispute (`payment_mismatch`) is that Company's evidence, in its own item.
   8. *Boundary.* Only evidence safely bound to a known payment and seller Company. Outside this entry: malformed notifications and notifications matching no attempt,
      which have no trusted payment binding; a held notification, which is not yet a conflict (S0-C9 item 3); and a payment sold by an Organization, as with every
      PAY-12 Owner kind. A Company is never inferred from an untrusted payload. **Provider-level visibility and reconciliation of the unbound notifications stays a

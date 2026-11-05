@@ -1,10 +1,11 @@
+import { createHmac } from 'node:crypto';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { APPS, PROHIBITED, deadDepth, resetAuditQueues, sql, startAudit, type LiveAudit } from './support/audit.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
-import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { TEST_PLATFORM, startReferenceStub } from './support/admission.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
 const refStub = await startReferenceStub();
@@ -18,6 +19,7 @@ const PAYMENT_DIR = `${APPS}payment-service`;
 const PAYMENT_PORT = 3871;
 const AUDIT_PORT = 3872;
 const PAYMENT_URL = `http://127.0.0.1:${PAYMENT_PORT}`;
+const WEBHOOK_SECRET = 'audit-producers-simulation-webhook-secret';
 
 describeWithEnv('Payment → outbox → RabbitMQ → audit-service (all real)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
   let paymentDb: TestDatabase;
@@ -50,7 +52,10 @@ describeWithEnv('Payment → outbox → RabbitMQ → audit-service (all real)', 
     await proxy.start();
     payment = spawnService('payment', PAYMENT_DIR, {
       NODE_ENV: 'test', PORT: String(PAYMENT_PORT), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: proxy.url,
-      PAYMENT_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `billing-service:${billing.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
+      AUTH_SERVICE_TOKEN: 'audit-producers-auth-service-token-unused', PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: WEBHOOK_SECRET,
+      PAYMENT_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `billing-service:${billing.digest}`, ...refStub.env,
+      // disputes are mounted where refunds are (no refund is requested here)
+      PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: { 'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create'], allowedPlatforms: [TEST_PLATFORM] } } }),
     });
     try {
       await waitForHealth(`${PAYMENT_URL}/health`, 30_000);
@@ -78,6 +83,44 @@ describeWithEnv('Payment → outbox → RabbitMQ → audit-service (all real)', 
     });
     expect((row!.occurredAt as Date).getTime()).toBe(Math.floor((ob!.occurredAt as Date).getTime()));
     for (const re of PROHIBITED) expect(JSON.stringify(ob!.payload)).not.toMatch(re);
+  });
+
+  /**
+   * Core V2 S0-C13 Part A: a real delivery to a running audit-service, of an action S-INT can only see at Payment's outbox. LABELLED FIXTURES (by SQL): the attempt,
+   * because this suite has no buyer identity, and the retry budget, as in S-INT, leaving the notification its last permitted processing. The notification is signed.
+   */
+  it('payment_dispute.conflict_recorded reaches audit_record exactly as the outbox recorded it, once under replay, naming no dispute and no provider reference', async () => {
+    const p = await newPayment();
+    const attemptId = (await sql(paymentDb.url, `INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), $1, 1, 'simulation', false) RETURNING id`, [p.id]))[0]!.id as string;
+    const providerDisputeId = `simd_audit-${crypto.randomUUID()}`;
+    const eventId = `audit_${crypto.randomUUID()}`;
+    const raw = JSON.stringify({ eventId, type: 'payment.dispute.opened', reference: attemptId, amount: 321, currency: 'TND', data: { disputeId: providerDisputeId } });
+    const deliver = async () => (await fetch(`${PAYMENT_URL}/payment/webhooks/simulation`, {
+      method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-simulation-signature': createHmac('sha256', WEBHOOK_SECRET).update(raw).digest('hex') } })).status;
+    expect(await deliver()).toBe(200);
+    expect(await sql(paymentDb.url, `SELECT 1 FROM payment_dispute_observation WHERE "paymentId" = $1`, [p.id])).toEqual([]); // held: not a conflict yet
+    await sql(paymentDb.url, `UPDATE webhook_event SET attempts = 9 WHERE "providerEventId" = $1`, [eventId]);
+    expect(await deliver()).toBe(200);
+    expect((await sql(paymentDb.url, `SELECT state, outcome FROM webhook_event WHERE "providerEventId" = $1`, [eventId]))[0]).toEqual({ state: 'conflict', outcome: 'dispute_capture_unverified' });
+    const [observation] = await sql(paymentDb.url, `SELECT id, reason, "disputeId" FROM payment_dispute_observation WHERE "paymentId" = $1`, [p.id]);
+    expect(observation).toMatchObject({ reason: 'capture_unverified', disputeId: null });
+    const observationId = observation!.id as string;
+    await waitFor(async () => (await audit.records(`"resourceId" = $1`, [observationId])).length === 1, 30_000, 'the conflict audit record');
+    const [row] = await audit.records(`"resourceId" = $1`, [observationId]);
+    const [ob] = await outboxAudit(observationId);
+    expect(row).toMatchObject({
+      eventId: ob!.id, sourceService: 'payment-service', action: 'payment_dispute.conflict_recorded', category: 'commercial', schemaVersion: 1,
+      actorType: 'system', actorId: 'payment_webhook', userKind: null, organizationId: p.organizationId, resourceType: 'payment_dispute_observation', resourceId: observationId,
+      subjectType: null, outcome: 'succeeded',
+    });
+    expect(row!.changes).toEqual({ payment_id: p.id, attempt_id: attemptId, reason: 'capture_unverified', notification_kind: 'opened' });
+    expect(JSON.stringify(row)).not.toContain(providerDisputeId);
+    for (const re of PROHIBITED) expect(JSON.stringify(ob!.payload)).not.toMatch(re);
+    expect(await deliver()).toBe(200);
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await sql(paymentDb.url, `SELECT 1 FROM outbox WHERE name = 'audit.payment_dispute.conflict_recorded' AND payload->'resource'->>'id' = $1`, [observationId])).toHaveLength(1);
+    expect(await audit.records(`"resourceId" = $1`, [observationId])).toHaveLength(1);
+    expect(await deadDepth(env.TEST_RABBITMQ_URL)).toBe(0);
   });
 
   it('a relay re-publish of the same outbox row is absorbed: still one audit record', async () => {

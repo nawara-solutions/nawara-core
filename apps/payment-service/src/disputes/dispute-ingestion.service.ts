@@ -87,13 +87,18 @@ export class DisputeIngestionService {
       const outcome: Outcome = d ? await this.onKnown(q, d, payment, attempt, n, webhookEventId, ctx) : await this.onNew(q, payment, attempt, n, webhookEventId, ctx, lastChance);
       // CB-5: held, not observed: the observation is written once, when the notification is finally applied or preserved as a conflict
       if (outcome.disposition === 'held') return { state: 'held' as const, outcome: DISPUTE_HELD_OUTCOME, attemptId: attempt.id };
-      await q.query(
+      const observation = (await q.query<{ id: string }>(
         `INSERT INTO payment_dispute_observation ("webhookEventId", provider, "providerDisputeId", kind, "paymentId", "attemptId", "disputeId", amount, currency,
            "chargebackTxnId", "chargebackAmount", "chargebackCurrency", "providerOccurredAt", disposition, reason)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
         [webhookEventId, providerId, n.providerDisputeId, n.kind, payment.id, attempt.id, outcome.disputeId, n.amount, n.currency,
           n.chargeback?.txnId ?? null, n.chargeback?.amount ?? null, n.chargeback?.currency ?? null, n.providerOccurredAt, outcome.disposition, outcome.reason],
-      );
+      )).rows[0]!;
+      // Core V2 S0-C13 Part A: once, with its observation; a replay answered above, before this. Another payment's dispute is never named.
+      if (outcome.disposition === 'conflict') {
+        await this.audit.recordDisputeConflict(q, { observationId: observation.id, paymentId: payment.id, attemptId: attempt.id, reason: outcome.reason as string, kind: n.kind,
+          disputeId: d?.paymentId === payment.id ? d.id : null }, payment.organizationId, ctx);
+      }
       return this.answer(outcome.disposition, outcome.reason, outcome.disputeId, attempt.id);
     });
     if (result.state === 'held') this.log.warn(`payment_dispute_held providerDispute=${n.providerDisputeId} kind=${n.kind} — its capture is not verified yet; retried within the webhook retry bound (CB-5)`);

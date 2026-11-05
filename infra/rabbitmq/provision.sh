@@ -111,7 +111,7 @@ permissions_for() {
 # file-service: write 7, read 0, domain events none
 # notification-service: write 0, read 9, domain events none
 # organization-service: write 7, read 0, domain events none
-# payment-service: write 26, read 0, domain events active
+# payment-service: write 27, read 0, domain events active
 # release-service: write 4, read 0, domain events none
 topic_grants_for() {
   case "$1" in
@@ -134,7 +134,7 @@ topic_grants_for() {
       TOPIC_WRITE='^(audit\.company\.created|audit\.company\.updated|audit\.hierarchy\.admin_operation_denied|audit\.organization\.created|audit\.organization\.updated|audit\.platform\.created|audit\.platform\.updated)$'
       TOPIC_READ='^(?!)$' ;;
     payment-service)
-      TOPIC_WRITE='^(audit\.payment\.cancelled|audit\.payment\.created|audit\.payment\.expired|audit\.payment\.failed|audit\.payment\.succeeded|audit\.payment_capture_mismatch\.recorded|audit\.payment_dispute\.closed|audit\.payment_dispute\.decided|audit\.payment_dispute\.evidence_added|audit\.payment_dispute\.opened|audit\.payment_late_success\.recorded|audit\.provider_fact\.associated|audit\.provider_fact_conflict\.recorded|audit\.refund_attempt\.authorized|audit\.refund_attempt\.failed|audit\.refund_attempt\.succeeded|audit\.refund_authorization\.completed|payment\.cancelled|payment\.created|payment\.dispute\.lost|payment\.dispute\.opened|payment\.expired|payment\.failed|payment\.late_success\.recorded|payment\.succeeded|refund\.case_completed)$'
+      TOPIC_WRITE='^(audit\.payment\.cancelled|audit\.payment\.created|audit\.payment\.expired|audit\.payment\.failed|audit\.payment\.succeeded|audit\.payment_capture_mismatch\.recorded|audit\.payment_dispute\.closed|audit\.payment_dispute\.conflict_recorded|audit\.payment_dispute\.decided|audit\.payment_dispute\.evidence_added|audit\.payment_dispute\.opened|audit\.payment_late_success\.recorded|audit\.provider_fact\.associated|audit\.provider_fact_conflict\.recorded|audit\.refund_attempt\.authorized|audit\.refund_attempt\.failed|audit\.refund_attempt\.succeeded|audit\.refund_authorization\.completed|payment\.cancelled|payment\.created|payment\.dispute\.lost|payment\.dispute\.opened|payment\.expired|payment\.failed|payment\.late_success\.recorded|payment\.succeeded|refund\.case_completed)$'
       TOPIC_READ='^(?!)$' ;;
     release-service)
       TOPIC_WRITE='^(audit\.compatibility_policy\.changed|audit\.release\.published|audit\.release\.registered|audit\.release\.withdrawn)$'

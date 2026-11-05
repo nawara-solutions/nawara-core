@@ -37,7 +37,7 @@ export class ReconciliationOwnerController {
   @ApiOperation({
     summary: "PAY-12: one kind of Payment's reconciliation items for the Owner's Company (keyset by id). Every kind is scoped through its payment.",
     description: 'Read-only evidence: nothing here creates, changes or resolves a fact. authorization_pending lists intents with no definitive Auth answer after '
-      + '15 minutes (Q8: fail closed; never released on missing evidence). capture_refund_unavailable lists the captures no original-payment refund can return.',
+      + '15 minutes (Q8: fail closed; never released on missing evidence). dispute_conflict (S0-C13 Part A, Owner only) lists preserved dispute conflicts: being listed never means the exposure cleared. capture_refund_unavailable lists the captures no original-payment refund can return.',
   })
   @ApiQuery({ name: 'kind', required: true, enum: ITEM_KINDS })
   @ApiQuery({ name: 'after', required: false, description: 'the last id of the previous page' })

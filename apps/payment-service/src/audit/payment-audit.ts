@@ -21,6 +21,8 @@ export type RefundAuditAction = 'refund_attempt.authorized' | 'refund_attempt.fa
 /** Core V2 S6e-D (R6E-8): the dispute actions (version 1, no trusted scope): provider observations by the verified webhook, Owner actions by the Owner. */
 export type DisputeAuditAction = 'payment_dispute.opened' | 'payment_dispute.closed' | 'payment_dispute.evidence_added' | 'payment_dispute.decided';
 /** Core V2 S6h (R6H-11): the Owner's association of an unmatched provider fact (version 1, no trusted scope). */
+/** Core V2 S0-C13 Part A: a preserved conflict of a verified dispute notification (version 1, no trusted scope). */
+export type DisputeConflictAuditAction = 'payment_dispute.conflict_recorded';
 export type ReconciliationAuditAction = 'provider_fact.associated' | 'provider_fact_conflict.recorded';
 /** Core V2 S0-C12 item 10: late successes and wrong-amount capture facts (version 1, no trusted scope). */
 export type CaptureAuditAction = 'payment_late_success.recorded' | 'payment_capture_mismatch.recorded';
@@ -149,6 +151,22 @@ export class PaymentAudit {
   }
 
   /** Core V2 S0-C11 item 8: a contradiction of a recorded capture fact, in the conflict row's transaction, once (its id keys the event). */
+  /**
+   * Core V2 S0-C13 Part A: in the observation's own transaction, so a failed write leaves the notification retryable, and with an id derived from the
+   * observation. Always the verified webhook's, on first delivery or on the retrier's last permitted processing. `disputeId` only when that dispute
+   * belongs to this payment: another payment's, possibly another Company's, is never named.
+   */
+  async recordDisputeConflict(q: Queryable, o: { observationId: string; paymentId: string; attemptId: string; reason: string; kind: string; disputeId: string | null },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    await this.writer.write(
+      q,
+      { action: 'payment_dispute.conflict_recorded' satisfies DisputeConflictAuditAction, actor: { type: 'system', id: 'payment_webhook' }, organizationId,
+        resource: { type: 'payment_dispute_observation', id: o.observationId }, outcome: 'succeeded',
+        changes: { payment_id: o.paymentId, attempt_id: o.attemptId, reason: o.reason, notification_kind: o.kind, ...(o.disputeId ? { dispute_id: o.disputeId } : {}) } } as never,
+      { eventId: deterministicEventId(o.observationId, 'audit.payment_dispute.conflict_recorded'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
   async recordFactConflict(q: Queryable, c: { id: string; factId: string; paymentId: string; attemptId: string; source: 'webhook' | 'status_check'; amount: number },
     organizationId: string | null, ctx: EventContext): Promise<void> {
     // a provider's observation, recorded by Payment: never attributed to whoever asked for the status read
