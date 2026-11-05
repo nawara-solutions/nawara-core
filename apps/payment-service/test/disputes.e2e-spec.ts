@@ -2,11 +2,13 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import type { DisputeEvidenceFiles, GrantedEvidence } from '../src/disputes/dispute-evidence-files.js';
 import { ownerAuthorityUnavailable, type OwnerCompanyAuthority, type VerifiedOwner } from '../src/disputes/owner-company.authority.js';
+import { WEBHOOK_RETRY_MAX_ATTEMPTS, WebhookRetriever } from '../src/webhooks/webhook-retrier.js';
+import { PaymentAudit } from '../src/audit/payment-audit.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
@@ -18,6 +20,7 @@ const COMPANY2 = '6c1d3e5f-2a4b-4d7c-9e0f-1a2b3c4d5e6f';
 const OWNER = '7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a';
 const OWNER2 = '8e7d6c5b-4a3f-4e2d-9c1b-0a9f8e7d6c5b';
 const MEMBER = '9f8e7d6c-5b4a-4f3e-8d2c-1b0a9f8e7d6c';
+const OPERATOR = '8e7d6c5b-4a3f-4e2d-9c1b-0a9f8e7d6c5b';
 const SECRET = randomBytes(32).toString('hex');
 type Row = Record<string, any>;
 
@@ -40,6 +43,7 @@ describeWithEnv('payment disputes (Core V2 S6e-D) — real PostgreSQL', ['TEST_D
     'owner-jwt': { id: OWNER, adminTier: 'owner', isActive: true, memberships: [] },
     'owner2-jwt': { id: OWNER2, adminTier: 'owner', isActive: true, memberships: [] },
     'member-jwt': { id: MEMBER, adminTier: null, isActive: true, memberships: [] },
+    'operator-jwt': { id: OPERATOR, adminTier: 'operator', isActive: true, memberships: [] },
   };
   const authClient: AuthClient = { getIdentity: async (bearer) => identities[bearer] ?? null, hasPlatformAccess: async () => false };
   const owners: Record<string, VerifiedOwner> = { 'owner-jwt': { userId: OWNER, companyId: COMPANY }, 'owner2-jwt': { userId: OWNER2, companyId: COMPANY2 } };
@@ -113,9 +117,9 @@ describeWithEnv('payment disputes (Core V2 S6e-D) — real PostgreSQL', ['TEST_D
       databaseUrl: db.url, authClient, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], refundWorker: false, ownerAuthority, evidenceFiles,
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
-        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
+        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET, PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000',
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
-          'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create'], allowedPlatforms: [TEST_PLATFORM] },
+          'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create', 'payment.reconciliation.read'], allowedPlatforms: [TEST_PLATFORM] },
           'other-producer': { operations: ['payment.create', 'payment.read'], allowedPlatforms: [TEST_PLATFORM] },
           'simulation-harness': { operations: ['payment.simulation.resolve'], allowedPlatforms: [] },
         } }),
@@ -285,6 +289,274 @@ describeWithEnv('payment disputes (Core V2 S6e-D) — real PostgreSQL', ['TEST_D
       const c = cmd();
       await sim(`payments/${payment.id}/disputes`, { commandId: c, disputeRef: `r-${randomUUID()}`, event: 'opened', delivery: 'held' }).expect(201);
       expect((await sim(`payments/${payment.id}/disputes`, { commandId: c, disputeRef: `r-${randomUUID()}`, event: 'opened', delivery: 'held' }).expect(409)).body.code).toBe('simulation_command_conflict');
+    });
+  });
+
+  describe('S0-C13 Part A: the Owner item dispute_conflict, its audit record, and PAY-09 isolation (service level; Owner authority a stand-in)', () => {
+    const route = (bearer?: string, query = 'kind=dispute_conflict&limit=200') => {
+      const r = request(server()).get(`/payment/admin/reconciliation-items?${query}`);
+      return bearer ? r.set('authorization', `Bearer ${bearer}`) : r;
+    };
+    const items = async (pid: string, bearer = 'owner-jwt') => ((await route(bearer).expect(200)).body.items as Row[]).filter((i) => i.paymentId === pid);
+    const auditsOf = async (pid: string) => (await admin.query(`SELECT id, payload FROM outbox WHERE name = 'audit.payment_dispute.conflict_recorded' AND payload->'changes'->>'payment_id' = $1 ORDER BY "occurredAt"`, [pid])).rows as Row[];
+    const conflictsOf = async (pid: string) => (await admin.query(`SELECT id, reason, "disputeId" FROM payment_dispute_observation WHERE "paymentId" = $1 AND disposition = 'conflict' ORDER BY "observedAt", id`, [pid])).rows as Row[];
+    const note = (attemptId: string, disputeId: string, over: Row = {}) => ({ eventId: `raw_${randomUUID()}`, type: 'payment.dispute.opened', reference: attemptId, amount: 100, currency: 'TND', data: { disputeId }, ...over });
+    /** A payment that settled on its second attempt: its first, failed attempt has no capture. */
+    const settledOnSecond = async () => {
+      const p = await createPayment();
+      const a1 = await startAttempt(p.id);
+      await sim(`payments/${p.id}/attempts/${a1.id}/outcomes`, { commandId: cmd(), outcome: 'failed', failureCode: 'declined' }).expect(201);
+      const a2 = await startAttempt(p.id);
+      await sim(`payments/${p.id}/attempts/${a2.id}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201);
+      return { payment: p, a1, a2 };
+    };
+    const onlyItem = async (pid: string, reason: string) => {
+      const [c] = await conflictsOf(pid);
+      expect(c).toMatchObject({ reason });
+      const list = await items(pid);
+      expect(list).toHaveLength(1);
+      expect(list[0]).toMatchObject({ kind: 'dispute_conflict', id: c.id, paymentId: pid, factId: null });
+      return list[0]!;
+    };
+    const auditOf = async (pid: string, observationId: string, changes: Row) => {
+      const list = await auditsOf(pid);
+      expect(list).toHaveLength(1);
+      expect(list[0]!.payload).toMatchObject({ action: 'payment_dispute.conflict_recorded', actor: { type: 'system', id: 'payment_webhook' }, resource: { type: 'payment_dispute_observation', id: observationId }, outcome: 'succeeded' });
+      expect(list[0]!.payload.changes).toEqual(changes);
+    };
+
+    it('every reason, with and without a dispute record: the approved fields only, and one audit record with the approved fields', async () => {
+      // exposure_mismatch, a dispute record
+      const a = await openDispute(4000);
+      await report(a.payment.id, { disputeRef: a.ref, event: 'opened', amount: 5000 });
+      const ia = await onlyItem(a.payment.id, 'exposure_mismatch');
+      expect(Object.keys(ia.detail).sort()).toEqual(['attemptId', 'chargeback', 'disputeId', 'notificationKind', 'providerDisputeId', 'providerOccurredAt', 'reason']);
+      expect(ia).toMatchObject({ amount: 5000, currency: 'TND', detail: { reason: 'exposure_mismatch', notificationKind: 'opened', attemptId: a.attempt.id, providerDisputeId: a.providerDisputeId, disputeId: a.dispute.id, chargeback: null } });
+      expect(Object.keys(ia).sort()).toEqual(['amount', 'at', 'currency', 'detail', 'factId', 'id', 'kind', 'organizationId', 'paymentId', 'paymentRequestId', 'producer', 'purpose']);
+      await auditOf(a.payment.id, ia.id, { payment_id: a.payment.id, attempt_id: a.attempt.id, reason: 'exposure_mismatch', notification_kind: 'opened', dispute_id: a.dispute.id });
+      // exposure_mismatch, no dispute record: nothing fabricated
+      const b = await captured();
+      const refB = `x-${randomUUID()}`;
+      await report(b.payment.id, { disputeRef: refB, event: 'opened', amount: 9001 });
+      const ib = await onlyItem(b.payment.id, 'exposure_mismatch');
+      expect(ib.detail).toMatchObject({ providerDisputeId: `simd_${refB}`, disputeId: null });
+      await auditOf(b.payment.id, ib.id, { payment_id: b.payment.id, attempt_id: b.attempt.id, reason: 'exposure_mismatch', notification_kind: 'opened' });
+      // terminal_contradiction
+      const c = await openDispute(9000);
+      await report(c.payment.id, { disputeRef: c.ref, event: 'won', amount: 9000 });
+      await report(c.payment.id, { disputeRef: c.ref, event: 'lost', amount: 9000 });
+      const ic = await onlyItem(c.payment.id, 'terminal_contradiction');
+      expect(ic.detail).toMatchObject({ notificationKind: 'lost', disputeId: c.dispute.id });
+      await auditOf(c.payment.id, ic.id, { payment_id: c.payment.id, attempt_id: c.attempt.id, reason: 'terminal_contradiction', notification_kind: 'lost', dispute_id: c.dispute.id });
+      // chargeback_mismatch
+      const d = await captured();
+      const refD = `c-${randomUUID()}`;
+      await report(d.payment.id, { disputeRef: refD, event: 'lost', chargebackAmount: 9000 });
+      await report(d.payment.id, { disputeRef: refD, event: 'lost', chargebackAmount: 8000 });
+      const id = await onlyItem(d.payment.id, 'chargeback_mismatch');
+      expect(id.detail.chargeback).toMatchObject({ amount: 8000, currency: 'TND' });
+      expect(typeof id.detail.chargeback.reference).toBe('string');
+      const dd = await disputeOf(`simd_${refD}`);
+      await auditOf(d.payment.id, id.id, { payment_id: d.payment.id, attempt_id: d.attempt.id, reason: 'chargeback_mismatch', notification_kind: 'lost', dispute_id: dd.id });
+      // chargeback_unverifiable: a reference already taken, no dispute record
+      const taken = (await admin.query(`SELECT "providerTxnId" FROM provider_transaction_fact WHERE "disputeId" = $1`, [dd.id])).rows[0].providerTxnId as string;
+      const e = await captured();
+      const refE = `simd_e-${randomUUID()}`;
+      await signed(note(e.attempt.id, refE, { type: 'payment.dispute.lost', data: { disputeId: refE, chargeback: { id: taken, amount: 100, currency: 'TND' } } })).expect(200);
+      const ie = await onlyItem(e.payment.id, 'chargeback_unverifiable');
+      expect(ie.detail).toMatchObject({ disputeId: null, notificationKind: 'lost' });
+      await auditOf(e.payment.id, ie.id, { payment_id: e.payment.id, attempt_id: e.attempt.id, reason: 'chargeback_unverifiable', notification_kind: 'lost' });
+      // capture_unverified: an attempt with no capture, on a payment another attempt settled
+      const f = await settledOnSecond();
+      await signed(note(f.a1.id, `simd_f-${randomUUID()}`)).expect(200);
+      const iF = await onlyItem(f.payment.id, 'capture_unverified');
+      expect(iF.detail.disputeId).toBeNull();
+      await auditOf(f.payment.id, iF.id, { payment_id: f.payment.id, attempt_id: f.a1.id, reason: 'capture_unverified', notification_kind: 'opened' });
+      // payment_mismatch within one payment: the other attempt; the dispute is this payment's, so it is named
+      const g = await settledOnSecond();
+      const refG = `g-${randomUUID()}`;
+      await report(g.payment.id, { disputeRef: refG, event: 'opened', amount: 1000 });
+      const dg = await disputeOf(`simd_${refG}`);
+      await signed(note(g.a1.id, `simd_${refG}`, { amount: 1000 })).expect(200);
+      const ig = await onlyItem(g.payment.id, 'payment_mismatch');
+      expect(ig.detail.disputeId).toBe(dg.id);
+      await auditOf(g.payment.id, ig.id, { payment_id: g.payment.id, attempt_id: g.a1.id, reason: 'payment_mismatch', notification_kind: 'opened', dispute_id: dg.id });
+      // no raw evidence, resolution or status in any item, and an item's currency and amounts are the notification's
+      for (const i of [ia, ib, ic, id, ie, iF, ig]) {
+        expect(JSON.stringify(i)).not.toMatch(/rawBody|signature|webhookEvent|resolution|resolved|acknowledg|"status"/i);
+      }
+    });
+
+    it('cross-Company: a notification of another Company\'s payment naming this dispute: each Owner sees only their own evidence; the other dispute\'s id never appears', async () => {
+      const mine = await openDispute(4000);
+      const theirs = await captured({ seller: { type: 'company', id: COMPANY2 } });
+      await signed(note(theirs.attempt.id, mine.providerDisputeId, { amount: 123 })).expect(200);
+      const [obs] = await conflictsOf(theirs.payment.id);
+      expect(obs).toMatchObject({ reason: 'payment_mismatch', disputeId: mine.dispute.id }); // the immutable evidence keeps it
+      // the other Company's Owner: their own notification, with no dispute id
+      const [item] = await items(theirs.payment.id, 'owner2-jwt');
+      expect(item).toMatchObject({ id: obs.id, amount: 123, detail: { reason: 'payment_mismatch', disputeId: null, providerDisputeId: mine.providerDisputeId } });
+      expect(JSON.stringify(item)).not.toContain(mine.dispute.id);
+      expect(JSON.stringify(item)).not.toContain(mine.payment.id);
+      await auditOf(theirs.payment.id, obs.id, { payment_id: theirs.payment.id, attempt_id: theirs.attempt.id, reason: 'payment_mismatch', notification_kind: 'opened' });
+      expect(JSON.stringify((await auditsOf(theirs.payment.id))[0]!.payload)).not.toContain(mine.dispute.id);
+      // this dispute's Owner: nothing of it, by the item or by PAY-09
+      expect(await items(theirs.payment.id, 'owner-jwt')).toEqual([]);
+      const detail = (await asOwner('get', `/${mine.dispute.id}`).expect(200)).body;
+      expect(detail.observations.map((o: Row) => [o.kind, o.disposition, o.reason])).toEqual([['opened', 'applied', null]]);
+      expect(JSON.stringify(detail)).not.toContain(theirs.payment.id);
+      expect(JSON.stringify(detail)).not.toContain(theirs.attempt.id);
+      expect(JSON.stringify(detail)).not.toContain('payment_mismatch');
+      expect(JSON.stringify(detail)).not.toContain('"amount":123');
+      // and neither Owner reads the other's dispute or items
+      expect((await asOwner('get', `/${mine.dispute.id}`, 'owner2-jwt')).status).toBe(404);
+      expect(await items(mine.payment.id, 'owner2-jwt')).toEqual([]);
+      // exposure stays each payment's own
+      expect((await exposure(mine.payment.id)).body).toMatchObject({ state: 'exposed', openDisputes: 1, conflicts: 0 });
+      expect((await exposure(theirs.payment.id)).body).toMatchObject({ state: 'unresolved', openDisputes: 0, conflicts: 1 });
+    });
+
+    it('same Company, another payment: the item names no dispute; PAY-09 still lists the observation, with no payment, attempt, reference or amount', async () => {
+      const mine = await openDispute(4000);
+      const sibling = await captured();
+      await signed(note(sibling.attempt.id, mine.providerDisputeId, { amount: 321 })).expect(200);
+      const [item] = await items(sibling.payment.id);
+      expect(item!.detail).toMatchObject({ reason: 'payment_mismatch', disputeId: null });
+      const detail = (await asOwner('get', `/${mine.dispute.id}`).expect(200)).body;
+      expect(detail.observations.map((o: Row) => [o.kind, o.disposition, o.reason])).toEqual([['opened', 'applied', null], ['opened', 'conflict', 'payment_mismatch']]);
+      expect(Object.keys(detail.observations[1]).sort()).toEqual(['disposition', 'kind', 'observedAt', 'reason']);
+      expect(JSON.stringify(detail)).not.toContain(sibling.payment.id);
+      expect(JSON.stringify(detail)).not.toContain('"amount":321');
+    });
+
+    it('Owner only: no credential, a member, an operator, a service and an unanswerable Auth are refused; a service read gets the same answer as a kind that does not exist', async () => {
+      const { payment, ref, dispute } = await openDispute(4000);
+      await report(payment.id, { disputeRef: ref, event: 'opened', amount: 5000 });
+      expect((await route()).status).toBe(401);
+      for (const bearer of ['member-jwt', 'operator-jwt', billing.token, other.token]) {
+        const r = await route(bearer);
+        expect([r.status, r.body.code], bearer).toEqual([403, 'operation_not_permitted']);
+        expect((await asOwner('get', `/${dispute.id}`, bearer)).status, `PAY-09 ${bearer}`).toBe(403);
+      }
+      const serviceRead = (kind: string) => request(server()).get(`/payment/reconciliation/items?kind=${kind}&limit=200`).set('authorization', `Bearer ${billing.token}`);
+      const [refused, unknown] = [await serviceRead('dispute_conflict'), await serviceRead('no_such_kind')];
+      expect([refused.status, refused.body.code]).toEqual([400, 'invalid_reconciliation_request']);
+      expect([refused.status, refused.body.code]).toEqual([unknown.status, unknown.body.code]);
+      ownerState.down = true;
+      const down = await route('owner-jwt');
+      expect([down.status, down.body.code]).toEqual([503, 'owner_authority_unavailable']);
+      ownerState.down = false;
+      expect((await request(server()).post('/payment/admin/reconciliation-items').set('authorization', 'Bearer owner-jwt').send({})).status, 'no action exists').toBe(404);
+      for (const path of [`/payment/admin/reconciliation-items/${(await conflictsOf(payment.id))[0]!.id}`, `/payment/admin/dispute-conflicts/${(await conflictsOf(payment.id))[0]!.id}/resolution`]) {
+        expect((await request(server()).post(path).set('authorization', 'Bearer owner-jwt').send({})).status, path).toBe(404);
+      }
+    });
+
+    it('paging: stable identity and order; a complete walk returns each item once, and repeats exactly', async () => {
+      const { payment, ref } = await openDispute(4000);
+      for (const amount of [5000, 5001, 5002]) await report(payment.id, { disputeRef: ref, event: 'opened', amount });
+      const walk = async () => {
+        const seen: string[] = [];
+        let after: string | undefined;
+        for (;;) {
+          const page = (await route('owner-jwt', `kind=dispute_conflict&limit=2${after ? `&after=${after}` : ''}`).expect(200)).body.items as Row[];
+          if (page.length === 0) return seen;
+          seen.push(...page.map((i) => i.id as string));
+          after = page.at(-1)!.id as string;
+        }
+      };
+      const first = await walk();
+      expect(first).toEqual([...first].sort());
+      expect(new Set(first).size).toBe(first.length);
+      for (const c of await conflictsOf(payment.id)) expect(first).toContain(c.id);
+      expect(await walk()).toEqual(first);
+    });
+
+    it('replay and the retrier: one observation, one item, one audit record; a distinct provider event is its own', async () => {
+      const f = await settledOnSecond();
+      const body = note(f.a1.id, `simd_r-${randomUUID()}`);
+      await signed(body).expect(200);
+      await Promise.all([signed(body), signed(body), signed(body)]);
+      await signed(body).expect(200);
+      expect(await conflictsOf(f.payment.id)).toHaveLength(1);
+      expect(await items(f.payment.id)).toHaveLength(1);
+      expect(await auditsOf(f.payment.id)).toHaveLength(1);
+      // a crash after the observation committed, before its notification's state was marked (LABELLED FIXTURE: that state set back by SQL): ingestion runs again and finds it
+      await admin.query(`UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE "providerEventId" = $1`, [body.eventId]);
+      await signed(body).expect(200);
+      expect((await admin.query(`SELECT state FROM webhook_event WHERE "providerEventId" = $1`, [body.eventId])).rows[0].state).toBe('conflict');
+      expect(await conflictsOf(f.payment.id)).toHaveLength(1);
+      expect(await auditsOf(f.payment.id), 'the crash window writes no second record').toHaveLength(1);
+      await signed({ ...body, eventId: `raw_${randomUUID()}` }).expect(200);
+      expect(await items(f.payment.id)).toHaveLength(2);
+      expect(await auditsOf(f.payment.id)).toHaveLength(2);
+      expect(new Set((await auditsOf(f.payment.id)).map((a) => a.id)).size).toBe(2);
+      // its last permitted processing BY THE REAL RETRIER (LABELLED FIXTURE: an older stored notification, inserted by SQL, and its retry budget set by SQL)
+      const u = await createPayment();
+      const a = await startAttempt(u.id);
+      const held = note(a.id, `simd_h-${randomUUID()}`);
+      const heldRaw = Buffer.from(JSON.stringify(held));
+      await admin.query(`INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody", "receivedAt") VALUES ('simulation', $1, 'payment.dispute.opened', $2, now() - interval '30 days')`, [held.eventId, heldRaw]);
+      await t.app.get(WebhookRetriever).drainOnce();
+      expect(await conflictsOf(u.id)).toEqual([]);
+      expect(await items(u.id), 'held is not a conflict').toEqual([]);
+      expect(await auditsOf(u.id)).toEqual([]);
+      await admin.query(`UPDATE webhook_event SET attempts = $2 WHERE "providerEventId" = $1`, [held.eventId, WEBHOOK_RETRY_MAX_ATTEMPTS - 1]);
+      await t.app.get(WebhookRetriever).drainOnce();
+      const [c] = await conflictsOf(u.id);
+      expect(c).toMatchObject({ reason: 'capture_unverified', disputeId: null });
+      await auditOf(u.id, c.id, { payment_id: u.id, attempt_id: a.id, reason: 'capture_unverified', notification_kind: 'opened' });
+      await t.app.get(WebhookRetriever).drainOnce();
+      expect(await items(u.id)).toHaveLength(1);
+      expect(await auditsOf(u.id)).toHaveLength(1);
+    });
+
+    it('atomic: a failed audit write stores no observation and no item, and leaves the notification retryable; the retry records each once', async () => {
+      const f = await settledOnSecond();
+      const body = note(f.a1.id, `simd_x-${randomUUID()}`);
+      const spy = vi.spyOn(t.app.get(PaymentAudit), 'recordDisputeConflict').mockRejectedValueOnce(new Error('audit write failed'));
+      try {
+        expect((await signed(body)).status).toBe(500);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await conflictsOf(f.payment.id)).toEqual([]);
+      expect(await items(f.payment.id)).toEqual([]);
+      expect(await auditsOf(f.payment.id)).toEqual([]);
+      await signed(body).expect(200);
+      expect(await conflictsOf(f.payment.id)).toHaveLength(1);
+      expect(await auditsOf(f.payment.id)).toHaveLength(1);
+    });
+
+    it('historical, LABELLED FIXTURE (its audit row removed by SQL, as a conflict recorded before this entry): readable and unchanged; a replay writes no audit record', async () => {
+      const f = await settledOnSecond();
+      const body = note(f.a1.id, `simd_o-${randomUUID()}`);
+      await signed(body).expect(200);
+      await admin.query(`ALTER TABLE outbox DISABLE TRIGGER USER`);
+      await admin.query(`DELETE FROM outbox WHERE name = 'audit.payment_dispute.conflict_recorded' AND payload->'changes'->>'payment_id' = $1`, [f.payment.id]);
+      await admin.query(`ALTER TABLE outbox ENABLE TRIGGER USER`);
+      const stored = await conflictsOf(f.payment.id);
+      await signed(body).expect(200);
+      await t.app.get(WebhookRetriever).drainOnce();
+      expect(await conflictsOf(f.payment.id)).toEqual(stored);
+      expect(await auditsOf(f.payment.id), 'no backfill').toEqual([]);
+      expect((await items(f.payment.id)).map((i) => i.id)).toEqual([stored[0]!.id]);
+    });
+
+    it('visibility only: reading writes nothing; exposure and its counts stay; the payment and its dispute are unchanged', async () => {
+      const { payment, ref, dispute } = await openDispute(4000);
+      await report(payment.id, { disputeRef: ref, event: 'opened', amount: 5000 });
+      const state = async () => (await admin.query(`SELECT
+        (SELECT count(*) FROM outbox)::int AS outbox, (SELECT count(*) FROM payment_dispute_observation)::int AS observations, (SELECT count(*) FROM payment_dispute)::int AS disputes,
+        (SELECT count(*) FROM provider_transaction_fact)::int AS facts, (SELECT status FROM payment WHERE id = $1) AS payment, (SELECT status FROM payment_dispute WHERE id = $2) AS dispute`, [payment.id, dispute.id])).rows[0];
+      const before = [await state(), (await exposure(payment.id)).body];
+      expect(before[1]).toMatchObject({ state: 'unresolved', openDisputes: 1, conflicts: 1, disputeExposure: 4000 });
+      for (let i = 0; i < 3; i++) await items(payment.id);
+      await asOwner('get', `/${dispute.id}`).expect(200);
+      const { asOf: _a, ...exp0 } = before[1] as Row;
+      const { asOf: _b, ...exp1 } = (await exposure(payment.id)).body as Row;
+      expect(await state()).toEqual(before[0]);
+      expect(exp1).toEqual(exp0);
     });
   });
 

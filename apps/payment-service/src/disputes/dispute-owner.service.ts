@@ -102,8 +102,10 @@ export class DisputeOwnerService {
         ? this.db.query<{ id: string; providerTxnId: string; amount: string; currency: string; observedAt: Date }>(
           `SELECT id, "providerTxnId", amount, currency, "observedAt" FROM provider_transaction_fact WHERE id = $1`, [d.chargebackFactId]).then((r) => r.rows[0] ?? null)
         : Promise.resolve(null),
+      // Core V2 S0-C13 Part A: a notification of another Company's payment can name this dispute (`payment_mismatch`): that is the other Company's evidence, not this Owner's (ADR-0050)
       this.db.query<{ kind: string; disposition: string; reason: string | null; observedAt: Date }>(
-        `SELECT kind, disposition, reason, "observedAt" FROM payment_dispute_observation WHERE "disputeId" = $1 ORDER BY "observedAt", id`, [d.id]).then((r) => r.rows),
+        `SELECT o.kind, o.disposition, o.reason, o."observedAt" FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId"
+          WHERE o."disputeId" = $1 AND p."sellerType" = 'company' AND p."sellerId" = $2 ORDER BY o."observedAt", o.id`, [d.id, owner.companyId]).then((r) => r.rows),
       this.db.query<DisputeEvidenceRow>(`SELECT * FROM payment_dispute_evidence WHERE "disputeId" = $1 ORDER BY "addedAt", id`, [d.id]).then((r) => r.rows),
       this.db.query<DisputeDecisionRow>(`SELECT * FROM payment_dispute_decision WHERE "disputeId" = $1 ORDER BY "requestedAt", id`, [d.id]).then((r) => r.rows),
     ]);

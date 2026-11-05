@@ -832,6 +832,20 @@ const SPEC = {
     },
     purpose: "The Owner's contest-or-accept decision on a dispute, authorized by a consumed Auth dispute-decision receipt (the provider still decides the outcome).",
   },
+  // Core V2 S0-C13 Part A (register PAY-09 J): a preserved conflict of a verified dispute notification. Version 1, no trusted scope. The resource is
+  // the observation, since there may be no dispute; `dispute_id` only when that dispute belongs to this payment. Never an amount or a provider reference.
+  'payment_dispute.conflict_recorded': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook'] }, organization: 'optional',
+    resource: ['payment_dispute_observation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      attempt_id: { type: 'uuid', shape: 'value', required: true },
+      reason: { type: 'code', shape: 'value', required: true, values: ['capture_unverified', 'exposure_mismatch', 'payment_mismatch', 'terminal_contradiction', 'chargeback_mismatch', 'chargeback_unverifiable'] },
+      notification_kind: { type: 'code', shape: 'value', required: true, values: ['opened', 'won', 'lost'] },
+      dispute_id: { type: 'uuid', shape: 'value', required: false },
+    },
+    purpose: 'A verified provider dispute notification Payment could not apply was preserved as a conflict: it changes nothing, resolves nothing, and the payment\'s exposure stays unresolved.',
+  },
   // Core V2 S6h (register PAY-13; the Owner's R6H-3, R6H-11): the Owner's association of an unmatched verified provider fact with one destination,
   // authorized by a consumed Auth provider_fact_associate receipt. Version 1, no trusted scope. The fact itself never changes.
   'provider_fact.associated': {

@@ -117,7 +117,9 @@ describeWithEnv(
     const adminD = actor(ORG_D, true);
     const beneficiaryD = actor(ORG_D, false);
     const beneficiaryD2 = actor(ORG_D, false);
-    const everyone = () => [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC, beneficiaryC2, adminD, beneficiaryD, beneficiaryD2];
+    const beneficiaryD3 = actor(ORG_D, false);
+    const beneficiaryD4 = actor(ORG_D, false);
+    const everyone = () => [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC, beneficiaryC2, adminD, beneficiaryD, beneficiaryD2, beneficiaryD3, beneficiaryD4];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -666,6 +668,21 @@ describeWithEnv(
       await redeliver(c.commandId); // terminal: a further redelivery changes nothing
       expect(await observations(ref)).toHaveLength(1);
       expect(await exposure(s.paymentId)).toMatchObject({ state: 'unresolved', conflicts: 1 });
+      // S0-C13 Part A: the real Owner (real Auth) reads it; a service can't; reading clears nothing. Its audit record: PAYMENT-OUTBOX evidence (S-INT runs no audit-service)
+      const conflictItems = async () => {
+        const r = await call(PAYMENT_URL, 'GET', ownerToken, '/payment/admin/reconciliation-items?kind=dispute_conflict&limit=200');
+        expect(r.status, JSON.stringify(r.json)).toBe(200);
+        return (r.json.items as Array<Record<string, any>>).filter((i) => i.paymentId === s.paymentId);
+      };
+      const [conflictItem, ...noOther] = await conflictItems();
+      expect(noOther).toEqual([]);
+      expect(conflictItem).toMatchObject({ kind: 'dispute_conflict', factId: null, amount: BASE, currency: 'TND', detail: { reason: 'capture_unverified', notificationKind: 'opened', attemptId: s.attempts[1], providerDisputeId: `simd_${ref}`, disputeId: null, chargeback: null } });
+      expect((await paymentAdmin.query(`SELECT payload->'changes' AS changes, payload->'actor' AS actor, payload->'resource' AS resource FROM outbox WHERE name = 'audit.payment_dispute.conflict_recorded' AND payload->'changes'->>'payment_id' = $1`, [s.paymentId])).rows).toEqual([{
+        changes: { payment_id: s.paymentId, attempt_id: s.attempts[1], reason: 'capture_unverified', notification_kind: 'opened' }, actor: { type: 'system', id: 'payment_webhook' }, resource: { type: 'payment_dispute_observation', id: conflictItem!.id } }]);
+      const serviceRead = await call(PAYMENT_URL, 'GET', billingToPaymentToken.token, '/payment/reconciliation/items?kind=dispute_conflict&limit=200');
+      expect([serviceRead.status, serviceRead.json?.code], 'this suite\'s caller has no reconciliation grant; a granted caller\'s 400 is proven at service level').toEqual([403, 'operation_not_permitted']);
+      expect((await call(PAYMENT_URL, 'GET', null, '/payment/admin/reconciliation-items?kind=dispute_conflict')).status).toBe(401);
+      expect(await exposure(s.paymentId)).toMatchObject({ state: 'unresolved', conflicts: 1 });
       expect((await applyL4(ls.id, receipt.secret)).status).toBe(503);
       expect(await receiptStatus(receipt.receiptId)).toBe('issued');
 
@@ -685,6 +702,35 @@ describeWithEnv(
       expect(await finality(s.paymentId)).toEqual(before);
       expect(await deadLettered()).toBe(0);
     }, 300_000);
+
+    it('S0-C13 Part A, one real Company (S-INT has no second): a notification of another payment naming this dispute: its item names no dispute, PAY-09 gives no payment, reference or amount; each exposure stays its own', async () => {
+      const mine = await failedAtPayment(beneficiaryD3, adminD);
+      await lateSuccessOf(mine.paymentId, mine.attempts[0]!, BASE);
+      const ref = `sint-a-${randomUUID()}`;
+      await dispute(mine.paymentId, mine.attempts[0]!, ref, { event: 'opened', amount: BASE });
+      const d = (await paymentDispute(ref))!;
+      const sibling = await failedAtPayment(beneficiaryD4, adminD);
+      const eventId = `sint_${randomUUID()}`;
+      const note = { eventId, type: 'payment.dispute.opened', reference: sibling.attempts[0], amount: 77, currency: 'TND', data: { disputeId: `simd_${ref}` } };
+      expect(await signed(note)).toBe(200);
+      expect(await signed(note)).toBe(200); // a replay: one observation, one item, one audit record
+      const r = await call(PAYMENT_URL, 'GET', ownerToken, '/payment/admin/reconciliation-items?kind=dispute_conflict&limit=200');
+      expect(r.status, JSON.stringify(r.json)).toBe(200);
+      const items = (r.json.items as Array<Record<string, any>>).filter((i) => i.paymentId === sibling.paymentId);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ amount: 77, detail: { reason: 'payment_mismatch', disputeId: null, providerDisputeId: `simd_${ref}` } });
+      expect(JSON.stringify(items[0])).not.toContain(d.id);
+      const audits = (await paymentAdmin.query(`SELECT payload->'changes' AS changes FROM outbox WHERE name = 'audit.payment_dispute.conflict_recorded' AND payload->'changes'->>'payment_id' = $1`, [sibling.paymentId])).rows;
+      expect(audits).toEqual([{ changes: { payment_id: sibling.paymentId, attempt_id: sibling.attempts[0], reason: 'payment_mismatch', notification_kind: 'opened' } }]);
+      const detail = await call(PAYMENT_URL, 'GET', ownerToken, `/payment/admin/disputes/${d.id}`);
+      expect(detail.status, JSON.stringify(detail.json)).toBe(200);
+      expect(detail.json.observations.map((o: Record<string, unknown>) => [o.kind, o.disposition, o.reason])).toEqual([['opened', 'applied', null], ['opened', 'conflict', 'payment_mismatch']]);
+      expect(Object.keys(detail.json.observations[1]).sort()).toEqual(['disposition', 'kind', 'observedAt', 'reason']);
+      expect(JSON.stringify(detail.json)).not.toContain(sibling.paymentId);
+      expect(await exposure(mine.paymentId)).toMatchObject({ state: 'exposed', conflicts: 0 });
+      expect(await exposure(sibling.paymentId)).toMatchObject({ state: 'unresolved', conflicts: 1 });
+      expect(await deadLettered()).toBe(0);
+    }, 180_000);
 
     it('G5 (S0-C9): a forged payment.dispute.lost naming a late capture (no broker-verified Payment identity) is refused and dead-lettered; no loss, no effect, no obligation', async () => {
       const template = (await paymentAdmin.query(`SELECT payload FROM outbox WHERE name = 'payment.dispute.lost' AND payload->>'captureBasis' = 'late_capture' ORDER BY "occurredAt" LIMIT 1`)).rows[0]

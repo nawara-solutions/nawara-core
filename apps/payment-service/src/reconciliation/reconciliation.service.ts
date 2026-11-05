@@ -24,11 +24,11 @@ export const AUTHORIZATION_PENDING_ITEM_AFTER_MINUTES = 15;
  */
 export const ITEM_KINDS = [
   'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
-  'association', 'capture_refund_unavailable', 'capture_mismatch', 'multiple_captures', 'capture_recovery_exhausted',
+  'association', 'capture_refund_unavailable', 'capture_mismatch', 'multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict',
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
-/** Core V2 S0-C12 items 14(f), 15: `multiple_captures` and `capture_recovery_exhausted` are the Owner's alone; a service read never reaches them. */
-const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted'];
+/** Core V2 S0-C12 items 14(f), 15 and S0-C13 Part A: `multiple_captures`, `capture_recovery_exhausted` and `dispute_conflict` are the Owner's alone; a service read never reaches them. */
+const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict'];
 export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS.filter((k) => !OWNER_ONLY_ITEM_KINDS.includes(k));
 
 export type ItemScope = { kind: 'owner'; companyId: string } | { kind: 'producer'; producer: string };
@@ -133,6 +133,14 @@ const ITEM_SQL: Record<ItemKind, string> = {
       jsonb_build_object('attemptId', f."attemptId", 'status', s.status, 'attempts', s.attempts, 'lastFailure', s."lastFailure", 'firstFailedAt', s."firstFailedAt") AS detail
     FROM capture_recovery_state s JOIN provider_transaction_fact f ON f.id = s."factId" JOIN payment p ON p.id = f."paymentId"
    WHERE s.status <> 'active' AND NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = f.id)`,
+  // Core V2 S0-C13 Part A: exactly the rows the exposure's `conflicts` counts, the notification's own values. A dispute of another payment, possibly another
+  // Company's, is never named. No resolution or status: being listed never means the exposure cleared. Never the raw body, headers or signature.
+  dispute_conflict: `SELECT o.id, o."paymentId", NULL::uuid AS "factId", o.amount, o.currency, o."observedAt" AS at,
+      jsonb_build_object('reason', o.reason, 'notificationKind', o.kind, 'attemptId', o."attemptId", 'providerDisputeId', o."providerDisputeId",
+        'disputeId', (SELECT d.id FROM payment_dispute d WHERE d.id = o."disputeId" AND d."paymentId" = o."paymentId"),
+        'chargeback', CASE WHEN o."chargebackTxnId" IS NULL THEN NULL ELSE jsonb_build_object('reference', o."chargebackTxnId", 'amount', o."chargebackAmount", 'currency', trim(o."chargebackCurrency")) END,
+        'providerOccurredAt', o."providerOccurredAt") AS detail
+    FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,
 };
 
 /**
