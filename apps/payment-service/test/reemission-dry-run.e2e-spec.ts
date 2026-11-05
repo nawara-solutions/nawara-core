@@ -72,6 +72,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0024_capture_evidence.sql', // Core V2 S0-C11: guards only, no table
       '0025_late_success_one_per_fact.sql', // Core V2 S0-C12 correction: one late success per capture fact (constraint only, no table)
       '0026_multiple_captures_and_recovery.sql', // Core V2 S0-C12 items 14, 15, FN-2: provider permission, recovery state, insert guards
+      '0027_provider_observation_quarantine.sql', // Core V2 S0-C12 item 16: durable quarantine of invalid currency evidence
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

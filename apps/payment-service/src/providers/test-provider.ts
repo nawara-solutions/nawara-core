@@ -1,3 +1,4 @@
+import { rawEvidenceOf } from '../webhooks/observation-quarantine.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { PaymentRow } from '../payments/payment.types.js';
@@ -31,6 +32,7 @@ export class TestPaymentProvider implements PaymentProvider {
     visibilityLagMs: 50,
     timeoutMs: 200,
     sessionExpiry: true,
+    quarantineAcknowledgement: 'simulated_received_200', // S0-C12 item 16: `{ received: true }`, 200, only after the record committed
     paymentFatalCodes: ['card_closed'],
   };
 
@@ -141,6 +143,8 @@ export class TestPaymentProvider implements PaymentProvider {
         providerTransactionId: body.reference.startsWith('ptx_') ? body.reference : `ptx_${body.reference}`,
         amount: typeof body.amount === 'number' ? body.amount : undefined,
         currency: typeof body.currency === 'string' ? body.currency : undefined,
+        rawCurrency: rawEvidenceOf(body, 'currency'),
+        rawAmount: rawEvidenceOf(body, 'amount'),
         data: body.data,
       };
     } catch {

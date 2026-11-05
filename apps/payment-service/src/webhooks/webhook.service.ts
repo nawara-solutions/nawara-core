@@ -4,12 +4,13 @@ import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-ki
 import { AttemptService } from '../attempts/attempt.service.js';
 import { webhookContext } from '../events/payment-events.js';
 import type { AttemptRow } from '../attempts/attempt.types.js';
-import type { FetchStatusResult, PaymentProvider, RefundStatusResult } from '../providers/provider.port.js';
+import type { FetchStatusResult, ParsedWebhookBody, PaymentProvider, RefundStatusResult } from '../providers/provider.port.js';
 import { RefundEvidenceService } from '../refunds/refund-evidence.service.js';
 import { DisputeIngestionService } from '../disputes/dispute-ingestion.service.js';
 import { isDisputeNotificationType, parseDisputeNotice } from '../disputes/dispute.types.js';
 import { WEBHOOK_RETRY_MAX_ATTEMPTS, type WebhookEventRow } from './webhook-event.types.js';
 import { CORE_V2_LIVE_MODE } from '../payments/payment.types.js';
+import { QUARANTINE_OUTCOME, classifyCurrencyEvidence, recordQuarantine, type CurrencyEvidenceShape, type RawEvidence } from './observation-quarantine.js';
 
 export interface WebhookResult {
   /** The HTTP status the controller should answer with. */
@@ -71,6 +72,8 @@ export class WebhookService {
     if (!event) {
       const { rows } = await this.db.query<WebhookEventRow>(`SELECT * FROM webhook_event WHERE provider = $1 AND "providerEventId" = $2`, [provider.id, providerEventId]);
       event = rows[0];
+      // Core V2 S0-C12 item 16: quarantined evidence is held, so it is acknowledged again, only as its adapter's contract says
+      if (event.state === 'conflict' && event.outcome === QUARANTINE_OUTCOME) return { status: this.quarantineAnswer(provider) };
       if (event.state === 'processed' || event.state === 'ignored' || event.state === 'conflict') return { status: 200 };
       // otherwise (received/processing/failed/unmatched): fall through and re-run processing
     }
@@ -99,9 +102,15 @@ export class WebhookService {
   private async process(
     eventId: string,
     provider: PaymentProvider,
-    parsed: { providerEventId: string; type: string; reference: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date },
+    parsed: ParsedWebhookBody,
     claim?: Queryable,
   ): Promise<WebhookResult> {
+    // Core V2 S0-C12 item 16: a capture whose currency no fact can hold is held as evidence, before anything could treat it as a fact or an unknown event type
+    if (parsed.type === 'payment.succeeded') {
+      const currency: RawEvidence = parsed.rawCurrency ?? { present: parsed.currency !== undefined, value: parsed.currency };
+      const shape = classifyCurrencyEvidence(currency);
+      if (shape) return this.quarantine(eventId, provider, parsed, currency, shape, claim);
+    }
     if (parsed.type.startsWith('refund.')) return this.processRefund(eventId, provider, parsed, claim);
     if (isDisputeNotificationType(parsed.type)) return this.processDispute(eventId, provider, parsed, claim);
     const status = this.toStatus(parsed);
@@ -131,6 +140,39 @@ export class WebhookService {
       await this.markState(eventId, 'failed', 'transient_error', attempt.id, claim);
       return { status: 500 }; // transient: let the provider retry
     }
+  }
+
+  /**
+   * Core V2 S0-C12 item 16. Only a permanent shape failure reaches here; a database error while holding it is a retryable answer, and the provider's redelivery or
+   * the retrier repeats it (one record per stored notification). The record and the event's terminal state commit together, and only then is anything acknowledged.
+   * No fact, no attempt or payment change; no value in any log.
+   */
+  private async quarantine(
+    eventId: string, provider: PaymentProvider,
+    parsed: { providerEventId: string; reference: string; amount?: number; providerTransactionId?: string; rawAmount?: RawEvidence },
+    currency: RawEvidence, shape: CurrencyEvidenceShape, claim?: Queryable,
+  ): Promise<WebhookResult> {
+    try {
+      const attempt = await this.findAttemptByReference(provider.id, parsed.reference).catch(() => null); // an unreadable reference is evidence too, not a transient failure
+      const write = async (q: Queryable): Promise<boolean> => {
+        const created = await recordQuarantine(q, { provider: provider.id, source: 'webhook', webhookEventId: eventId, providerEventId: parsed.providerEventId,
+          attemptId: attempt?.id ?? null, paymentId: attempt?.paymentId ?? null, providerTxnId: parsed.providerTransactionId, currency, currencyShape: shape,
+          amount: parsed.rawAmount ?? { present: parsed.amount !== undefined, value: parsed.amount } });
+        await this.markState(eventId, 'conflict', QUARANTINE_OUTCOME, attempt?.id, q);
+        return created;
+      };
+      const created = claim ? await write(claim) : await this.db.tx(write);
+      if (created) this.logger.error(`capture_observation_quarantined event=${eventId} provider=${provider.id} attempt=${attempt?.id ?? 'none'} shape=${shape} — authenticated evidence held; no fact; needs an approved policy to act on it`);
+      return { status: this.quarantineAnswer(provider) };
+    } catch {
+      await this.markState(eventId, 'failed', 'transient_error', undefined, claim).catch(() => undefined);
+      return { status: 500 }; // not durably held: nothing is acknowledged
+    }
+  }
+
+  /** The adapter's contract decides; without one, a retryable answer even though the evidence is held. Never a statement of financial success. */
+  private quarantineAnswer(provider: PaymentProvider): number {
+    return provider.capabilities.quarantineAcknowledgement === 'simulated_received_200' ? 200 : 500;
   }
 
   /**

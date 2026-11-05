@@ -1222,16 +1222,41 @@ describeWithEnv(
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM reconciliation_case WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
       const refused = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId: s.paymentId, captureFactId: w.factId, reason: 'customer_request' });
-      expect(refused.status, JSON.stringify(refused.json)).toBeGreaterThanOrEqual(400); // the exact refusal code is an open Owner question: only "no refund route" is pinned
+      expect([refused.status, refused.json?.code], JSON.stringify(refused.json)).toEqual([409, 'refund_not_eligible']); // item 17: known and permanent
+      expect(JSON.stringify(refused.json), 'no currency value in the answer').not.toContain('XY1');
+      // item 17: Payment really unavailable is the other answer; nothing is opened by either
+      await payment.kill();
+      const unavailable = await call(BILLING_URL, 'POST', ownerToken, '/billing/admin/refund-cases', { paymentId: s.paymentId, captureFactId: w.factId, reason: 'customer_request' });
+      payment = spawnService('payment', PAYMENT_DIR, paymentEnv);
+      await waitForHealth(`${PAYMENT_URL}/health`, 60_000);
+      // the exposure read comes first (S0-C9), so that is what answers; the capture read's own 503 is proven in `refund-cases`
+      expect([unavailable.status, unavailable.json?.code], JSON.stringify(unavailable.json)).toEqual([503, 'refund_dispute_unavailable']);
       expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM refund_case WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
-      // O-2: the notification stays stored as received and is not a fact (the HTTP answer to the provider is an open Owner question: not pinned)
-      for (const unstorable of ['ABCDEFGHIJKLMNOPQ', '']) {
+      // item 16, O-2: genuine signed notifications through the simulation provider: held exactly, acknowledged as held only after commit, no fact; redelivery and a new
+      // notification id behave; the Owner sees nothing of it (O-2)
+      for (const [label, currencyPart, shape, evidence, amountPart, amountShape] of [
+        ['missing', {}, 'missing', null, { amount: BASE + 100 }, 'present'],
+        ['null', { currency: null }, 'null', 'null', { amount: BASE + 100 }, 'present'],
+        ['non-string', { currency: 840 }, 'non_string', '840', { amount: BASE + 100 }, 'present'],
+        ['empty', { currency: '' }, 'empty', '""', { amount: BASE + 100 }, 'present'],
+        ['overlength', { currency: 'ABCDEFGHIJKLMNOPQ' }, 'overlength', '"ABCDEFGHIJKLMNOPQ"', { amount: BASE + 100 }, 'present'],
+        ['unstorable', { currency: 'TN\u0000' }, 'unstorable', '"TN\\u0000"', { amount: BASE + 100 }, 'present'],
+        ['both defects', { currency: null }, 'null', 'null', {}, 'missing'],
+      ] as const) {
         const txn = `sim_o2_${randomUUID()}`;
         const eventId = `sint_${randomUUID()}`;
-        await signed({ eventId, type: 'payment.succeeded', reference: s.attempts[1], providerTransactionId: txn, amount: BASE + 100, currency: unstorable });
-        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM webhook_event WHERE "providerEventId" = $1`, [eventId]), `stored: ${JSON.stringify(unstorable)}`).toBe(1);
-        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [txn]), `not a fact: ${JSON.stringify(unstorable)}`).toBe(0);
+        const body = { eventId, type: 'payment.succeeded', reference: s.attempts[1], providerTransactionId: txn, ...amountPart, ...currencyPart };
+        expect(await signed(body), `${label}: acknowledged as held`).toBe(200);
+        expect(await signed(body), `${label}: redelivered`).toBe(200);
+        const held = (await paymentAdmin.query(`SELECT provider, source, "currencyShape", "amountShape", "attemptId", "paymentId", "providerTxnId", "investigationState", convert_from("currencyEvidence", 'UTF8') AS currency FROM provider_observation_quarantine WHERE "providerEventId" = $1`, [eventId])).rows;
+        expect(held, label).toEqual([{ provider: 'simulation', source: 'webhook', currencyShape: shape, amountShape, attemptId: s.attempts[1], paymentId: s.paymentId, providerTxnId: txn, investigationState: 'held', currency: evidence }]);
+        expect((await paymentAdmin.query(`SELECT state, outcome FROM webhook_event WHERE "providerEventId" = $1`, [eventId])).rows, label).toEqual([{ state: 'conflict', outcome: 'quarantined_invalid_currency' }]);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [txn]), `not a fact: ${label}`).toBe(0);
       }
+      await reconciliationPass();
+      expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId]), 'no late success').toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM reconciliation_case WHERE "paymentId" = $1`, [s.paymentId])).toBe(0);
       expect(await paymentStatus(s.paymentId)).toBe('failed');
       expect(await deadLettered()).toBe(0);
     }, 300_000);

@@ -72,7 +72,7 @@ describe('TestPaymentProvider', () => {
       const result = await p.verifyWebhook(body, { 'x-test-provider-signature': signature });
       expect(result).toEqual({
         signatureValid: true,
-        parsed: { providerEventId: 'evt_att-8', type: 'payment.succeeded', reference: 'ptx_att-8', providerTransactionId: 'ptx_att-8', amount: 1000, currency: 'TND', data: undefined },
+        parsed: { providerEventId: 'evt_att-8', type: 'payment.succeeded', reference: 'ptx_att-8', providerTransactionId: 'ptx_att-8', rawCurrency: { present: true, value: 'TND' }, rawAmount: { present: true, value: 1000 }, amount: 1000, currency: 'TND', data: undefined },
       });
     });
 

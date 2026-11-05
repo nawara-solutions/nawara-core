@@ -2,13 +2,18 @@ import { createHmac } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
+import { Logger } from '@nestjs/common';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DbService, OutboxService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptService } from '../src/attempts/attempt.service.js';
+import { WebhookService } from '../src/webhooks/webhook.service.js';
 import { PaymentAudit } from '../src/audit/payment-audit.js';
 import { CAPTURE_RECOVERY_MAX_ATTEMPTS, CaptureReconciler, captureInfrastructurePauseMs, captureRecoveryWaitSeconds, classifyCaptureRecoveryFailure } from '../src/payments/capture-reconciler.js';
 import { ExpirySweeper } from '../src/payments/expiry-sweeper.js';
+import { ProviderRegistry } from '../src/providers/provider-registry.js';
+import { WebhookRetriever } from '../src/webhooks/webhook-retrier.js';
+import { classifyAmountEvidence, classifyCurrencyEvidence } from '../src/webhooks/observation-quarantine.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
 import { describeWithEnv } from './support/env.js';
@@ -175,7 +180,7 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       expect(await items('capture_mismatch')).toContainEqual(expect.objectContaining({ id: g.id, detail: expect.objectContaining({ reason: 'unrecognized_currency' }) }));
     });
 
-    it('a currency no fact can hold (O-2): only the authenticated notification stays stored; no fact, no late success, the payment unchanged', async () => {
+    it('a currency no fact can hold (O-2): the authenticated notification stays stored and is held in quarantine (item 16); no fact, no late success, the payment unchanged', async () => {
       const { p, a } = await cancelledAfterFailure();
       const c = capture(a.id, 9000, 'X'.repeat(17));
       await c.send();
@@ -833,6 +838,209 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       expect(await one(`SELECT count(*)::int AS n FROM capture_recovery_state WHERE "factId" = $1`, [a.factId])).toEqual({ n: 0 });
       await reconcile();
       expect(await lateSuccesses(a.p.id)).toHaveLength(1);
+    });
+  });
+
+  describe('S0-C12 item 16: durable quarantine of authenticated invalid currency evidence', () => {
+    const quarantined = async (providerEventId: string) => (await admin.query(`SELECT q.* FROM provider_observation_quarantine q WHERE q."providerEventId" = $1`, [providerEventId])).rows;
+    const nothingFinancial = async (pid: string, st: string) => {
+      expect(await status(pid)).toBe(st);
+      expect(await facts(pid), 'no fact').toEqual([]);
+      expect(await lateSuccesses(pid)).toEqual([]);
+      expect((await outboxOf('payment.late_success.recorded', 'paymentId', pid)).length).toBe(0);
+      expect(await succeededEvents(pid)).toBe(0);
+      expect(await audits('audit.payment_capture_mismatch.recorded', pid)).toEqual([]);
+    };
+    const note = (aid: string, currencyPart: Row, amountPart: Row = { amount: 9000 }, eventId = `evt_${crypto.randomUUID()}`) => {
+      const n = signed({ eventId, type: 'payment.succeeded', reference: aid, ...amountPart, ...currencyPart });
+      return { eventId, raw: n.raw, send: () => post(n.raw, n.signature) };
+    };
+    const SHAPES: Array<[string, Row, string, Buffer | null]> = [
+      ['missing', {}, 'missing', null],
+      ['null', { currency: null }, 'null', Buffer.from('null')],
+      ['a number', { currency: 840 }, 'non_string', Buffer.from('840')],
+      ['an object', { currency: { code: 'TND' } }, 'non_string', Buffer.from('{"code":"TND"}')],
+      ['an array', { currency: ['TND'] }, 'non_string', Buffer.from('["TND"]')],
+      ['empty', { currency: '' }, 'empty', Buffer.from('""')],
+      ['17 characters', { currency: 'ABCDEFGHIJKLMNOPQ' }, 'overlength', Buffer.from('"ABCDEFGHIJKLMNOPQ"')],
+      ['a long value, never truncated', { currency: 'Z'.repeat(5000) }, 'overlength', Buffer.from(`"${'Z'.repeat(5000)}"`)],
+      ['U+0000', { currency: 'TN\u0000' }, 'unstorable', Buffer.from('"TN\\u0000"')],
+    ];
+
+    it.each(SHAPES)('%s: authenticated, held exactly as sent, acknowledged only as held; no fact, no attempt or payment change', async (_label, currencyPart, shape, evidence) => {
+      const { p, a } = await cancelledAfterFailure();
+      const attemptBefore = await one(`SELECT status FROM payment_attempt WHERE id = $1`, [a.id]);
+      const n = note(a.id, currencyPart);
+      const res = await n.send();
+      expect(res.status).toBe(200);
+      expect(res.body, 'never a statement of financial success').toEqual({ received: true });
+      const [q] = await quarantined(n.eventId);
+      expect(q).toMatchObject({ provider: 'test', source: 'webhook', providerEventId: n.eventId, attemptId: a.id, paymentId: p.id, classification: 'invalid_currency', currencyShape: shape, amountShape: 'present', investigationState: 'held' });
+      expect(q.currencyEvidence === null ? null : Buffer.from(q.currencyEvidence).toString(), 'the value, exact').toBe(evidence === null ? null : evidence.toString());
+      const stored = await one(`SELECT id, state, outcome, "rawBody" FROM webhook_event WHERE "providerEventId" = $1`, [n.eventId]);
+      expect(stored).toMatchObject({ id: q.webhookEventId, state: 'conflict', outcome: 'quarantined_invalid_currency' });
+      expect(Buffer.from(stored.rawBody).equals(n.raw), 'the authenticated bytes, unchanged').toBe(true);
+      await nothingFinancial(p.id, 'cancelled');
+      expect(await one(`SELECT status FROM payment_attempt WHERE id = $1`, [a.id])).toEqual(attemptBefore);
+    });
+
+    it('storable values are facts as before: a valid code and an unrecognized one (O-1); neither is quarantined', async () => {
+      for (const currency of ['EUR', 'XY1', 'ABCDEFGHIJKLMNOP']) {
+        const { p, a } = await cancelledAfterFailure();
+        const n = note(a.id, { currency });
+        await n.send();
+        expect(await quarantined(n.eventId), currency).toEqual([]);
+        expect(await facts(p.id)).toEqual([expect.objectContaining({ currency })]);
+      }
+    });
+
+    it('a currency defect with a missing or invalid amount keeps both defects, inventing neither; a valid currency with a missing amount stays with item 18, unchanged', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      for (const [amountPart, amountShape, amountEvidence] of [[{}, 'missing', null], [{ amount: 'NaN' }, 'invalid', '"NaN"'], [{ amount: 12.5 }, 'invalid', '12.5'], [{ amount: null }, 'invalid', 'null']] as const) {
+        const n = note(a.id, { currency: null }, amountPart);
+        expect((await n.send()).status).toBe(200);
+        const [q] = await quarantined(n.eventId);
+        expect(q).toMatchObject({ currencyShape: 'null', amountShape });
+        expect(q.amountEvidence === null ? null : Buffer.from(q.amountEvidence).toString()).toBe(amountEvidence);
+      }
+      await nothingFinancial(p.id, 'cancelled');
+      const item18 = note(a.id, { currency: 'TND' }, {});
+      expect((await item18.send()).status).toBe(200);
+      expect(await quarantined(item18.eventId)).toEqual([]);
+      expect(await webhookState(item18.eventId), 'recorded as it was, an unresolved risk').toMatchObject({ state: 'ignored', outcome: 'unknown_event_type:payment.succeeded' });
+    });
+
+    it('a duplicate delivery is one record and the same answer; distinct event ids stay distinct records; replays and the retrier add nothing', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const n = note(a.id, { currency: '' });
+      const answers = await Promise.all([n.send(), n.send(), n.send()]);
+      expect(answers.map((r) => r.status)).toEqual([200, 200, 200]);
+      expect(await n.send().then((r) => r.status)).toBe(200);
+      expect(await quarantined(n.eventId)).toHaveLength(1);
+      const other = note(a.id, { currency: '' });
+      await other.send();
+      expect(await quarantined(other.eventId)).toHaveLength(1);
+      expect((await one(`SELECT count(*)::int AS n FROM provider_observation_quarantine WHERE "paymentId" = $1`, [p.id])).n).toBe(2);
+      await t.app.get(WebhookRetriever).drainOnce();
+      expect(await quarantined(n.eventId), 'a terminal event: the retrier leaves it').toHaveLength(1);
+      await nothingFinancial(p.id, 'cancelled');
+    });
+
+    it('an unknown reference is held too, naming no attempt or payment; it is no unmatched fact', async () => {
+      const n = note(crypto.randomUUID(), { currency: '' });
+      expect((await n.send()).status).toBe(200);
+      expect((await quarantined(n.eventId))[0]).toMatchObject({ attemptId: null, paymentId: null, currencyShape: 'empty' });
+      expect((await one(`SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "webhookEventId" = (SELECT id FROM webhook_event WHERE "providerEventId" = $1)`, [n.eventId])).n).toBe(0);
+    });
+
+    it('a database failure before the quarantine commits: a retryable answer, nothing held and nothing acknowledged; the redelivery holds it once', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const n = note(a.id, { currency: '' });
+      const db = t.app.get(DbService);
+      const tx = db.tx.bind(db);
+      let calls = 0;
+      const spy = vi.spyOn(db, 'tx').mockImplementation((async (work: never) => {
+        if (++calls === 2) throw Object.assign(new Error('x'), { code: '08006' }); // transaction A stored the notification; the quarantine's transaction is the second
+        return tx(work);
+      }) as never);
+      const failed = await n.send();
+      spy.mockRestore();
+      expect(failed.status, 'not acknowledged').toBe(500);
+      expect(await quarantined(n.eventId)).toEqual([]);
+      expect(await webhookState(n.eventId)).toMatchObject({ state: 'failed', outcome: 'transient_error' });
+      expect((await n.send()).status).toBe(200);
+      expect(await quarantined(n.eventId)).toHaveLength(1);
+      await nothingFinancial(p.id, 'cancelled');
+    });
+
+    it('the record and the event\'s terminal state commit together: if marking fails, neither stands and nothing is acknowledged', async () => {
+      const { a } = await cancelledAfterFailure();
+      const n = note(a.id, { currency: '' });
+      const svc = t.app.get(WebhookService) as unknown as { markState: (...x: unknown[]) => Promise<void> };
+      const real = svc.markState.bind(svc);
+      const spy = vi.spyOn(svc, 'markState').mockImplementation(async (...x: unknown[]) => { if (x[2] === 'quarantined_invalid_currency') throw Object.assign(new Error('x'), { code: '40001' }); return real(...x); });
+      const res = await n.send();
+      spy.mockRestore();
+      expect(res.status).toBe(500);
+      expect(await quarantined(n.eventId), 'rolled back with it').toEqual([]);
+      expect((await n.send()).status).toBe(200);
+      expect(await quarantined(n.eventId)).toHaveLength(1);
+    });
+
+    it('LABELLED FIXTURE, a crash between storing the notification and classifying it (the stored row inserted by SQL): the retrier holds it from the stored bytes, exactly; the provider\'s redelivery adds nothing', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const n = note(a.id, { currency: 840 });
+      await admin.query(`INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", "receivedAt") VALUES ('test', $1, 'payment.succeeded', $2, now() - interval '1 hour')`, [n.eventId, n.raw]);
+      await t.app.get(WebhookRetriever).drainOnce();
+      const [q] = await quarantined(n.eventId);
+      expect(q).toMatchObject({ currencyShape: 'non_string', attemptId: a.id });
+      expect(Buffer.from(q.currencyEvidence).toString()).toBe('840');
+      expect(await webhookState(n.eventId)).toMatchObject({ state: 'conflict', outcome: 'quarantined_invalid_currency' });
+      expect((await n.send()).status).toBe(200);
+      expect(await quarantined(n.eventId)).toHaveLength(1);
+      await nothingFinancial(p.id, 'cancelled');
+    });
+
+    it('an adapter with no acknowledgement contract: the evidence is held and the answer stays retryable, on redelivery too; HTTP 200 is not assumed', async () => {
+      const { a } = await cancelledAfterFailure();
+      const n = note(a.id, { currency: '' });
+      const provider = t.app.get(ProviderRegistry).get('test') as unknown as { capabilities: Row };
+      const was = provider.capabilities.quarantineAcknowledgement;
+      provider.capabilities.quarantineAcknowledgement = undefined;
+      try {
+        expect((await n.send()).status).toBe(500);
+        expect(await quarantined(n.eventId), 'held all the same').toHaveLength(1);
+        expect((await n.send()).status).toBe(500);
+      } finally {
+        provider.capabilities.quarantineAcknowledgement = was;
+      }
+      expect((await n.send()).status).toBe(200);
+    });
+
+    it('a status read: its record is the only evidence, once per exact answer, a different answer its own; no fact; the attempt unchanged; refused as before', async () => {
+      const { p, a } = await openAfterFailure();
+      const read = (currency: unknown, amount: unknown = 9000) => t.app.get(AttemptService).applyStatus(a.id, { kind: 'succeeded', amount, currency, providerTransactionId: `ptx_q_${a.id}` } as never, {} as never).then(() => null, (e: { response?: Row }) => e.response?.code);
+      expect(await read('')).toBe('provider_error');
+      expect(await read('')).toBe('provider_error');
+      await read('ABCDEFGHIJKLMNOPQ');
+      const rows = (await admin.query(`SELECT * FROM provider_observation_quarantine WHERE "attemptId" = $1 ORDER BY "observedAt"`, [a.id])).rows;
+      expect(rows.map((r) => [r.source, r.currencyShape, r.providerEventId, r.webhookEventId])).toEqual([['status_check', 'empty', null, null], ['status_check', 'overlength', null, null]]);
+      await nothingFinancial(p.id, 'created');
+      expect((await cancel(p.id)).status).toBe(200);
+      await nothingFinancial(p.id, 'cancelled');
+    });
+
+    it('quarantined evidence never reaches finality, recovery or a refund; a real capture of the same attempt still behaves as FN-2 and item 14 say, sole among facts', async () => {
+      const { p, a } = await openAfterFailure();
+      const n = note(a.id, { currency: '' });
+      await n.send();
+      await capture(a.id, 9000).send();
+      expect((await cancel(p.id)).status).toBe(200);
+      expect(await facts(p.id), 'the quarantine is no sibling').toHaveLength(1);
+      expect(await lateSuccesses(p.id)).toEqual([expect.objectContaining({ amount: 9000, paymentStatus: 'cancelled' })]);
+      expect((await reconcile()).recorded).toBe(0);
+      expect((await one(`SELECT "paymentId" FROM provider_observation_quarantine WHERE "providerEventId" = $1`, [n.eventId])).paymentId).toBe(p.id);
+    });
+
+    it('no evidence value in any log line; the record is append-only; the classifier agrees with what a fact can hold', async () => {
+      const lines: string[] = [];
+      const spies = (['log', 'warn', 'error'] as const).map((m) => vi.spyOn(Logger.prototype, m).mockImplementation((x: unknown) => void lines.push(String(x))));
+      const { a } = await cancelledAfterFailure();
+      const secret = `SECRETCURRENCY${crypto.randomUUID()}`;
+      const n = note(a.id, { currency: secret });
+      await n.send();
+      spies.forEach((s) => s.mockRestore());
+      expect(lines.filter((l) => l.includes('capture_observation_quarantined'))).toHaveLength(1);
+      expect(lines.filter((l) => l.includes('SECRETCURRENCY'))).toEqual([]);
+      await expect(admin.query(`UPDATE provider_observation_quarantine SET "currencyShape" = 'empty' WHERE "providerEventId" = $1`, [n.eventId])).rejects.toThrow();
+      await expect(admin.query(`DELETE FROM provider_observation_quarantine WHERE "providerEventId" = $1`, [n.eventId])).rejects.toThrow();
+      expect(classifyCurrencyEvidence({ present: true, value: 'ABCDEFGHIJKLMNOP' })).toBeNull();
+      expect(classifyCurrencyEvidence({ present: true, value: '😀'.repeat(16) }), 'characters as PostgreSQL counts them').toBeNull();
+      expect(classifyCurrencyEvidence({ present: true, value: '😀'.repeat(17) })).toBe('overlength');
+      expect(classifyCurrencyEvidence({ present: true, value: 'A\uD83D' }), 'an unpaired surrogate').toBe('unstorable');
+      expect(classifyCurrencyEvidence({ present: false, value: undefined })).toBe('missing');
+      expect(classifyAmountEvidence({ present: true, value: 0 })).toBe('invalid');
+      expect(classifyAmountEvidence({ present: true, value: 1 })).toBe('present');
     });
   });
 
