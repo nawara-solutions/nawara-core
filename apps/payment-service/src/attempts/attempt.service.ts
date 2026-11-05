@@ -15,6 +15,7 @@ import type { AttemptRow } from './attempt.types.js';
 import type { StartAttemptDto } from './dto/start-attempt.dto.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 import { FINAL_UNSUCCESSFUL, ISO_CURRENCY, recordQualifyingLateSuccesses } from '../payments/late-success-at-finality.js';
+import { classifyCurrencyEvidence, recordQuarantine } from '../webhooks/observation-quarantine.js';
 import { observationActor, type CaptureMismatchReason } from '../audit/payment-audit.js';
 
 export interface StartAttemptResult {
@@ -350,6 +351,15 @@ export class AttemptService {
   private async recordCaptureFact(attemptId: string, status: Extract<FetchStatusResult, { kind: 'succeeded' }>, ctx: EventContext): Promise<string | null> {
     const attempt = await this.findById(attemptId);
     if (!attempt) return null; // applyStatus answers 404 below
+    // Core V2 S0-C12 item 16: a status read has no stored notification, so this record is its only evidence; no fact, and `applyStatus` then refuses it (FI-13)
+    const shape = classifyCurrencyEvidence({ present: true, value: status.currency });
+    if (shape) {
+      const created = await this.db.tx((q) => recordQuarantine(q, { provider: attempt.provider, source: 'status_check', webhookEventId: null, providerEventId: null, attemptId,
+        paymentId: attempt.paymentId, providerTxnId: status.providerTransactionId ?? attempt.providerTransactionId, currency: { present: true, value: status.currency },
+        amount: { present: true, value: status.amount }, currencyShape: shape }));
+      if (created) this.logger.error(`capture_observation_quarantined source=status_check provider=${attempt.provider} attempt=${attemptId} shape=${shape} — authenticated evidence held; no fact; needs an approved policy to act on it`);
+      return null;
+    }
     const txn = status.providerTransactionId ?? attempt.providerTransactionId;
     if (!txn) {
       this.logger.error(`provider_fact_unidentifiable attempt=${attemptId} provider=${attempt.provider} — the adapter supplied no provider transaction reference`);

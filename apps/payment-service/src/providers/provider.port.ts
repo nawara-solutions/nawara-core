@@ -26,6 +26,12 @@ export interface ParsedWebhookBody {
   /** Core V2 S4d (FC-1): the provider's own transaction reference and stated time, when the adapter can read them from the message. */
   providerTransactionId?: string;
   providerOccurredAt?: Date;
+  /**
+   * Core V2 S0-C12 item 16: the message's own values, uninterpreted, so a value `currency` and `amount` above can't express is kept exactly. An adapter that
+   * can't supply them is read from `currency` and `amount` alone.
+   */
+  rawCurrency?: { present: boolean; value: unknown };
+  rawAmount?: { present: boolean; value: unknown };
 }
 
 /** A verified provider notification, or how verification failed (SDD section 7's two distinct failure modes). */
@@ -47,6 +53,12 @@ export interface ProviderCapabilities {
   sessionExpiry: boolean;
   /** Failure codes that mean the PAYMENT itself is unrecoverable, not just this attempt. */
   paymentFatalCodes: string[];
+  /**
+   * Core V2 S0-C12 item 16: what this adapter's contract says to answer once invalid currency evidence is durably held. It means "held", never "processed". The one
+   * value is the simulator's and the test provider's; what a success response tells a real provider differs per provider, so a real adapter needs its own
+   * separately approved value (S0-C12 item 19, B5). Anything else is answered as a retryable failure, the evidence kept.
+   */
+  quarantineAcknowledgement: 'simulated_received_200';
 }
 
 /** Options for one attempt, opaque to payment-service and validated by the adapter (SDD section 9.1, endpoint 3). */

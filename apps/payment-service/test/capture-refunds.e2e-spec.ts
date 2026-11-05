@@ -219,6 +219,25 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
     expect(dispatches.filter((d) => d.refundAttemptId === res.body.refundAttemptId).every((d) => d.idempotencyKey === res.body.refundAttemptId)).toBe(true);
   });
 
+  it('S0-C12 items 8, 17: a capture in an unrecognized currency has no refund route at Payment either, whatever the request states; no receipt is spent', async () => {
+    const p = await createPayment();
+    const a = await startAttempt(p.id);
+    await outcome(p.id, a.id, { outcome: 'expired' });
+    await request(server()).post(`/payment/payments/${p.id}/cancel`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key()).send({}).expect(200);
+    const txn = `sim_x_${randomUUID()}`;
+    await signed({ eventId: `x_${randomUUID()}`, type: 'payment.succeeded', reference: a.id, providerTransactionId: txn, amount: 9000, currency: 'XY1' }).expect(200);
+    const fact = await one(`SELECT * FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [txn]);
+    // the request can't state that currency (validation), and the capture is never returned in another one (D4): no route exists, and no receipt is spent
+    for (const [currency, status, code] of [['XY1', 400, 'invalid_refund_request'], ['TND', 422, 'refund_amount_not_full']] as const) {
+      const caseId = randomUUID();
+      const { secret } = auth.issue(binding(p.id, caseId, { captureFactId: fact.id, currency }), OWNER);
+      const refused = await refund(p.id, { captureFactId: fact.id, caseId, secret, currency });
+      expect([refused.status, refused.body.code], JSON.stringify(refused.body)).toEqual([status, code]);
+      expect(auth.receipts.get(secret)!.status, 'no receipt is spent').toBe('issued');
+    }
+    expect(await count(`SELECT count(*) AS n FROM refund_attempt WHERE "captureFactId" = $1`, [fact.id])).toBe(0);
+  });
+
   describe('S0-C12 item 14(d), (e): a new refund of an ambiguous attempt needs the provider\'s permission; the simulator holds it, R6H-5 stays as certified', () => {
     const permission = (effect: 'grant' | 'withdraw') => admin.query(`INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('simulation', 'refund_independent', $1, 'test', 'simulation')`, [effect]);
     const withdrawn = async <T>(work: () => Promise<T>): Promise<T> => {

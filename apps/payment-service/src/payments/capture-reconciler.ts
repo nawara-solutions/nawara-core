@@ -166,10 +166,11 @@ export class CaptureReconciler {
   /** Periodic, and whenever work is retrying or has ended: identifiers and counts only. */
   private async snapshot(): Promise<void> {
     if (++this.passes % 10 !== 0) return;
-    const { rows } = await this.db.query<{ retrying: number; exhausted: number; refused: number }>(
-      `SELECT count(*) FILTER (WHERE s.status = 'active')::int AS retrying, count(*) FILTER (WHERE s.status = 'exhausted')::int AS exhausted, count(*) FILTER (WHERE s.status = 'refused')::int AS refused
+    const { rows } = await this.db.query<{ retrying: number; exhausted: number; refused: number; quarantined: number }>(
+      `SELECT count(*) FILTER (WHERE s.status = 'active')::int AS retrying, count(*) FILTER (WHERE s.status = 'exhausted')::int AS exhausted, count(*) FILTER (WHERE s.status = 'refused')::int AS refused,
+              (SELECT count(*)::int FROM provider_observation_quarantine) AS quarantined
          FROM capture_recovery_state s WHERE NOT EXISTS (SELECT 1 FROM payment_late_success l WHERE l."factId" = s."factId")`).catch(() => ({ rows: [] }));
-    if (rows[0]) this.logger.log(`capture_reconcile_snapshot retrying=${rows[0].retrying} exhausted=${rows[0].exhausted} refused=${rows[0].refused}`);
+    if (rows[0]) this.logger.log(`capture_reconcile_snapshot retrying=${rows[0].retrying} exhausted=${rows[0].exhausted} refused=${rows[0].refused} quarantined=${rows[0].quarantined}`);
   }
 }
 

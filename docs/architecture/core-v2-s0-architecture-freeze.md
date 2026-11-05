@@ -348,7 +348,7 @@ status change still needs its own explicit owner authorization.
 - **S0-C12 Wrong-amount captures (2026-11-04, ADOPTED #467: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with owner-approved
   additions D-1 and D-B; logic-audit findings F-01, F-20, FN-1; decisions A1 and N1, with N3 future-gated). Items 1 to 13: implemented and CONDITIONALLY
   certified for development and simulation only (Owner, 2026-11-04, at `b775ff3`), open for final closure review. Items 14 to 20 and the references to them
-  (the Owner's FN-1 contract GO, 2026-11-04): ADOPTED CONTRACT, IMPLEMENTED for development and simulation only except item 16 (item 20).** A *wrong-amount capture* is a capture
+  (the Owner's FN-1 contract GO, 2026-11-04): ADOPTED CONTRACT, IMPLEMENTED for development and simulation only (item 20).** A *wrong-amount capture* is a capture
   verified under S0-C11 item 1 whose amount or currency differs from its payment's. It is an immutable financial observation, never a sale. FC-1 to FC-5, S4c
   F-1 to F-5, S0-C8, S0-C9 and S0-C11 are unchanged and govern except as stated here.
   1. *No commercial effect by itself.* Recording it settles nothing, finalizes or reopens no payment, changes no attempt state, creates no purchase or
@@ -479,15 +479,16 @@ status change still needs its own explicit owner authorization.
       no currency value.
   18. *Other malformed evidence (separately gated).* A verified notification with a **missing amount**, and an authenticated body that **cannot be parsed**, are
       outside this entry. As implemented, they are stored and answered HTTP 200 with state `ignored` or `failed` / `malformed_body`. That is recorded as an
-      **unresolved risk**, not an approved real-provider acknowledgement policy.
+      **unresolved risk**, not an approved real-provider acknowledgement policy. The one overlap: an invalid currency with a missing or invalid amount is item 16's, and
+      its record keeps both defects without inventing either value.
   19. *Real-provider blockers.* No real provider may be activated until each is separately authorized and certified. **B1** FN-1: items 14 and 15 implemented
       and certified. **B2** a per-adapter provider permission with verified reference semantics: one reference per capture or per attempt, stability across
       channels, partial capture and correction. **B3** an approved reconciliation or return route for facts in exceptional review. **B4** O-2: Owner visibility and
       reconciliation of quarantined monetary evidence. **B5** a per-adapter acknowledgement contract, and bodies over the service's body limit, refused before
       authentication and storage. **B6** refunds in another currency: adapter support or failing closed. **B7** item 18. **B8** N3, S0-C11's L2 two-Company
       evidence, and production readiness.
-  20. *Status and implementation requirements.* Implemented for development and simulation only: items 14, 15 and 17, and FN-2 (item 11). Item 16 implements
-      nothing yet; it needs a separate Owner authorization. **Historical limitation:** a late success recorded before `0026` with a non-final status, and any EVT-10
+  20. *Status and implementation requirements.* Implemented for development and simulation only: items 14, 15, 16 and 17, and FN-2 (item 11).
+      **Historical limitation:** a late success recorded before `0026` with a non-final status, and any EVT-10
       dead-lettered for it, can't self-heal: the row is immutable, Billing refuses it, replay refuses it again, and finality won't record its fact again. Such a
       row exists only in development or simulation data, is kept as recorded, and has no automatic backfill, duplicate EVT-10 or compensation; correcting one needs a
       separately approved policy. Items 14 to 19 required, in Payment only and expand-only with no backfill and no existing row changed: a provider

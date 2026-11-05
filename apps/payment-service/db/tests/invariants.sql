@@ -1033,6 +1033,25 @@ SELECT pg_temp.expect_constraint('S0-C12', 'item 15: exhaustion is not reset: re
 SELECT pg_temp.expect_constraint('S0-C12', 'item 15: its history is never deleted', format($$DELETE FROM capture_recovery_state WHERE "factId" = %L$$, :'i14bf'), 'capture_recovery_state_kept');
 SELECT pg_temp.assert_eq('S0-C12', 'item 15: the fact itself is untouched', (SELECT count(*)::text FROM provider_transaction_fact WHERE id = :'i14bf'), '1');
 
+-- ================================= Core V2 S0-C12 item 16 (0027): the quarantine is evidence, not a fact ----
+\o /dev/null
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-i16-1', 'payment.succeeded', '\x7b7d') RETURNING id AS i16w \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-i16-2', 'payment.succeeded', '\x7b7d') RETURNING id AS i16w2 \gset
+CREATE FUNCTION pg_temp.i16(wid uuid, ev text, shape text, cur bytea, amt_shape text DEFAULT 'present', amt bytea DEFAULT '\x39', cls text DEFAULT 'invalid_currency', st text DEFAULT 'held') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO provider_observation_quarantine (provider, source, "webhookEventId", "providerEventId", classification, "currencyShape", "currencyEvidence", "amountShape", "amountEvidence", "evidenceDigest", "investigationState")
+    VALUES ('test', 'webhook', %L, %L, %L, %L, %L::bytea, %L, %L::bytea, repeat('a', 64), %L)$$, wid, ev, cls, shape, cur, amt_shape, amt, st);
+$f$;
+\o
+SELECT pg_temp.expect_ok('S0-C12', 'item 16: a quarantine record names its stored notification', pg_temp.i16(:'i16w', 'evt-i16-1', 'empty', '\x2222'));
+SELECT pg_temp.expect_error('S0-C12', 'item 16: one record per stored notification', pg_temp.i16(:'i16w', 'evt-i16-1', 'empty', '\x2222'), '23505');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 16: a missing currency has no invented evidence', pg_temp.i16(:'i16w2', 'evt-i16-2', 'missing', '\x2222'), 'provider_observation_quarantine_currency_evidence');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 16: a present defect keeps its evidence', pg_temp.i16(:'i16w2', 'evt-i16-2', 'empty', NULL), 'provider_observation_quarantine_currency_evidence');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 16: a missing amount has no invented evidence', pg_temp.i16(:'i16w2', 'evt-i16-2', 'empty', '\x2222', 'missing', '\x39'), 'provider_observation_quarantine_amount_evidence');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 16: only the adopted classification', pg_temp.i16(:'i16w2', 'evt-i16-2', 'empty', '\x2222', 'present', '\x39', 'settled'), 'provider_observation_quarantine_classification');
+SELECT pg_temp.expect_constraint('S0-C12', 'item 16: only the held state: acting on evidence needs an approved policy', pg_temp.i16(:'i16w2', 'evt-i16-2', 'empty', '\x2222', 'present', '\x39', 'invalid_currency', 'reconciled'), 'provider_observation_quarantine_state');
+SELECT pg_temp.expect_error('S0-C12', 'item 16: evidence is never edited', $$UPDATE provider_observation_quarantine SET "currencyShape" = 'null'$$, '23514');
+SELECT pg_temp.expect_error('S0-C12', 'item 16: evidence is never deleted', $$DELETE FROM provider_observation_quarantine$$, '23514');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

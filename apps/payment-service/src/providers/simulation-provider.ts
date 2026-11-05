@@ -1,3 +1,4 @@
+import { rawEvidenceOf } from '../webhooks/observation-quarantine.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService } from '@nawara/service-kit';
@@ -97,6 +98,7 @@ export class SimulationPaymentProvider implements PaymentProvider {
     visibilityLagMs: 50,
     timeoutMs: 200,
     sessionExpiry: true,
+    quarantineAcknowledgement: 'simulated_received_200', // S0-C12 item 16: `{ received: true }`, 200, only after the record committed
     paymentFatalCodes: [],
   };
 
@@ -250,6 +252,8 @@ export class SimulationPaymentProvider implements PaymentProvider {
         providerTransactionId: typeof body.providerTransactionId === 'string' ? body.providerTransactionId : undefined,
         amount: typeof body.amount === 'number' ? body.amount : undefined,
         currency: typeof body.currency === 'string' ? body.currency : undefined,
+        rawCurrency: rawEvidenceOf(body, 'currency'),
+        rawAmount: rawEvidenceOf(body, 'amount'),
         data: body.data,
       };
     } catch {
