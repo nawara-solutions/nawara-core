@@ -44,6 +44,8 @@ export interface PaymentCapture {
   refund: 'none' | 'in_progress' | 'refunded';
   /** S6 certification: false when Payment would refuse to refund this capture on its own (the last capture backing the sale) */
   refundableOnItsOwn: boolean;
+  /** S0-C12 item 14: the capture facts Payment holds on this fact's attempt (0: an associated fact, no attempt). More than one: the attempt is ambiguous. */
+  attemptCaptures: number;
 }
 /**
  * Which `404` Payment's R6H-5 capture read answered (BIL-32 M): `capture_not_found` (Payment states the named fact is not a capture of that
@@ -52,10 +54,20 @@ export interface PaymentCapture {
  * their own approved meaning of `not_found`.
  */
 export type CaptureNotFoundReason = 'capture_not_found' | 'collapsed' | 'unrecognized';
-/** What Payment's capture read proves: the capture, or that this payment has no such capture (404); anything else proves nothing. */
-export type CaptureReadOutcome = { kind: 'capture'; capture: PaymentCapture } | { kind: 'not_found'; reason?: CaptureNotFoundReason } | { kind: 'unknown'; reason: string };
+/**
+ * What Payment's capture read proves: the capture; that this payment has no such capture (404); or (S0-C12 item 17) that this very fact is well-formed
+ * in a 1 to 16 character currency no ISO shape holds, carrying no figures and no currency value. Anything else proves nothing.
+ */
+export type CaptureReadOutcome = { kind: 'capture'; capture: PaymentCapture } | { kind: 'not_found'; reason?: CaptureNotFoundReason } | { kind: 'ineligible_currency' }
+  | { kind: 'unknown'; reason: string };
 const CAPTURE_BASES: readonly string[] = ['settling_capture', 'duplicate_capture', 'other_attempt_capture', 'late_capture', 'associated_capture'];
 const CAPTURE_REFUND: readonly string[] = ['none', 'in_progress', 'refunded'];
+/**
+ * S0-C12 item 14: a count that can be true of its basis. An associated fact has no attempt (0); a settling capture is its attempt's single fact (1); a
+ * duplicate has a sibling (2 or more); any other basis names an attempt holding at least itself. Anything else is inconsistent and proves nothing.
+ */
+const consistentCaptureCount = (n: unknown, basis: string): boolean => typeof n === 'number' && Number.isSafeInteger(n)
+  && (basis === 'associated_capture' ? n === 0 : basis === 'settling_capture' ? n === 1 : basis === 'duplicate_capture' ? n >= 2 : n >= 1);
 
 /**
  * What Payment's answer to PAY-07 PROVES (R6B-10), classified once here:
@@ -168,12 +180,17 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
     const b = r.body;
     if (r.status !== 200 || !b) return { kind: 'unknown', reason: `status_${r.status}` };
     if (b.factId !== factId || b.paymentId !== paymentId || typeof b.amount !== 'number' || !Number.isSafeInteger(b.amount) || b.amount < 1
-      || typeof b.currency !== 'string' || !/^[A-Z]{3}$/.test(b.currency) || typeof b.paymentStatus !== 'string' || !CAPTURE_BASES.includes(b.basis as string)
+      || typeof b.currency !== 'string' || typeof b.paymentStatus !== 'string' || !CAPTURE_BASES.includes(b.basis as string)
       || typeof b.conflicted !== 'boolean' || !CAPTURE_REFUND.includes(b.refund as string) || typeof b.refundableOnItsOwn !== 'boolean') {
       return { kind: 'unknown', reason: 'malformed_capture' };
     }
+    if (!consistentCaptureCount(b.attemptCaptures, b.basis as string)) return { kind: 'unknown', reason: 'inconsistent_capture_count' };
+    if (!/^[A-Z]{3}$/.test(b.currency)) {
+      const length = [...b.currency].length; // what a fact can hold (`0013`): characters, as PostgreSQL counts them
+      return length >= 1 && length <= 16 ? { kind: 'ineligible_currency' } : { kind: 'unknown', reason: 'malformed_capture' };
+    }
     return { kind: 'capture', capture: { factId, paymentId, amount: b.amount, currency: b.currency, paymentStatus: b.paymentStatus, basis: b.basis as CaptureBasis,
-      conflicted: b.conflicted, refund: b.refund as PaymentCapture['refund'], refundableOnItsOwn: b.refundableOnItsOwn } };
+      conflicted: b.conflicted, refund: b.refund as PaymentCapture['refund'], refundableOnItsOwn: b.refundableOnItsOwn, attemptCaptures: b.attemptCaptures as number } };
   }
 
   async settlingCapture(paymentId: string): Promise<SettlingCaptureOutcome> {

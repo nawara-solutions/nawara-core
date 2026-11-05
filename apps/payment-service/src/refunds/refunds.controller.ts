@@ -115,7 +115,7 @@ export class RefundsController {
 
 const representCapture = (c: CaptureEvidence) => ({
   factId: c.factId, paymentId: c.paymentId, provider: c.provider, amount: c.amount, currency: c.currency, paymentStatus: c.paymentStatus, basis: c.basis,
-  conflicted: c.conflicted, refund: c.refund, refundableOnItsOwn: c.refundableOnItsOwn, observedAt: iso(c.observedAt),
+  conflicted: c.conflicted, refund: c.refund, refundableOnItsOwn: c.refundableOnItsOwn, attemptCaptures: c.attemptCaptures, observedAt: iso(c.observedAt),
 });
 
 const UUID_PARAM = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -170,7 +170,7 @@ export class RefundCapturesController {
   @ApiOperation({
     summary: 'R6H-5: one verified capture of the caller\'s own payment: amount, currency, provider, the payment status, its basis '
       + '(settling_capture | duplicate_capture | other_attempt_capture | late_capture | associated_capture), whether it is contested, and the refund '
-      + 'state of THIS captured money (none | in_progress | refunded).',
+      + 'state of THIS captured money (none | in_progress | refunded). S0-C12 item 14: attemptCaptures, the capture facts Payment holds on its attempt (0 for an associated fact).',
   })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted' })

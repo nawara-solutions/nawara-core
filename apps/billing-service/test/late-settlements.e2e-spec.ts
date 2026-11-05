@@ -727,6 +727,24 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       }
     });
 
+    it('S0-C12 item 14(a), input (a): a committed application stands when Payment later states two capture facts: its replay answers the stored result without reading Payment or spending again', async () => {
+      const l = await ready();
+      const body = attested(l);
+      const idem = key();
+      const first = await applyLate(l.lateId, body, 'owner-tok', idem);
+      expect(first.status, JSON.stringify(first.body)).toBe(201);
+      const consumeRef = fraudAuth.issued.get(body.receiptSecret)!.consumeRef;
+      let reads = 0;
+      settlingAt.answer = async () => { reads++; return { kind: 'ambiguous' }; };
+      const replay = await applyLate(l.lateId, body, 'owner-tok', idem);
+      expect(replay.status).toBe(201);
+      expect(replay.body.application.id).toBe(first.body.application.id);
+      expect(reads, 'a replay reads nothing').toBe(0);
+      expect(fraudAuth.issued.get(body.receiptSecret)!.consumeRef).toBe(consumeRef);
+      expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [l.requestId])).toBe(1);
+      settlingAt.answer = verifiedSettlingCapture;
+    });
+
     it('Payment unavailable, a malformed answer, or an answer about another payment: 503 late_settlement_capture_unavailable; it applies once Payment answers', async () => {
       const l = await ready();
       const body = attested(l);
@@ -883,7 +901,7 @@ describeWithEnv('late assisted settlement application (Core V2 S6g, simulation) 
       paymentItems.items.set('fact_conflict', [{ kind: 'fact_conflict', id: randomUUID(), paymentId: l.paymentId, factId, amount: 4500, currency: 'TND', detail: {},
         at: new Date().toISOString() }]);
       captureAt.answer = async (paymentId, f) => ({ kind: 'capture', capture: { factId: f, paymentId, amount: 5300, currency: 'TND', basis: 'settling_capture',
-        paymentStatus: 'succeeded', conflicted: true, refundableOnItsOwn: true, refund: 'none' } });
+        paymentStatus: 'succeeded', conflicted: true, refundableOnItsOwn: true, attemptCaptures: 1, refund: 'none' } });
       await t.app.get(ReconciliationService).drainOnce();
       const listed = (await send(request(server()).get('/billing/admin/reconciliation-cases?type=capture_contradiction'), 'owner-tok', null).expect(200)).body.items as Row[];
       expect(listed.find((c) => c.paymentId === l.paymentId)).toMatchObject({ captureFactId: factId, l4Purchase: true, status: 'open' });

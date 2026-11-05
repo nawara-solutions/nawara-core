@@ -59,7 +59,7 @@ const refundsAtPayment: PaymentRefundClient = {
   // R6H-5: Payment's evidence of a late capture, refundable on its own (the capture-specific route must still refuse it, S0-C8)
   // the capture as Payment states it: these fixtures' late captures are of the channel invoice's total (5300; the Organization's fee is not captured)
   capture: async (paymentId, factId) => ({ kind: 'capture' as const, capture: { factId, paymentId, amount: 5300, currency: 'TND', basis: 'late_capture' as const, paymentStatus: 'expired',
-    conflicted: false, refundableOnItsOwn: true, refund: 'none' as const } }),
+    conflicted: false, refundableOnItsOwn: true, attemptCaptures: 1, refund: 'none' as const } }),
   settlingCapture: async () => ({ kind: 'unknown' as const, reason: 'not_used_in_this_suite' }), // Core V2 S0-C11 7c: no E-7 application here
 };
 

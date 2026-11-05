@@ -415,6 +415,8 @@ export class LateSettlementService {
    * PAY-16, which derives the settling capture (no fact is named, inferred from an amount, or taken from the Owner); also equal to the payment request
    * (the original settlement). Contested: `409 capture_contested`. Missing, legacy, ambiguous or unequal: `409 capture_unverified`. Payment
    * unanswerable, or an answer about anything else: `503 late_settlement_capture_unavailable`. Nothing is written and no receipt is spent.
+   * S0-C12 item 14: more than one capture fact on the attempt is ambiguous under both inputs: PAY-16 states it for input (a), `attemptCaptures` for input (b).
+   * A committed application is never reached here: its replay answers from the stored result first.
    */
   private async captureEvidenceVerified(l: LateRow): Promise<string> {
     let refusal: 'capture_contested' | 'capture_unverified' | 'unavailable' | null = null;
@@ -432,12 +434,14 @@ export class LateSettlementService {
         } catch {
           read = { kind: 'unknown', reason: 'error' };
         }
-        if (read.kind === 'unknown') refusal = 'unavailable';
+        // S0-C12 item 17: Billing's own late success holds an ISO currency, so a non-ISO answer about its fact is inconsistent evidence, not an ineligibility
+        if (read.kind === 'unknown' || read.kind === 'ineligible_currency') refusal = 'unavailable';
         // BIL-32 M: only Payment's statement that the fact is not a capture of that payment is missing evidence (409); the collapsed answer
         // (Billing names its own payment and fact, so Payment cannot answer about Billing's own evidence) or any other 404 proves nothing (503)
         else if (read.kind === 'not_found') refusal = read.reason === 'collapsed' || read.reason === 'unrecognized' ? 'unavailable' : 'capture_unverified';
         else if (read.capture.paymentId !== ls.paymentId || read.capture.factId !== ls.factId) refusal = 'unavailable'; // an answer about something else proves nothing
         else if (read.capture.conflicted) refusal = 'capture_contested';
+        else if (read.capture.attemptCaptures !== 1) refusal = 'capture_unverified'; // S0-C12 item 14(c): ambiguous, whatever any fact's amount
         else if (read.capture.amount !== Number(ls.amount) || read.capture.currency !== ls.currency
           || read.capture.amount !== Number(ls.total) || read.capture.currency !== ls.invoiceCurrency) refusal = 'capture_unverified';
         else factId = ls.factId;

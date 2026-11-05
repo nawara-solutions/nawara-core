@@ -88,7 +88,7 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       databaseUrl: db.url, tokens: [{ caller: 'billing-service', digest: billing.digest }], authClient, refundWorker: false,
       migrationsDirs: [kitMigrationsDir, paymentMigrationsDir],
       env: {
-        PAYMENT_TEST_PROVIDER: 'true', PAYMENT_MAX_ATTEMPTS: '2', AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token,
+        PAYMENT_TEST_PROVIDER: 'true', PAYMENT_MAX_ATTEMPTS: '2', PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000', AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token,
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create', 'payment.reconciliation.read'], allowedPlatforms: [TEST_PLATFORM] },
         } }),
@@ -406,6 +406,50 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       const ls = await lateSuccesses(p.id);
       expect(ls).toEqual([expect.objectContaining({ amount: 9100, factId: f.id, paymentStatus: 'expired' })]);
       expect(await sameTransaction(ls[0].id, p.id)).toBe(true);
+    });
+  });
+
+  describe('S0-C12 item 14: the capture read states how many capture facts an attempt holds', () => {
+    const read = async (pid: string, factId: string) => (await request(server()).get(`/payment/payments/${pid}/captures/${factId}`).set('authorization', `Bearer ${billing.token}`).expect(200)).body;
+    const factOf = async (txn: string) => (await one(`SELECT id FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'capture'`, [txn])).id as string;
+    /** A second provider reference on the attempt: this test provider's notifications always name `ptx_<attempt>`, so the sibling comes through a status read. */
+    const sibling = (aid: string, txn: string, amount: number) => t.app.get(AttemptService)
+      .applyStatus(aid, { kind: 'succeeded', amount, currency: 'TND', providerTransactionId: txn } as never, {} as never).catch((e: unknown) => e);
+
+    it('from committed facts only: 1 for a sole fact, a contradiction adds none; 2 on both once a distinct reference exists, contested or not; existing fields unchanged; another attempt never counts', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      await capture(a.id, 9100).send();
+      const f1 = await factOf(`ptx_${a.id}`);
+      expect(await read(p.id, f1)).toMatchObject({ factId: f1, paymentId: p.id, amount: 9100, currency: 'TND', paymentStatus: 'cancelled', basis: 'late_capture', conflicted: false, refund: 'none', refundableOnItsOwn: true, attemptCaptures: 1 });
+      await capture(a.id, 9200).send(); // the same reference, another figure: a contradiction, not a fact
+      expect(await read(p.id, f1)).toMatchObject({ conflicted: true, attemptCaptures: 1 });
+      await sibling(a.id, `ptx_b_${a.id}`, 9000);
+      const f2 = await factOf(`ptx_b_${a.id}`);
+      expect((await read(p.id, f1)).attemptCaptures).toBe(2);
+      expect((await read(p.id, f2)).attemptCaptures).toBe(2);
+      const other = await create();
+      const x = await start(other.id, 'failure');
+      const y = await start(other.id, 'failure');
+      await capture(x.id, 9100).send();
+      await capture(y.id, 9100).send();
+      expect((await read(other.id, await factOf(`ptx_${x.id}`))).attemptCaptures, 'per attempt, not per payment').toBe(1);
+      expect((await read(other.id, await factOf(`ptx_${y.id}`))).attemptCaptures).toBe(1);
+    });
+
+    it('a notification cannot state the count: Payment derives it from its committed facts only', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      const n = signed({ eventId: `evt_${crypto.randomUUID()}`, type: 'payment.succeeded', reference: a.id, amount: 9100, currency: 'TND', attemptCaptures: 99 });
+      await post(n.raw, n.signature);
+      expect((await read(p.id, await factOf(`ptx_${a.id}`))).attemptCaptures).toBe(1);
+    });
+
+    it('a caller with no valid service token reads nothing of the count', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      await capture(a.id, 9100).send();
+      const factId = await factOf(`ptx_${a.id}`);
+      const r = await request(server()).get(`/payment/payments/${p.id}/captures/${factId}`).set('authorization', `Bearer ${generateServiceToken().token}`);
+      expect(r.status).toBeGreaterThanOrEqual(401);
+      expect(JSON.stringify(r.body)).not.toContain('attemptCaptures');
     });
   });
 

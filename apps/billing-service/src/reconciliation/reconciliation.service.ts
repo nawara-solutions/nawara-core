@@ -216,7 +216,7 @@ export class ReconciliationService {
       } catch {
         read = { kind: 'unknown', reason: 'error' };
       }
-      if (read.kind === 'unknown') return;
+      if (read.kind === 'unknown' || read.kind === 'ineligible_currency') return; // no figures to show: nothing inferred, as for any read that proves nothing
       const own = read.kind === 'capture' && read.capture.paymentId === i.paymentId && read.capture.factId === i.factId;
       if (read.kind === 'capture' && (!own || !read.capture.conflicted)) return; // Payment's answers disagree: proven nothing
       const factId = i.factId;

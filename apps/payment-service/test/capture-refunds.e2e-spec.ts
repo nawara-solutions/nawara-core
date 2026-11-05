@@ -197,9 +197,10 @@ describeWithEnv('capture-specific refunds (Core V2 R6H-5) — real PostgreSQL', 
 
   it('3, 5, 18. distinct duplicate captures: each is its own money; one is refunded on its own, the LAST one backing the sale never is; the ordinary refund stays refused', async () => {
     const { payment, attempt, capture } = await captured();
+    expect((await captureRead(payment.id, capture.id).expect(200)).body).toMatchObject({ basis: 'settling_capture', attemptCaptures: 1 }); // S0-C12 item 14
     const dup = await duplicate(attempt.id);
     expect(dup).toMatchObject({ paymentId: payment.id, attemptId: attempt.id, kind: 'capture' });
-    expect((await captureRead(payment.id, dup.id).expect(200)).body).toMatchObject({ basis: 'duplicate_capture', refundableOnItsOwn: true });
+    expect((await captureRead(payment.id, dup.id).expect(200)).body).toMatchObject({ basis: 'duplicate_capture', refundableOnItsOwn: true, attemptCaptures: 2 });
     expect((await refund(payment.id)).body.code).toBe('refund_capture_unverified'); // ambiguous: the ordinary path never picks one
     const res = await refund(payment.id, { captureFactId: dup.id });
     expect(res.status, JSON.stringify(res.body)).toBe(201);

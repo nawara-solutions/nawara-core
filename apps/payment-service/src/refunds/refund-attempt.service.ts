@@ -50,6 +50,11 @@ export interface CaptureEvidence {
    * capture of a succeeded payment's settling attempt (the sale's own money). Billing never opens a case Payment would refuse.
    */
   refundableOnItsOwn: boolean;
+  /**
+   * Core V2 S0-C12 item 14 (BIL-28 H, BIL-32 N): how many capture facts Payment's committed records hold on this fact's attempt, this one included and
+   * contested or not; a contradiction is not a fact. 0 for an associated fact, which has no attempt. Derived here, never from a provider or a caller.
+   */
+  attemptCaptures: number;
   observedAt: Date;
 }
 
@@ -323,7 +328,7 @@ export class RefundAttemptService {
     const refundableOnItsOwn = basis !== 'associated_capture' && (basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id)));
     return {
       factId: f.id, paymentId: p.id, provider: f.provider, providerTxnId: f.providerTxnId, amount: Number(f.amount), currency: f.currency, paymentStatus: p.status,
-      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn,
+      basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn, attemptCaptures: f.siblings,
       refund: refunded || ordinary.done ? 'refunded' : live.length > 0 || ordinary.live ? 'in_progress' : 'none',
     };
   }

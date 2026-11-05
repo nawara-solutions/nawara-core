@@ -79,6 +79,7 @@ export class LateSuccessService {
     }
     if (read.kind === 'capture' && read.capture.paymentId === l.paymentId && read.capture.factId === l.factId) {
       if (read.capture.conflicted) return 'contested';
+      if (read.capture.attemptCaptures !== 1) return 'unverified'; // S0-C12 item 14(c): an ambiguous attempt authorizes no new allocation, whatever the amount
       return read.capture.amount === l.amount && read.capture.currency === l.currency ? 'verified' : 'unverified';
     }
     if (read.kind === 'not_found' && read.reason === 'capture_not_found') return 'unverified';
