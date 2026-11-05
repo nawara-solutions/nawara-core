@@ -346,9 +346,8 @@ status change still needs its own explicit owner authorization.
       record its contract. **Implemented for development and simulation only; the Owner closed S0-C11 as PASS for development and simulation at `787c856`
       (2026-11-03).** It is not production-certified, and two-Company real-event evidence (L2) is required before real money.
 - **S0-C12 Wrong-amount captures (2026-11-04, ADOPTED #467: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with owner-approved
-  additions D-1 and D-B; logic-audit findings F-01, F-20, FN-1; decisions A1 and N1, with N3 future-gated). Items 1 to 13: implemented and CONDITIONALLY
-  certified for development and simulation only (Owner, 2026-11-04, at `b775ff3`), open for final closure review. Items 14 to 20 and the references to them
-  (the Owner's FN-1 contract GO, 2026-11-04): ADOPTED CONTRACT, IMPLEMENTED for development and simulation only (item 20).** A *wrong-amount capture* is a capture
+  additions D-1 and D-B; logic-audit findings F-01, F-20, FN-1; decisions A1 and N1, with N3 future-gated). PASS FOR DEVELOPMENT AND SIMULATION ONLY (the Owner's decision, 2026-11-05, at `12f52df`): not production-certified and not
+  real-money ready (item 20). Items 14 to 20 and the references to them come from the Owner's FN-1 contract GO, 2026-11-04.** A *wrong-amount capture* is a capture
   verified under S0-C11 item 1 whose amount or currency differs from its payment's. It is an immutable financial observation, never a sale. FC-1 to FC-5, S4c
   F-1 to F-5, S0-C8, S0-C9 and S0-C11 are unchanged and govern except as stated here.
   1. *No commercial effect by itself.* Recording it settles nothing, finalizes or reopens no payment, changes no attempt state, creates no purchase or
@@ -487,7 +486,10 @@ status change still needs its own explicit owner authorization.
       reconciliation of quarantined monetary evidence. **B5** a per-adapter acknowledgement contract, and bodies over the service's body limit, refused before
       authentication and storage. **B6** refunds in another currency: adapter support or failing closed. **B7** item 18. **B8** N3, S0-C11's L2 two-Company
       evidence, and production readiness.
-  20. *Status and implementation requirements.* Implemented for development and simulation only: items 14, 15, 16 and 17, and FN-2 (item 11).
+  20. *Status and implementation requirements.* **Items 1 to 20: PASS for development and simulation only (the Owner's decision, 2026-11-05, at `12f52df`).** Real-money and
+      production readiness are not certified. Retained: blockers B2 to B8; S0-C11's L2 two-Company real-process evidence; F-20 and N3; no exceptional-review return
+      route; no approved reactivation operation; S-INT doesn't run audit-service, so a real Payment emission reaching it isn't observed; item 18; and the existing
+      infrastructure and production-readiness gates. Implemented for development and simulation only: items 14, 15, 16 and 17, and FN-2 (item 11).
       **Historical limitation:** a late success recorded before `0026` with a non-final status, and any EVT-10
       dead-lettered for it, can't self-heal: the row is immutable, Billing refuses it, replay refuses it again, and finality won't record its fact again. Such a
       row exists only in development or simulation data, is kept as recorded, and has no automatic backfill, duplicate EVT-10 or compensation; correcting one needs a
@@ -498,6 +500,53 @@ status change still needs its own explicit owner authorization.
       read, for Billing's D-1 and L-4 checks; EVT-10 stays v1. Acceptance (real events across processes, simulation only): each case of items 14, 15, 16 and 17 on
       every channel, with replay and concurrency; both orders of a status read and a notification; R6H-5 simulation behaviour unchanged; tenant isolation of
       `multiple_captures`; the recovery test's equal capture moved to its own attempt, keeping what it proves. Reactivation stays out until its decision.
+
+- **S0-C13 Part A Terminal dispute conflicts: visibility and recording audit (2026-11-05, ADOPTED CONTRACT, the Owner's Part A GO: clarification of S0-C9 items 3
+  and 8; logic-audit finding F-02; register PAY-09 J, PAY-12 K). NOT IMPLEMENTED: this entry adopts the contract only.** Parts B and C are not adopted and are not
+  authorized. S0-C9, S0-C11 and S0-C12 are unchanged and govern. Today a conflict is stored and counts as `unresolved` exposure, but no Owner API lists it and no
+  audit record is written for it.
+  1. *Owner item.* Every `payment_dispute_observation` with disposition `conflict`, exactly the rows the exposure's `conflicts` field counts, of a payment whose
+     seller is a Company, is readable by that Company's active Owner through PAY-12 kind `dispute_conflict`, whether or not Payment holds a dispute record for it.
+     Read-only and derived at read from committed evidence, with no new storage. A provider dispute reference is always stated on such a row; what can be missing is
+     Payment's own dispute record.
+  2. *Isolation and identity.* Scoped through the payment's seller, verified live from the Owner's own bearer. Another Company's Owner gets no such item, a
+     non-Owner or a service gets `403`, Auth unavailable gets `503`, and a service read of the kind gets the same `400` as a kind that doesn't exist. The item's id is
+     the observation's id, with the existing keyset paging. One observation exists per webhook event, so a replay adds no item; a distinct provider event is its own
+     observation and its own item.
+  3. *Fields.* The standard item fields, with `amount` and `currency` as the notification stated them and `at` as the observation time, and `detail`: `reason`,
+     `notificationKind`, `attemptId`, `providerDisputeId`, `disputeId`, `chargeback` (`{reference, amount, currency}` or null) and `providerOccurredAt`. Each value is this
+     observation's or its payment's, never one read from another payment's row. **`disputeId` is non-null only when that dispute belongs to this payment:**
+     `payment_mismatch` names a dispute of another payment, possibly another Company's, so its id is withheld. No id is ever fabricated. Never included: the raw body,
+     headers, signature, credentials or the webhook event id. No resolution, status or acknowledgement field exists until Part B defines a lifecycle.
+  4. *Original evidence.* The original form stays in its authoritative stores: the stored authenticated notification and the immutable observation (CB-6). Nothing
+     rewrites them, and the item and the audit record expose only the structured fields stated here.
+  5. *Audit action `payment_dispute.conflict_recorded`.* Business meaning approved by the Owner. Category `commercial`; version 1, no trusted scope and no `approvedBy`,
+     as every Payment action (S2-Audit D3). Producer `payment-service`, actor system `payment_webhook`, because a conflict only ever comes from a verified provider
+     notification, on first delivery or on the retrier's last permitted processing. `organizationId` as recorded on the payment (optional). Resource
+     `payment_dispute_observation` and the observation's id, since there may be no dispute. No subject; outcome `succeeded`. Changes: `payment_id` and `attempt_id`
+     (uuid, required), `reason` (code: the six conflict reasons), `notification_kind` (code: `opened`, `won`, `lost`), `dispute_id` (uuid, optional, under item 3's rule).
+     No amount, provider reference or chargeback reference. Written in the observation's own transaction through the transactional outbox, with an event id
+     derived from the observation's id; a failed write fails the transaction, leaving the notification retryable. A replay finds the observation first and writes
+     nothing. Earlier observations stay unchanged and readable and get no audit record (CB-6).
+  6. *Audit compatibility and order.* Additive to the catalog and compatible: an audit-service with an older catalog refuses the action as `unknown_action` and keeps the
+     message replayable after an upgrade (ADR-0049 A50). Adding it requires, together: the catalog entry and its regenerated document, the catalog's pin tests, and
+     Payment's broker topic permission (`infra/rabbitmq/provision.sh`, pinned in `scripts/check-repo.test.mjs`). In any environment, the broker permission and an
+     audit-service with the new catalog come before Payment emits it. Payment isn't in production, so this entry requires and performs no deployment; any later one
+     stays separately authorized.
+  7. *Financial safeguards.* Visibility and evidence only. Reading changes and clears nothing, and an item never means exposure has cleared: `unresolved` stays
+     `unresolved`, and the exposure read stays the authority. Refund and L-4 refusals, capture and payment finality, Organization obligations, recovery allocation
+     and every immutable record are unchanged. No clearance, dismissal, refund, compensation or event follows from it.
+  8. *Boundary.* Only evidence safely bound to a known payment and seller Company. Outside this entry: malformed notifications and notifications matching no attempt,
+     which have no trusted payment binding; a held notification, which is not yet a conflict (S0-C9 item 3); and a payment sold by an Organization, as with every
+     PAY-12 Owner kind. A Company is never inferred from an untrusted payload. **Provider-level visibility and reconciliation of the unbound notifications stays a
+     future requirement.**
+  9. *Order.* Part A, then S0-C10 (multiple-chargeback protection), then Part B (evidence-based conflict resolution), which needs its own adoption. Reassess if Part A
+     exposes a critical safety issue. Until Part B, a conflict has no exit: its payment's exposure stays `unresolved`.
+  10. *Acceptance (later implementation, simulation only; needs a separate Owner authorization).* The Company's Owner reads every reason, with and without a dispute
+      record; another Company, a member, a service and a service read are refused; `payment_mismatch` withholds the other payment's dispute id; paging is stable; earlier
+      rows stay readable and unaudited; the audit record is atomic and single under replay and retrier processing; reading writes nothing and exposure, refunds and L-4
+      answer as before; a real cross-process read replaces the admin SQL in `s-int-late-capture-disputes`. ADR-0035 and ADR-0069 stay Proposed, and this entry implies no
+      acceptance. ADR-0049 is unedited; its catalog rule governs item 6.
 
 ## 2. ADR disposition
 
