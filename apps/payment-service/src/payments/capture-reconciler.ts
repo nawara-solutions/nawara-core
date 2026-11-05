@@ -89,7 +89,10 @@ export class CaptureReconciler {
             WHERE ${ELIGIBLE} AND (s."factId" IS NULL OR (s.status = 'active' AND s."workAfter" <= now()))
             ORDER BY s."factId" IS NOT NULL, COALESCE(s."workAfter", f."observedAt"), f.id LIMIT $1`, [CAPTURE_RECONCILE_BATCH])).rows;
       } catch (e) {
-        this.infrastructureFailure(e); // a pass that can't even read: no fact is involved, so no fact pays for it
+        // a pass that can't even read: no fact is involved, so no fact pays for it. Only an infrastructure failure pauses; anything else stays the job
+        // error boundary's: logged by the loop, and the next pass runs
+        if (classifyCaptureRecoveryFailure(e) !== 'infrastructure') throw e;
+        this.infrastructureFailure(e);
         return { recorded: 0 };
       }
       const ctx = jobContext('capture_reconciler'); // one run, one correlation id

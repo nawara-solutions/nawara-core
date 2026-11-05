@@ -808,6 +808,19 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       }
     });
 
+    it('a pass-level failure that is not infrastructure consumes no attempt, does not pause, and reaches the job error boundary', async () => {
+      const a = await lost();
+      const worker = new CaptureReconciler(t.app.get(DbService), t.app.get(OutboxService), t.app.get(PaymentAudit));
+      const query = vi.spyOn(t.app.get(DbService), 'query').mockRejectedValueOnce(Object.assign(new Error('x'), { code: '42P01' }));
+      try {
+        await expect(worker.reconcileOnce()).rejects.toMatchObject({ code: '42P01' });
+      } finally {
+        query.mockRestore();
+      }
+      expect((await worker.reconcileOnce()).recorded, 'the next pass runs at once').toBe(1);
+      expect(await one(`SELECT count(*)::int AS n FROM capture_recovery_state WHERE "factId" = $1`, [a.factId])).toEqual({ n: 0 });
+    });
+
     it('a mid-pass infrastructure failure stops the pass and charges no fact', async () => {
       const a = await lost();
       const spy = failing(Object.assign(new Error('x'), { code: '53300' }));
