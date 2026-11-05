@@ -615,6 +615,66 @@ describeWithEnv('late-capture dispute attribution, Billing consumer (Core V2 S0-
       expect((await entitlement(U.b1, x.r.productId).expect(200)).body.valid).toBe(true);
     });
 
+    it('Core V2 S0-C10 item 6 (O-2): a loss of the L-4 capture ABOVE it is the recovery worker\'s review (chargeback_exceeds_capture), listed as chargeback_loss_review at its whole amount; no obligation, no T3, no contradictory_effect', async () => {
+      const x = await applied();
+      const total = Number(x.s.inv.total);
+      const d = await lost(x.s, { chargeback: total + 1, capture: lateCapture(x.l.factId) });
+      expect(await losses().apply(d.disputeId)).toEqual({ kind: 'applied', outcome: 'none', reason: 'assisted_purchase_preserved' });
+      expect(await one(`SELECT "captureKey", gross::int AS gross, "chargebackAmount"::int AS cb, "withinCap" FROM capture_loss_cap WHERE "disputeId" = $1`, [d.disputeId]))
+        .toEqual({ captureKey: `late:${x.l.factId}`, gross: total, cb: total + 1, withinCap: false });
+      expect(await recovery().visit(d.disputeId)).toBe('review');
+      expect(await one(`SELECT reason FROM recovery_review WHERE "disputeId" = $1`, [d.disputeId])).toEqual({ reason: 'chargeback_exceeds_capture' });
+      expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "purchaseId" = $1`, [x.p.id])).toBe(0);
+      expect(await restrictions()).toEqual([]);
+      await reconcile();
+      expect(await caseOf('chargeback_loss_review', d.disputeId)).toMatchObject({ amount: String(total + 1), detail: 'chargeback_exceeds_capture', resolution: null });
+      expect(await caseOf('contradictory_effect', d.disputeId)).toBeUndefined();
+      expect(await resolutionOf('late_assisted_settlement', x.row.id)).toBe('late_settlement_applied');
+      expect((await entitlement(U.b1, x.r.productId).expect(200)).body.valid).toBe(true);
+    });
+
+    it('Core V2 S0-C10 item 5: a SECOND full loss of the L-4 capture opens no second obligation (repeated_loss)', async () => {
+      const x = await applied();
+      const d1 = await lost(x.s, { capture: lateCapture(x.l.factId) });
+      await losses().apply(d1.disputeId);
+      expect(await recovery().visit(d1.disputeId)).toBe('opened');
+      const d2 = await lost(x.s, { capture: lateCapture(x.l.factId) });
+      expect(await losses().apply(d2.disputeId)).toMatchObject({ reason: 'assisted_purchase_preserved' });
+      expect(await recovery().visit(d2.disputeId)).toBe('review');
+      expect(await one(`SELECT reason FROM recovery_review WHERE "disputeId" = $1`, [d2.disputeId])).toEqual({ reason: 'repeated_loss' });
+      expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "purchaseId" = $1`, [x.p.id])).toBe(1);
+      expect((await restrictions()).map((v) => v.kind)).toEqual(['T3']);
+    });
+
+    it('Core V2 S0-C10 (O-2): an excess L-4 loss reviewed BEFORE 0049 keeps its contradictory_effect review and case exactly; nothing new is derived from it', async () => {
+      const x = await applied();
+      const total = Number(x.s.inv.total);
+      const d = lostEnvelope(x.s, { chargeback: total + 1, capture: lateCapture(x.l.factId) });
+      await t.bus.deliver(d.envelope);
+      // LABELLED FIXTURE: the loss as migration 0049 marks a pre-existing one (append-only trigger bypassed), and the review the pre-0049
+      // worker recorded for it (an effect-stage chargeback_exceeds_capture, with no cap row)
+      const cl = await admin.connect();
+      try {
+        await cl.query(`SET session_replication_role = replica`);
+        await cl.query(`UPDATE payment_dispute_loss SET "beforeS0c10" = true WHERE "disputeId" = $1`, [d.disputeId]);
+      } finally {
+        await cl.query(`SET session_replication_role = origin`);
+        cl.release();
+      }
+      await admin.query(`INSERT INTO dispute_loss_effect_attempt ("disputeId", state, reason, "workAfter") VALUES ($1, 'review', 'chargeback_exceeds_capture', now())`, [d.disputeId]);
+      await reconcile();
+      const before = await caseOf('contradictory_effect', d.disputeId);
+      expect(before).toMatchObject({ detail: 'dispute_effect_review', resolution: null });
+      await losses().drainOnce();
+      expect(await losses().apply(d.disputeId)).toEqual({ kind: 'review', reason: 'chargeback_exceeds_capture' });
+      expect(await effectOf(d.disputeId)).toBeUndefined();
+      expect(await count(`SELECT count(*) AS n FROM capture_loss_cap WHERE "disputeId" = $1`, [d.disputeId])).toBe(0);
+      expect(await recovery().visit(d.disputeId)).toBe('already');
+      await reconcile();
+      expect(await caseOf('contradictory_effect', d.disputeId)).toMatchObject({ id: before.id, resolution: null });
+      expect(await caseOf('chargeback_loss_review', d.disputeId)).toBeUndefined();
+    });
+
     it('a PARTIAL loss: the purchase is kept; recovery review (no debt, no T3); a partial_chargeback case', async () => {
       const x = await applied();
       const d = await lost(x.s, { chargeback: Number(x.s.inv.total) - 1000, capture: lateCapture(x.l.factId) });

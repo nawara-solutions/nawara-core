@@ -77,6 +77,8 @@ SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the 
     -- S6f: the recovery base, a channel's outstanding amount at issue, a verified recovery payment and its split, a surplus (checked below)
     AND NOT (table_name = 'recovery_obligation' AND column_name = 'baseAmount') AND NOT (table_name = 'recovery_settlement_channel' AND column_name = 'amount')
     AND NOT (table_name = 'recovery_payment' AND column_name IN ('amount', 'principalAmount', 'surplusAmount')) AND NOT (table_name = 'recovery_surplus' AND column_name = 'amount')
+    -- Core V2 S0-C10 (0049): a capture's gross, a loss's chargeback and the capture's cumulative loss before it, copied or summed by the database
+    AND NOT (table_name = 'capture_loss_cap' AND column_name IN ('gross', 'chargebackAmount', 'cumulativeBefore'))
     -- S6h-B: Payment's verified late success, a case's evidence amount, a FinancialLoss and its signed adjustment (CHECKed, guarded)
     AND NOT (table_name IN ('payment_late_success', 'reconciliation_case', 'financial_loss', 'financial_loss_adjustment') AND column_name = 'amount')), '8'); -- S6e-D: Payment's verified statements, as reported (CHECKed safe, positive)
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",

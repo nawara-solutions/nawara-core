@@ -1,4 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ServiceUnavailableException } from '@nestjs/common';
 import pg from 'pg';
 import request from 'supertest';
@@ -1347,6 +1350,471 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         await reconcile();
         expect(await count(`SELECT count(*) AS n FROM payment_late_success WHERE "lateSuccessId" = $1`, [stray.id])).toBe(0);
         expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1`, [paymentId])).toBe(0);
+      });
+    });
+
+    describe('Core V2 S0-C10: repeated and excess chargeback losses (Constraint A per capture, Constraint B per assisted purchase; service and database level)', () => {
+      const capOf = (disputeId: string) => one(`SELECT "captureKey", "beforeS0c10", gross::int AS gross, "chargebackAmount"::int AS "chargebackAmount", "sameCurrency",
+        "cumulativeBefore"::int AS "cumulativeBefore", "withinCap", "firstFull" FROM capture_loss_cap WHERE "disputeId" = $1`, [disputeId]);
+      const obligations = (purchaseId: string) => count(`SELECT count(*) AS n FROM recovery_obligation WHERE "purchaseId" = $1`, [purchaseId]);
+      const lossRow = (disputeId: string) => one(`SELECT "chargebackAmount"::int AS "chargebackAmount", "chargebackCurrency", "chargebackFactId", "beforeS0c10" FROM payment_dispute_loss WHERE "disputeId" = $1`, [disputeId]);
+      const acknowledge = (caseId: string) => send(request(server()).post(`/billing/admin/reconciliation-cases/${caseId}/acknowledgement`), 'owner-tok', key()).send({ reason: 'provider_statement_reviewed' });
+      /** Payment's verified loss of an existing payment, recorded by Billing but NOT applied yet (the worker has not run). */
+      const recordLoss = async (paymentId: string, purpose: 'assisted_settlement' | 'direct_purchase', amount: number, chargeback = amount) => {
+        const id = randomUUID();
+        const disputeId = randomUUID();
+        const envelope = { id, name: 'payment.dispute.lost', payload: {
+          disputeId, paymentId, paymentRequestId: randomUUID(), producer: 'billing-service', organizationId: null, purpose, amount, currency: 'TND',
+          lostAt: new Date().toISOString(), chargeback: { factId: randomUUID(), amount: chargeback, currency: 'TND' }, liveMode: false,
+        }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as EventEnvelope;
+        await t.bus.deliver(envelope);
+        return { disputeId, envelope };
+      };
+      /**
+       * LABELLED FIXTURE (O-1): marks losses as recorded BEFORE migration 0049, as the migration marks every loss that existed when it ran
+       * (`beforeS0c10` true). The append-only trigger is bypassed for this test-only edit (session_replication_role = replica, superuser).
+       */
+      const markBeforeS0c10 = async (...disputeIds: string[]) => {
+        const cl = await admin.connect();
+        try {
+          await cl.query(`SET session_replication_role = replica`);
+          await cl.query(`UPDATE payment_dispute_loss SET "beforeS0c10" = true WHERE "disputeId" = ANY($1::uuid[])`, [disputeIds]);
+        } finally {
+          await cl.query(`SET session_replication_role = origin`);
+          cl.release();
+        }
+      };
+
+      it('items 4, 5, 7: the first full loss opens ONE obligation; a second full loss of the capture opens none, is reviewed (repeated_loss), and is listed for the Owner with its whole recorded amount, forever open', async () => {
+        const o = await opened();
+        expect(await capOf(o.disputeId)).toMatchObject({ captureKey: `settling:${o.paymentId}`, beforeS0c10: false, gross: o.amount, chargebackAmount: o.amount, cumulativeBefore: 0, withinCap: true, firstFull: true });
+        const second = await lose(o.paymentId, o.amount);
+        expect(await recovery().visit(second)).toBe('review');
+        expect(await reviewOf(second)).toEqual({ reason: 'repeated_loss' });
+        expect(await obligations(o.purchaseId)).toBe(1);
+        expect((await restrictions()).filter((r) => r.kind === 'T3')).toHaveLength(1);
+        // every authentic debit stays recorded at its own figures, and its place in the capture's cumulative loss is the database's
+        expect(await lossRow(second)).toMatchObject({ chargebackAmount: o.amount, chargebackCurrency: 'TND', beforeS0c10: false });
+        expect(await capOf(second)).toMatchObject({ cumulativeBefore: o.amount, withinCap: false, firstFull: false, chargebackAmount: o.amount });
+        await reconcile();
+        const c = await caseOf('chargeback_loss_review', second);
+        expect(c).toMatchObject({ companyId: COMPANY, organizationId: ORG, paymentId: o.paymentId, amount: String(o.amount), currency: 'TND', detail: 'repeated_loss', resolution: null });
+        expect(await auditNames(c.id)).toEqual(['audit.reconciliation_case.opened']);
+        expect((await audit(c.id))[0]!.payload.changes).toEqual({ case_type: 'chargeback_loss_review', evidence_id: second, amount: o.amount });
+        // the Owner of the Company sees it; another Company's Owner does not; a member is refused
+        expect((await cases('?type=chargeback_loss_review').expect(200)).body.items.map((i: Row) => i.id)).toContain(c.id);
+        expect((await cases('?type=chargeback_loss_review', 'foreign-owner-tok').expect(200)).body.items).toEqual([]);
+        expect((await send(request(server()).get(`/billing/admin/reconciliation-cases/${c.id}`), 'foreign-owner-tok', null)).status).toBe(404);
+        expect((await cases('?type=chargeback_loss_review', 'member-tok')).status).toBe(403);
+        // never acknowledged, resolved or closed by any mechanism; no liability is assigned to anyone
+        expect((await acknowledge(c.id)).body).toMatchObject({ code: 'reconciliation_case_not_acknowledgeable' });
+        for (const kind of ['acknowledged', 'effect_applied', 'loss_recognized', 'refund_completed']) {
+          await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, $2, $3, $4)`,
+            [c.id, kind, kind === 'acknowledged' ? U.owner : null, kind === 'acknowledged' ? 'reviewed_no_financial_effect' : null])).rejects.toThrow();
+        }
+        await reconcile();
+        await recovery().drainOnce();
+        expect(await caseOf('chargeback_loss_review', second)).toMatchObject({ resolution: null });
+        expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "disputeId" = $1 OR "obligationId" = $2`, [second, o.obligationId])).toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "evidenceKey" = $1`, [second])).toBe(1); // one case for one observation
+      });
+
+      it('item 5: an obligation already RECOVERED still blocks another; a later full loss is repeated_loss and T3 is not reopened', async () => {
+        const o = await opened();
+        const c = (await settleRecovery(o.obligationId)).body;
+        await recoveryEvent(c.paymentRequestId);
+        expect((await obligationOf(o.disputeId)).status).toBe('recovered');
+        expect(await restrictions()).toEqual([]);
+        const later = await lose(o.paymentId, o.amount);
+        expect(await recovery().visit(later)).toBe('review');
+        expect(await reviewOf(later)).toEqual({ reason: 'repeated_loss' });
+        expect(await obligations(o.purchaseId)).toBe(1);
+        expect(await restrictions()).toEqual([]);
+      });
+
+      it('item 10 (Constraint A): a partial then a full loss: the partial stays partial_chargeback (acknowledgeable as before); the full one is above the cap: no obligation, no T3', async () => {
+        const l = await assistedLoss({ partial: true });
+        expect(await recovery().visit(l.disputeId)).toBe('review');
+        expect(await reviewOf(l.disputeId)).toEqual({ reason: 'partial_chargeback' });
+        const full = await lose(l.paymentId, l.amount);
+        expect(await recovery().visit(full)).toBe('review');
+        expect(await reviewOf(full)).toEqual({ reason: 'chargeback_exceeds_capture' });
+        expect(await capOf(full)).toMatchObject({ cumulativeBefore: l.amount - 100, withinCap: false, firstFull: false });
+        expect(await obligations(l.purchaseId)).toBe(0);
+        expect(await restrictions()).toEqual([]);
+        await reconcile();
+        expect(await caseOf('partial_chargeback', l.disputeId)).toMatchObject({ resolution: null });
+        expect(await caseOf('chargeback_loss_review', full)).toMatchObject({ detail: 'chargeback_exceeds_capture', amount: String(l.amount) });
+        expect(await caseOf('chargeback_loss_review', l.disputeId)).toBeUndefined();
+      });
+
+      it('item 6 (F-07): a loss above the payment is a review on the first visit, never a failing pass; its whole authenticated amount stays recorded and listed', async () => {
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const amount = Number(s.inv.total);
+        const d = await lose(s.paymentId, amount, amount + 2500);
+        expect(await recovery().drainOnce()).toMatchObject({ failed: 0 });
+        expect(await reviewOf(d)).toEqual({ reason: 'chargeback_exceeds_capture' });
+        expect(await lossRow(d)).toMatchObject({ chargebackAmount: amount + 2500 });
+        expect(await capOf(d)).toMatchObject({ gross: amount, chargebackAmount: amount + 2500, cumulativeBefore: 0, withinCap: false, firstFull: false });
+        await reconcile();
+        expect(await caseOf('chargeback_loss_review', d)).toMatchObject({ amount: String(amount + 2500), detail: 'chargeback_exceeds_capture' });
+        expect(await restrictions()).toEqual([]);
+      });
+
+      it('duplicate delivery: the same loss again (event and Payment\'s losses read) is one loss, one cap row, one effect and one decision', async () => {
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const amount = Number(s.inv.total);
+        const x = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+        await t.bus.deliver(x.envelope);
+        await t.bus.deliver({ ...x.envelope, id: randomUUID(), headers: { ...x.envelope.headers, eventId: randomUUID() } });
+        const p = x.envelope.payload as Row;
+        lossesAtPayment.items = [{ disputeId: x.disputeId, paymentId: s.paymentId, amount, currency: 'TND', lostAt: p.lostAt, chargeback: p.chargeback } as PaymentDisputeLoss];
+        await losses().drainOnce();
+        await losses().drainOnce();
+        await recovery().drainOnce();
+        await recovery().drainOnce();
+        expect(await count(`SELECT count(*) AS n FROM payment_dispute_loss WHERE "paymentId" = $1`, [s.paymentId])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM capture_loss_cap WHERE "disputeId" = $1`, [x.disputeId])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM dispute_loss_effect WHERE "disputeId" = $1`, [x.disputeId])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [x.disputeId])).toBe(1);
+      });
+
+      it('item 4 (O-4): a direct write-off waits for the committed reversal, then once per capture; a second full loss is reviewed with no second reversal or write-off', async () => {
+        const p = await directPurchase('b2');
+        const first = await recordLoss(p.paymentId, 'direct_purchase', p.amount);
+        await reconcile(); // the reversal is not committed yet: no write-off
+        expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toBe(0);
+        await losses().drainOnce();
+        expect(await one(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [first.disputeId])).toEqual({ outcome: 'reversed_purchase' });
+        await reconcile();
+        await reconcile();
+        expect((await admin.query(`SELECT "disputeId", amount::int AS amount FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).rows).toEqual([{ disputeId: first.disputeId, amount: p.amount }]);
+        const second = await loseDirect(p.paymentId, p.amount);
+        expect(await one(`SELECT state, reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [second])).toEqual({ state: 'review', reason: 'reversed_by_another_chargeback' });
+        await reconcile();
+        await reconcile();
+        expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal r JOIN subscription_purchase s ON s.id = r."purchaseId" WHERE s."paymentRequestId" = $1`, [p.paymentRequestId])).toBe(1);
+        expect(await caseOf('contradictory_effect', second)).toMatchObject({ detail: 'dispute_effect_review', resolution: null });
+        expect(await lossRow(second)).toMatchObject({ chargebackAmount: p.amount });
+      });
+
+      it('item 6: direct partials whose sum exceeds the capture: the first is partial (acknowledgeable as before), the second is above the cap and never acknowledgeable; nothing is reversed or written off', async () => {
+        const p = await directPurchase('b1');
+        const a = await loseDirect(p.paymentId, p.amount, p.amount - 1000);
+        const b = await loseDirect(p.paymentId, p.amount, p.amount - 1000);
+        expect(await one(`SELECT reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [a])).toEqual({ reason: 'partial_chargeback_threshold_open' });
+        expect(await one(`SELECT reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [b])).toEqual({ reason: 'chargeback_exceeds_capture' });
+        await reconcile();
+        expect(await caseOf('partial_chargeback', a)).toMatchObject({ resolution: null });
+        const cb = await caseOf('contradictory_effect', b);
+        expect(cb).toMatchObject({ detail: 'dispute_effect_review', resolution: null });
+        expect((await acknowledge(cb.id)).body).toMatchObject({ code: 'reconciliation_case_not_acknowledgeable' });
+        expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM dispute_loss_effect WHERE "disputeId" = ANY($1::uuid[])`, [[a, b]])).toBe(0);
+      });
+
+      it('concurrency: eight workers over two full losses of one purchase open ONE obligation (audited once) and review the other; eight concurrent cap rows of one capture sum exactly', async () => {
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const amount = Number(s.inv.total);
+        const purchase = await purchaseOf(s.paymentId);
+        const a = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+        const b = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+        await Promise.all([losses().apply(a.disputeId), losses().apply(b.disputeId)]);
+        const outs = await Promise.all(Array.from({ length: 8 }, (_, i) => recovery().visit(i % 2 ? a.disputeId : b.disputeId)));
+        expect(outs.filter((o) => o === 'opened')).toHaveLength(1);
+        expect(await obligations(purchase.id)).toBe(1);
+        const o = await one(`SELECT id, "disputeId" FROM recovery_obligation WHERE "purchaseId" = $1`, [purchase.id]);
+        expect(await auditNames(o.id)).toEqual(['audit.recovery_obligation.opened']);
+        const other = o.disputeId === a.disputeId ? b.disputeId : a.disputeId;
+        expect(await reviewOf(other)).toEqual({ reason: 'repeated_loss' });
+        expect(await capOf(o.disputeId as string)).toMatchObject({ firstFull: true });
+        // eight partial losses of one direct capture, their cap rows written by eight concurrent transactions
+        const p = await directPurchase('b2');
+        const ds = [];
+        for (let i = 0; i < 8; i++) ds.push((await recordLoss(p.paymentId, 'direct_purchase', p.amount, 700)).disputeId);
+        await Promise.all(ds.map((d) => admin.query(`INSERT INTO capture_loss_cap ("disputeId") VALUES ($1)`, [d])));
+        const rows = (await admin.query(`SELECT "cumulativeBefore"::int AS c, "withinCap" FROM capture_loss_cap WHERE "disputeId" = ANY($1::uuid[]) ORDER BY 1`, [ds])).rows;
+        expect(rows.map((x) => x.c)).toEqual([0, 700, 1400, 2100, 2800, 3500, 4200, 4900]);
+        expect(rows.map((x) => x.withinCap)).toEqual(rows.map((x) => x.c + 700 <= p.amount));
+      });
+
+      it('order of visits: the later loss visited FIRST is still repeated_loss (the evidence decides, not which worker ran first); the first then opens the one obligation', async () => {
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const amount = Number(s.inv.total);
+        const purchase = await purchaseOf(s.paymentId);
+        const a = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+        expect(await losses().apply(a.disputeId)).toMatchObject({ reason: 'assisted_purchase_preserved' });
+        const b = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+        expect(await losses().apply(b.disputeId)).toMatchObject({ reason: 'assisted_purchase_preserved' });
+        expect(await capOf(a.disputeId)).toMatchObject({ firstFull: true });
+        expect(await capOf(b.disputeId)).toMatchObject({ firstFull: false, cumulativeBefore: amount });
+        expect(await recovery().visit(b.disputeId)).toBe('review');
+        expect(await reviewOf(b.disputeId)).toEqual({ reason: 'repeated_loss' });
+        expect(await obligations(purchase.id)).toBe(0);
+        expect(await recovery().visit(a.disputeId)).toBe('opened');
+        expect(await obligations(purchase.id)).toBe(1);
+      });
+
+      it('crash and retry: a cap row written before a crash is used once; replays and repeated passes decide nothing twice', async () => {
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const amount = Number(s.inv.total);
+        const x = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+        // CONTROLLED FAILURE: the cap row committed, the worker stopped before its decision (as after a crash between the two transactions)
+        await admin.query(`INSERT INTO capture_loss_cap ("disputeId") VALUES ($1)`, [x.disputeId]);
+        expect(await losses().apply(x.disputeId)).toEqual({ kind: 'applied', outcome: 'none', reason: 'assisted_purchase_preserved' });
+        expect(await losses().apply(x.disputeId)).toEqual({ kind: 'already_applied' });
+        expect(await recovery().visit(x.disputeId)).toBe('opened');
+        expect(await recovery().visit(x.disputeId)).toBe('already');
+        expect(await count(`SELECT count(*) AS n FROM capture_loss_cap WHERE "disputeId" = $1`, [x.disputeId])).toBe(1);
+        // a direct loss: the same, through the dispute-loss worker
+        const p = await directPurchase('b1');
+        const y = await recordLoss(p.paymentId, 'direct_purchase', p.amount);
+        await admin.query(`INSERT INTO capture_loss_cap ("disputeId") VALUES ($1)`, [y.disputeId]);
+        expect(await losses().apply(y.disputeId)).toMatchObject({ kind: 'applied', outcome: 'reversed_purchase' });
+        expect(await losses().apply(y.disputeId)).toEqual({ kind: 'already_applied' });
+        await reconcile();
+        await reconcile();
+        expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toBe(1);
+      });
+
+      it('the database alone (guards bypassed where stated): Constraint B by uniqueness, Constraint A by the obligation guard, one write-off per capture, reasons proven, the cap row derived and append-only', async () => {
+        const insertObligation = (disputeId: string, purchaseId: string, b: Row) => admin.query(`INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId",
+          "organizationId", "companyId", "platformId", "baseAmount", currency) VALUES ($1, $2, $3, $4, $5, $6, $7, 'TND')`, [disputeId, b.assistanceRequestId, purchaseId, b.organizationId, b.companyId, b.platformId, b.baseAmount]);
+        // Constraint A, independently: a purchase with NO obligation, whose full loss follows a partial (above the cap)
+        const l = await assistedLoss({ partial: true });
+        const full = await lose(l.paymentId, l.amount);
+        const lb = await one(`SELECT s."assistanceRequestId", a."organizationId", $2::uuid AS "companyId", a."platformId", a."baseAmount" FROM subscription_purchase s
+          JOIN assistance_request a ON a.id = s."assistanceRequestId" WHERE s.id = $1`, [l.purchaseId, COMPANY]);
+        await expect(insertObligation(full, l.purchaseId, lb)).rejects.toMatchObject({ constraint: 'recovery_obligation_loss_cap' });
+        // a review reason must be proven by its evidence
+        await expect(admin.query(`INSERT INTO recovery_review ("disputeId", reason) VALUES ($1, 'repeated_loss')`, [full])).rejects.toMatchObject({ constraint: 'recovery_review_evidence' });
+        await expect(admin.query(`INSERT INTO recovery_review ("disputeId", reason) VALUES ($1, 'chargeback_exceeds_capture')`, [l.disputeId])).rejects.toMatchObject({ constraint: 'recovery_review_evidence' });
+        // a direct write-off only for a loss that reversed its purchase; a second one for the capture refused even with every trigger disabled
+        const p = await directPurchase('b2');
+        const d1 = await loseDirect(p.paymentId, p.amount);
+        await reconcile();
+        const d2 = await loseDirect(p.paymentId, p.amount);
+        const lossFor = (disputeId: string) => one(`SELECT "chargebackFactId" FROM payment_dispute_loss WHERE "disputeId" = $1`, [disputeId]);
+        const directWriteOff = async (q: pg.Pool | pg.PoolClient, disputeId: string) => q.query(`INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "paymentId", "disputeId", amount, currency)
+          VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, $5, 'TND')`, [(await lossFor(disputeId)).chargebackFactId, COMPANY, p.paymentId, disputeId, p.amount]);
+        await expect(directWriteOff(admin, d2)).rejects.toMatchObject({ constraint: 'financial_loss_reversal' });
+        const c2 = await admin.connect();
+        try {
+          await c2.query(`SET session_replication_role = replica`);
+          await expect(directWriteOff(c2, d2)).rejects.toMatchObject({ constraint: 'financial_loss_direct_write_off_capture' });
+        } finally {
+          await c2.query(`SET session_replication_role = origin`);
+          c2.release();
+        }
+        expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toBe(1);
+        expect(await one(`SELECT "disputeId" FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).toEqual({ disputeId: d1 });
+        // the cap row: any value a caller supplies is replaced by the database's; the row and the loss are append-only
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const x = await recordLoss(s.paymentId, 'assisted_settlement', Number(s.inv.total), 50);
+        await admin.query(`INSERT INTO capture_loss_cap ("disputeId", "captureKey", "beforeS0c10", gross, currency, "chargebackAmount", "sameCurrency", "cumulativeBefore", "withinCap", "firstFull")
+          VALUES ($1, 'forged', true, 50, 'TND', 50, true, 0, true, true)`, [x.disputeId]);
+        expect(await capOf(x.disputeId)).toMatchObject({ captureKey: `settling:${s.paymentId}`, beforeS0c10: false, gross: Number(s.inv.total), chargebackAmount: 50, cumulativeBefore: 0, withinCap: true, firstFull: false });
+        await expect(admin.query(`UPDATE capture_loss_cap SET "firstFull" = true WHERE "disputeId" = $1`, [x.disputeId])).rejects.toThrow(/append-only/);
+        await expect(admin.query(`DELETE FROM capture_loss_cap WHERE "disputeId" = $1`, [x.disputeId])).rejects.toThrow(/append-only/);
+        await expect(admin.query(`UPDATE payment_dispute_loss SET "chargebackAmount" = 1 WHERE "disputeId" = $1`, [x.disputeId])).rejects.toThrow(/append-only/);
+        // a new loss can never claim to predate S0-C10
+        expect(await lossRow(x.disputeId)).toMatchObject({ beforeS0c10: false });
+        // Constraint B, last (its obligation restricts the Organization's new requests, T3)
+        const o = await opened();
+        const second = await lose(o.paymentId, o.amount);
+        const base = await one(`SELECT "assistanceRequestId", "organizationId", "companyId", "platformId", "baseAmount" FROM recovery_obligation WHERE id = $1`, [o.obligationId]);
+        // Constraint B holds even with every trigger disabled (the uniqueness is not application logic)
+        const cl = await admin.connect();
+        try {
+          await cl.query(`SET session_replication_role = replica`);
+          await expect(cl.query(`INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'TND')`, [second, base.assistanceRequestId, o.purchaseId, base.organizationId, base.companyId, base.platformId, base.baseAmount]))
+            .rejects.toMatchObject({ constraint: 'recovery_obligation_purchase' });
+        } finally {
+          await cl.query(`SET session_replication_role = origin`);
+          cl.release();
+        }
+      });
+
+      /** A database migrated up to 0048 (before S0-C10), seeded by `seed` through a superuser session with triggers off, then fully migrated. */
+      const before0049 = async (name: string, seed: (c: pg.Client) => Promise<void>) => {
+        const pre = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, name);
+        const dir = mkdtempSync(join(tmpdir(), 'billing-pre-0049-'));
+        const c = new pg.Client({ connectionString: pre.url });
+        try {
+          for (const f of readdirSync(billingMigrationsDir)) if (f < '0049') copyFileSync(join(billingMigrationsDir, f), join(dir, f));
+          await runMigrations(pre.url, [kitMigrationsDir, dir]);
+          await c.connect();
+          await c.query(`SET session_replication_role = replica`);
+          await seed(c);
+          await c.query(`SET session_replication_role = origin`);
+          const migrated = await runMigrations(pre.url, [kitMigrationsDir, billingMigrationsDir]).then(() => null, (e: Error) => e);
+          return { migrated, c, pre };
+        } catch (e) {
+          await c.end().catch(() => undefined);
+          await pre.drop();
+          throw e;
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+      const lossSql = `INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount",
+        "chargebackCurrency", "lostAt", source, "captureBasis") VALUES ($1, $2, $3, 5600, 'TND', $4, 5600, 'TND', now(), 'reconciliation', 'settling_capture')`;
+
+      it('item 13: historical duplicate obligations, or two direct write-offs of one capture, refuse migration 0049, which changes nothing', async () => {
+        for (const kind of ['obligations', 'write_offs'] as const) {
+          const purchaseId = randomUUID();
+          const paymentId = randomUUID();
+          const { migrated, c, pre } = await before0049(`billings0c10dup${kind === 'obligations' ? 'o' : 'w'}`, async (q) => {
+            for (let i = 0; i < 2; i++) {
+              if (kind === 'obligations') {
+                await q.query(`INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
+                  VALUES ($1, $2, $3, $4, $5, $6, 6100, 'TND')`, [randomUUID(), randomUUID(), purchaseId, randomUUID(), COMPANY, PLATFORM]);
+              } else {
+                await q.query(`INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "paymentId", "disputeId", amount, currency)
+                  VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, 4900, 'TND')`, [randomUUID(), COMPANY, paymentId, randomUUID()]);
+              }
+            }
+          });
+          try {
+            // the runner reports the file and the code only (never the database's text); the preflight raises P0001, so this is its refusal,
+            // not a later unique constraint failing on the duplicates (23505)
+            expect(migrated?.message).toMatch(/^0049_s0c10_chargeback_loss_cap\.sql failed and was rolled back: .*code=P0001$/);
+            expect((await c.query(`SELECT count(*)::int AS n FROM schema_migrations WHERE name = '0049_s0c10_chargeback_loss_cap.sql'`)).rows[0].n).toBe(0);
+            expect((await c.query(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'payment_dispute_loss' AND column_name = 'beforeS0c10'`)).rows[0].n).toBe(0);
+            expect((await c.query(`SELECT to_regclass('capture_loss_cap') AS t`)).rows[0].t).toBeNull();
+            expect((await c.query(kind === 'obligations' ? `SELECT count(*)::int AS n FROM recovery_obligation WHERE "purchaseId" = $1` : `SELECT count(*)::int AS n FROM financial_loss WHERE "paymentId" = $1`,
+              [kind === 'obligations' ? purchaseId : paymentId])).rows[0].n).toBe(2);
+          } finally {
+            await c.end();
+            await pre.drop();
+          }
+        }
+      });
+
+      it('O-1: migration 0049 marks every existing loss as recorded before S0-C10 without writing it; a later loss is never marked so', async () => {
+        const id = randomUUID();
+        let before: Row = {};
+        const { migrated, c, pre } = await before0049('billings0c10mark', async (q) => {
+          await q.query(lossSql, [id, randomUUID(), randomUUID(), randomUUID()]);
+          before = (await q.query(`SELECT xmin::text AS xmin, ctid::text AS ctid FROM payment_dispute_loss WHERE "disputeId" = $1`, [id])).rows[0];
+        });
+        try {
+          expect(migrated).toBeNull();
+          expect((await c.query(`SELECT "beforeS0c10", xmin::text AS xmin, ctid::text AS ctid FROM payment_dispute_loss WHERE "disputeId" = $1`, [id])).rows[0])
+            .toEqual({ beforeS0c10: true, ...before });
+          expect((await c.query(`SELECT count(*)::int AS n FROM capture_loss_cap`)).rows[0].n).toBe(0); // no historical ledger row is generated
+        } finally {
+          await c.end();
+          await pre.drop();
+        }
+        // in this suite's database: a loss inserted claiming to predate S0-C10 is marked as it is (the trigger decides, not the caller)
+        const p = await directPurchase('b1');
+        const x = await recordLoss(p.paymentId, 'direct_purchase', p.amount, 10);
+        const forged = randomUUID();
+        await admin.query(`INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount",
+          "chargebackCurrency", "lostAt", source, "captureBasis", "beforeS0c10")
+          SELECT $1, "paymentId", "paymentRequestId", "disputeAmount", currency, gen_random_uuid(), 10, "chargebackCurrency", "lostAt", 'reconciliation', "captureBasis", true
+            FROM payment_dispute_loss WHERE "disputeId" = $2`, [forged, x.disputeId]);
+        expect(await lossRow(forged)).toMatchObject({ beforeS0c10: false });
+      });
+
+      describe('O-1 Option B: losses recorded before 0049 (LABELLED FIXTURE: marked as the migration marks them)', () => {
+        it('a capture\'s ONLY historical loss, not yet visited, is provably its first: R6F-8 still opens its obligation', async () => {
+          const r = await collected({ unit: 6100, fee: 400 });
+          const s = await started(r.id);
+          await t.bus.deliver(s.ev('payment.succeeded'));
+          const x = await recordLoss(s.paymentId, 'assisted_settlement', Number(s.inv.total));
+          await markBeforeS0c10(x.disputeId);
+          await losses().drainOnce();
+          expect(await recovery().visit(x.disputeId)).toBe('opened');
+          expect(await capOf(x.disputeId)).toMatchObject({ beforeS0c10: true, cumulativeBefore: 0, withinCap: true, firstFull: true });
+        });
+
+        it('two historical full losses of one capture: their order cannot be proven, so NEITHER opens an obligation; both are kept and reviewed', async () => {
+          const r = await collected({ unit: 6100, fee: 400 });
+          const s = await started(r.id);
+          await t.bus.deliver(s.ev('payment.succeeded'));
+          const amount = Number(s.inv.total);
+          const purchase = await purchaseOf(s.paymentId);
+          const a = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+          const b = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+          await markBeforeS0c10(a.disputeId, b.disputeId);
+          await losses().drainOnce();
+          await recovery().drainOnce();
+          for (const d of [a.disputeId, b.disputeId]) {
+            expect(await capOf(d)).toMatchObject({ beforeS0c10: true, cumulativeBefore: null, withinCap: false, firstFull: false, chargebackAmount: amount });
+            expect(await reviewOf(d)).toEqual({ reason: 'chargeback_exceeds_capture' });
+          }
+          expect(await obligations(purchase.id)).toBe(0);
+          await reconcile();
+          expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'chargeback_loss_review' AND "evidenceKey" = ANY($1::uuid[])`, [[a.disputeId, b.disputeId]])).toBe(2);
+        });
+
+        it('a loss after S0-C10 follows EVERY historical loss of its capture: a committed historical obligation makes it repeated_loss, counted after the historical amount', async () => {
+          const r = await collected({ unit: 6100, fee: 400 });
+          const s = await started(r.id);
+          await t.bus.deliver(s.ev('payment.succeeded'));
+          const amount = Number(s.inv.total);
+          const old = await recordLoss(s.paymentId, 'assisted_settlement', amount);
+          await markBeforeS0c10(old.disputeId);
+          await losses().drainOnce();
+          expect(await recovery().visit(old.disputeId)).toBe('opened');
+          // LABELLED FIXTURE: an obligation committed before 0049 has no cap row (the pre-0049 worker never wrote one); its row is removed
+          // here (superuser, triggers off) so the obligation alone, not a first-full cap row, is the evidence the later loss meets
+          const cl = await admin.connect();
+          try {
+            await cl.query(`SET session_replication_role = replica`);
+            await cl.query(`DELETE FROM capture_loss_cap WHERE "disputeId" = $1`, [old.disputeId]);
+          } finally {
+            await cl.query(`SET session_replication_role = origin`);
+            cl.release();
+          }
+          const later = await lose(s.paymentId, amount, 300);
+          expect(await capOf(later)).toMatchObject({ beforeS0c10: false, cumulativeBefore: amount, withinCap: false });
+          expect(await recovery().visit(later)).toBe('review');
+          expect(await reviewOf(later)).toEqual({ reason: 'repeated_loss' });
+        });
+
+        it('a historical loss already in review keeps exactly that review: no cap row, no new reason, no second case, its case still open', async () => {
+          const p = await directPurchase('b2');
+          // two partials whose sum exceeds the capture, both reviewed by the pre-0049 worker (LABELLED FIXTURE: its review rows, as it wrote
+          // them, with no cap row); under S0-C10 the second would be chargeback_exceeds_capture, but a recorded review is never re-derived
+          const a = await recordLoss(p.paymentId, 'direct_purchase', p.amount, p.amount - 1000);
+          const b = await recordLoss(p.paymentId, 'direct_purchase', p.amount, p.amount - 1000);
+          await markBeforeS0c10(a.disputeId, b.disputeId);
+          for (const d of [a.disputeId, b.disputeId]) {
+            await admin.query(`INSERT INTO dispute_loss_effect_attempt ("disputeId", state, reason, "workAfter") VALUES ($1, 'review', 'partial_chargeback_threshold_open', now())`, [d]);
+          }
+          await reconcile();
+          const before = await caseOf('partial_chargeback', b.disputeId);
+          expect(before).toMatchObject({ resolution: null });
+          await losses().drainOnce();
+          for (const d of [a.disputeId, b.disputeId]) {
+            expect(await losses().apply(d)).toEqual({ kind: 'review', reason: 'partial_chargeback_threshold_open' });
+            expect(await one(`SELECT state, reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [d])).toEqual({ state: 'review', reason: 'partial_chargeback_threshold_open' });
+            expect(await count(`SELECT count(*) AS n FROM capture_loss_cap WHERE "disputeId" = $1`, [d])).toBe(0);
+          }
+          await reconcile();
+          expect(await caseOf('partial_chargeback', b.disputeId)).toMatchObject({ id: before.id, resolution: null });
+          expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "evidenceKey" = $1`, [b.disputeId])).toBe(1);
+          // a NEW loss of that capture still counts both historical amounts before it
+          const later = await loseDirect(p.paymentId, p.amount, 100);
+          expect(await capOf(later)).toMatchObject({ cumulativeBefore: 2 * (p.amount - 1000), withinCap: false });
+        });
       });
     });
 

@@ -58,6 +58,7 @@ const ORG_A = randomUUID(); // A + E: dispute before L-4, then won
 const ORG_B = randomUUID(); // B: chargeback after L-4 (its T3 never restricts another Organization)
 const ORG_C = randomUUID(); // C: unsold late captures, full and partial chargebacks
 const ORG_D = randomUUID(); // D: out-of-order disputes, eventual attribution and the never-verifiable capture
+const ORG_E = randomUUID(); // S0-C10: repeated and excess losses of one capture (assisted and direct)
 const OWNER = randomUUID(); // the Owner of the seller Company (L-4), with a real TOTP factor at the real Auth
 const OWNER_EMAIL = `owner-${randomUUID().slice(0, 8)}@s-int.e2e.test`;
 const PASSWORD = 's-int assisted certification password';
@@ -119,7 +120,12 @@ describeWithEnv(
     const beneficiaryD2 = actor(ORG_D, false);
     const beneficiaryD3 = actor(ORG_D, false);
     const beneficiaryD4 = actor(ORG_D, false);
-    const everyone = () => [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC, beneficiaryC2, adminD, beneficiaryD, beneficiaryD2, beneficiaryD3, beneficiaryD4];
+    const adminE = actor(ORG_E, true);
+    const beneficiaryE = actor(ORG_E, false); // partial, then full
+    const beneficiaryE2 = actor(ORG_E, false); // two full losses
+    const buyerE = actor(ORG_E, false); // a direct purchase, two full losses
+    const everyone = () => [adminA, beneficiaryA, adminB, beneficiaryB, adminC, beneficiaryC, beneficiaryC2, adminD, beneficiaryD, beneficiaryD2, beneficiaryD3, beneficiaryD4,
+      adminE, beneficiaryE, beneficiaryE2, buyerE];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -179,7 +185,7 @@ describeWithEnv(
       const hash = await bcrypt.hash(PASSWORD, 4);
       await authAdmin.query(`INSERT INTO company(id, name) VALUES ($1, 'S-INT')`, [COMPANY]);
       await authAdmin.query(`INSERT INTO platform(id, "companyId", name) VALUES ($1, $2, 'S-INT platform')`, [TEST_PLATFORM, COMPANY]);
-      for (const org of [ORG_A, ORG_B, ORG_C, ORG_D]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
+      for (const org of [ORG_A, ORG_B, ORG_C, ORG_D, ORG_E]) await authAdmin.query(`INSERT INTO organization(id, "platformId", name) VALUES ($1, $2, 'S-INT organization')`, [org, TEST_PLATFORM]);
       const oc = await authAdmin.connect();
       try {
         await oc.query('BEGIN');
@@ -731,6 +737,101 @@ describeWithEnv(
       expect(await exposure(sibling.paymentId)).toMatchObject({ state: 'unresolved', conflicts: 1 });
       expect(await deadLettered()).toBe(0);
     }, 180_000);
+
+    it('S0-C10 across processes: per-capture loss cap and one obligation per assisted purchase; one direct write-off per capture; every debit recorded at its figures; reviews open for the Owner', async () => {
+      /** An assisted request settled by the Organization at Payment (real Auth, signed simulation success): its purchase is the SETTLING capture's. */
+      const settledAssisted = async (beneficiary: Actor) => {
+        const s = await settlementAtPayment(beneficiary, adminE);
+        const a = await attemptOf(s.paymentId, adminE);
+        await outcome(s.paymentId, a.id, { outcome: 'succeeded' });
+        await waitFor(async () => (await purchasesOf(s.requestId)) === 1, 30_000, `Billing to record the assisted purchase\n${tails()}`);
+        const purchase = (await billingAdmin.query(`SELECT id FROM subscription_purchase WHERE "assistanceRequestId" = $1`, [s.requestId])).rows[0].id as string;
+        return { ...s, attemptId: a.id, purchase };
+      };
+      const lostAt = async (paymentId: string, attemptId: string, send: Record<string, unknown> = {}) => {
+        const ref = `sint-c10-${randomUUID()}`;
+        await dispute(paymentId, attemptId, ref, { event: 'lost', ...send });
+        const d = (await paymentDispute(ref))!;
+        expect(d).toMatchObject({ status: 'lost', captureBasis: 'settling_capture' });
+        const at = await lossAtBilling(d.id);
+        expect(at.effect.reason === null || typeof at.effect.reason === 'string').toBe(true);
+        return { d, ...at };
+      };
+      const reviewOf = async (disputeId: string) => {
+        await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM recovery_review WHERE "disputeId" = $1`, [disputeId])).rowCount === 1, 45_000,
+          `Billing's recovery worker to review the loss of dispute ${disputeId}\n${tails()}`);
+        return (await billingAdmin.query(`SELECT reason FROM recovery_review WHERE "disputeId" = $1`, [disputeId])).rows[0].reason as string;
+      };
+      const ownerCase = async (disputeId: string) => {
+        await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'chargeback_loss_review' AND "evidenceKey" = $1`, [disputeId])).rowCount === 1,
+          45_000, `Billing's reconciliation worker to open the chargeback_loss_review case\n${tails()}`);
+        const r = await call(BILLING_URL, 'GET', ownerToken, '/billing/admin/reconciliation-cases?type=chargeback_loss_review');
+        expect(r.status, JSON.stringify(r.json)).toBe(200);
+        return (r.json.items as Array<Record<string, any>>).find((i) => i.evidenceId === disputeId);
+      };
+      const balance = async (paymentId: string) => {
+        const r = await call(PAYMENT_URL, 'GET', ownerToken, `/payment/admin/payments/${paymentId}/balance`);
+        expect(r.status, JSON.stringify(r.json)).toBe(200);
+        return r.json as Record<string, any>;
+      };
+
+      // ── assisted, Constraint A: a partial, then a full loss of the same capture: no obligation, no T3; both recorded at their own figures
+      const p = await settledAssisted(beneficiaryE);
+      const partial = await lostAt(p.paymentId, p.attemptId, { chargebackAmount: BASE - 1000 });
+      expect(partial.effect).toEqual({ outcome: 'none', reason: 'assisted_purchase_preserved', purchaseId: p.purchase });
+      expect(await reviewOf(partial.d.id)).toBe('partial_chargeback');
+      const full = await lostAt(p.paymentId, p.attemptId);
+      expect(full.loss.chargebackAmount).toBe(BASE);
+      expect(await reviewOf(full.d.id)).toBe('chargeback_exceeds_capture');
+      const fullCase = await ownerCase(full.d.id);
+      expect(fullCase, 'the Owner reads the review through the real Auth').toMatchObject({ caseType: 'chargeback_loss_review', amount: BASE, currency: 'TND', status: 'open', reviewOnly: false, resolution: null });
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_obligation WHERE "purchaseId" = $1`, [p.purchase])).toBe(0);
+      expect(await restrictions(ORG_E)).toEqual([]);
+      // recognition is not liability: Payment's balance counts both chargebacks, unclamped (netRetained negative)
+      expect((await balance(p.paymentId)).currencies).toEqual([{ currency: 'TND', captured: BASE, refundedNet: 0, chargebackNet: 2 * BASE - 1000, netRetained: 1000 - BASE }]);
+
+      // ── direct purchase: one reversal and one write-off per capture; a second full loss is recorded and reviewed, never a second write-off
+      const co = await call(BILLING_URL, 'POST', buyerE.token, '/billing/checkout/direct', { platformId: TEST_PLATFORM, productId, priceId });
+      expect(co.status, `${JSON.stringify(co.json)}\n${tails()}`).toBe(201);
+      const directPayment = await requestedAt(co.json.paymentRequestId as string);
+      const da = await call(PAYMENT_URL, 'POST', buyerE.token, `/payment/payments/${directPayment}/attempts`, {});
+      expect(da.json, `${JSON.stringify(da.json)}\n${tails()}`).toMatchObject({ provider: 'simulation', status: 'submitted' });
+      await outcome(directPayment, da.json.id, { outcome: 'succeeded' });
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM subscription_purchase WHERE "invoiceId" = $1`, [co.json.invoiceId])).rowCount === 1, 30_000, `the direct purchase\n${tails()}`);
+      const d1 = await lostAt(directPayment, da.json.id);
+      expect(d1.effect.outcome).toBe('reversed_purchase');
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM financial_loss WHERE "paymentId" = $1`, [directPayment])).rowCount === 1, 45_000, `the direct write-off\n${tails()}`);
+      const ref2 = `sint-c10-${randomUUID()}`;
+      await dispute(directPayment, da.json.id, ref2, { event: 'lost' });
+      const d2 = (await paymentDispute(ref2))!;
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM dispute_loss_effect_attempt WHERE "disputeId" = $1 AND state = 'review'`, [d2.id])).rowCount === 1, 45_000,
+        `Billing to review the second direct loss\n${tails()}`);
+      expect((await billingAdmin.query(`SELECT reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [d2.id])).rows[0].reason).toBe('reversed_by_another_chargeback');
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'contradictory_effect' AND "evidenceKey" = $1`, [d2.id])).rowCount === 1,
+        45_000, `the second direct loss's review case\n${tails()}`);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM financial_loss WHERE "paymentId" = $1`, [directPayment])).toBe(1);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_dispute_loss WHERE "paymentId" = $1`, [directPayment])).toBe(2);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM subscription_purchase_reversal r JOIN subscription_purchase s ON s.id = r."purchaseId" WHERE s."invoiceId" = $1`,
+        [co.json.invoiceId])).toBe(1);
+
+      // ── assisted, Constraint B: the first full loss opens ONE obligation; a second dispute's full loss of the same capture opens none (repeated_loss)
+      const q = await settledAssisted(beneficiaryE2);
+      const first = await lostAt(q.paymentId, q.attemptId);
+      await waitFor(async () => (await billingAdmin.query(`SELECT 1 FROM recovery_obligation WHERE "disputeId" = $1`, [first.d.id])).rowCount === 1, 45_000, `the obligation\n${tails()}`);
+      expect(await restrictions(ORG_E)).toEqual(['T3']);
+      const again = await lostAt(q.paymentId, q.attemptId);
+      expect(again.effect).toEqual({ outcome: 'none', reason: 'assisted_purchase_preserved', purchaseId: q.purchase });
+      expect(await reviewOf(again.d.id)).toBe('repeated_loss');
+      expect(await ownerCase(again.d.id)).toMatchObject({ caseType: 'chargeback_loss_review', amount: BASE, status: 'open' });
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM recovery_obligation WHERE "purchaseId" = $1`, [q.purchase])).toBe(1);
+      expect(await restrictions(ORG_E)).toEqual(['T3']);
+      expect((await balance(q.paymentId)).currencies).toEqual([{ currency: 'TND', captured: BASE, refundedNet: 0, chargebackNet: 2 * BASE, netRetained: -BASE }]);
+      // replays change nothing; no case was closed by the passes that ran meanwhile
+      await settle();
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM reconciliation_case c JOIN reconciliation_case_resolution r ON r."caseId" = c.id WHERE c."caseType" = 'chargeback_loss_review'`)).toBe(0);
+      expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM capture_loss_cap WHERE "disputeId" = ANY($1::uuid[])`, [[partial.d.id, full.d.id, d1.d.id, d2.id, first.d.id, again.d.id]])).toBe(6);
+      expect(await deadLettered()).toBe(0);
+    }, 300_000);
 
     it('G5 (S0-C9): a forged payment.dispute.lost naming a late capture (no broker-verified Payment identity) is refused and dead-lettered; no loss, no effect, no obligation', async () => {
       const template = (await paymentAdmin.query(`SELECT payload FROM outbox WHERE name = 'payment.dispute.lost' AND payload->>'captureBasis' = 'late_capture' ORDER BY "occurredAt" LIMIT 1`)).rows[0]

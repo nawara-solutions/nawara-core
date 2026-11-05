@@ -17,6 +17,7 @@ import { PaymentRequestRepository } from '../invoices/payment-request.repository
 import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
+import { captureLossOf, recordCaptureLoss } from '../refunds/dispute-loss.service.js';
 
 /** The worker's system identity (Audit catalog: `recovery_obligation.opened`). */
 export const RECOVERY_WORKER = 'recovery_worker';
@@ -122,22 +123,36 @@ export class RecoveryService {
   async visit(disputeId: string): Promise<'opened' | 'review' | 'already'> {
     const ctx: TransitionContext = { actor: { type: 'system', id: RECOVERY_WORKER }, cause: { type: 'sweep', id: disputeId }, correlationId: `recovery:${disputeId}` };
     const f = (await this.db.query<{ purchaseId: string; assistanceRequestId: string; organizationId: string; platformId: string; companyId: string | null;
-      baseAmount: string; currency: string; chargebackAmount: string; prAmount: string; refunded: boolean }>(
+      baseAmount: string; currency: string; refunded: boolean }>(
       `SELECT e."purchaseId", s."assistanceRequestId", a."organizationId", a."platformId", b."companyId", a."baseAmount", a.currency,
-              l."chargebackAmount", pr.amount AS "prAmount",
               EXISTS (SELECT 1 FROM refund_case c WHERE c."paymentRequestId" = pr.id AND c.status = 'completed') AS refunded
          FROM payment_dispute_loss l JOIN dispute_loss_effect e ON e."disputeId" = l."disputeId" JOIN subscription_purchase s ON s.id = e."purchaseId"
          JOIN assistance_request a ON a.id = s."assistanceRequestId" JOIN payment_request pr ON pr.id = l."paymentRequestId"
          LEFT JOIN billing_platform b ON b."platformId" = a."platformId"
         WHERE l."disputeId" = $1 AND e.reason = 'assisted_purchase_preserved'`, [disputeId])).rows[0];
     if (!f) return 'already';
+    // Core V2 S0-C10 item 3: the loss's place in its capture's cumulative loss, written once before deciding (a visit of a loss recorded
+    // before S0-C10 writes it here; the dispute loss worker wrote it for every later loss)
+    await recordCaptureLoss(this.db, disputeId);
     return this.db.tx(async (q) => {
       await lockOrganization(q, f.organizationId);
       const seen = (await q.query(`SELECT 1 FROM recovery_obligation WHERE "disputeId" = $1 UNION ALL SELECT 1 FROM recovery_review WHERE "disputeId" = $1`, [disputeId])).rows.length;
       if (seen > 0) return 'already' as const;
-      // R6F-4 first (a refunded payment is reconciliation only, whatever was charged back), then R6F-3 (Option A: a partial chargeback)
-      const reason = f.refunded ? 'refund_completed' : Number(f.chargebackAmount) < Number(f.prAmount) ? 'partial_chargeback' : null;
-      if (!reason && Number(f.chargebackAmount) > Number(f.prAmount)) throw new Error('chargeback_exceeds_payment');
+      const cap = await captureLossOf(q, disputeId);
+      const obligated = (await q.query(`SELECT 1 FROM recovery_obligation WHERE "purchaseId" = $1`, [f.purchaseId])).rows.length > 0;
+      // the purchase's obligation belongs to another loss of it that is its capture's first full loss, whichever is visited first: the reason
+      // is the evidence's, never the order of two workers
+      const otherFirst = (await q.query(`SELECT 1 FROM capture_loss_cap c JOIN dispute_loss_effect e ON e."disputeId" = c."disputeId"
+        WHERE e."purchaseId" = $1 AND c."firstFull" AND c."disputeId" <> $2`, [f.purchaseId, disputeId])).rows.length > 0;
+      // R6F-4 first (a refunded payment is reconciliation only, whatever was charged back); then S0-C10 item 5 (Constraint B: the purchase
+      // already has its one obligation, in any state, or another loss of it is the one that opens it); then item 3 (Constraint A: only the
+      // capture's first full loss within its cap opens one; a loss above the cap or the payment, F-07, is a review, never a failing pass);
+      // then R6F-3 (Option A: a partial within the cap)
+      const reason = f.refunded ? 'refund_completed'
+        : obligated ? 'repeated_loss'
+          : cap.firstFull ? null
+            : otherFirst ? 'repeated_loss'
+              : cap.withinCap && cap.chargebackAmount < cap.gross ? 'partial_chargeback' : 'chargeback_exceeds_capture';
       if (!reason && !f.companyId) throw new Error('platform_not_configured');
       if (reason) {
         await q.query(`INSERT INTO recovery_review ("disputeId", reason) VALUES ($1, $2)`, [disputeId, reason]);
