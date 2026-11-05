@@ -232,8 +232,8 @@ Except where stated, a finding rests on reading code, with no test run for it. T
 
 | Finding | Gap | Disposition |
 |---|---|---|
-| F-27 | After a wrong-amount capture, a later notification equal to the payment, under the same reference, can settle it or qualify for L-4 against a contested fact | **Open.** Draft S0-C11, not adopted |
-| F-28 | A capture with no provider reference gets no fact, and can still settle | **Open.** Draft S0-C11, not adopted |
+| F-27 | After a wrong-amount capture, a later notification equal to the payment, under the same reference, can settle it or qualify for L-4 against a contested fact | **Closed for development and simulation** by S0-C11 (adopted #451; implemented #452, #454, #456, #457; Owner closed at `787c856`). Open when this record was written |
+| F-28 | A capture with no provider reference gets no fact, and can still settle | **Closed for development and simulation** by S0-C11 (adopted #451; implemented #452; Owner closed at `787c856`). Open when this record was written |
 | F-01 | A wrong-amount capture on a final payment reaches no Billing case | **Closed for development and simulation** by S0-C12 (adopted #467; implemented #468, #469; conditionally certified at `b775ff3`, open for closure review). Open when this record was written |
 | F-20 | On an open payment, a wrong-amount capture can prevent finality and leave no refund route | **Visible, not resolved.** S0-C12 N1 (adopted #467; implemented #469) makes it a `capture_mismatch` item; the payment can still stay non-final with no refund route until the provider answers, a documented limitation; N3 stays gated. Open when this record was written |
 | F-02 | S0-C9 item 3's "visible for manual reconciliation" is not implemented; recording a conflict writes no audit record; no conflict can be cleared | **Open.** Draft S0-C13, not adopted. See [PAY-09 I](./core-v2-d-a2-contract-register.md) |

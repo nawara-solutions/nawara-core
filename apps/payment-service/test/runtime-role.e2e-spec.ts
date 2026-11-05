@@ -99,6 +99,32 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
     await request(server).get('/ready').expect(200);
   });
 
+  it('S0-C12 item 14(d), 15, 16: the runtime role can read but never write a provider permission; recovery state and quarantine evidence can\'t be removed; quarantine evidence can\'t be changed', async () => {
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await app.connect();
+    try {
+      const flagged = (await app.query(`SELECT payment_provider_refund_permitted('simulation') AS simulation, payment_provider_refund_permitted('flouci') AS flouci`)).rows[0];
+      expect(flagged).toEqual({ simulation: true, flouci: false });
+      for (const statement of [
+        `INSERT INTO provider_capture_permission (provider, permission, effect, "approvalRef", scope) VALUES ('flouci', 'refund_independent', 'grant', 'x', 'flouci')`,
+        `UPDATE provider_capture_permission SET effect = 'withdraw'`,
+        'DELETE FROM provider_capture_permission',
+        'TRUNCATE provider_capture_permission',
+        'ALTER TABLE provider_capture_permission DISABLE TRIGGER ALL',
+        'DELETE FROM capture_recovery_state',
+        'TRUNCATE capture_recovery_state',
+        `UPDATE provider_observation_quarantine SET "investigationState" = 'held'`,
+        'DELETE FROM provider_observation_quarantine',
+        'TRUNCATE provider_observation_quarantine',
+      ]) {
+        await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
+      }
+      expect((await app.query('SELECT count(*)::int AS n FROM capture_recovery_state')).rows[0].n, 'it reads its own state').toBeGreaterThanOrEqual(0);
+    } finally {
+      await app.end();
+    }
+  });
+
   it('the runtime role cannot change the schema, disable a trigger, or truncate a financial table', async () => {
     const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
     await app.connect();

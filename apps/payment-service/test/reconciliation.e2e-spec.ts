@@ -388,6 +388,21 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       expect((await one(`SELECT status FROM payment WHERE id = $1`, [payment.id])).status).toBe('succeeded');
     });
 
+    it('S0-C12 final acceptance, capture_recovery_exhausted through the Owner route, LABELLED FIXTURE (fact and state by SQL; the real transitions are in wrong-amount-captures): visible to its Company only, with its history; gone when a late success names the fact', async () => {
+      const p = await createPayment();
+      const a = await startAttempt(p.id);
+      await outcome(p.id, a.id, { outcome: 'expired' });
+      await request(server()).post(`/payment/payments/${p.id}/cancel`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key()).send({}).expect(200);
+      // LABELLED FIXTURE: the fact and its state; the transitions to this state are proven in wrong-amount-captures
+      const f = await one(`INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source) VALUES ('simulation', $1, 'capture', $2, $3, 9000, 'TND', false, 'status_check') RETURNING id`, [`sim_ex_${randomUUID()}`, p.id, a.id]);
+      await admin.query(`INSERT INTO capture_recovery_state ("factId", attempts, "workAfter", "lastFailure", status, "endedAt") VALUES ($1, 12, NULL, 'transient_failure', 'exhausted', now())`, [f.id]);
+      const mine = async (bearer = 'owner-jwt') => (await itemsOf('capture_recovery_exhausted', bearer)).filter((i) => i.paymentId === p.id);
+      expect(await mine()).toEqual([expect.objectContaining({ id: f.id, factId: f.id, amount: 9000, currency: 'TND', detail: expect.objectContaining({ status: 'exhausted', attempts: 12, lastFailure: 'transient_failure', attemptId: a.id }) })]);
+      expect(await mine('owner2-jwt'), 'another Company').toEqual([]);
+      await admin.query(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES ($1, $2, 'status_check', 9000, 'TND', 'cancelled', $3)`, [p.id, a.id, f.id]);
+      expect(await mine(), 'resolved by a late success').toEqual([]);
+    });
+
     it('a distinct second capture of a succeeded attempt is kept as its own fact; neither capture is refundable by the original path; both are visible', async () => {
       const { payment, attempt } = await captured();
       await signed({ eventId: `x_${randomUUID()}`, type: 'payment.succeeded', reference: attempt.id, providerTransactionId: `sim_dup_${randomUUID()}`, amount: 9000, currency: 'TND' }).expect(200);

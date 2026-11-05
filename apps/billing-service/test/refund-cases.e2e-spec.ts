@@ -1294,6 +1294,24 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(await untouched()).toEqual(before);
     });
 
+    it('S0-C12 company isolation before item 17, Payment read stubbed: another Company\'s Owner gets 404 on the capture route, learning nothing of the currency or the capture', async () => {
+      const p = await directPurchase('b2');
+      const factId = randomUUID();
+      capturesAtPayment.items.set(`${p.paymentId}:${factId}`, { kind: 'ineligible_currency' });
+      const foreign = await openCase({ paymentId: p.paymentId, captureFactId: factId, reason: 'duplicate_charge' }, { bearer: 'foreign-owner-tok' });
+      expect(foreign.status, JSON.stringify(foreign.body)).toBe(404);
+      // the Company check alone: Auth now says the Platform is the foreign Owner's, so only the invoice's seller still refuses them
+      auth.platforms.set(PLATFORM, OTHER_COMPANY);
+      try {
+        const sameAnswer = await openCase({ paymentId: p.paymentId, captureFactId: factId, reason: 'duplicate_charge' }, { bearer: 'foreign-owner-tok' });
+        expect([sameAnswer.status, sameAnswer.body.code], 'the same answer').toEqual([404, foreign.body.code]);
+      } finally {
+        auth.platforms.set(PLATFORM, COMPANY);
+      }
+      expect(JSON.stringify(foreign.body), 'nothing about the capture or its currency').not.toMatch(/currency|refund_not_eligible|capture/i);
+      expect(await count(`SELECT count(*) AS n FROM refund_case WHERE "captureFactId" = $1`, [factId])).toBe(0);
+    });
+
     it('S0-C12 item 17: a currency ineligibility Payment states about this fact is 409 refund_not_eligible, nothing written; a read that proves nothing stays 503', async () => {
       const p = await directPurchase('b2');
       const factId = randomUUID();
