@@ -343,8 +343,8 @@ status change still needs its own explicit owner authorization.
       contested, missing or mismatched capture without spending the receipt, and answers `503` when Payment can't. (4) A contradiction after the read
       leaves the purchase and opens one case recording it. (5) Both refund routes refuse a contested capture, and an authorized attempt continues. (6) F-4's
       paths are unchanged. (7) The contradiction is audited once, atomically. The register entries PAY-02, PAY-05, PAY-07, PAY-12, BIL-32, BIL-33 and EVT-10
-      record its contract. **Current code does not yet meet this entry.** It implements and activates nothing; each Payment, Billing and certification PR needs
-      a separate Owner authorization.
+      record its contract. **Implemented for development and simulation only; the Owner closed S0-C11 as PASS for development and simulation at `787c856`
+      (2026-11-03).** It is not production-certified, and two-Company real-event evidence (L2) is required before real money.
 - **S0-C12 Wrong-amount captures (2026-11-04, ADOPTED #467: clarification of L-1, L-2, FI-13 and S0-C8 item 1, read with S0-C11, with owner-approved
   additions D-1 and D-B; logic-audit findings F-01, F-20, FN-1; decisions A1 and N1, with N3 future-gated). Items 1 to 13: implemented and CONDITIONALLY
   certified for development and simulation only (Owner, 2026-11-04, at `b775ff3`), open for final closure review. Items 14 to 20 and the references to them

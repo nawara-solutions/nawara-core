@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DbService, OutboxService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptService } from '../src/attempts/attempt.service.js';
+import { ownerAuthorityUnavailable, type OwnerCompanyAuthority, type VerifiedOwner } from '../src/disputes/owner-company.authority.js';
 import { WebhookService } from '../src/webhooks/webhook.service.js';
 import { PaymentAudit } from '../src/audit/payment-audit.js';
 import { CAPTURE_RECOVERY_MAX_ATTEMPTS, CaptureReconciler, captureInfrastructurePauseMs, captureRecoveryWaitSeconds, classifyCaptureRecoveryFailure } from '../src/payments/capture-reconciler.js';
@@ -20,6 +21,8 @@ import { describeWithEnv } from './support/env.js';
 
 const paymentMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
 const BUYER = '2a0b7c5d-3e2f-4a6b-9c8d-7e6f5a4b3c22';
+const OWNER = '3b1c8d6e-4f30-4b7c-8d9e-8f7a6b5c4d33';
+const FOREIGN_OWNER = '4c2d9e7f-5a41-4c8d-9eaf-9a8b7c6d5e44';
 type Row = Record<string, any>;
 
 const body = (over: Row = {}) => ({
@@ -39,7 +42,14 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
   let admin: pg.Pool;
   let auth: FakeReceiptServer;
   const billing = generateServiceToken();
-  const identities: Record<string, AuthIdentity> = { 'buyer-jwt': { id: BUYER, adminTier: null, isActive: true, memberships: [] } };
+  const identities: Record<string, AuthIdentity> = {
+    'buyer-jwt': { id: BUYER, adminTier: null, isActive: true, memberships: [] },
+    'owner-jwt': { id: OWNER, adminTier: 'owner', isActive: true, memberships: [] },
+    'foreign-owner-jwt': { id: FOREIGN_OWNER, adminTier: 'owner', isActive: true, memberships: [] },
+  };
+  const owners: Record<string, VerifiedOwner> = { 'owner-jwt': { userId: OWNER, companyId: 'nawara-company-reference' }, 'foreign-owner-jwt': { userId: FOREIGN_OWNER, companyId: 'another-company-reference' } };
+  const ownerState = { down: false };
+  const ownerAuthority: OwnerCompanyAuthority = { owner: async (bearer) => { if (ownerState.down) throw ownerAuthorityUnavailable(); return owners[bearer] ?? null; } };
   const authClient: AuthClient = { getIdentity: async (bearer) => identities[bearer] ?? null, hasPlatformAccess: async () => false };
   const server = () => t.app.getHttpServer();
   const create = async (over: Row = {}) => (await request(server()).post('/payment/payments').set('authorization', `Bearer ${billing.token}`).send(body(over)).expect(201)).body;
@@ -91,7 +101,7 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
     admin = new pg.Pool({ connectionString: db.url, max: 12 });
     auth = await startFakeReceiptServer(); // Payment's own Auth credential: refunds, and so PAY-12, are mounted (development and simulation only)
     t = await createTestApp({
-      databaseUrl: db.url, tokens: [{ caller: 'billing-service', digest: billing.digest }], authClient, refundWorker: false,
+      databaseUrl: db.url, tokens: [{ caller: 'billing-service', digest: billing.digest }], authClient, ownerAuthority, refundWorker: false,
       migrationsDirs: [kitMigrationsDir, paymentMigrationsDir],
       env: {
         PAYMENT_TEST_PROVIDER: 'true', PAYMENT_MAX_ATTEMPTS: '2', PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000', AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token,
@@ -516,10 +526,9 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
     it('pending: another attempt is open; a provider-confirmed failure of it ends the payment failed and decides the earlier capture', async () => {
       const { p, a } = await openAfterFailure();
       const b = await start(p.id, 'timeout_before_accept');
-      const during = await status(p.id);
-      expect(['pending', 'created']).toContain(during);
+      expect(await status(p.id)).toBe('pending');
       await capture(a.id, 9000).send();
-      const f = await deferred(p.id, during);
+      const f = await deferred(p.id, 'pending');
       expect((await failedNote(b.id)).status).toBe(200);
       await decided(p.id, f.id, 'failed');
     });
@@ -729,9 +738,33 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       expect((await reconcile()).recorded, 'exhausted facts are no longer selected').toBe(0);
       const exhausted = await admin.query(`SELECT s.status FROM capture_recovery_state s WHERE s."factId" = $1`, [factId]);
       expect(exhausted.rows).toEqual([{ status: 'exhausted' }]);
+      // the real exhausted row, through the Owner's actual route and its authorization (a stand-in Owner authority: service level)
+      const route = (bearer?: string) => {
+        const r = request(server()).get('/payment/admin/reconciliation-items?kind=capture_recovery_exhausted&limit=200');
+        return bearer ? r.set('authorization', `Bearer ${bearer}`) : r;
+      };
+      const seenBy = async (bearer: string) => ((await route(bearer).expect(200)).body.items as Row[]).filter((i) => i.paymentId === p.id);
+      expect(await seenBy('owner-jwt')).toEqual([expect.objectContaining({ id: factId, factId, amount: 9100, currency: 'TND',
+        detail: expect.objectContaining({ status: 'exhausted', attempts: 12, lastFailure: 'transient_failure', attemptId: a.id }) })]);
+      expect(await seenBy('foreign-owner-jwt'), 'another Company').toEqual([]);
+      expect((await route()).status, 'no credential').toBe(401);
+      const notOwner = await route('buyer-jwt');
+      expect([notOwner.status, notOwner.body.code], 'not an Owner').toEqual([403, 'operation_not_permitted']);
+      const service = await route(billing.token);
+      expect([service.status, service.body.code], 'a service').toEqual([403, 'operation_not_permitted']);
+      const serviceKind = await request(server()).get('/payment/reconciliation/items?kind=capture_recovery_exhausted&limit=200').set('authorization', `Bearer ${billing.token}`);
+      expect([serviceKind.status, serviceKind.body.code], "the service read doesn't reach it").toEqual([400, 'invalid_reconciliation_request']);
+      ownerState.down = true;
+      try {
+        const down = await route('owner-jwt');
+        expect([down.status, down.body.code], 'fails closed').toEqual([503, 'owner_authority_unavailable']);
+      } finally {
+        ownerState.down = false;
+      }
       expect((await facts(p.id))[0].id).toBe(factId);
       expect((await capture(a.id, 9100).send()).status).toBe(200);
       expect(await lateSuccesses(p.id)).toEqual([expect.objectContaining({ amount: 9100 })]);
+      expect(await seenBy('owner-jwt'), 'completed by the redelivery: no longer an exhausted item').toEqual([]);
     });
 
     it('a guard refusing an eligible fact is permanent: refused at once, visible, not retried; state survives a new worker instance', async () => {
@@ -1041,6 +1074,93 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       expect(classifyCurrencyEvidence({ present: false, value: undefined })).toBe('missing');
       expect(classifyAmountEvidence({ present: true, value: 0 })).toBe('invalid');
       expect(classifyAmountEvidence({ present: true, value: 1 })).toBe('present');
+    });
+  });
+
+  describe('S0-C12 final acceptance (service level, real Payment and PostgreSQL; fixtures labelled)', () => {
+    const same = async (lsId: string, pid: string) => (await one(`SELECT (SELECT xmin FROM payment_late_success WHERE id = $1)::text = (SELECT xmin FROM payment WHERE id = $2)::text AS same`, [lsId, pid])).same;
+    const failedNote = (aid: string) => { const n = signed({ eventId: `evt_fail_${crypto.randomUUID()}`, type: 'payment.failed', reference: aid, data: { failureCode: 'card_declined' } }); return post(n.raw, n.signature); };
+    const replica = async (sql: string, p: unknown[]) => { const c = await admin.connect(); try { await c.query(`SET session_replication_role = replica`); await c.query(sql, p); } finally { await c.query(`SET session_replication_role = origin`); c.release(); } };
+
+    it('FN-2 while genuinely pending: a real open attempt keeps the payment pending; the capture of the earlier failed attempt is a fact only; finality decides it', async () => {
+      const { p, a } = await openAfterFailure();
+      const b = await start(p.id, 'success');
+      const during = await status(p.id);
+      expect(during).toBe('pending');
+      expect(b.status).toBe('submitted');
+      await capture(a.id, 9000).send();
+      expect(await status(p.id)).toBe('pending');
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      expect((await outboxOf('payment.late_success.recorded', 'paymentId', p.id)).length).toBe(0);
+      expect((await failedNote(b.id)).status).toBe(200);
+      expect(await status(p.id)).toBe('failed');
+      const ls = await lateSuccesses(p.id);
+      expect(ls).toEqual([expect.objectContaining({ amount: 9000, paymentStatus: 'failed' })]);
+      expect(await same(ls[0].id, p.id)).toBe(true);
+    });
+
+    it('FN-2 closing by cancel: closing, then cancelled, decides the capture in that transaction', async () => {
+      const { p, a } = await openAfterFailure();
+      const b = await start(p.id, 'timeout_before_accept');
+      expect((await cancel(p.id)).status).toBe(202);
+      expect(await status(p.id)).toBe('closing');
+      await capture(a.id, 9000).send();
+      expect(await lateSuccesses(p.id)).toEqual([]);
+      expect((await failedNote(b.id)).status).toBe(200);
+      expect(await status(p.id)).toBe('cancelled');
+      const ls = await lateSuccesses(p.id);
+      expect(ls).toEqual([expect.objectContaining({ amount: 9000, paymentStatus: 'cancelled' })]);
+      expect(await same(ls[0].id, p.id)).toBe(true);
+    });
+
+    it('item 15, schedule as persisted (the failure injected, the wait made due by SQL): workAfter is 2^n seconds out, for the attempts checked', async () => {
+      const x = await cancelledAfterFailure();
+      const spy0 = vi.spyOn(t.app.get(AttemptService) as unknown as { recordLateSuccess: () => Promise<void> }, 'recordLateSuccess').mockRejectedValueOnce(new Error('crash'));
+      await capture(x.a.id, 9100).send();
+      spy0.mockRestore();
+      const factId = (await facts(x.p.id))[0].id as string;
+      const db = t.app.get(DbService);
+      const spy = vi.spyOn(db, 'tx').mockRejectedValue(Object.assign(new Error('x'), { code: '40001' }));
+      try {
+        const seen: Array<[number, number]> = [];
+        for (let n = 1; n <= 11; n++) {
+          await admin.query(`UPDATE capture_recovery_state SET "workAfter" = now() WHERE "factId" = $1 AND status = 'active'`, [factId]);
+          await reconcile();
+          const r = await one(`SELECT attempts, EXTRACT(EPOCH FROM ("workAfter" - "updatedAt"))::float AS wait FROM capture_recovery_state WHERE "factId" = $1`, [factId]);
+          seen.push([r.attempts, Math.round(r.wait)]);
+        }
+        expect(seen.map((s) => s[1])).toEqual([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]);
+      } finally {
+        spy.mockRestore();
+      }
+      await admin.query(`UPDATE capture_recovery_state SET "workAfter" = now() WHERE "factId" = $1 AND status = 'active'`, [factId]);
+      expect((await reconcile()).recorded, 'a success still completes it').toBe(1);
+    });
+
+    it('item 15 no_effect, LABELLED FIXTURE (the legacy row and the fact inserted by SQL): a legacy fact-less status-read row blocks the insert; the pass counts it, does not loop, holds nothing back', async () => {
+      const { p, a } = await cancelledAfterFailure();
+      await replica(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES ($1, $2, 'status_check', 9000, 'TND', 'cancelled', NULL)`, [p.id, a.id]);
+      await admin.query(`INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source) VALUES ('test', $1, 'capture', $2, $3, 9100, 'TND', false, 'status_check')`, [`ptx_ne_${a.id}`, p.id, a.id]);
+      const f = (await one(`SELECT id FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [`ptx_ne_${a.id}`])).id as string;
+      await reconcile();
+      const st = await one(`SELECT attempts, status, "lastFailure" FROM capture_recovery_state WHERE "factId" = $1`, [f]);
+      expect(st).toEqual({ attempts: 1, status: 'active', lastFailure: 'no_effect' });
+    });
+
+    it('historical limitation, LABELLED FIXTURE (the pre-0026 row inserted by SQL with its guard off): a non-final late success recorded before 0026 stays as recorded, is not re-recorded by finality or recovery, emits nothing new, and is never treated as recovered', async () => {
+      const { p, a } = await openAfterFailure();
+      await capture(a.id, 9000).send();
+      const [f] = await facts(p.id);
+      await replica(`INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES ($1, $2, 'status_check', 9000, 'TND', 'created', $3)`, [p.id, a.id, f.id]);
+      const stored = await one(`SELECT * FROM payment_late_success WHERE "factId" = $1`, [f.id]);
+      expect((await cancel(p.id)).status).toBe(200);
+      await reconcile();
+      await capture(a.id, 9000).send();
+      expect(await one(`SELECT * FROM payment_late_success WHERE "factId" = $1`, [f.id]), 'unchanged').toEqual(stored);
+      expect((await lateSuccesses(p.id)).map((l) => l.paymentStatus)).toEqual(['created']);
+      expect((await outboxOf('payment.late_success.recorded', 'paymentId', p.id)).length, 'no new or compensating EVT-10').toBe(0);
+      expect((await items('late_success')).filter((i) => i.factId === f.id)).toEqual([expect.objectContaining({ detail: expect.objectContaining({ paymentStatus: 'created' }) })]);
+      expect(await one(`SELECT count(*)::int AS n FROM capture_recovery_state WHERE "factId" = $1`, [f.id])).toEqual({ n: 0 });
     });
   });
 

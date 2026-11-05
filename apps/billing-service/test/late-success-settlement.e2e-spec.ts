@@ -1052,6 +1052,21 @@ describeWithEnv('late assisted settlement from Payment\'s late success (Core V2 
         paymentItems.items.delete('fact_conflict');
       });
 
+      it('S0-C12 historical limitation, Payment read stubbed: a PAY-12 late success stating a non-final status is refused every pass: no record, no case, not recovered; it does not block the next item', async () => {
+        const e = await ended('payment.expired');
+        const e2 = await ended('payment.expired');
+        const stuck = randomUUID();
+        const fine = randomUUID();
+        const item = (id: string, paymentId: string, st: string) => asItem({ kind: 'late_success', id, paymentId, factId: randomUUID(), amount: 5300, currency: 'TND', detail: { paymentStatus: st }, at: new Date().toISOString() });
+        paymentItems.items.set('late_success', [stuck < fine ? item(stuck, e.s.paymentId, 'created') : item(fine, e2.s.paymentId, 'expired'), stuck < fine ? item(fine, e2.s.paymentId, 'expired') : item(stuck, e.s.paymentId, 'created')]);
+        await reconcile();
+        await reconcile();
+        expect(await count(`SELECT count(*) AS n FROM payment_late_success WHERE "lateSuccessId" = $1`, [stuck]), 'never recorded').toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "evidenceKey" = $1`, [stuck]), 'no case').toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM payment_late_success WHERE "lateSuccessId" = $1`, [fine]), 'the other item proceeds').toBe(1);
+        paymentItems.items.delete('late_success');
+      });
+
       it('a contradiction of a fact recorded elsewhere: the observing payment\'s own case, its Company from Billing\'s records, never the other fact\'s id, figures or owner; no authority over it', async () => {
         const e = await ended('payment.expired');
         const elsewhere = randomUUID(); // a capture fact of another payment, possibly another Company's: Payment's capture read answers 404 for this payment
