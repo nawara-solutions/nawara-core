@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
-import { DbService, PollLoop, describeFailure, isUniqueViolation, type DrainOutcome, type Queryable } from '@nawara/service-kit';
+import { DbService, PollLoop, describeFailure, isUniqueViolation, pgConstraint, type DrainOutcome, type Queryable } from '@nawara/service-kit';
 import { BillingAudit } from '../audit/billing-audit.js';
 import type { TransitionContext } from '../domain/actors.js';
 import { PAYMENT_DISPUTE_CLIENT, type PaymentDisputeClient } from './payment-dispute-client.js';
@@ -38,6 +38,35 @@ export function captureOf(l: Pick<PaymentLoss, 'captureFactId' | 'captureBasis'>
   if (typeof l.captureBasis !== 'string' || !(CAPTURE_BASES as readonly string[]).includes(l.captureBasis)) return null;
   if (typeof l.captureFactId !== 'string' || !UUID.test(l.captureFactId)) return null;
   return { basis: l.captureBasis as CaptureBasis, factId: l.captureFactId };
+}
+
+/** Core V2 S0-C10 item 3: a loss's place in its capture's cumulative verified loss, as the database derived it (migration 0049). */
+export interface CaptureLoss {
+  gross: number;
+  chargebackAmount: number;
+  withinCap: boolean;
+  firstFull: boolean;
+}
+
+/**
+ * Core V2 S0-C10 (Constraint A, O-1): writes the loss's `capture_loss_cap` row once, in its own transaction, before anything is decided from it.
+ * The database derives every column under the capture's lock. A late capture whose late success Billing has not recorded has no capture yet:
+ * nothing is written, and the caller holds the loss (S0-C9 item 2). Replays and crashes find the row already written.
+ */
+export async function recordCaptureLoss(db: DbService, disputeId: string): Promise<void> {
+  try {
+    await db.tx((q) => q.query(`INSERT INTO capture_loss_cap ("disputeId") VALUES ($1) ON CONFLICT ("disputeId") DO NOTHING`, [disputeId]));
+  } catch (e) {
+    if (pgConstraint(e) !== 'capture_loss_cap_capture') throw e;
+  }
+}
+
+/** The loss's recorded place in its capture's cumulative loss; missing is a technical failure (retried), never an eligibility. */
+export async function captureLossOf(q: Queryable, disputeId: string): Promise<CaptureLoss> {
+  const c = (await q.query<{ gross: string; chargebackAmount: string; withinCap: boolean; firstFull: boolean }>(
+    `SELECT gross, "chargebackAmount", "withinCap", "firstFull" FROM capture_loss_cap WHERE "disputeId" = $1`, [disputeId])).rows[0];
+  if (!c) throw new Error('capture_loss_cap_missing');
+  return { gross: Number(c.gross), chargebackAmount: Number(c.chargebackAmount), withinCap: c.withinCap, firstFull: c.firstFull };
 }
 
 export type LossOutcome = 'recorded' | 'duplicate' | 'no_chargeback' | 'binding_mismatch' | 'conflict';
@@ -82,6 +111,11 @@ class Held extends Error {
  *   - no Personal purchase: `none`.
  * A PARTIAL chargeback of a direct purchase is never applied: the frozen rules define no threshold for it, so it stays a non-terminal review
  * (`partial_chargeback_threshold_open`) — the contract gap reported to the Owner. A technical failure rolls back and is retried with backoff.
+ *
+ * Core V2 S0-C10 (migration 0049): every loss first takes its place in its capture's cumulative loss (`capture_loss_cap`); a direct purchase is
+ * reversed only by its capture's first full loss within the cap (a further full loss: `reversed_by_another_chargeback`; a partial above the cap:
+ * `chargeback_exceeds_capture`); an L-4 capture's loss above it is the recovery worker's review (O-2); a loss recorded before 0049 that is
+ * already in review keeps that review exactly (O-1).
  */
 @Injectable()
 export class DisputeLossService {
@@ -207,6 +241,14 @@ export class DisputeLossService {
   async apply(disputeId: string): Promise<DisputeEffectOutcome> {
     const ctx: TransitionContext = { actor: { type: 'system', id: DISPUTE_LOSS_WORKER }, cause: { type: 'sweep', id: disputeId }, correlationId: `dispute-loss:${disputeId}` };
     try {
+      // Core V2 S0-C10 (O-1, O-2): a loss recorded before S0-C10 that is already in review keeps that review exactly, so no historical case is
+      // re-derived, duplicated or closed; every other loss is placed in its capture's cumulative loss FIRST, in its own transaction, because a
+      // review below rolls its transaction back
+      const frozen = (await this.db.query<{ reason: string }>(
+        `SELECT t.reason FROM dispute_loss_effect_attempt t JOIN payment_dispute_loss l ON l."disputeId" = t."disputeId"
+          WHERE t."disputeId" = $1 AND t.state = 'review' AND l."beforeS0c10"`, [disputeId])).rows[0];
+      if (frozen) throw new Review(frozen.reason);
+      await recordCaptureLoss(this.db, disputeId);
       const outcome = await this.db.tx(async (q) => {
         const l = (await q.query<{ disputeId: string; paymentId: string; paymentRequestId: string; disputeAmount: string; currency: string; chargebackAmount: string; chargebackCurrency: string;
           captureBasis: CaptureBasis; captureFactId: string | null }>(
@@ -236,11 +278,19 @@ export class DisputeLossService {
         if (p.purpose === 'assisted_settlement') return this.recordEffect(q, disputeId, 'none', p.id, 'assisted_purchase_preserved');
         if (p.purpose !== 'direct_purchase') throw new Review('purchase_mismatch');
         // B10: a direct purchase LOST is reversed; only a chargeback of the whole payment is that loss (no partial threshold is frozen)
-        if (Number(l.chargebackAmount) < Number(pr.amount)) throw new Review('partial_chargeback_threshold_open');
         if (Number(l.chargebackAmount) > Number(pr.amount)) throw new Review('chargeback_exceeds_payment');
-        await q.query(`SELECT pg_advisory_xact_lock(hashtextextended('billing.personal_subscription:' || $1 || ':' || $2, 0))`, [p.beneficiaryUserId, p.productId]);
-        const prior = (await q.query<{ cause: string }>(`SELECT cause FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [p.id])).rows[0];
-        if (prior?.cause === 'final_lost_chargeback') throw new Review('reversed_by_another_chargeback');
+        const full = Number(l.chargebackAmount) === Number(pr.amount);
+        let prior: { cause: string } | undefined;
+        if (full) {
+          await q.query(`SELECT pg_advisory_xact_lock(hashtextextended('billing.personal_subscription:' || $1 || ':' || $2, 0))`, [p.beneficiaryUserId, p.productId]);
+          prior = (await q.query<{ cause: string }>(`SELECT cause FROM subscription_purchase_reversal WHERE "purchaseId" = $1`, [p.id])).rows[0];
+          if (prior?.cause === 'final_lost_chargeback') throw new Review('reversed_by_another_chargeback');
+        }
+        // S0-C10 items 3, 4, 6 (Constraint A): only the capture's first full loss within its cap reverses; a partial that takes the capture's
+        // cumulative loss above its gross, or a full loss after any other, is reviewed; both keep their recorded figures
+        const cap = await captureLossOf(q, disputeId);
+        if (!cap.withinCap || (full && !cap.firstFull)) throw new Review('chargeback_exceeds_capture');
+        if (!full) throw new Review('partial_chargeback_threshold_open');
         await q.query(`INSERT INTO subscription_purchase_reversal_cause ("purchaseId", cause, "disputeId") VALUES ($1, 'final_lost_chargeback', $2)`, [p.id, disputeId]);
         if (prior) {
           // FC-4: already reversed by a completed refund; this cause is appended, no second reversal, no entitlement change (S6h)
@@ -281,8 +331,11 @@ export class DisputeLossService {
     if (!ls) throw new Held('late_success_not_recorded');
     if (ls.paymentId !== l.paymentId || ls.paymentRequestId !== pr.id) throw new Review('capture_mismatch');
     if (l.currency !== ls.currency || l.chargebackCurrency !== ls.currency) throw new Review('currency_mismatch');
-    if (Number(l.chargebackAmount) > Number(ls.amount)) throw new Review('chargeback_exceeds_capture');
     const p = (await q.query<{ id: string; purpose: string }>(`SELECT id, purpose FROM subscription_purchase WHERE "lateSuccessId" = $1`, [ls.lateSuccessId])).rows[0];
+    // Core V2 S0-C10 item 6 (O-2): an L-4 purchase is assisted, so a loss of its capture above the capture is the recovery worker's review
+    // (`recovery_review` and its `chargeback_loss_review` case), never this effect's; a loss of any other late capture above it stays here
+    if (p?.purpose === 'assisted_settlement') return this.recordEffect(q, l.disputeId, 'none', p.id, 'assisted_purchase_preserved');
+    if (Number(l.chargebackAmount) > Number(ls.amount)) throw new Review('chargeback_exceeds_capture');
     if (!p) {
       // a late success counted as a RECOVERY payment (S6h R6H-4) charged back: no purchase effect, but recovered principal is at stake, which
       // S0-C9 does not define: kept for review (contradictory_effect), never silently closed

@@ -293,6 +293,13 @@ export class ReconciliationService {
            WHERE e.reason = 'late_capture_unsold' AND pl."chargebackAmount" < ls.amount) x
         JOIN payment_dispute_loss l ON l."disputeId" = x."disputeId" WHERE ${fresh('partial_chargeback', 'x."disputeId"')}`,
       (r) => ({ caseType: 'partial_chargeback', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, amount: Number(r.amount), currency: r.currency, detail: 'partial_chargeback' }));
+    // Core V2 S0-C10 item 7: an assisted loss reviewed as repeated (Constraint B) or above its capture's cap (Constraint A) is listed for the
+    // Owner with the loss's own recorded figures, scoped by its payment request's Company; no resolution kind exists for it, so it stays open
+    await run(`SELECT r."disputeId" AS id, l."paymentId", l."paymentRequestId", l."captureFactId", l."chargebackAmount" AS amount, c.currency, r.reason
+        FROM recovery_review r JOIN payment_dispute_loss l ON l."disputeId" = r."disputeId" JOIN capture_loss_cap c ON c."disputeId" = r."disputeId"
+        WHERE r.reason IN ('repeated_loss', 'chargeback_exceeds_capture') AND ${fresh('chargeback_loss_review', 'r."disputeId"')}`,
+      (r) => ({ caseType: 'chargeback_loss_review', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, paymentId: r.paymentId, captureFactId: r.captureFactId,
+        amount: Number(r.amount), currency: r.currency, detail: r.reason }));
     // Core V2 S0-C9 item 6: a late capture refunded (completed) AND charged back: preserved for reconciliation, never `chargeback_returned`
     await run(`SELECT l."disputeId" AS id, l."paymentRequestId", l."chargebackAmount" AS amount, trim(l.currency) AS currency FROM payment_dispute_loss l
         WHERE l."captureBasis" = 'late_capture'
@@ -321,7 +328,12 @@ export class ReconciliationService {
         WHERE i."sellerType" = 'company' AND l."chargebackAmount" = r.amount AND l."chargebackCurrency" = trim(r.currency) AND l."captureBasis" = 'settling_capture'
           AND EXISTS (SELECT 1 FROM subscription_purchase s WHERE s."paymentRequestId" = r.id AND s.purpose = 'direct_purchase')
           AND NOT EXISTS (SELECT 1 FROM financial_loss f WHERE f.kind = 'direct_chargeback_write_off' AND f."evidenceKey" = l."chargebackFactId")
-          AND NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = 'chargeback_refund_overlap' AND k."evidenceKey" = l."disputeId")`);
+          AND NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = 'chargeback_refund_overlap' AND k."evidenceKey" = l."disputeId")
+          -- Core V2 S0-C10 item 4 (O-4): a write-off only for the loss whose committed effect reversed the purchase, once per capture; a loss in
+          -- review never gets one, and a write-off waits for its reversal (the next pass after it)
+          AND (EXISTS (SELECT 1 FROM refund_case c WHERE c."paymentId" = l."paymentId" AND c.status = 'completed')
+               OR (EXISTS (SELECT 1 FROM dispute_loss_effect e WHERE e."disputeId" = l."disputeId" AND e.outcome = 'reversed_purchase')
+                   AND NOT EXISTS (SELECT 1 FROM financial_loss f WHERE f.kind = 'direct_chargeback_write_off' AND f."paymentId" = l."paymentId")))`);
     for (const l of rows) {
       await this.db.tx(async (q) => {
         if (l.refunded) {
@@ -332,7 +344,7 @@ export class ReconciliationService {
         }
         const loss = (await q.query<{ id: string }>(
           `INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "organizationId", "paymentId", "disputeId", amount, currency)
-           VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, $5, $6, $7) ON CONFLICT ON CONSTRAINT financial_loss_once DO NOTHING RETURNING id`,
+           VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING RETURNING id`, // once per evidence, and once per capture (0049)
           [l.chargebackFactId, l.sellerId, l.organizationId, l.paymentId, l.disputeId, l.amount, l.currency])).rows[0];
         if (!loss) return;
         tally.losses++;

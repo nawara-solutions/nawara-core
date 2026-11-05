@@ -198,6 +198,12 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     `surplus_evidence` and an Auth `recovery_surplus_external` receipt) confirmed by the Organization's administrator
     (`POST /billing/recovery-surpluses/:id/recipient-confirmation`). The Owner reads (`GET /billing/admin/recovery-obligations/:id`) but
     never settles or confirms. Six audit actions; no `billing.*` event (EVT-06); FinancialLoss is S6h-B's (below).
+  - Core V2 S0-C10 (`db/migrations/0049`; BIL-28 G, BIL-33 L, BIL-34 G; development and simulation only, not certified): every verified loss
+    takes its place in its capture's cumulative loss (`capture_loss_cap`, derived by the database under a per-capture lock). Only a capture's
+    first full loss within its gross opens the obligation (or, for a direct purchase, reverses it and then gets the one write-off per capture);
+    an assisted purchase has at most one obligation ever (`UNIQUE ("purchaseId")`). A repeated or excess assisted loss is a `recovery_review`
+    (`repeated_loss`, `chargeback_exceeds_capture`) listed as an open, never-resolvable `chargeback_loss_review` case at its recorded amount;
+    a direct one stays a `contradictory_effect` review. Losses recorded before `0049` are marked `beforeS0c10` and never ordered.
   - Core V2 S6h-B (`db/migrations/0042`, `src/reconciliation/`; BIL-33, BIL-34, EVT-10; the Owner's R6H-1 to R6H-12): Payment's verified
     `payment.late_success.recorded` (and, when an event is lost, Payment's reconciliation read with `payment.reconciliation.read`) is recorded
     once per late success and provider fact and never treated as `payment.succeeded`: a late recovery success is a `recovery_payment`

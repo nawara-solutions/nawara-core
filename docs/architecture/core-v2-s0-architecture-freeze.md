@@ -279,8 +279,8 @@ status change still needs its own explicit owner authorization.
       Implements and activates nothing; each Billing, Payment, harness and certification PR needs a separate Owner authorization.
 - **S0-C10 Repeated and excess chargeback losses (2026-11-05, ADOPTED CONTRACT, the Owner's S0-C10 contract GO: decisions C10-1 to C10-7;
   clarification of FC-4, FC-6, B10, R6F-3, R6F-8 and S0-C9 item 6, with an Owner-approved amendment of R6F-8's per-loss obligation in item 5;
-  logic-audit findings F-03, F-07; F-26 as a scope limit). NOT IMPLEMENTED: the Billing implementation and its certification each need a separate
-  Owner authorization.** Assigns no liability. FC-1, FC-5, S0-C9, S0-C11 to S0-C13 and every recovery invariant not named here are unchanged and
+  logic-audit findings F-03, F-07; F-26 as a scope limit). IMPLEMENTED for development and simulation only (Billing `0049`, the Owner's implementation decisions
+  O-1 to O-5, 2026-11-05), not certified: certification needs a separate Owner review.** Assigns no liability. FC-1, FC-5, S0-C9, S0-C11 to S0-C13 and every recovery invariant not named here are unchanged and
   govern. Before this entry a second full loss of an assisted purchase could open a second recovery obligation (`recovery_obligation` is unique per
   dispute), a second full chargeback of a direct purchase could record a second write-off (`financial_loss` is unique per chargeback fact), and an
   assisted chargeback above the payment failed on every recovery pass with no review.
@@ -366,6 +366,12 @@ status change still needs its own explicit owner authorization.
       full loss, the second full loss and partials above the gross for an assisted purchase, and the second full loss of a direct purchase; refunds and
       L-4 of that capture stay refused. Existing tests that protect valid behaviour stay; the register entries BIL-28 G, BIL-33 L and BIL-34 G record
       this contract. ADR-0035, ADR-0044 Part B and ADR-0069 stay Proposed; no Accepted ADR is edited.
+  16. *Implementation decisions (the Owner's O-1 to O-5, 2026-11-05).* O-1 (Option B): a loss that existed when `0049` ran is marked
+      `beforeS0c10`, never ordered; a capture's only such loss is its first, several such losses are never first (review), every later loss follows
+      all of them, and one already in review keeps that review. O-2: an L-4 capture's loss above it is a `recovery_review`, not an effect-stage review;
+      earlier ones keep theirs. O-3: the ledger `capture_loss_cap`. O-4: a direct write-off follows its committed reversal on the next reconciliation
+      pass. O-5: in any environment, in this order: an audit-service whose catalog has `chargeback_loss_review`; the required audit and broker permissions
+      (Billing already publishes `audit.reconciliation_case.opened`, so S0-C10 changes none); then a Billing that opens the case.
 - **S0-C11 Capture evidence for commercial effect (2026-11-03, owner-approved clarification of FC-1, FI-13, S4c F-4 and S0-C8 item 1, with
   owner-approved additions in items 2, 3, 7 and 8; logic-audit findings F-27, F-28).** The number S0-C10 is reserved for a separate draft that is not
   adopted. *(S0-C10 was adopted on 2026-11-05; see above.)* FC-1 to FC-5, S0-C8 and S0-C9 are unchanged and govern except as stated here. The first recorded fact under an identity

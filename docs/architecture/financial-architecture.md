@@ -139,7 +139,7 @@ receipts with dedicated factor-only step-ups, one beneficiary and product only, 
 compensated exactly after the interrupted run (derived, never a purchase; reversals remove it); holds block no financial command.
 **Organization recovery: IMPLEMENTED (S6f, simulation only; the Owner's R6F-1 to R6F-8)**: a verified FULL final lost chargeback of an
 assisted purchase (never refunded) opens the Organization's base-only recovery obligation and T3 (a partial chargeback or a refunded payment
-is kept for review: no debt, no T3; *S0-C10, adopted 2026-11-05, not implemented: at most one obligation per assisted purchase, only within the
+is kept for review: no debt, no T3; *S0-C10, adopted 2026-11-05, implemented for development and simulation only: at most one obligation per assisted purchase, only within the
 capture's loss cap; repeated and excess losses are reviewed*); the Organization's administrator settles the outstanding amount through one `recovery_settlement`
 invoice at a time (Payment's narrow `payment.create.recovery_settlement`); only Payment's verified success is a recovery payment, split by
 the database into principal and `recovery_surplus` owed to the Organization (never revenue, never offset, no expiry); T3 clears once when
