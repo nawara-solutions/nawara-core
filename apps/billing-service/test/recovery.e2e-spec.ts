@@ -23,7 +23,9 @@ import { RefundEffectService } from '../src/refunds/refund-effect.service.js';
 import { DisputeLossService } from '../src/refunds/dispute-loss.service.js';
 import type { PaymentDisputeClient, PaymentDisputeLoss } from '../src/refunds/payment-dispute-client.js';
 import type { FraudEvidenceFiles, FraudHoldReceipts, GrantedFraudEvidence } from '../src/fraud-holds/fraud-hold-clients.js';
-import type { CaptureReadOutcome, PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
+import type { CaptureReadOutcome, PaymentRefundClient, PaymentRefunds } from '../src/refunds/payment-refund-client.js';
+import { RefundRelayReconciler } from '../src/refunds/refund-relay-reconciler.js';
+import { FinancialSafetyCheck } from '../src/refunds/financial-safety.js';
 import { RecoveryModule } from '../src/recovery/recovery.module.js';
 import { RecoveryService } from '../src/recovery/recovery.service.js';
 import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
@@ -68,6 +70,9 @@ const captureAsPayment = async (paymentId: string, factId: string): Promise<Capt
     conflicted: false, refund: 'none', refundableOnItsOwn: true, attemptCaptures: 1 } };
 };
 
+/** Core V2 S0-C14: Payment's PAY-08 answers, per payment (a `null` answer is Payment's 404). */
+const pay08 = { answers: new Map<string, PaymentRefunds | null | 'down'>(), down: false, calls: [] as string[] };
+
 /** Core V2 S6d: Payment's refund port, authorizing every relayed attempt (the S6b/S6c Payment behaviour is certified in its own suites). */
 const relayAnswer = { unknown: false, bodies: [] as Record<string, unknown>[] };
 const refundsAtPayment: PaymentRefundClient = {
@@ -76,7 +81,12 @@ const refundsAtPayment: PaymentRefundClient = {
     if (relayAnswer.unknown) return { kind: 'unknown', reason: 'status_0' }; // Core V2 S6h-B: Payment's answer lost (Q8 tests)
     return { kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } };
   },
-  refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+  // Core V2 S0-C14: Payment's PAY-08 answer per payment under test control (default: nothing refunded, nothing attempted); `down` makes it fail
+  refunds: async (paymentId) => {
+    const a = pay08.answers.get(paymentId);
+    if (pay08.down || a === 'down') throw new Error('payment unavailable');
+    return a === undefined ? { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] } : a;
+  },
   capture: async (paymentId, factId) => {
     captureAt.calls.push([paymentId, factId]);
     return captureAt.answer ? captureAt.answer(paymentId, factId) : captureAsPayment(paymentId, factId);
@@ -316,6 +326,8 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
     auth.reset();
     disputes.open.clear();
     disputes.down = false;
+    pay08.answers.clear();
+    pay08.down = false;
   });
   afterAll(async () => {
     await t?.app.close();
@@ -1945,6 +1957,427 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       .map((r) => r.table_name)).toEqual(['financial_loss', 'financial_loss_adjustment']);
     expect(await count(`SELECT count(*) AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name ~ '^recovery_' AND column_name ~* '(write|forgiv)'`)).toBe(0);
     expect(await count(`SELECT count(*) AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name ~ '^recovery_' AND column_name ~* '(expir|offset|revenue)'`)).toBe(0);
+  });
+
+  /**
+   * Core V2 S0-C14 WP B (S0 §1.5 S0-C14 items 2 to 15; DO-50, DO-51, DO-52): refund and chargeback overlap precedence, through Billing's real paths
+   * on real PostgreSQL. Payment's PAY-08 answers are under test control (`pay08`); relays are relayed through the real route and mirrored by the
+   * real relay reconciler; completions are Payment's `refund.case_completed`. Cross-process and multi-instance proofs (V3, V9, V18, V19, V24,
+   * V27, V32) are WP D's.
+   */
+  describe('Core V2 S0-C14: refund and chargeback overlap (waiting effects, overlap cases, collection freeze, acknowledgement, suspension evidence)', () => {
+    const reconciliation = () => t.app.get(ReconciliationService);
+    const relayReconciler = () => t.app.get(RefundRelayReconciler);
+    const waitingCase = (disputeId: string) => one(`SELECT c.id, c.detail, c."organizationId", r.kind, r."refundCaseId" FROM reconciliation_case c
+      LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id WHERE c."caseType" = 'chargeback_effect_waiting' AND c."evidenceKey" = $1`, [disputeId]);
+    const overlapCase = (disputeId: string) => one(`SELECT c.id, c."paymentId", r.kind FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+      WHERE c."caseType" = 'chargeback_refund_overlap' AND c."evidenceKey" = $1`, [disputeId]);
+    /** An assisted purchase paid (base 6100, fee 400): no loss yet. */
+    const assistedPaid = async () => {
+      const r = await collected({ unit: 6100, fee: 400 });
+      const s = await started(r.id);
+      await t.bus.deliver(s.ev('payment.succeeded'));
+      return { paymentId: s.paymentId, paymentRequestId: s.paymentRequestId, amount: Number(s.inv.total), purchaseId: (await purchaseOf(s.paymentId)).id as string };
+    };
+    /** The Owner's refund case and its relay through the real route; Payment authorized the attempt, so the relay is LIVE (`authorized`). */
+    const relayed = async (paymentId: string) => {
+      const caseId = (await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId, reason: 'customer_request' })).body.id as string;
+      await send(request(server()).post(`/billing/admin/refund-cases/${caseId}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      const attemptId = (await one(`SELECT id, "attemptStatus" FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [caseId])).id as string;
+      return { caseId, attemptId };
+    };
+    /** Payment states the attempt's status (PAY-08) and the real relay reconciler mirrors it. */
+    const atPayment = async (paymentId: string, attemptId: string, status: 'failed' | 'succeeded' | 'authorized' | 'unknown' | 'discrepancy') => {
+      pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status, approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [] });
+      await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]); // LABELLED TEST AID: the reconciler's lease, not a status
+      await relayReconciler().reconcileOnce();
+      return (await one(`SELECT "attemptStatus" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).attemptStatus as string;
+    };
+    /** Payment's verified completion of the case (the event), as Payment emits it. */
+    const completed = async (r: { caseId: string; attemptId: string }, p: { paymentId: string; paymentRequestId: string; amount: number }, purpose = 'assisted_settlement') => {
+      const ev = randomUUID();
+      await t.bus.deliver({ id: ev, name: 'refund.case_completed', payload: { refundCaseId: r.caseId, refundAuthorizationId: randomUUID(), refundAttemptId: r.attemptId, paymentId: p.paymentId,
+        paymentRequestId: p.paymentRequestId, producer: 'billing-service', approvedAmount: p.amount, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false,
+        organizationId: purpose === 'assisted_settlement' ? ORG : null, purpose }, headers: { eventId: ev, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      expect((await one(`SELECT status FROM refund_case WHERE id = $1`, [r.caseId])).status).toBe('completed');
+    };
+    /** Payment's verified final lost chargeback of any purchase (a direct one included), applied by the dispute loss worker. */
+    const loseAny = async (paymentId: string, amount: number) => {
+      const id = randomUUID();
+      const disputeId = randomUUID();
+      await t.bus.deliver({ id, name: 'payment.dispute.lost', payload: {
+        disputeId, paymentId, paymentRequestId: randomUUID(), producer: 'billing-service', organizationId: null, purpose: 'direct_purchase', amount, currency: 'TND',
+        lostAt: new Date().toISOString(), chargeback: { factId: randomUUID(), amount, currency: 'TND' }, liveMode: false,
+      }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as never);
+      await losses().drainOnce();
+      return disputeId;
+    };
+    const acknowledge = (caseId: string, reason: string) =>
+      send(request(server()).post(`/billing/admin/reconciliation-cases/${caseId}/acknowledgement`), 'owner-tok', key()).send({ reason });
+
+    it('DO-52 / V1, V13: an assisted loss while a refund is LIVE waits (no obligation, no T3, nothing written); the waiting case is visible; the refund then completes: review, overlap case, waiting case resolved refund_completed', async () => {
+      const p = await assistedPaid();
+      const r = await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      expect(await recovery().visit(disputeId)).toBe('waiting');
+      expect(await obligationOf(disputeId)).toBeUndefined();
+      expect(await reviewOf(disputeId)).toBeUndefined();
+      expect((await restrictions()).filter((x) => x.kind === 'T3')).toEqual([]);
+      await reconciliation().drainOnce();
+      expect(await waitingCase(disputeId)).toMatchObject({ detail: 'relay_live', kind: null, organizationId: ORG });
+      await completed(r, p);
+      expect(await recovery().visit(disputeId)).toBe('review');
+      expect(await reviewOf(disputeId)).toEqual({ reason: 'refund_completed' });
+      await reconciliation().drainOnce();
+      // never `effect_applied` when nothing was applied: the completed refund of the same captured movement
+      expect(await waitingCase(disputeId)).toMatchObject({ kind: 'refund_completed', refundCaseId: r.caseId });
+      expect(await overlapCase(disputeId)).toMatchObject({ paymentId: p.paymentId, kind: null }); // DO-51: an assisted settling capture's overlap is a case
+      expect(await obligationOf(disputeId)).toBeUndefined();
+      expect((await restrictions()).filter((x) => x.kind === 'T3')).toEqual([]);
+    });
+
+    it('V13 (fail closed, item 6): PAY-08 down, 404, without unallocated facts, with an attempt Billing never relayed, or with refund evidence: the obligation waits; a clean read then lets it proceed', async () => {
+      const p = await assistedPaid();
+      const disputeId = await lose(p.paymentId, p.amount);
+      const unknownAttempt = randomUUID();
+      const answers: Array<[PaymentRefunds | null | 'down', string]> = [
+        ['down', 'payment_unavailable'],
+        [null, 'payment_not_found'],
+        [{ attempts: [], refusals: [], authorizations: [], unallocatedFacts: null }, 'unallocated_facts_unknown'],
+        [{ attempts: [{ refundAttemptId: unknownAttempt, status: 'failed', approvedBy: null }], refusals: [], authorizations: [], unallocatedFacts: [] }, 'attempt_unknown_to_billing'], // V31
+        [{ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [{ factId: randomUUID(), refundAttemptId: null, amount: p.amount, currency: 'TND', state: 'pending' }] }, 'attempt_unknown_to_billing'],
+      ];
+      for (const [answer, reason] of answers) {
+        pay08.answers.set(p.paymentId, answer);
+        expect(await recovery().visit(disputeId), reason).toBe('waiting');
+        expect(await obligationOf(disputeId), reason).toBeUndefined();
+      }
+      // the waiting case states the first reason seen by the reconciliation worker; nothing is applied meanwhile
+      await reconciliation().drainOnce();
+      expect(await waitingCase(disputeId)).toMatchObject({ detail: 'attempt_unknown_to_billing', kind: null });
+      pay08.answers.delete(p.paymentId); // Payment: nothing attempted, nothing refunded
+      expect(await recovery().visit(disputeId)).toBe('opened');
+      await reconciliation().drainOnce();
+      expect(await waitingCase(disputeId)).toMatchObject({ kind: 'effect_applied', refundCaseId: null });
+    });
+
+    it('V6 / V26: the refund FAILED at Payment, the obligation proceeds; then the provider reports money (the case completes): nothing is undone, the overlap case opens, collection is frozen (409), T3 stays', async () => {
+      const p = await assistedPaid();
+      const r = await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      expect(await recovery().visit(disputeId)).toBe('waiting');
+      expect(await atPayment(p.paymentId, r.attemptId, 'failed')).toBe('failed');
+      expect(await recovery().visit(disputeId)).toBe('opened');
+      const o = await obligationOf(disputeId);
+      await completed(r, p); // the late money of a confirmed failure: the race item 6 cannot prevent
+      await reconciliation().drainOnce();
+      expect(await overlapCase(disputeId)).toMatchObject({ kind: null });
+      expect(await obligationOf(disputeId)).toMatchObject({ id: o.id, status: 'open' }); // facts stand (item 3)
+      expect((await restrictions()).map((x) => [x.kind, x.sourceId])).toContainEqual(['T3', o.id]);
+      const frozenSettle = await settleRecovery(o.id);
+      expect(frozenSettle.status, JSON.stringify(frozenSettle.body)).toBe(409);
+      expect(frozenSettle.body).toMatchObject({ code: 'recovery_collection_frozen' });
+      expect(await count(`SELECT count(*) AS n FROM recovery_settlement_channel WHERE "obligationId" = $1`, [o.id])).toBe(0);
+      // V5: the database refuses a channel during the overlap even past the application
+      const inv = randomUUID();
+      await expect(admin.query(`INSERT INTO recovery_settlement_channel ("obligationId", "invoiceId", amount, "startedBy") VALUES ($1, $2, 6100, $3)`, [o.id, inv, randomUUID()]))
+        .rejects.toMatchObject({ constraint: 'recovery_collection_frozen' });
+    });
+
+    it('V7: a channel started BEFORE the overlap continues; its verified payment is recorded and counted; a NEW channel after it is refused', async () => {
+      const p = await assistedPaid();
+      const r = await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      await atPayment(p.paymentId, r.attemptId, 'failed');
+      expect(await recovery().visit(disputeId)).toBe('opened');
+      const o = await obligationOf(disputeId);
+      const channel = await settleRecovery(o.id);
+      expect(channel.status, JSON.stringify(channel.body)).toBe(201);
+      await completed(r, p); // overlap from here on
+      await recoveryEvent(channel.body.paymentRequestId); // the channel's payment succeeds: never refused, never dead-lettered
+      expect(await count(`SELECT count(*) AS n FROM recovery_payment WHERE "paymentRequestId" = $1`, [channel.body.paymentRequestId])).toBe(1);
+      expect(await obligationOf(disputeId)).toMatchObject({ status: 'recovered' });
+      expect((await restrictions()).filter((x) => x.kind === 'T3')).toEqual([]);
+    });
+
+    it('V13: a relay mirrored `unknown` or `discrepancy` (Payment\'s own statement) keeps the obligation waiting and visible; D9 stays open (no exit is invented)', async () => {
+      for (const status of ['unknown', 'discrepancy'] as const) {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        expect(await atPayment(p.paymentId, r.attemptId, status), status).toBe(status);
+        const disputeId = await lose(p.paymentId, p.amount);
+        expect(await recovery().visit(disputeId), status).toBe('waiting');
+        await reconciliation().drainOnce();
+        expect(await waitingCase(disputeId), status).toMatchObject({ detail: 'relay_live', kind: null });
+        await reconciliation().drainOnce();
+        expect(await obligationOf(disputeId), status).toBeUndefined();
+        expect((await restrictions()).filter((x) => x.kind === 'T3'), status).toEqual([]);
+      }
+    });
+
+    it('V4: past the application, the database refuses an obligation while a refund of the captured movement is live', async () => {
+      const p = await assistedPaid();
+      await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      const a = await one(`SELECT s."assistanceRequestId", a."platformId", a."baseAmount", a.currency FROM subscription_purchase s JOIN assistance_request a ON a.id = s."assistanceRequestId" WHERE s.id = $1`, [p.purchaseId]);
+      await expect(admin.query(`INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [disputeId, a.assistanceRequestId, p.purchaseId, ORG, COMPANY, a.platformId, a.baseAmount, a.currency]))
+        .rejects.toMatchObject({ constraint: 'recovery_obligation_refund_live' });
+    });
+
+    it('DO-50 / V2: a direct purchase lost while its refund is live: reversal as adopted, the write-off WAITS; the refund completes: no write-off ever, overlap case; acknowledging no financial effect is refused (V16)', async () => {
+      const p = await directPurchase();
+      const r = await relayed(p.paymentId);
+      const disputeId = await loseAny(p.paymentId, p.amount);
+      expect(await one(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId])).toEqual({ outcome: 'reversed_purchase' }); // not delayed (item 5)
+      await reconciliation().drainOnce();
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "disputeId" = $1`, [disputeId])).toBe(0);
+      expect(await waitingCase(disputeId)).toMatchObject({ detail: 'relay_live', kind: null });
+      await completed(r, { ...p }, 'direct_purchase');
+      await t.app.get(RefundEffectService).drainOnce();
+      await reconciliation().drainOnce();
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE "disputeId" = $1`, [disputeId])).toBe(0);
+      expect(await overlapCase(disputeId)).toMatchObject({ kind: null });
+      expect(await waitingCase(disputeId)).toMatchObject({ kind: 'refund_completed', refundCaseId: r.caseId });
+      const second = await one(`SELECT id FROM reconciliation_case WHERE "caseType" = 'second_reversal_cause' AND "evidenceKey" = $1`, [(await purchaseOf(p.paymentId)).id]);
+      expect(second, 'the second reversal cause is reviewed').toBeTruthy();
+      const ack = await acknowledge(second.id, 'reviewed_no_financial_effect');
+      expect(ack.status, JSON.stringify(ack.body)).toBe(409);
+      expect(ack.body).toMatchObject({ code: 'reconciliation_case_in_overlap' });
+      // the database refuses it too, past the application
+      await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, 'acknowledged', $2, 'reviewed_no_financial_effect')`, [second.id, U.owner]))
+        .rejects.toMatchObject({ constraint: 'reconciliation_case_overlap_acknowledgement' });
+      // another reason still acknowledges the review; the overlap case stays open
+      expect((await acknowledge(second.id, 'provider_statement_reviewed')).status).toBe(200);
+      expect(await overlapCase(disputeId)).toMatchObject({ kind: null });
+    });
+
+    it('DO-50 order D: the write-off recorded first (refund failed at Payment), then the provider reports the refund: the write-off stands and the overlap case opens', async () => {
+      const p = await directPurchase();
+      const r = await relayed(p.paymentId);
+      const disputeId = await loseAny(p.paymentId, p.amount);
+      await atPayment(p.paymentId, r.attemptId, 'failed');
+      await reconciliation().drainOnce();
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE kind = 'direct_chargeback_write_off' AND "disputeId" = $1`, [disputeId])).toBe(1);
+      await completed(r, { ...p }, 'direct_purchase');
+      await t.app.get(RefundEffectService).drainOnce();
+      await reconciliation().drainOnce();
+      expect(await count(`SELECT count(*) AS n FROM financial_loss WHERE kind = 'direct_chargeback_write_off' AND "disputeId" = $1`, [disputeId])).toBe(1);
+      expect(await overlapCase(disputeId)).toMatchObject({ kind: null });
+    });
+
+    it('item 12: a waiting case resolves only by its evidence; effect_applied without an effect, or a refund of another movement, is refused by the database', async () => {
+      const p = await assistedPaid();
+      await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      await reconciliation().drainOnce();
+      const w = await waitingCase(disputeId);
+      await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind) VALUES ($1, 'effect_applied')`, [w.id]))
+        .rejects.toMatchObject({ constraint: 'reconciliation_case_resolution_evidence' });
+      const other = await assistedPaid();
+      const or = await relayed(other.paymentId);
+      await completed(or, other);
+      await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId") VALUES ($1, 'refund_completed', $2)`, [w.id, or.caseId]))
+        .rejects.toMatchObject({ constraint: 'reconciliation_case_resolution_evidence' });
+      await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, 'acknowledged', $2, 'provider_statement_reviewed')`, [w.id, U.owner]))
+        .rejects.toMatchObject({ constraint: 'reconciliation_case_resolution_evidence' });
+    });
+
+    it('items 10, 11 (evidence only, no route in WP B): an Owner suspension of an obligation in overlap removes its T3 and nothing else; one active; revocation restores T3; never outside an overlap', async () => {
+      const p = await assistedPaid();
+      const r = await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      await atPayment(p.paymentId, r.attemptId, 'failed');
+      expect(await recovery().visit(disputeId)).toBe('opened');
+      const o = await obligationOf(disputeId);
+      const event = (kind: 'suspended' | 'revoked', suspensionId: string, over: Record<string, unknown> = {}) => {
+        const v = { suspensionId, kind, obligationId: o.id, organizationId: ORG, companyId: COMPANY, disputeId, refundCaseId: r.caseId,
+          reasonCode: kind === 'suspended' ? 'refund_chargeback_overlap' : 'owner_reinstated_restriction', actorUserId: U.owner, receiptId: randomUUID(), consumeRef: randomUUID(), ...over };
+        return admin.query(`INSERT INTO recovery_restriction_suspension_event ("suspensionId", kind, "obligationId", "organizationId", "companyId", "disputeId", "refundCaseId", "reasonCode",
+          "actorUserId", "receiptId", "consumeRef") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [v.suspensionId, v.kind, v.obligationId, v.organizationId, v.companyId, v.disputeId, v.refundCaseId, v.reasonCode, v.actorUserId, v.receiptId, v.consumeRef]);
+      };
+      // no overlap yet: refused (the refund case is not completed either)
+      await expect(event('suspended', randomUUID())).rejects.toMatchObject({ constraint: 'recovery_restriction_suspension_evidence' });
+      await completed(r, p);
+      const s1 = randomUUID();
+      await event('suspended', s1);
+      expect((await restrictions()).filter((x) => x.kind === 'T3')).toEqual([]);
+      expect(await obligationOf(disputeId)).toMatchObject({ status: 'open' }); // the debt is untouched
+      await expect(event('suspended', randomUUID())).rejects.toMatchObject({ constraint: 'recovery_restriction_suspension_active' });
+      await expect(event('revoked', randomUUID())).rejects.toMatchObject({ constraint: 'recovery_restriction_suspension_revocation' });
+      await expect(event('suspended', randomUUID(), { companyId: OTHER_COMPANY })).rejects.toMatchObject({ constraint: 'recovery_restriction_suspension_evidence' });
+      await event('revoked', s1);
+      expect((await restrictions()).map((x) => [x.kind, x.sourceId])).toContainEqual(['T3', o.id]);
+      await expect(event('revoked', s1)).rejects.toMatchObject({ constraint: 'recovery_restriction_suspension_event_once' });
+      await expect(admin.query(`UPDATE recovery_restriction_suspension_event SET "reasonCode" = 'x' WHERE "suspensionId" = $1`, [s1])).rejects.toThrow();
+      await expect(admin.query(`DELETE FROM recovery_restriction_suspension_event WHERE "suspensionId" = $1`, [s1])).rejects.toThrow();
+      // a later fresh suspension is allowed
+      await event('suspended', randomUUID());
+      expect((await restrictions()).filter((x) => x.kind === 'T3')).toEqual([]);
+    });
+
+    // ── S0-C14 WP C: the Owner's suspension and revocation routes, and the read fields (items 10, 11, 13)
+    /** An open obligation whose captured movement is in overlap: the refund failed at Payment, the obligation opened, then the refund completed. */
+    const inOverlap = async () => {
+      const p = await assistedPaid();
+      const r = await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      await atPayment(p.paymentId, r.attemptId, 'failed');
+      expect(await recovery().visit(disputeId)).toBe('opened');
+      await completed(r, p);
+      const o = await obligationOf(disputeId);
+      return { ...p, disputeId, refundCaseId: r.caseId, obligationId: o.id as string };
+    };
+    /** Auth's receipt for exactly this binding, issued to `issuer` (AUTH-01): a suspension or a revocation. */
+    const restrictionReceipt = (o: { obligationId: string; disputeId: string; refundCaseId: string }, suspensionId: string, kind: 'suspend' | 'revoke',
+      over: Record<string, unknown> = {}, issuer = U.owner) => {
+      const secret = randomBytes(32).toString('base64url');
+      fraudAuth.issued.set(secret, { id: randomUUID(), issuer, binding: { operation: `recovery_restriction_${kind}`, audience: 'billing-service', companyId: COMPANY, suspensionId,
+        obligationId: o.obligationId, organizationId: ORG, disputeId: o.disputeId, refundCaseId: o.refundCaseId,
+        reasonCode: kind === 'suspend' ? 'refund_chargeback_overlap' : 'owner_reinstated_restriction', ...over } });
+      return secret;
+    };
+    const suspend = (obligationId: string, body: unknown, bearer = 'owner-tok') =>
+      send(request(server()).post(`/billing/admin/recovery-obligations/${obligationId}/restriction-suspensions`), bearer, null).send(body as object);
+    const revoke = (obligationId: string, suspensionId: string, body: unknown, bearer = 'owner-tok') =>
+      send(request(server()).post(`/billing/admin/recovery-obligations/${obligationId}/restriction-suspensions/${suspensionId}/revocation`), bearer, null).send(body as object);
+    const events = (obligationId: string) => admin.query(`SELECT "suspensionId", kind, "reasonCode", "actorUserId", "receiptId" FROM recovery_restriction_suspension_event
+      WHERE "obligationId" = $1 ORDER BY "recordedAt", kind`, [obligationId]).then((r) => r.rows as Row[]);
+    const restrictionsRead = async () => (await send(request(server()).get(`/billing/organizations/${ORG}/restrictions`), 'a1', null)).body as Row;
+
+    it('items 10, 13: the Owner sees the overlap evidence; suspending removes T3 for that obligation only; the debt, the freeze and the overlap case stay; one audit record', async () => {
+      const o = await inOverlap();
+      const before = (await ownerRead(o.obligationId)).body;
+      expect(before).toMatchObject({ outstanding: 6100, status: 'open', collection: 'frozen_overlap', restriction: 'active', overlap: { disputeId: o.disputeId, refundCaseId: o.refundCaseId },
+        suspensions: [] });
+      const suspensionId = randomUUID();
+      const s = await suspend(o.obligationId, { suspensionId, receiptSecret: restrictionReceipt(o, suspensionId, 'suspend') });
+      expect(s.status, JSON.stringify(s.body)).toBe(201);
+      expect(s.body).toMatchObject({ obligationId: o.obligationId, suspensionId, status: 'suspended', reasonCode: 'refund_chargeback_overlap', recordedBy: { userId: U.owner } });
+      expect((await ownerRead(o.obligationId)).body).toMatchObject({ outstanding: 6100, status: 'open', collection: 'frozen_overlap', restriction: 'suspended',
+        suspensions: [{ suspensionId, status: 'active', suspendedBy: { userId: U.owner }, revokedBy: null }] });
+      // the Organization's administrator: the derived status only, never the overlap evidence, who suspended or when
+      const org = (await readRecovery(o.obligationId)).body;
+      expect(org).toMatchObject({ outstanding: 6100, status: 'open', collection: 'frozen_overlap', restriction: 'suspended' });
+      expect(org).not.toHaveProperty('suspensions');
+      expect(org).not.toHaveProperty('overlap');
+      const list = await restrictionsRead();
+      expect(list.restrictions.filter((x: Row) => x.kind === 'T3' && x.sourceId === o.obligationId)).toEqual([]);
+      expect(list.suspended).toEqual([{ kind: 'T3', obligationId: o.obligationId, since: expect.any(String) }]);
+      expect((await settleRecovery(o.obligationId)).body).toMatchObject({ code: 'recovery_collection_frozen' }); // still frozen
+      await reconciliation().drainOnce();
+      expect(await overlapCase(o.disputeId)).toMatchObject({ kind: null }); // open, and no suspension resolves it
+      const recorded = (await audit(o.obligationId)).filter((x) => x.name === 'audit.recovery_restriction.suspended');
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]!.payload).toMatchObject({ action: 'recovery_restriction.suspended', organizationId: ORG, resource: { type: 'recovery_obligation', id: o.obligationId },
+        actor: { type: 'user', id: U.owner, userKind: 'owner' },
+        changes: { suspension_id: suspensionId, dispute_id: o.disputeId, refund_case_id: o.refundCaseId, reason_code: 'refund_chargeback_overlap' } });
+    });
+
+    it('item 10: exact binding (suspension id, obligation, Organization, dispute, refund case, closed reason), the issuing Owner only; nothing recorded on a refusal', async () => {
+      const o = await inOverlap();
+      const sid = randomUUID();
+      for (const over of [{ suspensionId: randomUUID() }, { obligationId: randomUUID() }, { organizationId: randomUUID() }, { disputeId: randomUUID() }, { refundCaseId: randomUUID() },
+        { reasonCode: 'owner_reinstated_restriction' }]) {
+        const r = await suspend(o.obligationId, { suspensionId: sid, receiptSecret: restrictionReceipt(o, sid, 'suspend', over) });
+        expect([r.status, r.body.code], JSON.stringify(over)).toEqual([409, 'recovery_authorization_refused']);
+      }
+      const other = await suspend(o.obligationId, { suspensionId: sid, receiptSecret: restrictionReceipt(o, sid, 'suspend', {}, randomUUID()) }); // issued to another Owner
+      expect([other.status, other.body.code]).toEqual([409, 'recovery_authorization_refused']);
+      for (const body of [{ suspensionId: sid }, { suspensionId: 'x', receiptSecret: randomBytes(32).toString('base64url') },
+        { suspensionId: sid, receiptSecret: randomBytes(32).toString('base64url'), reasonCode: 'free text' }]) {
+        expect((await suspend(o.obligationId, body)).body, JSON.stringify(body)).toMatchObject({ code: 'invalid_recovery_request' });
+      }
+      expect(await events(o.obligationId)).toEqual([]);
+    });
+
+    it('isolation: another Company\'s Owner gets the collapsed 404, an operator or a member 403; an obligation outside an overlap is not suspendable', async () => {
+      // the same obligation BEFORE its overlap: the refund failed at Payment and the obligation opened; nothing is refunded yet
+      const p = await assistedPaid();
+      const rl = await relayed(p.paymentId);
+      const disputeId = await lose(p.paymentId, p.amount);
+      await atPayment(p.paymentId, rl.attemptId, 'failed');
+      expect(await recovery().visit(disputeId)).toBe('opened');
+      const o = { disputeId, refundCaseId: rl.caseId, obligationId: (await obligationOf(disputeId)).id as string };
+      expect((await ownerRead(o.obligationId)).body).toMatchObject({ collection: 'open', restriction: 'active', overlap: null, suspensions: [] });
+      const x = randomUUID();
+      const early = await suspend(o.obligationId, { suspensionId: x, receiptSecret: restrictionReceipt(o, x, 'suspend') });
+      expect([early.status, early.body.code]).toEqual([409, 'recovery_restriction_not_suspendable']);
+      await completed(rl, p); // the overlap from here on
+      const sid = randomUUID();
+      const secret = restrictionReceipt(o, sid, 'suspend');
+      expect((await suspend(o.obligationId, { suspensionId: sid, receiptSecret: secret }, 'foreign-owner-tok')).status).toBe(404);
+      expect((await suspend(randomUUID(), { suspensionId: sid, receiptSecret: secret })).status).toBe(404);
+      for (const bearer of ['operator-tok', 'member-tok']) expect((await suspend(o.obligationId, { suspensionId: sid, receiptSecret: secret }, bearer)).status, bearer).toBe(403);
+      expect((await revoke(o.obligationId, sid, { receiptSecret: secret }, 'foreign-owner-tok')).status).toBe(404);
+      expect(await events(o.obligationId)).toEqual([]);
+      expect((await suspend(o.obligationId, { suspensionId: sid, receiptSecret: secret })).status).toBe(201); // the receipt was never spent by a refused caller
+    });
+
+    it('item 10: one active suspension; the same request again is answered once; a retry after Auth was unavailable, or after a lost answer, records once (V10, V12)', async () => {
+      const o = await inOverlap();
+      const sid = randomUUID();
+      const secret = restrictionReceipt(o, sid, 'suspend');
+      fraudAuth.down = true;
+      try {
+        expect((await suspend(o.obligationId, { suspensionId: sid, receiptSecret: secret })).body).toMatchObject({ code: 'recovery_authorization_unresolved' });
+      } finally {
+        fraudAuth.down = false;
+      }
+      expect(await events(o.obligationId)).toEqual([]);
+      // Auth consumed it, but Billing never recorded it (a crash after the consumption): the same request finds that consumption and records once
+      await fraudHoldReceipts.consume({ secret, binding: fraudAuth.issued.get(secret)!.binding as never, consumeRef: sid });
+      expect((await suspend(o.obligationId, { suspensionId: sid, receiptSecret: secret })).status).toBe(201);
+      const again = await suspend(o.obligationId, { suspensionId: sid, receiptSecret: secret });
+      expect(again.status).toBe(200);
+      expect(await events(o.obligationId)).toHaveLength(1);
+      const second = randomUUID();
+      const r = await suspend(o.obligationId, { suspensionId: second, receiptSecret: restrictionReceipt(o, second, 'suspend') });
+      expect([r.status, r.body.code]).toEqual([409, 'recovery_restriction_not_suspendable']);
+      // the same suspension id with ANOTHER receipt: Auth refuses the second consumption under the same reference
+      const other = await suspend(o.obligationId, { suspensionId: sid, receiptSecret: restrictionReceipt(o, sid, 'suspend') });
+      expect(other.status).toBe(200); // already recorded for this id: answered, nothing consumed
+      expect((await audit(o.obligationId)).filter((x) => x.name === 'audit.recovery_restriction.suspended')).toHaveLength(1);
+    });
+
+    it('item 11: revocation restores T3 for new requests; answered once; a second or unknown revocation is refused; a later fresh suspension is allowed', async () => {
+      const o = await inOverlap();
+      const sid = randomUUID();
+      expect((await suspend(o.obligationId, { suspensionId: sid, receiptSecret: restrictionReceipt(o, sid, 'suspend') })).status).toBe(201);
+      const wrong = await revoke(o.obligationId, sid, { receiptSecret: restrictionReceipt(o, sid, 'revoke', { reasonCode: 'refund_chargeback_overlap' }) });
+      expect([wrong.status, wrong.body.code]).toEqual([409, 'recovery_authorization_refused']);
+      const secret = restrictionReceipt(o, sid, 'revoke');
+      const r = await revoke(o.obligationId, sid, { receiptSecret: secret });
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      expect(r.body).toMatchObject({ suspensionId: sid, status: 'revoked', reasonCode: 'owner_reinstated_restriction' });
+      expect((await revoke(o.obligationId, sid, { receiptSecret: secret })).status).toBe(200);
+      expect((await revoke(o.obligationId, sid, { receiptSecret: restrictionReceipt(o, sid, 'revoke') }, 'owner-tok')).status).toBe(200); // the same Owner: answered
+      expect((await revoke(o.obligationId, randomUUID(), { receiptSecret: secret })).body).toMatchObject({ code: 'recovery_suspension_not_active' });
+      expect((await ownerRead(o.obligationId)).body).toMatchObject({ restriction: 'active', suspensions: [{ suspensionId: sid, status: 'revoked' }] });
+      expect((await restrictions()).map((x) => [x.kind, x.sourceId])).toContainEqual(['T3', o.obligationId]);
+      const revokedAudit = (await audit(o.obligationId)).filter((x) => x.name === 'audit.recovery_restriction.suspension_revoked');
+      expect(revokedAudit.map((x) => x.payload.changes)).toEqual([{ suspension_id: sid, reason_code: 'owner_reinstated_restriction' }]);
+      const fresh = randomUUID();
+      expect((await suspend(o.obligationId, { suspensionId: fresh, receiptSecret: restrictionReceipt(o, fresh, 'suspend') })).status).toBe(201);
+      expect(await events(o.obligationId)).toHaveLength(3);
+      // S0-C14 WP D finding: every suspension and revocation of one obligation is its own audit record (the event id's identity is the suspension)
+      const intents = (await audit(o.obligationId)).filter((x) => String(x.name).startsWith('audit.recovery_restriction.'));
+      expect(intents.map((x) => [x.name, x.payload.changes.suspension_id])).toEqual([
+        ['audit.recovery_restriction.suspended', sid], ['audit.recovery_restriction.suspension_revoked', sid], ['audit.recovery_restriction.suspended', fresh]]);
+    });
+
+    it('item 14 (C14): the safety check reads every page and compares one way; unavailable when Payment cannot answer; a Billing relay Payment does not hold is a mismatch', async () => {
+      const check = t.app.get(FinancialSafetyCheck);
+      pay08.down = true;
+      expect(await check.scan()).toMatchObject({ kind: 'unavailable' });
+      pay08.down = false;
+      const p = await assistedPaid();
+      const r = await relayed(p.paymentId); // Billing mirrors `authorized`; Payment (default answer) holds no attempt at all
+      const out = await check.scan();
+      expect(out.kind).toBe('mismatch');
+      expect((out as { findings: string[] }).findings).toContain(`relay_unknown_to_payment payment=${p.paymentId} relay=${r.attemptId}`);
+    });
   });
 
   it('production mounts no recovery route and no worker', () => {

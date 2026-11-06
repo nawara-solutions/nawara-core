@@ -94,12 +94,22 @@ export interface RefundAuthorizationSnapshot {
   approvedAmount: number;
   currency: string;
   completedAt: string | null;
+  /** Core V2 S0-C14 item 6: Payment's verified allocations of refund facts to this authorization (refund evidence). Absent from an older Payment: none */
+  allocations: { factId: string; amount: number; currency: string }[];
 }
+
+/** Core V2 S0-C14 item 6: a refund fact Payment holds but has not allocated (pending or blocked): refund evidence all the same. */
+export interface UnallocatedRefundFact { factId: string; refundAttemptId: string | null; amount: number; currency: string; state: 'pending' | 'blocked' }
 
 export interface PaymentRefunds {
   attempts: RefundAttemptSnapshot[];
   refusals: { refundAttemptId: string; code: PaymentRefusal }[];
   authorizations: RefundAuthorizationSnapshot[];
+  /**
+   * Core V2 S0-C14 item 6: the producer's view of the refund facts not (yet) allocated. `null` when Payment's answer does not carry the field
+   * (a non-producer view, or a Payment older than S6c): the answer then proves nothing about refund evidence, and callers fail closed.
+   */
+  unallocatedFacts: UnallocatedRefundFact[] | null;
 }
 
 /** Core V2 S0-C11 item 7c (PAY-16): a payment's settling capture, as Payment's committed records state it. */
@@ -225,9 +235,30 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
     const authorizations = raw.map((z) => {
       if (![z.refundAuthorizationId, z.refundAttemptId, z.refundCaseId].every((v) => typeof v === 'string' && UUID.test(v)) || typeof z.approvedAmount !== 'number'
         || typeof z.currency !== 'string' || (z.completedAt !== null && typeof z.completedAt !== 'string')) throw new Error('payment-service GET refunds: malformed authorization');
+      // Core V2 S0-C14 item 6: each verified allocation is refund evidence; a malformed one proves nothing, so the whole answer is refused
+      const rawAllocations = z.allocations === undefined ? [] : z.allocations;
+      if (!Array.isArray(rawAllocations)) throw new Error('payment-service GET refunds: malformed allocations');
+      const allocations = (rawAllocations as Record<string, unknown>[]).map((a) => {
+        if (typeof a?.factId !== 'string' || !UUID.test(a.factId) || typeof a.amount !== 'number' || !Number.isSafeInteger(a.amount) || typeof a.currency !== 'string') {
+          throw new Error('payment-service GET refunds: malformed allocation');
+        }
+        return { factId: a.factId, amount: a.amount, currency: a.currency };
+      });
       return { refundAuthorizationId: z.refundAuthorizationId as string, refundAttemptId: z.refundAttemptId as string, refundCaseId: z.refundCaseId as string,
-        approvedAmount: z.approvedAmount, currency: z.currency, completedAt: (z.completedAt as string | null) ?? null };
+        approvedAmount: z.approvedAmount, currency: z.currency, completedAt: (z.completedAt as string | null) ?? null, allocations };
     });
-    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations };
+    // Core V2 S0-C14 item 6: the producer's unallocated refund facts; absent: null (proves nothing); malformed: the answer is refused
+    let unallocatedFacts: UnallocatedRefundFact[] | null = null;
+    if (r.body.unallocatedFacts !== undefined) {
+      if (!Array.isArray(r.body.unallocatedFacts)) throw new Error('payment-service GET refunds: malformed unallocated facts');
+      unallocatedFacts = (r.body.unallocatedFacts as Record<string, unknown>[]).map((f) => {
+        if (typeof f?.factId !== 'string' || !UUID.test(f.factId) || (f.refundAttemptId !== null && (typeof f.refundAttemptId !== 'string' || !UUID.test(f.refundAttemptId)))
+          || typeof f.amount !== 'number' || !Number.isSafeInteger(f.amount) || typeof f.currency !== 'string' || (f.state !== 'pending' && f.state !== 'blocked')) {
+          throw new Error('payment-service GET refunds: malformed unallocated fact');
+        }
+        return { factId: f.factId, refundAttemptId: f.refundAttemptId as string | null, amount: f.amount, currency: f.currency, state: f.state };
+      });
+    }
+    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations, unallocatedFacts };
   }
 }

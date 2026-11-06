@@ -55,7 +55,7 @@ const refundsAtPayment: PaymentRefundClient = {
     relayed.push(body as unknown as Record<string, unknown>);
     return { kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } };
   },
-  refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+  refunds: async () => ({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] }),
   // R6H-5: Payment's evidence of a late capture, refundable on its own (the capture-specific route must still refuse it, S0-C8)
   // the capture as Payment states it: these fixtures' late captures are of the channel invoice's total (5300; the Organization's fee is not captured)
   capture: async (paymentId, factId) => ({ kind: 'capture' as const, capture: { factId, paymentId, amount: 5300, currency: 'TND', basis: 'late_capture' as const, paymentStatus: 'expired',

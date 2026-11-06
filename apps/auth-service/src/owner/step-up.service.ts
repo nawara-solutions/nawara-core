@@ -96,6 +96,12 @@ export const STEP_UP_METHODS = {
   // amount as a loss (billing-service consumes it; accounting only, never forgiveness). Declaring them activates no Payment or Billing operation.
   'payment.provider_fact.associate': ['totp', 'webauthn'],
   'billing.recovery.write_off': ['totp', 'webauthn'],
+  // Core V2 S0-C14 WP A (S0 §1.5 S0-C14 items 10, 11; register AUTH-01 H): an Owner's suspension of T3 for ONE recovery obligation in a refund
+  // and chargeback overlap, and its revocation, each with its own fresh, factor-only proof, never the bare key. Auth-local: consumed only by the
+  // issuance of its own receipt (receipt-binding.ts); POST /auth/step-up/verify refuses both without consuming them. A suspension never clears,
+  // forgives or resolves the debt. Declaring them activates no Billing operation.
+  'billing.recovery_restriction.suspend': ['totp', 'webauthn'],
+  'billing.recovery_restriction.revoke': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
@@ -124,9 +130,13 @@ export const LATE_SETTLEMENT_APPLY_PURPOSE = 'billing.late_settlement.apply' sat
 export const PROVIDER_FACT_ASSOCIATE_PURPOSE = 'payment.provider_fact.associate' satisfies StepUpPurpose;
 export const RECOVERY_WRITE_OFF_PURPOSE = 'billing.recovery.write_off' satisfies StepUpPurpose;
 
+/** The purposes of an Owner's T3 suspension and its revocation (S0-C14 items 10, 11). Only receipt issuance consumes them. */
+export const RECOVERY_RESTRICTION_SUSPEND_PURPOSE = 'billing.recovery_restriction.suspend' satisfies StepUpPurpose;
+export const RECOVERY_RESTRICTION_REVOKE_PURPOSE = 'billing.recovery_restriction.revoke' satisfies StepUpPurpose;
+
 /** Purposes no calling service may verify or consume through POST /auth/step-up/verify: each has its one Auth-local consumer. */
 const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE, DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE,
-  PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE]);
+  PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE, RECOVERY_RESTRICTION_SUSPEND_PURPOSE, RECOVERY_RESTRICTION_REVOKE_PURPOSE]);
 
 /**
  * What `consumeForReferenceRepair` knows after its one statement (ADR-0065 §5; A5.4-A3 O8):

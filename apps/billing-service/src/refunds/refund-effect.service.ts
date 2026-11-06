@@ -1,6 +1,7 @@
 import { Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, PollLoop, describeFailure, type DrainOutcome, type Queryable } from '@nawara/service-kit';
 import { BillingAudit } from '../audit/billing-audit.js';
+import { FinancialWorkerGate } from './financial-safety.js';
 import type { TransitionContext } from '../domain/actors.js';
 
 /** The worker's system identity (Audit catalog: `subscription_purchase.reversed`, `cash_return_obligation.opened`). */
@@ -240,14 +241,21 @@ export class RefundEffectService {
 
 @Injectable()
 export class RefundEffectWorkerService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
-  constructor(private readonly worker: RefundEffectService) {}
+  /** Core V2 S0-C14 item 14: set at shutdown, so a gate opened late never starts a stopped worker. */
+  private stopping = false;
+  constructor(private readonly worker: RefundEffectService, private readonly gate: FinancialWorkerGate) {}
+  /** Core V2 S0-C14 item 14: no pass before the financial reconciliation safety check passes (never after a mismatch); bootstrap is not blocked. */
   onApplicationBootstrap(): void {
-    this.worker.start();
+    void this.gate.whenPassed().then(() => {
+      if (!this.stopping) this.worker.start();
+    });
   }
   onModuleDestroy(): void {
+    this.stopping = true;
     void this.worker.stop();
   }
   async beforeApplicationShutdown(): Promise<void> {
+    this.stopping = true;
     await this.worker.stop();
   }
   async onApplicationShutdown(): Promise<void> {

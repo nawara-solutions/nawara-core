@@ -666,7 +666,8 @@ const SPEC = {
     changes: {
       case_type: { type: 'code', shape: 'value', required: true, values: ['late_assisted_settlement', 'recovery_surplus', 'late_success', 'unmatched_capture',
         'unrouted_settlement', 'over_return', 'refund_discrepancy', 'partial_chargeback', 'second_reversal_cause', 'contradictory_effect', 'authorization_pending',
-        'chargeback_refund_overlap', 'capture_contradiction', 'chargeback_loss_review'] },
+        'chargeback_refund_overlap', 'capture_contradiction', 'chargeback_loss_review',
+        'chargeback_effect_waiting'] }, // Core V2 S0-C14 item 12 (BIL-33 M): a loss effect waiting on a live refund
       evidence_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: false, min: 1, max: 9007199254740991 },
     },
@@ -707,6 +708,30 @@ const SPEC = {
     resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK,
     changes: { amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 } },
     purpose: 'The Owner recognized a recovery obligation\'s outstanding principal as a loss, with a dedicated receipt: accounting only, never forgiveness; the obligation and T3 stay.',
+  },
+  // Core V2 S0-C14 WP A (S0 §1.5 S0-C14 items 10, 11; register AUTH-01 H): the Owner's suspension of T3 for ONE recovery obligation in a refund
+  // and chargeback overlap, and its revocation, each with its own Auth receipt. Version 1, no trusted scope (S2-Audit D3), so they are not on the
+  // Company timeline (DO-59); the Organization is stated, so an Organization read can reach them. The resource is the obligation; the
+  // suspension's own id is a change. No amount: a suspension moves no money and never clears, forgives or resolves the debt.
+  'recovery_restriction.suspended': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      suspension_id: { type: 'uuid', shape: 'value', required: true },
+      dispute_id: { type: 'uuid', shape: 'value', required: true },
+      refund_case_id: { type: 'uuid', shape: 'value', required: true },
+      reason_code: { type: 'code', shape: 'value', required: true, values: ['refund_chargeback_overlap'] },
+    },
+    purpose: 'The Owner suspended T3 for one recovery obligation in a refund and chargeback overlap, with a dedicated receipt: the debt, the collection freeze and the overlap case stay; nothing is forgiven or resolved.',
+  },
+  'recovery_restriction.suspension_revoked': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['recovery_obligation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      suspension_id: { type: 'uuid', shape: 'value', required: true },
+      reason_code: { type: 'code', shape: 'value', required: true, values: ['owner_reinstated_restriction'] },
+    },
+    purpose: 'The Owner revoked an active T3 suspension of one recovery obligation, with a dedicated receipt: T3 applies again to new assistance requests only, never retroactively.',
   },
   'recovery_surplus.recipient_confirmed': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['member'] }, organization: 'required',

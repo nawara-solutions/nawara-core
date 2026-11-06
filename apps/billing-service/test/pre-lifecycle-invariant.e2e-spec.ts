@@ -17,6 +17,7 @@ import type { CancelPaymentOutcome, CreatePaymentOutcome, PaymentClient, Payment
 import { RecoveryService } from '../src/recovery/recovery.service.js';
 import { DisputeLossService } from '../src/refunds/dispute-loss.service.js';
 import type { PaymentDisputeClient } from '../src/refunds/payment-dispute-client.js';
+import type { PaymentRefundClient } from '../src/refunds/payment-refund-client.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -179,6 +180,8 @@ describeWithEnv('Billing pre-lifecycle invariant (T-A4, S0-C7) — real PostgreS
     await admin.query(`INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, $2, 'TND', $3)`, [PLATFORM, COMPANY, randomUUID()]);
     t = await createTestApp({
       databaseUrl: db.url, authClient, organizationReference: reference, paymentClient: payment, paymentDisputeClient: noLossesRead,
+      // Core V2 S0-C14 item 6: an obligation proceeds only on Payment's PAY-08 proof that no refund of the movement exists (here: nothing attempted)
+      paymentRefundClient: { refunds: async () => ({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] }) } as unknown as PaymentRefundClient,
       tokens: [{ caller: 'test-producer', digest: producer.digest }],
     });
   });

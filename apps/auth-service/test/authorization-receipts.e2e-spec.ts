@@ -32,7 +32,9 @@ describe('authorization receipts (S2-Auth.1)', () => {
   let t: TestCtx;
   let svc: AuthorizationReceiptService;
   beforeAll(async () => {
-    t = await createTestApp({ AUTHORIZATION_RECEIPT_PEPPER: PEPPER });
+    // The helper lifts every Auth rate bucket; this file's step-up volume (S0-C14 WP A added two more receipt operations) also exceeds the
+    // baseline per-IP HTTP throttler's default 100 requests a minute, which no test here exercises.
+    t = await createTestApp({ AUTHORIZATION_RECEIPT_PEPPER: PEPPER, BASELINE_RATE_LIMIT_PER_MINUTE: '100000' });
     svc = t.app.get(AuthorizationReceiptService);
   });
   afterAll(() => t.close());
@@ -751,6 +753,84 @@ describe('authorization receipts (S2-Auth.1)', () => {
       try {
         expect(await codeOf(svc.consume(CALLER, { secret: a.secret, binding: a.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
         expect(await codeOf(svc.consume(BILLING, { secret: w.secret, binding: w.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+      } finally {
+        await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [o.id]);
+      }
+    });
+  });
+
+  /**
+   * Core V2 S0-C14 WP A (S0 §1.5 S0-C14 items 10, 11; register AUTH-01 H): an Owner's suspension of T3 for one recovery obligation in overlap,
+   * and its revocation, each a receipt bound to its exact obligation, issued only after its own factor-only step-up and consumed only by
+   * billing-service. Every receipt rule above applies unchanged. Declaring them activates no Billing operation.
+   */
+  describe('recovery-restriction suspension and revocation receipts (S0-C14 WP A)', () => {
+    const SUSPEND = 'billing.recovery_restriction.suspend';
+    const REVOKE = 'billing.recovery_restriction.revoke';
+    const BILLING = 'billing-service';
+    const suspend = (companyId: string, over: Record<string, unknown> = {}) => ({
+      operation: 'recovery_restriction_suspend', audience: BILLING, companyId, suspensionId: randomUUID(), obligationId: randomUUID(), organizationId: randomUUID(),
+      disputeId: randomUUID(), refundCaseId: randomUUID(), reasonCode: 'refund_chargeback_overlap', ...over,
+    });
+    const revoke = (companyId: string, over: Record<string, unknown> = {}) => ({ ...suspend(companyId), operation: 'recovery_restriction_revoke', reasonCode: 'owner_reinstated_restriction', ...over });
+    const issueWith = async (o: Ready, purpose: string, b: Record<string, unknown>) => {
+      const stepUpToken = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+      return { ...(await svc.issue(o.owner, { stepUpToken, idempotencyKey: key(), binding: b })), binding: b, stepUpToken };
+    };
+
+    it('each is issued after its own factor-only step-up and consumed once, only by billing-service, for exactly that binding', async () => {
+      const o = await ready();
+      for (const [purpose, b] of [[SUSPEND, suspend(o.companyId)], [REVOKE, revoke(o.companyId)]] as const) {
+        const r = await issueWith(o, purpose, b);
+        expect(await stepUpConsumed(r.stepUpToken), purpose).toBe(true);
+        expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() })), purpose).toBe('receipt_binding_invalid');
+        const ref = randomUUID();
+        const c = await svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: ref });
+        expect(c, purpose).toMatchObject({ receiptId: r.receiptId, consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
+        expect(await svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: ref }), purpose).toEqual(c);
+        expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() })), purpose).toBe('consume_ref_conflict');
+      }
+    });
+
+    it('purpose separation both ways; refused proofs are not burned; the secret key never qualifies', async () => {
+      const o = await ready();
+      for (const [purpose, b] of [[SUSPEND, revoke(o.companyId)], [REVOKE, suspend(o.companyId)], ['billing.recovery.write_off', suspend(o.companyId)], [SUSPEND, { operation: 'recovery_write_off', audience: BILLING, companyId: o.companyId, obligationId: randomUUID(), organizationId: randomUUID(), amount: 6100, currency: 'TND' }]] as const) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await httpStatusOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: b })), purpose).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+      for (const purpose of [SUSPEND, REVOKE]) {
+        const sk = await t.stepUp(o.tokens as Tokens, purpose, o.totpSecret, { method: 'secret_key', secretKey: 'x'.repeat(43), code: undefined });
+        expect([sk.status, sk.body.code], purpose).toEqual([400, 'step_up_unsupported']);
+      }
+    });
+
+    it('never authorizes another suspension, obligation, Organization, dispute, refund case, reason or Company; an unknown reason is never issued; revoked authority consumes nothing; verify refuses both proofs', async () => {
+      const o = await ready();
+      const s = await issueWith(o, SUSPEND, suspend(o.companyId));
+      const r = await issueWith(o, REVOKE, revoke(o.companyId));
+      for (const change of [{ suspensionId: randomUUID() }, { obligationId: randomUUID() }, { organizationId: randomUUID() }, { disputeId: randomUUID() }, { refundCaseId: randomUUID() }]) {
+        expect(await codeOf(svc.consume(BILLING, { secret: s.secret, binding: { ...s.binding, ...change }, consumeRef: randomUUID() })), JSON.stringify(change)).toBe('receipt_invalid');
+        expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: { ...r.binding, ...change }, consumeRef: randomUUID() })), JSON.stringify(change)).toBe('receipt_invalid');
+      }
+      // A reason outside the operation's closed vocabulary is not a binding at all: refused before any receipt is touched
+      for (const reasonCode of ['owner_review', 'Owner forgives', 'owner_reinstated_restriction']) {
+        expect(await codeOf(svc.consume(BILLING, { secret: s.secret, binding: { ...s.binding, reasonCode }, consumeRef: randomUUID() })), reasonCode).toBe('receipt_binding_invalid');
+      }
+      expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: { ...r.binding, reasonCode: 'refund_chargeback_overlap' }, consumeRef: randomUUID() }))).toBe('receipt_binding_invalid');
+      expect((await row(s.receiptId)).status).toBe('issued');
+      expect((await row(r.receiptId)).status).toBe('issued');
+      for (const [purpose, b] of [[SUSPEND, suspend(await t.newCompany())], [REVOKE, revoke(await t.newCompany())], [SUSPEND, suspend(o.companyId, { reasonCode: 'owner_review' })],
+        [REVOKE, revoke(o.companyId, { reasonCode: 'refund_chargeback_overlap' })]] as const) {
+        const su = await t.stepUpToken(o.tokens as Tokens, purpose, o.totpSecret);
+        expect(await codeOf(svc.issue(o.owner, { stepUpToken: su, idempotencyKey: key(), binding: b })), purpose).toBe('receipt_binding_invalid');
+        expect(await httpStatusOf(t.app.get(StepUpService).verifyForService(t.dbs, { ownerId: o.id, sid: o.owner.sid, purpose, token: su })), purpose).toBe(403);
+        expect(await stepUpConsumed(su)).toBe(false);
+      }
+      await t.db.query(`UPDATE "user" SET "isActive"=false WHERE id=$1`, [o.id]);
+      try {
+        expect(await codeOf(svc.consume(BILLING, { secret: s.secret, binding: s.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
+        expect(await codeOf(svc.consume(BILLING, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('authority_revoked');
       } finally {
         await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [o.id]);
       }

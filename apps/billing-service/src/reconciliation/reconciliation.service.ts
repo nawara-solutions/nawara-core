@@ -12,8 +12,10 @@ import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authori
 import { RefundCommandIdempotency } from '../refunds/refund-idempotency.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { LateSuccessService } from './late-success.service.js';
+import { RefundEvidenceReader } from '../refunds/refund-evidence.js';
 import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient } from '../refunds/payment-refund-client.js';
 import { PAYMENT_RECONCILIATION_CLIENT, type PaymentItem, type PaymentItemKind, type PaymentReconciliationClient } from './payment-reconciliation-client.js';
+import { FinancialWorkerGate } from '../refunds/financial-safety.js';
 import {
   ACKNOWLEDGEMENT_REASONS, CASE_TYPES, REVIEW_ONLY, ReconciliationCases, workerContext, type CaseType,
 } from './reconciliation-cases.js';
@@ -106,6 +108,7 @@ export class ReconciliationService {
     @Inject(FRAUD_HOLD_RECEIPTS) private readonly receipts: FraudHoldReceipts,
     @Inject(OWNER_AUTHORITY) private readonly owners: OwnerAuthority,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
+    private readonly evidence: RefundEvidenceReader,
   ) {}
 
   start(intervalMs = 10_000): void {
@@ -307,6 +310,13 @@ export class ReconciliationService {
           AND ${fresh('chargeback_refund_overlap', 'l."disputeId"')}`,
       (r) => ({ caseType: 'chargeback_refund_overlap', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, amount: Number(r.amount), currency: r.currency,
         detail: 'refund_and_chargeback' }));
+    // Core V2 S0-C14 items 2, 8: every refund and chargeback overlap, on every capture basis and in any order (an assisted settling capture
+    // included, DO-51; a direct write-off recorded first included, DO-50; an obligation opened first included, DO-52): decided from recorded facts
+    await run(`SELECT l."disputeId" AS id, l."paymentRequestId", l."paymentId", l."captureFactId", l."chargebackAmount" AS amount, trim(l.currency) AS currency
+        FROM payment_dispute_loss l WHERE billing_loss_overlap(l."disputeId") AND ${fresh('chargeback_refund_overlap', 'l."disputeId"')}`,
+      (r) => ({ caseType: 'chargeback_refund_overlap', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, paymentId: r.paymentId, captureFactId: r.captureFactId,
+        amount: Number(r.amount), currency: r.currency, detail: 'refund_and_chargeback' }));
+    await this.discoverWaiting(tally);
     // recovery surpluses: owed to the Organization until resolved (R-2); the case is the Owner's visibility, the obligation's Company
     for (const r of (await this.db.query<{ id: string; amount: string; currency: string; companyId: string; platformId: string; organizationId: string }>(
       `SELECT s.id, s.amount, trim(s.currency) AS currency, o."companyId", o."platformId", s."organizationId" FROM recovery_surplus s JOIN recovery_obligation o ON o.id = s."obligationId"
@@ -318,7 +328,41 @@ export class ReconciliationService {
     }
   }
 
-  /** FC-6: the direct final-lost chargeback write-off, once per chargeback fact; with a completed refund of the payment, a case instead. */
+  /**
+   * Core V2 S0-C14 item 12 (BIL-33 M): one `chargeback_effect_waiting` case per loss whose automatic effect qualifies (an assisted capture's first
+   * full loss within its cap whose purchase has no obligation; a direct purchase's committed reversal by a full settling-capture loss with no
+   * write-off yet) but waits: a refund of its captured movement may still exist (a live local relay, or a fresh Payment read that does not prove
+   * none can). Owner-only, never acknowledgeable; a partial, excess or repeated loss never had an effect to wait for. A clean read opens nothing:
+   * the effect's own worker proceeds.
+   */
+  private async discoverWaiting(tally: { opened: number }): Promise<void> {
+    const { rows } = await this.db.query<{ disputeId: string; paymentRequestId: string; paymentId: string; captureFactId: string | null; amount: string; currency: string }>(
+      `SELECT l."disputeId", l."paymentRequestId", l."paymentId", l."captureFactId", l."chargebackAmount" AS amount, trim(l.currency) AS currency
+         FROM payment_dispute_loss l JOIN dispute_loss_effect e ON e."disputeId" = l."disputeId"
+        WHERE NOT billing_loss_effect_applied(l."disputeId") AND NOT billing_loss_overlap(l."disputeId")
+          AND NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = 'chargeback_effect_waiting' AND k."evidenceKey" = l."disputeId")
+          AND ((e.reason = 'assisted_purchase_preserved'
+                AND EXISTS (SELECT 1 FROM capture_loss_cap c WHERE c."disputeId" = l."disputeId" AND c."firstFull")
+                AND NOT EXISTS (SELECT 1 FROM recovery_review r WHERE r."disputeId" = l."disputeId")
+                AND NOT EXISTS (SELECT 1 FROM recovery_obligation o WHERE o."purchaseId" = e."purchaseId"))
+            OR (e.outcome = 'reversed_purchase' AND l."captureBasis" = 'settling_capture'
+                AND EXISTS (SELECT 1 FROM payment_request r JOIN subscription_purchase s ON s."paymentRequestId" = r.id AND s.purpose = 'direct_purchase'
+                             WHERE r.id = l."paymentRequestId" AND l."chargebackAmount" = r.amount AND l."chargebackCurrency" = trim(r.currency))
+                AND NOT EXISTS (SELECT 1 FROM financial_loss f WHERE f.kind = 'direct_chargeback_write_off' AND f."paymentId" = l."paymentId")))
+        ORDER BY l."recordedAt", l."disputeId"`);
+    for (const l of rows) {
+      const verdict = await this.evidence.check(l.disputeId); // a fresh read, after the loss was committed, for this decision only
+      if (verdict.clean) continue;
+      await this.db.tx(async (q) => this.caseFor(q, { caseType: 'chargeback_effect_waiting', evidenceKey: l.disputeId, paymentRequestId: l.paymentRequestId,
+        paymentId: l.paymentId, captureFactId: l.captureFactId, amount: Number(l.amount), currency: l.currency, detail: verdict.reason }, tally));
+    }
+  }
+
+  /**
+   * FC-6: the direct final-lost chargeback write-off, once per chargeback fact; with a completed refund of the payment, a case instead. Core V2
+   * S0-C14 items 5, 6: the write-off also WAITS while a refund of the loss's captured movement may still exist (local relays, then a fresh Payment
+   * read for this decision only); the database re-checks the local half (`financial_loss_refund_live`). Nothing is written while it waits.
+   */
   private async recognizeChargebackLosses(tally: { opened: number; losses: number }): Promise<void> {
     const { rows } = await this.db.query<{ disputeId: string; paymentId: string; paymentRequestId: string; chargebackFactId: string; amount: string; currency: string;
       sellerId: string; organizationId: string | null; refunded: boolean }>(
@@ -335,24 +379,37 @@ export class ReconciliationService {
                OR (EXISTS (SELECT 1 FROM dispute_loss_effect e WHERE e."disputeId" = l."disputeId" AND e.outcome = 'reversed_purchase')
                    AND NOT EXISTS (SELECT 1 FROM financial_loss f WHERE f.kind = 'direct_chargeback_write_off' AND f."paymentId" = l."paymentId")))`);
     for (const l of rows) {
-      await this.db.tx(async (q) => {
-        if (l.refunded) {
-          // the money was refunded AND charged back: preserved for reconciliation, never a second (or guessed) recognition
-          await this.caseFor(q, { caseType: 'chargeback_refund_overlap', evidenceKey: l.disputeId, paymentRequestId: l.paymentRequestId, amount: Number(l.amount),
-            currency: l.currency, detail: 'refund_and_chargeback' }, tally);
-          return;
+      if (!l.refunded) {
+        const verdict = await this.evidence.check(l.disputeId);
+        if (!verdict.clean) {
+          this.log.warn(`direct_write_off_waiting dispute=${l.disputeId} reason=${verdict.reason} — nothing recorded; the next pass decides again`);
+          continue;
         }
-        const loss = (await q.query<{ id: string }>(
-          `INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "organizationId", "paymentId", "disputeId", amount, currency)
-           VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING RETURNING id`, // once per evidence, and once per capture (0049)
-          [l.chargebackFactId, l.sellerId, l.organizationId, l.paymentId, l.disputeId, l.amount, l.currency])).rows[0];
-        if (!loss) return;
-        tally.losses++;
-        await this.audit.record(q, 'financial_loss.recorded', {
-          organizationId: l.organizationId, resource: { type: 'financial_loss', id: loss.id },
-          changes: { kind: 'direct_chargeback_write_off', amount: Number(l.amount), evidence_id: l.chargebackFactId },
-        }, workerContext(l.chargebackFactId));
-      });
+      }
+      try {
+        await this.db.tx(async (q) => {
+          if (l.refunded) {
+            // the money was refunded AND charged back: preserved for reconciliation, never a second (or guessed) recognition
+            await this.caseFor(q, { caseType: 'chargeback_refund_overlap', evidenceKey: l.disputeId, paymentRequestId: l.paymentRequestId, amount: Number(l.amount),
+              currency: l.currency, detail: 'refund_and_chargeback' }, tally);
+            return;
+          }
+          const loss = (await q.query<{ id: string }>(
+            `INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "organizationId", "paymentId", "disputeId", amount, currency)
+             VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING RETURNING id`, // once per evidence, and once per capture (0049)
+            [l.chargebackFactId, l.sellerId, l.organizationId, l.paymentId, l.disputeId, l.amount, l.currency])).rows[0];
+          if (!loss) return;
+          tally.losses++;
+          await this.audit.record(q, 'financial_loss.recorded', {
+            organizationId: l.organizationId, resource: { type: 'financial_loss', id: loss.id },
+            changes: { kind: 'direct_chargeback_write_off', amount: Number(l.amount), evidence_id: l.chargebackFactId },
+          }, workerContext(l.chargebackFactId));
+        });
+      } catch (e) {
+        // a relay of the movement was recorded between the read and the insert: the database refused the write-off; it waits (V30)
+        if (pgConstraint(e) !== 'financial_loss_refund_live') throw e;
+        this.log.warn(`direct_write_off_waiting dispute=${l.disputeId} reason=relay_recorded_meanwhile — refused by the database; the next pass decides again`);
+      }
     }
   }
 
@@ -372,13 +429,17 @@ export class ReconciliationService {
                   (SELECT 'effect' FROM dispute_loss_effect e WHERE e."disputeId" = c."evidenceKey"))
                 WHEN 'authorization_pending' THEN (SELECT 'definitive' FROM refund_authorization_relay r WHERE r.id = c."evidenceKey"
                   AND r."attemptStatus" IS NOT NULL AND r."attemptStatus" <> 'authorization_pending')
+                -- Core V2 S0-C14 item 12: the effect exists, or else the completed refund of the loss's captured movement; otherwise it stays open
+                WHEN 'chargeback_effect_waiting' THEN coalesce((SELECT 'effect' WHERE billing_loss_effect_applied(c."evidenceKey")),
+                  billing_loss_completed_refund(c."evidenceKey")::text)
                 ELSE (SELECT r.id::text FROM refund_case r WHERE r."paymentId" = c."paymentId" AND r.status = 'completed'
                   AND (c."captureFactId" IS NULL OR r."captureFactId" = c."captureFactId") LIMIT 1)
               END AS ref,
               CASE WHEN c."caseType" = 'late_assisted_settlement' AND EXISTS (SELECT 1 FROM late_settlement_application a WHERE a."lateSettlementId" = c."evidenceKey")
                 THEN 'applied' END AS via
          FROM reconciliation_case c WHERE NOT EXISTS (SELECT 1 FROM reconciliation_case_resolution r WHERE r."caseId" = c.id)
-          AND c."caseType" IN ('late_assisted_settlement', 'recovery_surplus', 'contradictory_effect', 'authorization_pending', 'late_success', 'unmatched_capture', 'unrouted_settlement')`);
+          AND c."caseType" IN ('late_assisted_settlement', 'recovery_surplus', 'contradictory_effect', 'authorization_pending', 'late_success', 'unmatched_capture', 'unrouted_settlement',
+            'chargeback_effect_waiting')`);
     for (const c of rows) {
       if (!c.ref) continue;
       const ctx = workerContext(c.evidenceKey);
@@ -392,6 +453,8 @@ export class ReconciliationService {
             return this.cases.resolve(q, c.id, 'effect_applied', {}, ctx);
           case 'authorization_pending':
             return this.cases.resolve(q, c.id, 'authorization_resolved', {}, ctx);
+          case 'chargeback_effect_waiting': // never `effect_applied` when nothing was applied (the database checks both)
+            return c.ref === 'effect' ? this.cases.resolve(q, c.id, 'effect_applied', {}, ctx) : this.cases.resolve(q, c.id, 'refund_completed', { refundCaseId: c.ref! }, ctx);
           default:
             return this.cases.resolve(q, c.id, 'refund_completed', { refundCaseId: c.ref! }, ctx);
         }
@@ -463,8 +526,22 @@ export class ReconciliationService {
     if (typeof body.reason !== 'string' || !(ACKNOWLEDGEMENT_REASONS as readonly string[]).includes(body.reason)) throw invalid();
     const reason = body.reason;
     const c = await this.ownedCase(owner, id);
+    try {
+      return await this.acknowledgeIn(owner, key, id, reason, c, ctx);
+    } catch (e) {
+      // the overlap was recorded after the check: the database refused the acknowledgement (S0-C14 item 9)
+      if (pgConstraint(e) === 'reconciliation_case_overlap_acknowledgement') throw billingError(409, 'reconciliation_case_in_overlap', BILLING_MESSAGES.reconciliationCaseInOverlap);
+      throw e;
+    }
+  }
+
+  private async acknowledgeIn(owner: VerifiedRefundOwner, key: string, id: string, reason: string, c: CaseRow, ctx: TransitionContext) {
     return this.idempotency.run(owner.userId, key, 'reconciliation_case.acknowledge', { id, reason }, async (q) => {
       if (!REVIEW_ONLY.includes(c.caseType)) throw billingError(409, 'reconciliation_case_not_acknowledgeable', BILLING_MESSAGES.reconciliationCaseNotAcknowledgeable);
+      // Core V2 S0-C14 item 9: an overlap on the case's movement means money did move; the database refuses this reason too
+      if (reason === 'reviewed_no_financial_effect' && (await q.query<{ o: boolean }>(`SELECT billing_case_movement_overlap($1) AS o`, [id])).rows[0]!.o) {
+        throw billingError(409, 'reconciliation_case_in_overlap', BILLING_MESSAGES.reconciliationCaseInOverlap);
+      }
       if (!(await this.cases.resolve(q, id, 'acknowledged', { userId: owner.userId, reason }, ctx))) {
         throw billingError(409, 'reconciliation_case_resolved', BILLING_MESSAGES.reconciliationCaseResolved);
       }
@@ -590,14 +667,21 @@ export class ReconciliationService {
 
 @Injectable()
 export class ReconciliationWorkerService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
-  constructor(private readonly worker: ReconciliationService) {}
+  /** Core V2 S0-C14 item 14: set at shutdown, so a gate opened late never starts a stopped worker. */
+  private stopping = false;
+  constructor(private readonly worker: ReconciliationService, private readonly gate: FinancialWorkerGate) {}
+  /** Core V2 S0-C14 item 14: no pass before the financial reconciliation safety check passes (never after a mismatch); bootstrap is not blocked. */
   onApplicationBootstrap(): void {
-    this.worker.start();
+    void this.gate.whenPassed().then(() => {
+      if (!this.stopping) this.worker.start();
+    });
   }
   async onModuleDestroy(): Promise<void> {
+    this.stopping = true;
     await this.worker.stop();
   }
   async beforeApplicationShutdown(): Promise<void> {
+    this.stopping = true;
     await this.worker.stop();
   }
   async onApplicationShutdown(): Promise<void> {

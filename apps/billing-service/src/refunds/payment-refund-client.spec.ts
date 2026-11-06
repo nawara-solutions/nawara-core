@@ -128,3 +128,52 @@ describe('HttpPaymentRefundClient.capture (Core V2 S0-C11 BIL-32 M, R6H-5)', () 
     expect(await read(503, { ...capture, currency: 'XY1' })).toMatchObject({ kind: 'unknown' });
   });
 });
+
+/**
+ * Core V2 S0-C14 item 6: PAY-08's refund evidence reaches Billing. Each authorization's verified allocations and the producer's unallocated refund
+ * facts are parsed; a malformed allocation or fact refuses the whole answer (it proves nothing); an answer without `unallocatedFacts` is `null`,
+ * which the evidence judgement treats as unproven (fail closed).
+ */
+describe('HttpPaymentRefundClient.refunds: refund evidence (Core V2 S0-C14 item 6, PAY-08)', () => {
+  let server: Server;
+  let url = '';
+  let answer: { status: number; body: unknown } = { status: 200, body: {} };
+  beforeAll(async () => {
+    server = createServer((_req, res) => {
+      res.writeHead(answer.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer.body));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  });
+  afterAll(() => new Promise<void>((r) => server.close(() => r())));
+  const read = (body: unknown, status = 200) => {
+    answer = { status, body };
+    return new HttpPaymentRefundClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).refunds(PAYMENT);
+  };
+  const AUTH = '55555555-5555-4555-8555-555555555555';
+  const CASE = '66666666-6666-4666-8666-666666666666';
+  const authorization = (over: Record<string, unknown> = {}) => ({ refundAuthorizationId: AUTH, refundAttemptId: ATTEMPT, refundCaseId: CASE, approvedAmount: 5300, currency: 'TND',
+    completedAt: null, ...over });
+
+  it('parses allocations and unallocated facts; the producer view without the field is null (unproven), an older Payment\'s authorization without allocations has none', async () => {
+    const r = await read({ attempts: [], refusals: [], authorizations: [authorization({ allocations: [{ factId: FACT, amount: 5300, currency: 'TND', intended: 5300, excess: 0 }] })],
+      unallocatedFacts: [{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'blocked', blockedReason: 'x' },
+        { factId: FACT, refundAttemptId: null, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }] });
+    expect(r!.authorizations[0]!.allocations).toEqual([{ factId: FACT, amount: 5300, currency: 'TND' }]);
+    expect(r!.unallocatedFacts).toEqual([{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'blocked' },
+      { factId: FACT, refundAttemptId: null, amount: 100, currency: 'TND', state: 'pending' }]);
+    const older = await read({ attempts: [], refusals: [], authorizations: [authorization()] });
+    expect(older!.unallocatedFacts).toBeNull();
+    expect(older!.authorizations[0]!.allocations).toEqual([]);
+  });
+
+  it('a malformed allocation or unallocated fact refuses the whole answer; 404 is null; anything else throws', async () => {
+    await expect(read({ attempts: [], refusals: [], authorizations: [authorization({ allocations: [{ factId: 'x', amount: 1, currency: 'TND' }] })], unallocatedFacts: [] })).rejects.toThrow(/malformed allocation/);
+    await expect(read({ attempts: [], refusals: [], authorizations: [authorization({ allocations: 'none' })], unallocatedFacts: [] })).rejects.toThrow(/malformed allocations/);
+    await expect(read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [{ factId: FACT, refundAttemptId: ATTEMPT, amount: 1, currency: 'TND', state: 'done' }] })).rejects.toThrow(/malformed unallocated fact/);
+    await expect(read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: {} })).rejects.toThrow(/malformed unallocated facts/);
+    expect(await read({ code: 'not_found' }, 404)).toBeNull();
+    await expect(read({}, 503)).rejects.toThrow();
+  });
+});

@@ -61,7 +61,7 @@ const refundsAtPayment: PaymentRefundClient = {
     capturesAtPayment.relayed.push(body);
     return { kind: 'attempt', attempt: { refundAttemptId: body.refundAttemptId, status: 'authorized', approvedBy: { userId: randomUUID() } } };
   },
-  refunds: async () => ({ attempts: [], refusals: [], authorizations: [] }),
+  refunds: async () => ({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] }),
   capture: async (paymentId, factId) => capturesAtPayment.items.get(`${paymentId}:${factId}`) ?? { kind: 'not_found' },
   settlingCapture: async () => ({ kind: 'unknown' as const, reason: 'not_used_in_this_suite' }), // Core V2 S0-C11 7c: no E-7 application here
 };

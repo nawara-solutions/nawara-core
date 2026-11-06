@@ -100,14 +100,41 @@ export class RecoveryWriteOffBindingDto {
   @ApiProperty({ pattern: '^[A-Z]{3}$' }) currency!: string;
 }
 
-/** A refund, dispute-decision, fraud-hold, external-surplus, late-settlement, provider-fact association or recovery write-off binding, by `operation` (parsed strictly by `parseBinding`). */
-const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto,
-  ProviderFactAssociateBindingDto, RecoveryWriteOffBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+/** Core V2 S0-C14 WP A (items 10, 11; AUTH-01 H): an Owner's T3 suspension for one recovery obligation in overlap (billing-service only). */
+export class RecoveryRestrictionSuspendBindingDto {
+  @ApiProperty({ enum: ['recovery_restriction_suspend'] }) operation!: 'recovery_restriction_suspend';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid', description: 'The suspension, its id chosen by Billing before issuance.' }) suspensionId!: string;
+  @ApiProperty({ format: 'uuid' }) obligationId!: string;
+  @ApiProperty({ format: 'uuid' }) organizationId!: string;
+  @ApiProperty({ format: 'uuid', description: "The loss's dispute." }) disputeId!: string;
+  @ApiProperty({ format: 'uuid', description: 'The completed refund case of the overlap.' }) refundCaseId!: string;
+  @ApiProperty({ enum: ['refund_chargeback_overlap'], description: 'Closed reason code, never free text.' }) reasonCode!: string;
+}
 
-@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto, ProviderFactAssociateBindingDto, RecoveryWriteOffBindingDto)
+/** Core V2 S0-C14 WP A (item 11): the revocation of one active suspension (billing-service only). */
+export class RecoveryRestrictionRevokeBindingDto {
+  @ApiProperty({ enum: ['recovery_restriction_revoke'] }) operation!: 'recovery_restriction_revoke';
+  @ApiProperty({ enum: ['billing-service'] }) audience!: 'billing-service';
+  @ApiProperty({ format: 'uuid', description: "The Owner's own Company." }) companyId!: string;
+  @ApiProperty({ format: 'uuid', description: 'The active suspension revoked.' }) suspensionId!: string;
+  @ApiProperty({ format: 'uuid' }) obligationId!: string;
+  @ApiProperty({ format: 'uuid' }) organizationId!: string;
+  @ApiProperty({ format: 'uuid' }) disputeId!: string;
+  @ApiProperty({ format: 'uuid' }) refundCaseId!: string;
+  @ApiProperty({ enum: ['owner_reinstated_restriction'], description: 'Closed reason code, never free text.' }) reasonCode!: string;
+}
+
+/** A refund, dispute-decision, fraud-hold, external-surplus, late-settlement, provider-fact association , recovery write-off or recovery-restriction suspension or revocation binding, by `operation` (parsed strictly by `parseBinding`). */
+const BINDING_SCHEMA = { oneOf: [RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto,
+  ProviderFactAssociateBindingDto, RecoveryWriteOffBindingDto, RecoveryRestrictionSuspendBindingDto, RecoveryRestrictionRevokeBindingDto].map((d) => ({ $ref: getSchemaPath(d) })) };
+
+@ApiExtraModels(RefundBindingDto, DisputeDecisionBindingDto, FraudHoldPlaceBindingDto, FraudHoldReleaseBindingDto, SurplusExternalBindingDto, LateSettlementApplyBindingDto, ProviderFactAssociateBindingDto, RecoveryWriteOffBindingDto,
+  RecoveryRestrictionSuspendBindingDto, RecoveryRestrictionRevokeBindingDto)
 /** AUTH-01 body. The step-up proof is never stored with the receipt, logged, audited or part of the replay hash (D-A2 §12). */
 export class IssueReceiptDto {
-  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external, late_settlement_apply, provider_fact_associate, recovery_write_off)." })
+  @ApiProperty({ format: 'uuid', description: "A fresh, factor-only step-up proof of this session for the binding's operation: its own dedicated purpose (refund, dispute_decision, fraud_hold_place, fraud_hold_release, recovery_surplus_external, late_settlement_apply, provider_fact_associate, recovery_write_off, recovery_restriction_suspend, recovery_restriction_revoke)." })
   @IsString() @MaxLength(64) stepUpToken!: string;
 
   @ApiProperty(BINDING_SCHEMA) @IsObject() binding!: Record<string, unknown>;

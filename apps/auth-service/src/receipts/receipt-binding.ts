@@ -1,6 +1,6 @@
 import { hmacHex } from '../crypto/hmac.js';
 import { canonicalJson } from '../hierarchy/snapshot.js';
-import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE, PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE,
+import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE, PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_RESTRICTION_REVOKE_PURPOSE, RECOVERY_RESTRICTION_SUSPEND_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE,
 } from '../owner/step-up.service.js';
 import { receiptError } from './receipt-errors.js';
 
@@ -141,9 +141,40 @@ export interface RecoveryWriteOffBinding {
   currency: string;
 }
 
+/**
+ * Core V2 S0-C14 WP A (S0 §1.5 S0-C14 items 10, 11; register AUTH-01 H; the Owner's WP A finalization, 2026-11-06): the closed reason-code
+ * vocabulary of each operation. Anything else, including free text, is `receipt_binding_invalid`.
+ */
+export const RECOVERY_RESTRICTION_SUSPEND_REASONS = ['refund_chargeback_overlap'] as const;
+export const RECOVERY_RESTRICTION_REVOKE_REASONS = ['owner_reinstated_restriction'] as const;
+
+/**
+ * Core V2 S0-C14 WP A: an Owner's suspension of T3 for ONE recovery obligation in a refund and chargeback overlap. Exactly what the Owner
+ * approved: the Company, the suspension (its id chosen by Billing BEFORE issuance, as a fraud-hold placement's is, so a retry finds the same
+ * suspension), the obligation, its Organization, the loss's dispute, the completed refund case of the overlap and the closed reason code.
+ * Only `billing-service` consumes it. It changes T3 for that obligation only and never clears, forgives or resolves the debt.
+ */
+export interface RecoveryRestrictionSuspendBinding {
+  operation: 'recovery_restriction_suspend';
+  audience: 'billing-service';
+  companyId: string;
+  suspensionId: string;
+  obligationId: string;
+  organizationId: string;
+  disputeId: string;
+  refundCaseId: string;
+  reasonCode: (typeof RECOVERY_RESTRICTION_SUSPEND_REASONS)[number];
+}
+
+/** Core V2 S0-C14 WP A (item 11): the revocation of ONE active suspension, the same fields, with its own closed reason code. */
+export interface RecoveryRestrictionRevokeBinding extends Omit<RecoveryRestrictionSuspendBinding, 'operation' | 'reasonCode'> {
+  operation: 'recovery_restriction_revoke';
+  reasonCode: (typeof RECOVERY_RESTRICTION_REVOKE_REASONS)[number];
+}
+
 /** Every receipt binding. `operation` selects the exact field set; the canonical form (and so every digest) includes it. */
 export type ReceiptBinding = RefundBinding | DisputeDecisionBinding | FraudHoldPlaceBinding | FraudHoldReleaseBinding | SurplusExternalBinding | LateSettlementApplyBinding
-  | ProviderFactAssociateBinding | RecoveryWriteOffBinding;
+  | ProviderFactAssociateBinding | RecoveryWriteOffBinding | RecoveryRestrictionSuspendBinding | RecoveryRestrictionRevokeBinding;
 export type ReceiptOperation = ReceiptBinding['operation'];
 
 export const RECEIPT_AUDIENCE = 'payment-service';
@@ -152,6 +183,7 @@ export const RECEIPT_AUDIENCE = 'payment-service';
 export const RECEIPT_AUDIENCES = {
   refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service',
   recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service', provider_fact_associate: 'payment-service', recovery_write_off: 'billing-service',
+  recovery_restriction_suspend: 'billing-service', recovery_restriction_revoke: 'billing-service',
 } as const satisfies Record<ReceiptOperation, string>;
 
 /** The one step-up purpose each operation's issuance consumes (Auth-local purposes, `step-up.service.ts`). */
@@ -159,6 +191,7 @@ export const RECEIPT_PURPOSES = {
   refund: REFUND_AUTHORIZE_PURPOSE, dispute_decision: DISPUTE_DECIDE_PURPOSE, fraud_hold_place: FRAUD_HOLD_PLACE_PURPOSE, fraud_hold_release: FRAUD_HOLD_RELEASE_PURPOSE,
   recovery_surplus_external: SURPLUS_EXTERNAL_PURPOSE, late_settlement_apply: LATE_SETTLEMENT_APPLY_PURPOSE,
   provider_fact_associate: PROVIDER_FACT_ASSOCIATE_PURPOSE, recovery_write_off: RECOVERY_WRITE_OFF_PURPOSE,
+  recovery_restriction_suspend: RECOVERY_RESTRICTION_SUSPEND_PURPOSE, recovery_restriction_revoke: RECOVERY_RESTRICTION_REVOKE_PURPOSE,
 } as const satisfies Record<ReceiptOperation, string>;
 
 const FIELDS = ['operation', 'audience', 'companyId', 'refundCaseId', 'paymentId', 'amount', 'currency', 'reason', 'legalOverride', 'captureFactId'] as const;
@@ -171,6 +204,7 @@ const SURPLUS_FIELDS = ['operation', 'audience', 'companyId', 'surplusId', 'orga
 const LATE_FIELDS = ['operation', 'audience', 'companyId', 'lateSettlementId', 'assistanceRequestId', 'beneficiaryUserId', 'reasonCode'] as const;
 const ASSOCIATE_FIELDS = ['operation', 'audience', 'companyId', 'factId', 'kind', 'amount', 'currency', 'targetType', 'targetId'] as const;
 const WRITE_OFF_FIELDS = ['operation', 'audience', 'companyId', 'obligationId', 'organizationId', 'amount', 'currency'] as const;
+const RESTRICTION_FIELDS = ['operation', 'audience', 'companyId', 'suspensionId', 'obligationId', 'organizationId', 'disputeId', 'refundCaseId', 'reasonCode'] as const;
 /** Canonical lower-case UUIDs only: two spellings of one id must never yield two digests. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURRENCY = /^[A-Z]{3}$/;
@@ -197,6 +231,7 @@ export function parseBinding(value: unknown): ReceiptBinding {
   if (v.operation === 'late_settlement_apply') return parseLateSettlementApply(v);
   if (v.operation === 'provider_fact_associate') return parseProviderFactAssociate(v);
   if (v.operation === 'recovery_write_off') return parseRecoveryWriteOff(v);
+  if (v.operation === 'recovery_restriction_suspend' || v.operation === 'recovery_restriction_revoke') return parseRecoveryRestriction(v);
   for (const k of Object.keys(v)) if (!(FIELDS as readonly string[]).includes(k)) throw invalid();
   for (const k of FIELDS) if (!OPTIONAL.has(k) && !(k in v)) throw invalid();
   const legalOverride = v.legalOverride === undefined ? false : v.legalOverride;
@@ -301,6 +336,23 @@ function parseRecoveryWriteOff(v: Record<string, unknown>): RecoveryWriteOffBind
     operation: 'recovery_write_off', audience: 'billing-service', companyId: v.companyId as string, obligationId: v.obligationId as string,
     organizationId: v.organizationId as string, amount: v.amount, currency: v.currency,
   };
+}
+
+function parseRecoveryRestriction(v: Record<string, unknown>): RecoveryRestrictionSuspendBinding | RecoveryRestrictionRevokeBinding {
+  const invalid = () => receiptError('receipt_binding_invalid');
+  const revoke = v.operation === 'recovery_restriction_revoke';
+  exactFields(v, RESTRICTION_FIELDS);
+  if (v.audience !== 'billing-service') throw invalid();
+  for (const k of ['companyId', 'suspensionId', 'obligationId', 'organizationId', 'disputeId', 'refundCaseId'] as const) if (typeof v[k] !== 'string' || !UUID.test(v[k] as string)) throw invalid();
+  const reasons: readonly unknown[] = revoke ? RECOVERY_RESTRICTION_REVOKE_REASONS : RECOVERY_RESTRICTION_SUSPEND_REASONS;
+  if (!reasons.includes(v.reasonCode)) throw invalid();
+  const fields = {
+    audience: 'billing-service' as const, companyId: v.companyId as string, suspensionId: v.suspensionId as string, obligationId: v.obligationId as string,
+    organizationId: v.organizationId as string, disputeId: v.disputeId as string, refundCaseId: v.refundCaseId as string,
+  };
+  return revoke
+    ? { operation: 'recovery_restriction_revoke', ...fields, reasonCode: v.reasonCode as RecoveryRestrictionRevokeBinding['reasonCode'] }
+    : { operation: 'recovery_restriction_suspend', ...fields, reasonCode: v.reasonCode as RecoveryRestrictionSuspendBinding['reasonCode'] };
 }
 
 /** `canonicalJson` (sorted keys) over exactly the fields of a parsed binding. Never logged, never stored. */

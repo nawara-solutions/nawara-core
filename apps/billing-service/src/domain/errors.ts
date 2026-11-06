@@ -101,6 +101,10 @@ export type BillingErrorCode =
   // Core V2 S6h-B reconciliation and losses (register BIL-33, BIL-34; R6H-1 to R6H-12)
   | 'invalid_reconciliation_request'
   | 'reconciliation_case_not_acknowledgeable'
+  | 'reconciliation_case_in_overlap' // Core V2 S0-C14 item 9
+  | 'recovery_collection_frozen' // Core V2 S0-C14 item 7
+  | 'recovery_restriction_not_suspendable' // Core V2 S0-C14 item 10
+  | 'recovery_suspension_not_active' // Core V2 S0-C14 item 11
   | 'reconciliation_case_resolved'
   | 'write_off_not_permitted'
   // Core V2 S6g late assisted settlement application (register BIL-32; R6G-1 to R6G-9)

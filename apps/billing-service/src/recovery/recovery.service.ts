@@ -18,6 +18,8 @@ import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { captureLossOf, recordCaptureLoss } from '../refunds/dispute-loss.service.js';
+import { FinancialWorkerGate } from '../refunds/financial-safety.js';
+import { RefundEvidenceReader, type RefundEvidenceVerdict } from '../refunds/refund-evidence.js';
 
 /** The worker's system identity (Audit catalog: `recovery_obligation.opened`). */
 export const RECOVERY_WORKER = 'recovery_worker';
@@ -43,6 +45,7 @@ export interface ObligationRow {
 const closed = () => billingError(409, 'recovery_obligation_closed', BILLING_MESSAGES.recoveryObligationClosed);
 const channelOpen = () => billingError(409, 'settlement_channel_open', BILLING_MESSAGES.settlementChannelOpen);
 const invalid = () => billingError(400, 'invalid_recovery_request', BILLING_MESSAGES.invalidRecoveryRequest);
+const frozen = () => billingError(409, 'recovery_collection_frozen', BILLING_MESSAGES.recoveryCollectionFrozen);
 
 /**
  * Core V2 S6f (register BIL-26 (T3), BIL-28 to BIL-31; ADR-0044 B8, B10; S0 §3.5, FC-9; the Owner's R6F-1 to R6F-8). DEVELOPMENT AND
@@ -81,6 +84,7 @@ export class RecoveryService {
     @Inject(OWNER_AUTHORITY) private readonly owners: OwnerAuthority,
     @Inject(FRAUD_HOLD_RECEIPTS) private readonly receipts: FraudHoldReceipts,
     @Inject(FRAUD_EVIDENCE_FILES) private readonly files: FraudEvidenceFiles,
+    private readonly evidence: RefundEvidenceReader,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -92,11 +96,11 @@ export class RecoveryService {
   }
 
   /** One pass over every assisted verified loss not yet visited (R6F-8). Exposed for tests. */
-  async drainOnce(): Promise<{ opened: number; review: number; failed: number }> {
-    if (this.running) return { opened: 0, review: 0, failed: 0 };
+  async drainOnce(): Promise<{ opened: number; review: number; waiting: number; failed: number }> {
+    if (this.running) return { opened: 0, review: 0, waiting: 0, failed: 0 };
     this.running = true;
     try {
-      const tally = { opened: 0, review: 0, failed: 0 };
+      const tally = { opened: 0, review: 0, waiting: 0, failed: 0 };
       const { rows } = await this.db.query<{ disputeId: string }>(
         `SELECT l."disputeId" FROM payment_dispute_loss l JOIN dispute_loss_effect e ON e."disputeId" = l."disputeId"
           WHERE e.reason = 'assisted_purchase_preserved'
@@ -108,6 +112,7 @@ export class RecoveryService {
           const o = await this.visit(r.disputeId);
           if (o === 'opened') tally.opened++;
           if (o === 'review') tally.review++;
+          if (o === 'waiting') tally.waiting++;
         } catch (e) {
           tally.failed++;
           this.log.warn(`recovery_worker_retry dispute=${r.disputeId} ${describeFailure(e)} — nothing was applied; the next pass retries`);
@@ -119,8 +124,13 @@ export class RecoveryService {
     }
   }
 
-  /** One verified assisted loss: the obligation, or the review record; idempotent (both are keyed by the loss). */
-  async visit(disputeId: string): Promise<'opened' | 'review' | 'already'> {
+  /**
+   * One verified assisted loss: the obligation, or the review record; idempotent (both are keyed by the loss). Core V2 S0-C14 items 5, 6: an
+   * obligation WAITS (nothing is written; the next pass decides again) while a refund of the loss's captured movement may still exist: a live
+   * local relay, or a fresh Payment read (started after the loss was committed, used for this decision only) that does not prove none can. No
+   * timer resumes it. The database re-checks the local half at the insert (`recovery_obligation_refund_live`).
+   */
+  async visit(disputeId: string): Promise<'opened' | 'review' | 'waiting' | 'already'> {
     const ctx: TransitionContext = { actor: { type: 'system', id: RECOVERY_WORKER }, cause: { type: 'sweep', id: disputeId }, correlationId: `recovery:${disputeId}` };
     const f = (await this.db.query<{ purchaseId: string; assistanceRequestId: string; organizationId: string; platformId: string; companyId: string | null;
       baseAmount: string; currency: string; refunded: boolean }>(
@@ -134,6 +144,22 @@ export class RecoveryService {
     // Core V2 S0-C10 item 3: the loss's place in its capture's cumulative loss, written once before deciding (a visit of a loss recorded
     // before S0-C10 writes it here; the dispute loss worker wrote it for every later loss)
     await recordCaptureLoss(this.db, disputeId);
+    // the remote half, read before the transaction (never inside it: no lock spans Billing and Payment); a refunded payment is a review anyway
+    const evidence: RefundEvidenceVerdict | null = f.refunded ? null : await this.evidence.check(disputeId);
+    try {
+      return await this.decide(disputeId, f, evidence, ctx);
+    } catch (e) {
+      // a relay of the movement was recorded between the read and the insert: the database refused the obligation; it waits (V30)
+      if (pgConstraint(e) === 'recovery_obligation_refund_live') {
+        this.log.warn(`recovery_obligation_waiting dispute=${disputeId} reason=relay_recorded_meanwhile — refused by the database; the next pass decides again`);
+        return 'waiting';
+      }
+      throw e;
+    }
+  }
+
+  private async decide(disputeId: string, f: { purchaseId: string; assistanceRequestId: string; organizationId: string; platformId: string; companyId: string | null;
+    baseAmount: string; currency: string; refunded: boolean }, evidence: RefundEvidenceVerdict | null, ctx: TransitionContext): Promise<'opened' | 'review' | 'waiting' | 'already'> {
     return this.db.tx(async (q) => {
       await lockOrganization(q, f.organizationId);
       const seen = (await q.query(`SELECT 1 FROM recovery_obligation WHERE "disputeId" = $1 UNION ALL SELECT 1 FROM recovery_review WHERE "disputeId" = $1`, [disputeId])).rows.length;
@@ -154,6 +180,11 @@ export class RecoveryService {
             : otherFirst ? 'repeated_loss'
               : cap.withinCap && cap.chargebackAmount < cap.gross ? 'partial_chargeback' : 'chargeback_exceeds_capture';
       if (!reason && !f.companyId) throw new Error('platform_not_configured');
+      // Core V2 S0-C14 items 5, 6: the obligation waits while a refund of the movement may still exist (nothing is written)
+      if (!reason && evidence && !evidence.clean) {
+        this.log.warn(`recovery_obligation_waiting dispute=${disputeId} reason=${evidence.reason} — no obligation and no T3 yet; the next pass decides again`);
+        return 'waiting' as const;
+      }
       if (reason) {
         await q.query(`INSERT INTO recovery_review ("disputeId", reason) VALUES ($1, $2)`, [disputeId, reason]);
         this.log.warn(`recovery_review dispute=${disputeId} reason=${reason} — no obligation, no T3; kept for reconciliation (S6h)`);
@@ -195,10 +226,23 @@ export class RecoveryService {
     const o = await this.obligation(this.db, id);
     if (!o) throw notFound();
     await this.organizationAdministrator(identity, o);
+    try {
+      return await this.openSettlement(identity, key, id, locale, ctx);
+    } catch (e) {
+      // the overlap was recorded after the check (a refund completion takes only its case's lock): the database refused the channel
+      if (pgConstraint(e) === 'recovery_collection_frozen') throw frozen();
+      throw e;
+    }
+  }
+
+  private async openSettlement(identity: AuthIdentity, key: string, id: string, locale: string, ctx: TransitionContext) {
+    const o = (await this.obligation(this.db, id))!;
     return this.idempotency.run(identity.id, key, 'recovery_obligation.settlement', { id }, async (q): Promise<AssistanceCommandResult> => {
       await lockOrganization(q, o.organizationId);
       const cur = (await this.obligation(q, id, true))!;
       if (cur.status !== 'open') throw closed();
+      // Core V2 S0-C14 item 7: no NEW settlement channel during a refund and chargeback overlap (the database refuses it too); the debt stays open
+      if ((await q.query<{ frozen: boolean }>(`SELECT billing_recovery_obligation_frozen($1) AS frozen`, [id])).rows[0]!.frozen) throw frozen();
       if ((await q.query(`SELECT 1 FROM recovery_settlement_channel c WHERE c."obligationId" = $1 AND billing_recovery_channel_active(c.id)`, [id])).rows.length > 0) throw channelOpen();
       const outstanding = Number((await q.query<{ n: string }>(`SELECT billing_recovery_outstanding($1) AS n`, [id])).rows[0]!.n);
       if (outstanding <= 0) throw closed();
@@ -255,17 +299,17 @@ export class RecoveryService {
     const o = await this.obligation(this.db, id);
     if (!o) throw notFound();
     await this.organizationAdministrator(identity, o);
-    return this.view(o);
+    return this.view(o, 'organization');
   }
 
   /** BIL-28 for the Owner of the obligation's Platform (live). */
   async readAsOwner(owner: VerifiedRefundOwner, id: string) {
     const o = await this.obligation(this.db, id);
     if (!o || o.companyId !== owner.companyId || !(await this.owners.platformAllowed(owner.bearer, o.platformId, AbortSignal.timeout(this.config.authTimeoutMs)))) throw notFound();
-    return this.view(o);
+    return this.view(o, 'owner');
   }
 
-  private async view(o: ObligationRow) {
+  private async view(o: ObligationRow, reader: 'owner' | 'organization') {
     const [payments, surpluses, channels, outstanding] = await Promise.all([
       this.db.query(`SELECT id, "paymentRequestId", amount::int, "principalAmount"::int, "surplusAmount"::int, "recordedAt" FROM recovery_payment WHERE "obligationId" = $1 ORDER BY "recordedAt", id`, [o.id]).then((r) => r.rows),
       this.db.query(`SELECT su.id, su.amount::int, su."recordedAt",
@@ -277,11 +321,31 @@ export class RecoveryService {
           FROM recovery_settlement_channel c LEFT JOIN payment_request pr ON pr.id = c."paymentRequestId" WHERE c."obligationId" = $1 ORDER BY c."createdAt", c.id`, [o.id]).then((r) => r.rows),
       this.db.query<{ n: string }>(`SELECT billing_recovery_outstanding($1) AS n`, [o.id]).then((r) => Number(r.rows[0]!.n)),
     ]);
+    // Core V2 S0-C14 item 13 (BIL-28 H): collection and T3 status, derived at read from recorded facts; an absent T3 never means the debt ended
+    const s = (await this.db.query<{ frozen: boolean; suspended: boolean; refundCaseId: string | null }>(
+      `SELECT billing_recovery_obligation_frozen($1) AS frozen, billing_recovery_restriction_suspended($1) AS suspended, billing_loss_completed_refund($2) AS "refundCaseId"`,
+      [o.id, o.disputeId])).rows[0]!;
+    const s0c14 = {
+      // `frozen_overlap`: no NEW settlement channel may start (a channel already started continues); the debt stays as `outstanding` states it
+      collection: s.frozen ? 'frozen_overlap' as const : 'open' as const,
+      // T3 for this obligation: `active` while open, `suspended` by the Owner (the debt is unchanged), `none` once recovered
+      restriction: o.status !== 'open' ? 'none' as const : s.suspended ? 'suspended' as const : 'active' as const,
+    };
+    // the Owner also sees the overlap evidence a suspension receipt binds and every suspension and revocation (who and when); the Organization never does
+    const ownerOnly = reader !== 'owner' ? {} : {
+      overlap: s.refundCaseId ? { disputeId: o.disputeId, refundCaseId: s.refundCaseId } : null,
+      suspensions: (await this.db.query<{ suspensionId: string; suspendedBy: string; suspendedAt: Date; revokedBy: string | null; revokedAt: Date | null }>(
+        `SELECT s."suspensionId", s."actorUserId" AS "suspendedBy", s."recordedAt" AS "suspendedAt", v."actorUserId" AS "revokedBy", v."recordedAt" AS "revokedAt"
+           FROM recovery_restriction_suspension_event s LEFT JOIN recovery_restriction_suspension_event v ON v."suspensionId" = s."suspensionId" AND v.kind = 'revoked'
+          WHERE s."obligationId" = $1 AND s.kind = 'suspended' ORDER BY s."recordedAt", s."suspensionId"`, [o.id])).rows.map((x) => ({
+        suspensionId: x.suspensionId, status: x.revokedAt ? 'revoked' : 'active', suspendedBy: { userId: x.suspendedBy }, suspendedAt: x.suspendedAt.toISOString(),
+        revokedBy: x.revokedBy ? { userId: x.revokedBy } : null, revokedAt: x.revokedAt?.toISOString() ?? null })),
+    };
     const base = Number(o.baseAmount);
     return {
       id: o.id, organizationId: o.organizationId, companyId: o.companyId, platformId: o.platformId, assistanceRequestId: o.assistanceRequestId, disputeId: o.disputeId,
       baseAmount: base, recovered: base - Math.max(0, outstanding), outstanding: Math.max(0, outstanding), currency: o.currency.trim(), status: o.status,
-      openedAt: o.openedAt.toISOString(), recoveredAt: o.recoveredAt?.toISOString() ?? null, payments, channels,
+      openedAt: o.openedAt.toISOString(), recoveredAt: o.recoveredAt?.toISOString() ?? null, ...s0c14, ...ownerOnly, payments, channels,
       surpluses: (surpluses as Record<string, unknown>[]).map((s) => ({
         ...s, status: s.refundCaseId || s.confirmedAt ? 'resolved' : s.externalRecordedAt ? 'external_execution_evidenced' : 'owed_to_organization',
       })),
@@ -394,14 +458,21 @@ export class RecoveryService {
 
 @Injectable()
 export class RecoveryWorkerService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
-  constructor(private readonly worker: RecoveryService) {}
+  /** Core V2 S0-C14 item 14: set at shutdown, so a gate opened late never starts a stopped worker. */
+  private stopping = false;
+  constructor(private readonly worker: RecoveryService, private readonly gate: FinancialWorkerGate) {}
+  /** Core V2 S0-C14 item 14: no pass before the financial reconciliation safety check passes (never after a mismatch); bootstrap is not blocked. */
   onApplicationBootstrap(): void {
-    this.worker.start();
+    void this.gate.whenPassed().then(() => {
+      if (!this.stopping) this.worker.start();
+    });
   }
   onModuleDestroy(): void {
+    this.stopping = true;
     void this.worker.stop();
   }
   async beforeApplicationShutdown(): Promise<void> {
+    this.stopping = true;
     await this.worker.stop();
   }
   async onApplicationShutdown(): Promise<void> {
