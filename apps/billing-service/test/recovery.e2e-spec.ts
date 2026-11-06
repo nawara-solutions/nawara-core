@@ -1385,7 +1385,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         }
       };
 
-      it('items 4, 5, 7: the first full loss opens ONE obligation; a second full loss of the capture opens none, is reviewed (repeated_loss), and is listed for the Owner with its whole recorded amount, forever open', async () => {
+      it('items 4, 5, 7: the first full loss opens ONE obligation; a second full loss of the capture opens none, is reviewed (repeated_loss), and is listed for the Owner with its whole recorded amount, unresolved and unacknowledgeable through every pass this test runs', async () => {
         const o = await opened();
         expect(await capOf(o.disputeId)).toMatchObject({ captureKey: `settling:${o.paymentId}`, beforeS0c10: false, gross: o.amount, chargebackAmount: o.amount, cumulativeBefore: 0, withinCap: true, firstFull: true });
         const second = await lose(o.paymentId, o.amount);
@@ -1543,6 +1543,102 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         const rows = (await admin.query(`SELECT "cumulativeBefore"::int AS c, "withinCap" FROM capture_loss_cap WHERE "disputeId" = ANY($1::uuid[]) ORDER BY 1`, [ds])).rows;
         expect(rows.map((x) => x.c)).toEqual([0, 700, 1400, 2100, 2800, 3500, 4200, 4900]);
         expect(rows.map((x) => x.withinCap)).toEqual(rows.map((x) => x.c + 700 <= p.amount));
+      });
+
+      it('C-1 (O-1): a loss recorded before 0049 that already has its cap row is counted ONCE by every later loss of its capture; the decision, the recorded debits and every committed effect follow from that', async () => {
+        const capRow = (disputeId: string) => one(`SELECT xmin::text AS xmin, "cumulativeBefore"::int AS "cumulativeBefore", "withinCap", "firstFull" FROM capture_loss_cap WHERE "disputeId" = $1`, [disputeId]);
+        const lossFacts = (disputeIds: string[]) => admin.query(`SELECT "disputeId", "chargebackFactId", "chargebackAmount"::int AS amount, "beforeS0c10", xmin::text AS xmin
+          FROM payment_dispute_loss WHERE "disputeId" = ANY($1::uuid[]) ORDER BY "disputeId"`, [disputeIds]).then((r) => r.rows);
+        // (a) assisted, partials: 3000 historical (cap row written when first visited after 0049) + 3000 later = 6000 within the gross,
+        // so the later loss is partial_chargeback; counting the historical loss twice (9000) would wrongly make it chargeback_exceeds_capture
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const amount = Number(s.inv.total);
+        expect(amount >= 6000 && amount < 9000, `the gross ${amount} must separate counting once (6000) from twice (9000)`).toBe(true);
+        const h = await recordLoss(s.paymentId, 'assisted_settlement', amount, 3000);
+        await markBeforeS0c10(h.disputeId);
+        await losses().drainOnce();
+        expect(await recovery().visit(h.disputeId)).toBe('review');
+        expect(await reviewOf(h.disputeId)).toEqual({ reason: 'partial_chargeback' });
+        const hRow = await capRow(h.disputeId);
+        expect(hRow).toMatchObject({ cumulativeBefore: 0, withinCap: true, firstFull: false });
+        const before = await lossFacts([h.disputeId]);
+        const n = await recordLoss(s.paymentId, 'assisted_settlement', amount, 3000);
+        await losses().drainOnce();
+        expect(await capOf(n.disputeId)).toMatchObject({ beforeS0c10: false, cumulativeBefore: 3000, withinCap: true, firstFull: false, chargebackAmount: 3000 });
+        expect(await recovery().visit(n.disputeId)).toBe('review');
+        expect(await reviewOf(n.disputeId)).toEqual({ reason: 'partial_chargeback' });
+        expect(await obligations((await purchaseOf(s.paymentId)).id)).toBe(0);
+        expect(await restrictions()).toEqual([]);
+        // the historical debit and its cap row are exactly as they were; both debits keep their own figures and facts
+        expect(await lossFacts([h.disputeId])).toEqual(before);
+        expect(await capRow(h.disputeId)).toEqual(hRow);
+        expect((await lossFacts([h.disputeId, n.disputeId])).map((x) => x.amount)).toEqual([3000, 3000]);
+
+        // (b) direct: a historical full loss that reversed the purchase and got its write-off; a later partial is counted after it ONCE
+        // (cumulative 4900, never 9800), above the cap: reviewed; the reversal and the write-off stay exactly one each
+        const p = await directPurchase('b2');
+        const hd = await recordLoss(p.paymentId, 'direct_purchase', p.amount);
+        await markBeforeS0c10(hd.disputeId);
+        await losses().drainOnce();
+        expect(await one(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [hd.disputeId])).toEqual({ outcome: 'reversed_purchase' });
+        await reconcile();
+        const writeOff = await one(`SELECT id, "disputeId", amount::int AS amount, xmin::text AS xmin FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId]);
+        expect(writeOff).toMatchObject({ disputeId: hd.disputeId, amount: p.amount });
+        expect(await capOf(hd.disputeId)).toMatchObject({ beforeS0c10: true, cumulativeBefore: 0, firstFull: true });
+        const nd = await loseDirect(p.paymentId, p.amount, 100);
+        expect(await capOf(nd)).toMatchObject({ beforeS0c10: false, cumulativeBefore: p.amount, withinCap: false, firstFull: false });
+        expect(await one(`SELECT state, reason FROM dispute_loss_effect_attempt WHERE "disputeId" = $1`, [nd])).toEqual({ state: 'review', reason: 'chargeback_exceeds_capture' });
+        await reconcile();
+        expect((await admin.query(`SELECT id, "disputeId", amount::int AS amount, xmin::text AS xmin FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).rows).toEqual([writeOff]);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal r JOIN subscription_purchase x ON x.id = r."purchaseId" WHERE x."paymentRequestId" = $1`, [p.paymentRequestId])).toBe(1);
+
+        // (c) assisted, committed obligation: a historical full loss opened the obligation; a later partial is counted after it ONCE
+        // (cumulative the gross, never twice it) and is repeated_loss; the obligation is unchanged (last: its T3 restricts ORG's new requests)
+        const r2 = await collected({ unit: 6100, fee: 400 });
+        const s2 = await started(r2.id);
+        await t.bus.deliver(s2.ev('payment.succeeded'));
+        const ho = await recordLoss(s2.paymentId, 'assisted_settlement', amount);
+        await markBeforeS0c10(ho.disputeId);
+        await losses().drainOnce();
+        expect(await recovery().visit(ho.disputeId)).toBe('opened');
+        const obligation = await one(`SELECT id, status, "baseAmount"::int AS base, xmin::text AS xmin FROM recovery_obligation WHERE "disputeId" = $1`, [ho.disputeId]);
+        const no = await recordLoss(s2.paymentId, 'assisted_settlement', amount, 200);
+        await losses().drainOnce();
+        expect(await capOf(no.disputeId)).toMatchObject({ cumulativeBefore: amount, withinCap: false, firstFull: false });
+        expect(await recovery().visit(no.disputeId)).toBe('review');
+        expect(await reviewOf(no.disputeId)).toEqual({ reason: 'repeated_loss' });
+        expect((await admin.query(`SELECT id, status, "baseAmount"::int AS base, xmin::text AS xmin FROM recovery_obligation WHERE "purchaseId" = $1`,
+          [(await purchaseOf(s2.paymentId)).id])).rows).toEqual([obligation]);
+      });
+
+      it('C-2: four distinct authentic full losses of one direct capture, applied by four concurrent transactions: one reversal, one write-off, three recorded losses in review; decided in cap-row order, not by time', async () => {
+        const p = await directPurchase('b2');
+        const ds: string[] = [];
+        for (let i = 0; i < 4; i++) ds.push((await recordLoss(p.paymentId, 'direct_purchase', p.amount)).disputeId);
+        const facts = (await admin.query(`SELECT "chargebackFactId", "chargebackAmount"::int AS amount FROM payment_dispute_loss WHERE "disputeId" = ANY($1::uuid[])`, [ds])).rows;
+        expect(new Set(facts.map((f) => f.chargebackFactId)).size).toBe(4); // four distinct provider debits
+        const outs = await Promise.all(ds.map((d) => losses().apply(d))); // four pool connections: independent concurrent transactions
+        const reversed = ds.filter((_, i) => outs[i]!.kind === 'applied' && (outs[i] as { outcome: string }).outcome === 'reversed_purchase');
+        expect(reversed).toHaveLength(1);
+        const reviewed = outs.filter((o) => o.kind === 'review').map((o) => (o as { reason: string }).reason);
+        expect(reviewed).toHaveLength(3);
+        for (const reason of reviewed) expect(['reversed_by_another_chargeback', 'chargeback_exceeds_capture']).toContain(reason);
+        // the cap rows are the decision order: exact prefix sums, and the one first full row is the loss that reversed the purchase
+        const rows = (await admin.query(`SELECT "disputeId", "cumulativeBefore"::int AS c, "firstFull" FROM capture_loss_cap WHERE "disputeId" = ANY($1::uuid[]) ORDER BY 2`, [ds])).rows;
+        expect(rows.map((x) => x.c)).toEqual([0, p.amount, 2 * p.amount, 3 * p.amount]);
+        expect(rows.filter((x) => x.firstFull).map((x) => x.disputeId)).toEqual(reversed);
+        await Promise.all([reconcile(), reconcile()]);
+        await reconcile();
+        expect((await admin.query(`SELECT "disputeId" FROM financial_loss WHERE "paymentId" = $1`, [p.paymentId])).rows).toEqual([{ disputeId: reversed[0] }]);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal r JOIN subscription_purchase x ON x.id = r."purchaseId" WHERE x."paymentRequestId" = $1`, [p.paymentRequestId])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase_reversal_cause c JOIN subscription_purchase x ON x.id = c."purchaseId" WHERE x."paymentRequestId" = $1`, [p.paymentRequestId])).toBe(1);
+        // every debit stays recorded at its own figures; each unapplied one is visible as a non-acknowledgeable review case
+        expect(facts.map((f) => f.amount)).toEqual([p.amount, p.amount, p.amount, p.amount]);
+        for (const d of ds.filter((x) => x !== reversed[0])) {
+          expect(await caseOf('contradictory_effect', d)).toMatchObject({ detail: 'dispute_effect_review', resolution: null });
+        }
       });
 
       it('order of visits: the later loss visited FIRST is still repeated_loss (the evidence decides, not which worker ran first); the first then opens the one obligation', async () => {
