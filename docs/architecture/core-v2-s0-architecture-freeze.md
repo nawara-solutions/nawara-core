@@ -254,7 +254,7 @@ status change still needs its own explicit owner authorization.
      case, and no remainder is refunded or sold automatically.
   6. *Mutual exclusion.* One captured movement has at most one return: a refund case is refused while the payment's exposure is not
      `clear` (FC-5, R6A-3, unchanged); a chargeback after a completed refund of that capture is `chargeback_refund_overlap` (S6h,
-     unchanged), never `chargeback_returned`; L-4 is refused once a loss is recorded (S0-C8 item 8) and, per item 4, while a dispute is
+     unchanged; *clarified by S0-C14 item 8: on every capture basis, including an assisted settling capture*), never `chargeback_returned`; L-4 is refused once a loss is recorded (S0-C8 item 8) and, per item 4, while a dispute is
      open; a chargeback of an L-4 purchase never reverses it (FC-4) and opens one base-only recovery obligation per loss (S6f) *(amended by S0-C10 item 5: at most one per assisted purchase, for the first
      qualifying loss)*.
   7. *Ordering outcomes (no synchronous guarantee).* Dispute recorded before the exposure read: refused (item 4). Loss already at Billing:
@@ -648,6 +648,170 @@ status change still needs its own explicit owner authorization.
       rows stay readable and unaudited; the audit record is atomic and single under replay and retrier processing; reading writes nothing and exposure, refunds and L-4
       answer as before; a real cross-process read replaces the admin SQL in `s-int-late-capture-disputes`. ADR-0035 and ADR-0069 stay Proposed, and this entry implies no
       acceptance. ADR-0049 is unedited; its catalog rule governs item 6.
+- **S0-C14 Refund and chargeback overlap precedence (2026-11-06, ADOPTED CONTRACT FOR CONTROLLED DEVELOPMENT AND SIMULATION IMPLEMENTATION ONLY, the Owner's S0-C14 Step 0 GO:
+  corrected items 1 to 15, labelled C1 to C15 in the Owner's review and distinct from ADR-0035's clarifications; clarification of FC-4, B10, R6F-4, R6F-8, R6H-2, S0-C9 item 6 and BIL-34 F;
+  an Owner-approved narrow amendment of S0 §3.5, FC-9, I-11, DN-1.2, BIL-26 part G and the Billing README in item 7; findings DO-50, DO-51, DO-52). NOT IMPLEMENTED: this entry changes no
+  code and no behaviour, and each step of item 19 needs its own Owner GO. Not production-certified, not real-money ready.** Assigns no liability. FC-1, FC-5, S0-C9 to S0-C13 and every
+  recovery invariant not named here are unchanged and govern. Before this entry the outcome of a refund and a chargeback on one captured movement depended on arrival order (item 18), and no adopted
+  rule set precedence between FC-4, B10, R6D-1 and R6F-4.
+  1. *Terms (C1).* A **recovery obligation** is the recorded debt. **Collection permission** is whether a new settlement channel may start. **T3** is the derived restriction on new
+     assistance requests. A **suspension** is an Owner decision that T3 does not apply to one obligation. None of these is a final financial resolution. None exists under this entry.
+  2. *Overlap (C2).* An overlap exists when one captured movement has both a completed refund and a verified chargeback loss. It is decided from recorded facts, never from arrival order.
+  3. *Facts stand (C3).* No provider fact, balance, loss, review, reversal, write-off, obligation, recovery payment or suspension record is rewritten, deleted, clamped, netted or automatically
+     undone.
+  4. *Refund governs the purchase (C4).* A completed refund reverses its purchase under R6D-1, even after a final loss. FC-4 and B10 read: a chargeback never reverses an assisted purchase.
+  5. *Waiting effect (C5).* A recovery obligation or direct write-off is a **waiting effect** while any relay of that movement is `NULL`, `authorization_pending`, `authorized`, `dispatching`,
+     `submitted`, `unknown`, `discrepancy`, or `succeeded` with its case not completed. It is also waiting while Payment cannot confirm the position under item 6. The loss, its effect row and
+     any direct reversal are not delayed.
+  6. *Resumption (C6).* A waiting effect proceeds only when: (a) a Payment refunds read that started after the loss was committed in Billing, and was not reused, shows no live attempt, no refund
+     evidence and no attempt unknown to Billing; and (b) at the effect's own statement, every relay of that movement is `rejected`, `authorization_expired`, `authorization_refused` or `failed`.
+     No timer resumes an effect. No lock spans Billing and Payment. This item does not guarantee that no refund follows: a refund reported after a confirmed failure may coexist with the
+     effect, and item 8 then applies.
+     - **Safety invariants.** *I1 Closed set:* once a chargeback fact is committed, no new refund attempt can commit for that payment (admission and dispute ingestion share the payment row lock;
+       application logic under a database lock, not a constraint). *I2 Fresh read:* the read starts after the local loss commit, so it sees the whole closed set; results are never reused across
+       decisions. *I3 Double check:* an effect commits only if the read showed no live attempt and no refund evidence, and the guard then saw no live relay. Only (b) is database-enforced; a
+       database guard cannot prove that a read happened.
+     - **The race.** After the read, a `failed` attempt can still gain verified money at Payment before the effect commits. It cannot be prevented, only detected. What the invariants prove: an
+       effect committed at a moment after the loss when every attempt was refused, expired or `failed`, with no refund evidence. Refused and expired attempts were never dispatched. So an effect
+       can sit beside a refund only if the provider confirmed failure and later reported money, or the money reached no attempt at all.
+     - **PAY-08 is not a snapshot.** It runs separate queries, attempts first. Attempt states only move forward, so it behaves as a slightly earlier read, which is safe.
+  7. *Collection freeze (C7).* While an overlap exists on an obligation, no new settlement channel may start. A channel already open continues. Every verified recovery payment is counted as
+     adopted. **S0-C14 C7 exception.** While a refund and chargeback overlap exists on a recovery obligation, starting a NEW recovery settlement channel on that obligation is refused. For that
+     obligation only, this narrows S0 §3.5 (a new channel also requires that no overlap exists), I-11, FC-9 and the "recovery settlement" entry of DN-1.2. Channels already started, the recording
+     of verified money and every other discharge action are not excepted. The S0 §8 criterion keeps its text and is read with this exception. DN-1 still does not amend ADR-0060. A-6 (PAY-03 F) is
+     not part of this amendment: the refusal is in Billing and existing channels continue.
+  8. *Overlap case (C8).* The reconciliation worker opens one `chargeback_refund_overlap` case per overlap, whatever the purchase kind, capture basis or order. It cannot be acknowledged, and
+     has no resolution kind under this entry.
+  9. *Acknowledgement (C9).* Acknowledging a review closes only that review. `reviewed_no_financial_effect` is refused while an overlap exists on that movement.
+  10. *Suspension (C10).* The live Owner of an obligation's Company and Platform may suspend its T3 with a `recovery_restriction_suspend` receipt, while the obligation is open and an overlap exists
+      on it. A suspension changes T3 for that obligation only. It has no expiry. An open or uncertain channel does not block it. The debt, the freeze, T1, T2, a write-off and the overlap case are
+      untouched, and an unused suspension right never lapses: if the Owner never acts, T3, the freeze and the case stay. Evidence is append-only, one `suspended` and at most one `revoked` per
+      suspension id, at most one active per obligation, each with a unique receipt and `consumeRef`; the database re-derives eligibility under the Organization lock.
+  11. *Revocation (C11).* That Owner may revoke an active suspension with a `recovery_restriction_revoke` receipt. T3 then applies to new requests only. There is no automatic revocation.
+  12. *Waiting visibility (C12).* Each waiting effect opens one `chargeback_effect_waiting` case, which cannot be acknowledged. It resolves only as: `effect_applied`, when the obligation or direct
+      write-off of that loss exists; or `refund_completed`, naming the completed refund of the same captured movement, when the effect will not be applied. Otherwise it stays open. Overlap cases
+      are unaffected. `effect_applied` is never used when no effect was applied. No new resolution value is needed. The database check for this type is stricter than the existing
+      `refund_completed` branch: a capture-specific refund of another capture does not count. The case opens only for a loss that qualifies for an effect (S0-C10 item 4); a partial or repeated loss
+      was never going to produce one. Waiting cases are Owner-only.
+  13. *Reads (C13).* Existing obligation and restriction reads state collection and suspension status. An absent T3 never implies the debt ended.
+  14. *Reconciliation safety check (C14).* The Billing financial reconciliation check runs before the four financial workers (`dispute_loss_worker`, `refund_effect_worker`, `recovery_worker`,
+      `reconciliation_worker`) start, on every process start. It is a consistency safety check. **It is not proof that no independent restore occurred.** A pass means only that no inconsistency was
+      found in what it covers. Item 6 still applies to every effect.
+      - **Coverage limits.** It cannot detect: a Billing rewind affecting payments with no loss yet (Payment has no list of all attempts; item 6 covers these when a loss arrives); both databases
+        rewound together; provider activity Core never received; rewinds after the scan; losses with no chargeback fact, which the losses read omits.
+      - **Scan.** Page `GET /payment/disputes/losses` by keyset, at most 200 per page, until a short page. Page Billing relays, losses and completions by keyset the same way. Read PAY-08 for every
+        payment involved. A partial, failed or timed-out scan is not a pass, and there is no sampling. Compare in one direction only: Payment ahead of Billing's mirror is normal, so an event in
+        transit never counts as a mismatch.
+      - **Worker startup.** The process and HTTP start normally. The check runs in the background and never blocks bootstrap. The four workers construct but run no pass until it passes, and each
+        instance runs its own. *Unavailable* (Payment down, partial scan): retry with backoff, workers stopped, logged, `/ready` unaffected. *Mismatch:* sticky for the process life, workers stopped,
+        `/ready` not ready, no automatic override. Nothing is lost while stopped: rows wait in the database and are selected later. The relay reconciler stays on.
+  15. *Limits (C15).* Nothing here assigns liability, forgives debt, sets a timeout or defines a final resolution. D9 (partial refund beside a loss) and D15 (final liability for the overlap
+      shortfall), decision numbers of this review and distinct from [OD] D1 to D8, stay unresolved. A `discrepancy` relay waits under item 5 until a separate decision.
+  16. *Exact amendments.* Each adopted text below is kept in place and carries a dated pointer here. Nothing is deleted.
+
+      | Rule | Adopted text, kept | Effect of this entry |
+      |---|---|---|
+      | S0 §3.5 | "a new channel only after definitive closure" | Item 7: a new channel also requires that no overlap exists on that obligation |
+      | S0 §3.5, BIL-28 A | "T3 clears only when verified recoveries reach the base amount" | Item 10: a suspension stops T3 applying to that obligation and never clears the debt |
+      | FC-9, I-11 | "block **new** assistance requests only"; "discharge stays available" | Item 7: the exception, on that obligation only. A collection freeze is not a restriction |
+      | DN-1.2 | "recovery settlement" in the closed discharge set | Item 7: starting a NEW channel is excepted during an overlap; recording verified money never is |
+      | BIL-26 G | "blocks only NEW assistance requests: every discharge action, including recovery settlement and surplus confirmation, stays available" | Replaced for the future by BIL-26 H |
+      | Billing README | Discharge wording of the S5d and S6f notes | Dated pointers; the README keeps describing current behaviour until implementation |
+      | S0 §8, S0-C7 item 2 | "every discharge action works for its authorized actors" | **Wording unchanged**, read with item 7 |
+      | FC-4, B10 | "An assisted purchase lost at final stage is never reversed" | Item 4: a chargeback never reverses it; a completed refund does |
+      | R6F-4, R6F-8 | "a FULL chargeback of a never-refunded payment"; refunded: "no debt and no T3" | Items 5, 6: decided with live refunds too. A committed obligation stands if a refund completes later (item 3) |
+      | S0-C9 item 6 | "a chargeback after a completed refund of that capture is `chargeback_refund_overlap`" | Item 8: applies to every capture basis, including an assisted settling capture |
+      | R6H-2 | Review-only acknowledgement | Item 9 |
+      | BIL-34 F | "never with a completed refund of the payment" | A rule at recognition, widened by items 5, 6. Not an end-state guarantee (item 6): a write-off already recorded stands and item 8 opens the case |
+
+      ADR-0035, ADR-0044 Part B, ADR-0057, ADR-0067, ADR-0068 and ADR-0069 stay Proposed and unedited; no Accepted ADR is edited. F-22 (ADR-0067's text) stays open and gains the two operations of item 10.
+  17. *Recorded limitation: no new collection route.* An unresolved obligation can consequently have no new collection route: if its only channel closes during an overlap, or none was open, nothing
+      can collect the remainder. An overlap is derived from permanent facts, and neither a suspension nor anything else under this entry ends it, so the freeze lasts until a separately adopted
+      contract provides otherwise. The debt stays open and visible. This is not forgiveness, a write-off, a release or a final financial
+      resolution, and no read may imply one. **Owner decision, 2026-11-06:** this is an INTERIM development and simulation policy, and it is an explicit
+      blocker for real-money readiness until a separately approved resolution policy exists.
+  18. *Findings (post-workshop validation, 2026-11-06, at `2ae3dea`, simulation provider, real processes, each scenario run twice; the observation register is kept outside this repository).* All open until
+      implemented and certified. Every database invariant held in every run: each step was lawful, and the guards check only at insert.
+
+      | Finding | Classification | Observed | Governed by |
+      |---|---|---|---|
+      | DO-52 | **Reproduced defect** | Assisted, loss first, then an in-flight refund: open obligation and T3 on a reversed, refunded purchase, no case, and a new settlement accepted | Items 4 to 8 |
+      | DO-50 | **Reproduced defect**, in one ordering; the other two conform | Direct, write-off pass first, then an in-flight refund: write-off stands and no overlap case opens. Acknowledging `second_reversal_cause` then left no open case | Items 5, 6, 8, 9 |
+      | DO-51 | **Confirmed visibility gap; policy interpretation resolved by this entry** | Assisted, refund first, then loss: debt protection works as adopted, but only a `recovery_review` row, no case and no read route | Item 8: S0-C9 item 6 covers this path |
+
+  19. *Implementation dependency plan (each step needs its own Owner GO; development and simulation only).*
+
+      | Step | Work | Depends on |
+      |---|---|---|
+      | 0 | This contract text. No code | Owner GO (done by this entry) |
+      | 1 | Audit catalog: `recovery_restriction.suspended`, `recovery_restriction.suspension_revoked` (version 1, no trusted scope), `case_type` value `chargeback_effect_waiting`; generated document, pin tests, Billing's broker topic permission and its check-repo pin. No `resolution` value | 0 |
+      | 2 | Auth: two factor-only purposes, two bindings. Code only, no migration | 0, parallel with 1 |
+      | 3 | Billing migration (PROPOSED `0050`, expand-only, no data): suspension event table, guards, `billing_assistance_restrictions`, case type constraint, and `billing_reconciliation_resolution_guard` with item 12's stricter same-movement check | 1 |
+      | 4 | Billing service: overlap discovery, waiting filter, Billing client parsing PAY-08 `allocations` and `unallocatedFacts` (Payment already returns them), post-loss read rule, freeze, acknowledgement rule. Worker filters ship with guard use, so a trigger refusal never aborts a pass | 3 |
+      | 5 | Billing: suspend and revoke routes, read fields, the BIL-26 route description | 2, 3 |
+      | 6 | Billing: reconciliation safety check (item 14): complete scan, background start | 4 |
+      | 7 | Tests V1 to V32, cross-process, two instances | 4, 5, 6 |
+      | 8 | Certification; registers updated for DO-50, DO-51, DO-52 | 7 |
+
+      Payment and File need no change. In any environment: audit catalog, broker permission, Auth, then Billing.
+  20. *Certification tests (all required; V30, V31 and V32 are explicitly required).* Interleavings use barrier locks held by the test, labelled as test aids, with two separate Billing processes.
+      V1, V2, V3 and V9 are critical.
+
+      | Test | Setup | Fails if |
+      |---|---|---|
+      | V1 | Hold the recovery visit between read and insert; complete the refund | Obligation opens |
+      | V2 | Same for the write-off pass | Write-off recorded with a live relay |
+      | V3 | Two Billing processes, one database, one loss, many passes | Two obligations, two write-offs or two cases |
+      | V4 | Direct SQL insert past the application with a live relay | Guard accepts it |
+      | V5 | Direct SQL channel insert during an overlap | Guard accepts it |
+      | V6 | Refund `failed`, effect proceeds, verified refund lands | No overlap case, or any effect undone |
+      | V7 | Channel open, overlap arises, then the payment succeeds | Payment refused or dead-lettered |
+      | V8 | Suspend, then full recovery | T3 reappears, or the suspension row changed |
+      | V9 | Suspend and assistance request concurrently, two processes | T3 read mid-change |
+      | V10 | Two concurrent suspensions; replayed receipt | Two active suspensions, or a second consumption |
+      | V11 | Receipt for another obligation, Organization or Company | Accepted |
+      | V12 | Crash after Auth consumed, before commit; retry | Nothing recorded, or the retry refused |
+      | V13 | `NULL`, `unknown`, `discrepancy` relays beside a loss | Effect proceeds, or no waiting case |
+      | V14 | Relay row deleted to simulate a rewind, refund live | Effect proceeds: item 6's read must hold it. Must pass |
+      | V15 | Refund after a chargeback attempted at Payment | Admitted |
+      | V16 | Acknowledge `second_reversal_cause` during an overlap | Reason accepted, or the overlap closes |
+      | V17 | Payment holds an attempt with no relay | Effect does not wait |
+      | V18 | Two Owners suspend at once | More than one active suspension |
+      | V19 | Suspension or revocation races an assistance request, two processes | T3 applied retroactively, or read mid-change |
+      | V20 | Waiting case on each exit, then a real overlap | Wrong resolution (`effect_applied` with no effect), or no overlap case afterwards |
+      | V21 | Reads for the Owner, the Organization administrator and another Company | Wrong status or disclosure, or a read implies the debt ended |
+      | V22 | Billing starts with a relay removed on a payment that has a loss | Workers start |
+      | V23 | Payment unreachable, or behind Billing | Workers start; or a mismatch is not sticky |
+      | V24 | Many concurrent lost disputes and refund admissions | An attempt commits after a chargeback fact |
+      | V25 | Attempt live at the read; barrier before commit | Effect commits |
+      | V26 | Attempt `failed` at the read; barrier; verified refund lands; release | Effect undone or refused, or no overlap case within two passes |
+      | V27 | Recording proxy on PAY-08 | A read started before the loss commit, or is reused across decisions |
+      | V28 | Mirror and Payment disagree, both directions | Effect commits |
+      | V29 | PAY-08 answers 503, malformed, or without refund evidence | Effect commits |
+      | V30 | All attempts dead at the read; a new relay commits before the transaction | Guard allows the effect, or the effect never resumes after `rejected` |
+      | V31 | Labelled fixture: an attempt at Payment with no Billing relay | Effect commits, or nothing flags the mismatch |
+      | V32 | Recording proxy on Payment's refund call | The relay row is not committed when the call arrives |
+
+  21. *Assumptions register.* None is database-enforced across the two databases. **A1, A3, A4 and A6 are not proven by the tests cited for them in the Owner's review.**
+
+      | Assumption | Status | Proof required |
+      |---|---|---|
+      | A1 Billing commits the relay before calling Payment | **Not proven.** Code order only; V27 does not test it | V32 |
+      | A2 After a chargeback, Payment refuses every new refund (I1) | Application rule under a row lock | V15, V24 |
+      | A3 Only Billing creates refunds for its payments | **Not proven.** Policy and producer check; no test confirmed | A named test at certification; V31 covers only the failure case |
+      | A4 A dead relay status comes only from Payment's own statement | **Not proven.** V28 proves an effect stays safe if A4 is false, not that A4 holds | A named test at certification |
+      | A5 Neither database is rewound independently | **Not provable by Core** | V14, V22, V23 reduce it; `G-FIN-RESTORE` governs |
+      | A6 Payment's loss eventually reaches Billing | **Not proven.** No test confirmed | A named test at certification |
+      | Provider de-duplicates by key and may report after failure | Unknown | Real provider only |
+      | A refund that matches no attempt | Not covered: stays an unmatched fact | Separate work |
+      | Multi-instance behaviour | Local proof only | V3, V9; real deployment |
+
+  22. *`G-FIN-RESTORE` (mandatory production activation gate of Billing; S0 §6).* These modules are not mounted in production, so it needs no code now. Billing and Payment are in backup scope, with
+      paired restore points. After any restore of either database, the financial workers stay off by deployment control until the Owner authorizes them. A documented procedure reconciles the two
+      databases and the provider. A restore drill has passed. In development and simulation: after a restore of either database, discard both, or stop and report.
+  23. *Preserved.* Earlier drafts of items 6, 12 and 14 were never adopted: in particular `effect_applied` on the mere existence of an overlap case, and a startup gate described as a restore gate. Every other
+      outstanding observation of the workshop register stays open as recorded, as do S-INT's F findings, S0-C13 Parts B and C, S0-C11 L2, V-4, V-5 and the OD items. No production gate moves: G6 deferred, G7, F6 and F7
+      locked, Final Core Validation last.
 
 ## 2. ADR disposition
 
@@ -687,7 +851,7 @@ ADR number 0066 is skipped: a draft ADR-0066 exists on an unmerged branch. Numbe
   room; any further action needs a separate authorization through reconciliation.
 - **FC-4 Reversal.** At most one entitlement reversal per purchase; each cause (refund completion, direct final-lost chargeback) is
   appended separately; a second cause changes no entitlement and opens reconciliation. Option D re-lays later paid periods with their
-  full duration. An assisted purchase lost at final stage is never reversed.
+  full duration. An assisted purchase lost at final stage is never reversed. *(Clarified by S0-C14 item 4: a chargeback never reverses an assisted purchase; a completed refund does, under R6D-1.)*
 - **FC-5 Balances.** Accounting balances come from facts and are never clamped: `netRetained = captured − refundedNet −
   chargebackNet` may become negative. `available = max(0, netRetained − inFlight − disputeExposure)` is used only to admit a new
   attempt, with `disputeExposure` net of chargeback facts already linked to the dispute. No new refund case while a dispute is open.
@@ -728,7 +892,7 @@ Settlement purposes and targets are those of ADR-0044 B2: `organization_subscrip
   step-up; violations are never erased (`superseded_by_correction`). Student disputes have no cutoff; 7 days is an escalation target
   only. A failed settlement opens a full cash-return obligation, including the school's fee.
 - **FC-9 Restrictions.** Derived from open T1 (overdue settlement), T2 (overdue cash return), T3 (recovery after an assisted
-  final-lost chargeback) and inactivity (D6). They block **new** assistance requests only; discharge actions stay available. Each
+  final-lost chargeback) and inactivity (D6). They block **new** assistance requests only; discharge actions stay available *(narrowed by S0-C14 item 7, on one obligation only: a new recovery settlement channel is refused during a refund and chargeback overlap; that collection freeze is not a restriction)*. Each
   clears on verified resolution when no other restriction applies. No persistent repeat-violation state.
 
 ### 3.4 Assisted late settlement [S0]
@@ -754,9 +918,9 @@ Settlement purposes and targets are those of ADR-0044 B2: `organization_subscrip
 
 ### 3.5 Recovery and over-recovery [S0]
 
-- One open or uncertain channel per recovery obligation; a new channel only after definitive closure, for the then-outstanding amount
+- One open or uncertain channel per recovery obligation; a new channel only after definitive closure *(amended by S0-C14 item 7: and only while no refund and chargeback overlap exists on that obligation)*, for the then-outstanding amount
   and the obligation's currency. Every verified success, including a late one, is a `RecoveryPayment` of the verified captured amount.
-  T3 clears only when verified recoveries reach the base amount.
+  T3 clears only when verified recoveries reach the base amount. *(S0-C14 item 10: an Owner suspension stops T3 applying to one obligation; it clears no debt.)*
 - **R-1** An excess is a `recovery_surplus` with status `owed_to_school`: not revenue, not a loss, never deleted, never subscription
   access.
 - **R-2** Every surplus opens an owner reconciliation case and stays owed until resolved; it has no expiry.
@@ -773,7 +937,7 @@ DN-1 does not amend ADR-0060.
 1. Resolving ADR-0060's OD-L7: an effectively inactive scope (`SUSPENDED` or `ARCHIVED`) accepts no new Pay with School assistance
    request.
 2. Existing obligations stay dischargeable through a closed set of Billing and Payment actions: electronic settlement of collected
-   cash, recording a full cash return, the student's confirmation or dispute, the school's dispute response, recovery settlement, and
+   cash, recording a full cash return, the student's confirmation or dispute, the school's dispute response, recovery settlement *(narrowed by S0-C14 item 7: starting a NEW channel is refused during a refund and chargeback overlap on that obligation; channels already started and the recording of verified money are not excepted)*, and
    the owner's corrections, resolutions and reconciliation. These are not ordinary administration, not access grants and not
    reactivation; they grant no general administration.
 3. Authority is verified live per request; if it cannot be verified the action fails closed with no mutation. The student acts on
@@ -869,6 +1033,7 @@ Out of the initial frozen scope unless separately approved:
 | PR #319 | on hold; reconciled after S0 and before Organization-related implementation, with separate authorization |
 | Accepted-ADR reciprocal notes (0007, 0049, 0060) and every ADR status change | separate explicit approval, one ADR at a time |
 | Roadmap, financial-architecture and Billing / Payment SDD updates | separate documentation authorization (§6.1) |
+| `G-FIN-RESTORE` Billing and Payment paired restore (S0-C14 item 22) | mandatory, before Billing's production activation |
 
 ### 6.1 Future documentation alignment (informational)
 
@@ -923,3 +1088,4 @@ task.
 - RabbitMQ `user_id` enforcement is assumed standard broker behaviour until proven by the S1 certification test.
 - Real-provider idempotency windows and debit timing are deferred with the provider.
 - Accepted ADRs 0007, 0049 and 0060 carry no reciprocal notes yet; the relationships are recorded in 0068, 0069 and this record.
+- S0-C14 item 17: an unresolved recovery obligation can have no new collection route during an overlap. This is neither forgiveness nor a final financial resolution. D9 and D15 stay unresolved.

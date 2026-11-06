@@ -143,7 +143,8 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     `return_reported`). Organization scope only.
   - A new assistance request in a restricted Organization is `409 assistance_restricted` with `restrictions` (kinds only) and
     `restriction`; the database refuses it too, under an Organization advisory lock and the database's current clock. Nothing else is
-    restricted: every discharge action, cash collection on an already-pending request and every read stay available.
+    restricted: every discharge action, cash collection on an already-pending request and every read stay available. (S0-C14 item 7, adopted 2026-11-06, NOT implemented: during a
+    refund and chargeback overlap, a new recovery settlement channel on that obligation will be refused; existing channels, verified recovery payments and other discharge actions stay.)
   - `GET /billing/organizations/:organizationId/restrictions`: the Owner of the Platform, the Organization actor, or a service holding
     `restriction.read` for the Platform.
   - **Not provided:** T3 (S6f) and Organization inactivity (D6, needs V-4's lifecycle state) are reserved and never returned.
@@ -187,7 +188,8 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     the entitlement read; the denied paid time is compensated after the interrupted run (C-1, exact ms, derived; paid spans never move).
   - Core V2 S6f (`db/migrations/0039`, `src/recovery/`; BIL-26 T3, BIL-28 to BIL-31; the Owner's R6F-1 to R6F-8): the recovery worker
     visits every verified assisted loss of S6e-D once (including earlier ones): a FULL chargeback of a never-refunded payment opens the
-    Organization's `recovery_obligation` for the frozen BASE only and T3 (new assistance requests refused; every discharge stays available);
+    Organization's `recovery_obligation` for the frozen BASE only and T3 (new assistance requests refused; every discharge stays available, subject to the S0-C14 item 7 exception once implemented;
+    an obligation in overlap can have no new collection route, which is neither forgiveness nor a final resolution);
     a partial chargeback or a refunded payment is kept in `recovery_review` (no debt, no T3). The Organization's administrator (never the
     beneficiary) reads it (`GET /billing/recovery-obligations/:id`) and settles it (`POST .../:id/settlement`, class M): one invoice of the
     reserved producer `billing-recovery` for exactly the outstanding amount, routed `recovery_settlement` (no entitlement), one open or
