@@ -45,7 +45,7 @@ class ScriptedPaymentRefunds implements PaymentRefundClient {
 
   async refunds(paymentId: string): Promise<PaymentRefunds | null> {
     if (this.readDown) throw new Error('payment unavailable');
-    return this.records.get(paymentId) ?? { attempts: [], refusals: [], authorizations: [] };
+    return this.records.get(paymentId) ?? { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] };
   }
 }
 
@@ -241,17 +241,17 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       payment.next = [{ kind: 'unknown', reason: 'status_504' }];
       await authorize(caseId, { receiptSecret: secret() }).expect(503);
       const [relay] = await relays(caseId);
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [], unallocatedFacts: [] });
       expect(await reconcile()).toMatchObject({ changed: 1 });
       expect((await relays(caseId))[0]!.attemptStatus).toBe('authorized');
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [], unallocatedFacts: [] });
       await reconcile();
       const c = await readCase(caseId);
       expect(c.attempts[0].status).toBe('succeeded');
       expect(c).toMatchObject({ status: 'open', completedAt: null }); // S6c completes, not S6b
       expect(Number((await one(`SELECT count(*) AS n FROM subscription_purchase_reversal`)).n)).toBe(0);
       // a backwards report is refused by the database and the mirror stays
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'authorized', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [], unallocatedFacts: [] });
       await reconcile();
       expect((await relays(caseId))[0]!.attemptStatus).toBe('succeeded');
       payment.readDown = true;
@@ -279,7 +279,7 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       expect((await relays(caseId))[0]!.attemptStatus).toBe('authorization_pending');
       expect((await authorize(caseId, { receiptSecret: secret() }).expect(409)).body.code).toBe('refund_authorization_in_progress');
       const [relay] = await relays(caseId);
-      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'failed', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [] });
+      payment.records.set(paymentId, { attempts: [{ refundAttemptId: relay!.id, status: 'failed', approvedBy: { userId: OWNER } }], refusals: [], authorizations: [], unallocatedFacts: [] });
       await reconcile();
       expect((await cancel(caseId).expect(409)).body.code).toBe('refund_processing_started'); // a consumed receipt and a dispatched refund
       await authorize(caseId, { receiptSecret: secret() }).expect(201); // a new receipt, a new attempt id
@@ -379,12 +379,12 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       const authorizationId = randomUUID();
       // Payment's read: the authorization is not complete yet -> nothing happens
       payment.records.set(c.paymentId, { attempts: [{ refundAttemptId: c.attemptId, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [],
-        authorizations: [{ refundAuthorizationId: authorizationId, refundAttemptId: c.attemptId, refundCaseId: c.caseId, approvedAmount: c.amount, currency: 'TND', completedAt: null }] });
+        authorizations: [{ refundAuthorizationId: authorizationId, refundAttemptId: c.attemptId, refundCaseId: c.caseId, approvedAmount: c.amount, currency: 'TND', completedAt: null, allocations: [] }], unallocatedFacts: [] });
       await reconcile();
       expect((await readCase(c.caseId)).status).toBe('open');
       // complete at Payment: the reconciler completes the case (source reconciliation)
       payment.records.set(c.paymentId, { attempts: [{ refundAttemptId: c.attemptId, status: 'succeeded', approvedBy: { userId: OWNER } }], refusals: [],
-        authorizations: [{ refundAuthorizationId: authorizationId, refundAttemptId: c.attemptId, refundCaseId: c.caseId, approvedAmount: c.amount, currency: 'TND', completedAt: '2026-10-29T11:00:00.000Z' }] });
+        authorizations: [{ refundAuthorizationId: authorizationId, refundAttemptId: c.attemptId, refundCaseId: c.caseId, approvedAmount: c.amount, currency: 'TND', completedAt: '2026-10-29T11:00:00.000Z', allocations: [] }], unallocatedFacts: [] });
       await reconcile();
       expect(await readCase(c.caseId)).toMatchObject({ status: 'completed', completion: { source: 'reconciliation', completedAt: '2026-10-29T11:00:00.000Z' } });
       expect((await completionAudits(c.caseId))[0].payload.actor).toEqual({ type: 'system', id: 'payment_reconciler' });
@@ -395,7 +395,7 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       // a Payment read whose amount differs is never applied
       const d = await authorizedCase();
       payment.records.set(d.paymentId, { attempts: [], refusals: [],
-        authorizations: [{ refundAuthorizationId: randomUUID(), refundAttemptId: d.attemptId, refundCaseId: d.caseId, approvedAmount: d.amount + 1, currency: 'TND', completedAt: '2026-10-29T11:00:00.000Z' }] });
+        authorizations: [{ refundAuthorizationId: randomUUID(), refundAttemptId: d.attemptId, refundCaseId: d.caseId, approvedAmount: d.amount + 1, currency: 'TND', completedAt: '2026-10-29T11:00:00.000Z', allocations: [] }], unallocatedFacts: [] });
       await reconcile();
       expect((await readCase(d.caseId)).status).toBe('open');
     });

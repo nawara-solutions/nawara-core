@@ -19,6 +19,8 @@ import { RefundAuthorizationService } from './refund-authorization.service.js';
 import { RefundRelayReconciler, RefundRelayReconcilerService } from './refund-relay-reconciler.js';
 import { RefundCompletionService } from './refund-completion.service.js';
 import { RefundEffectService, RefundEffectWorkerService } from './refund-effect.service.js';
+import { RefundEvidenceReader } from './refund-evidence.js';
+import { FinancialSafetyCheck, FinancialSafetyCheckService, FinancialWorkerGate } from './financial-safety.js';
 
 /**
  * Core V2 S6a refund cases (register BIL-23, BIL-25; the Owner's R6A-1 to R6A-9). PRODUCTION REFUSAL, first line: in production the module
@@ -42,6 +44,10 @@ export class RefundModule {
       controllers: [RefundCaseController, FraudHoldController],
       providers: [
         RefundCaseService, RefundCommandIdempotency, RefundOwnerGuard,
+        // Core V2 S0-C14 items 5, 6: whether a loss's effect waits on a refund of its captured movement (local relays, then a fresh PAY-08 read)
+        RefundEvidenceReader,
+        // Core V2 S0-C14 item 14: the financial reconciliation safety check gates the four financial workers (not proof of no restore)
+        FinancialWorkerGate, FinancialSafetyCheck, ...(refunds.reconciler === false ? [] : [FinancialSafetyCheckService]),
         // Core V2 S6b (BIL-24): the relay to Payment and its reconciler (Billing's own service token; never an Owner's bearer)
         RefundAuthorizationService, RefundRelayReconciler, RefundCompletionService, ...(refunds.reconciler === false ? [] : [RefundRelayReconcilerService]),
         // Core V2 S6d (R6D-3): the commercial effects of completed cases, asynchronously (tests drive `drainOnce` themselves)
@@ -71,7 +77,8 @@ export class RefundModule {
       // Core V2 S6c: global, so the Payment event consumer can apply Payment's refund completion where (and only where) refunds are mounted
       global: true,
       exports: [RefundRelayReconciler, RefundCompletionService, RefundEffectService, DisputeLossService, FraudHoldService, FRAUD_HOLD_RECEIPTS, FRAUD_EVIDENCE_FILES, PAYMENT_LATE_SETTLEMENT_EXPOSURE,
-        PAYMENT_REFUND_CLIENT /* Core V2 S0-C11: L-4 and the contradiction cases read capture evidence */], // S6f: the recovery Path B reuses both clients
+        PAYMENT_REFUND_CLIENT /* Core V2 S0-C11: L-4 and the contradiction cases read capture evidence */,
+        RefundEvidenceReader /* Core V2 S0-C14: recovery and reconciliation decide waiting effects */, FinancialWorkerGate, FinancialSafetyCheck], // S6f: the recovery Path B reuses both clients
     };
   }
 }

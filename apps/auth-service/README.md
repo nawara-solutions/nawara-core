@@ -122,6 +122,10 @@ Core V2 S6g (the Owner's R6G-1, R6G-3): `late_settlement_apply` (`companyId`, `l
 Core V2 S6h (the Owner's R6H-3, R6H-8): `provider_fact_associate` (`companyId`, `factId`, `kind`, `amount`, `currency`, `targetType` ∈
 `payment` / `refund_authorization`, `targetId`), audience `payment-service`, after `payment.provider_fact.associate`; and `recovery_write_off`
 (`companyId`, `obligationId`, `organizationId`, `amount`, `currency`), audience `billing-service`, after `billing.recovery.write_off`.
+Core V2 S0-C14 WP A (S0 §1.5 S0-C14 items 10, 11; register AUTH-01 H; development and simulation only): `recovery_restriction_suspend`
+(`companyId`, `suspensionId` chosen by Billing before issuance, `obligationId`, `organizationId`, `disputeId`, `refundCaseId`, `reasonCode` =
+`refund_chargeback_overlap`) and `recovery_restriction_revoke` (the same fields, `reasonCode` = `owner_reinstated_restriction`), audience `billing-service`, after the dedicated `billing.recovery_restriction.suspend` / `billing.recovery_restriction.revoke`
+step-ups. Declaring them activates no Billing operation.
 
 | Route | Caller | Purpose |
 |---|---|---|

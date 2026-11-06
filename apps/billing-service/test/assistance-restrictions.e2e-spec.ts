@@ -355,15 +355,22 @@ describeWithEnv('Organization financial restrictions (Core V2 S5d, simulation) â
       expect((await confirm(r2.obligationId, 'b2')).status).toBe(200);
       expect(((await restrictionsOf(ORG)).body.restrictions as Row[]).map((x) => [x.kind, x.sourceId])).toEqual([['T1', r1.id], ['T2', r1.obligationId]]);
       // S5D-3: never another Organization, the beneficiary's account elsewhere, the Platform or the Company
-      expect((await restrictionsOf(ORG2, 'a2')).body).toEqual({ restrictions: [] });
+      expect((await restrictionsOf(ORG2, 'a2')).body).toEqual({ restrictions: [], suspended: [] }); // + S0-C14: the additive list of suspended T3s
       expect((await newRequest('b1', ORG2)).status).toBe(201); // the same beneficiary, another Organization of the same Platform
     });
 
     it('no obligation: no T2; the read is the restrictions list only; no restriction state is ever stored', async () => {
       await collected();
-      expect((await restrictionsOf(ORG)).body).toEqual({ restrictions: [] });
-      const stored = await count(`SELECT count(*) AS n FROM information_schema.columns WHERE table_schema = 'public' AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')`);
+      expect((await restrictionsOf(ORG)).body).toEqual({ restrictions: [], suspended: [] }); // + S0-C14: the additive list of suspended T3s
+      // Core V2 S0-C14 items 10, 11 (Owner-approved): the append-only evidence of an Owner's T3 suspension and its revocation is the ONE exception;
+      // it stores who suspended which obligation and why, never a restriction kind, a restriction state or a repeat-violation count (pinned below)
+      const SUSPENSION_EVIDENCE = 'recovery_restriction_suspension_event';
+      const stored = await count(`SELECT count(*) AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name <> $1
+        AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')`, [SUSPENSION_EVIDENCE]);
       expect(stored).toBe(0);
+      const evidence = await admin.query(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY column_name`, [SUSPENSION_EVIDENCE]);
+      expect(evidence.rows.map((r: Row) => r.column_name)).toEqual(['actorUserId', 'companyId', 'consumeRef', 'disputeId', 'id', 'kind', 'obligationId', 'organizationId',
+        'reasonCode', 'receiptId', 'recordedAt', 'refundCaseId', 'suspensionId']);
       for (const kind of RESERVED_RESTRICTION_KINDS) {
         expect(await count(`SELECT count(*) AS n FROM pg_proc WHERE proname = 'billing_assistance_restrictions' AND prosrc LIKE $1`, [`%'${kind}'%`])).toBe(0); // reserved: no source exists
       }
@@ -478,7 +485,7 @@ describeWithEnv('Organization financial restrictions (Core V2 S5d, simulation) â
   describe('restriction read (BIL-26)', () => {
     it('the Owner of the Platform, the Organization actor and a service with restriction.read on that Platform read it; read-only', async () => {
       const r = await owed();
-      const expected = { restrictions: [{ kind: 'T1', sourceId: r.id, since: expect.any(String) }, { kind: 'T2', sourceId: r.obligationId, since: expect.any(String) }] };
+      const expected = { restrictions: [{ kind: 'T1', sourceId: r.id, since: expect.any(String) }, { kind: 'T2', sourceId: r.obligationId, since: expect.any(String) }], suspended: [] }; // + S0-C14
       for (const bearer of ['owner-tok', 'a1', reader.token]) {
         const res = await restrictionsOf(ORG, bearer);
         expect([res.status, res.body], bearer).toEqual([200, expected]);

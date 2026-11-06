@@ -28,7 +28,8 @@ export type BillingAuditAction =
   | 'recovery_obligation.opened' | 'recovery_payment.recorded' | 'recovery_obligation.recovered' // Core V2 S6f (R6F-6)
   | 'recovery_surplus.recorded' | 'recovery_surplus.resolved' | 'recovery_surplus.recipient_confirmed'
   | 'assistance_late_settlement.attested' | 'assistance_late_settlement.applied' | 'cash_return_obligation.superseded' // Core V2 S6g (R6G-9)
-  | 'reconciliation_case.opened' | 'reconciliation_case.resolved' | 'financial_loss.recorded' | 'financial_loss.adjusted' | 'recovery_obligation.written_off'; // Core V2 S6h-B (R6H-11)
+  | 'reconciliation_case.opened' | 'reconciliation_case.resolved' | 'financial_loss.recorded' | 'financial_loss.adjusted' | 'recovery_obligation.written_off' // Core V2 S6h-B (R6H-11)
+  | 'recovery_restriction.suspended' | 'recovery_restriction.suspension_revoked'; // Core V2 S0-C14 WP C (items 10, 11): the Owner, with dedicated receipts
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in

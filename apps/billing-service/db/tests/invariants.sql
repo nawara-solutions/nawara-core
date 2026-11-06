@@ -1118,8 +1118,13 @@ SELECT pg_temp.expect_ok('S5d', 'an unrestricted Organization admits a new reque
 -- Core V2 S6f (R6F-6 / FC-9): T3 now has its source (an open recovery obligation); D6 inactivity stays reserved (V-4)
 SELECT pg_temp.assert_eq('S5d', 'the reserved kind (inactive) has no source in the model; T3 is sourced from open recovery obligations only (S6f)',
   (SELECT (prosrc NOT LIKE '%''inactive''%' AND prosrc LIKE '%''T3''%' AND prosrc LIKE '%recovery_obligation%')::text FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+-- Core V2 S0-C14 items 10, 11 (Owner-approved): the append-only suspension evidence is the ONE exception; it holds no restriction kind, state or count
 SELECT pg_temp.assert_eq('S5d', 'no restriction or violation state is stored (FC-9)',
-  (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')), '0');
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name <> 'recovery_restriction_suspension_event'
+     AND (table_name ~* '(restriction|violation)' OR column_name ~* '(restrict|violation|repeat)')), '0');
+SELECT pg_temp.assert_eq('S0-C14', 'the suspension evidence holds who suspended which obligation and why, never a restriction kind or state (items 10, 11)',
+  (SELECT string_agg(column_name::text, ',' ORDER BY column_name) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'recovery_restriction_suspension_event'),
+  'actorUserId,companyId,consumeRef,disputeId,id,kind,obligationId,organizationId,reasonCode,receiptId,recordedAt,refundCaseId,suspensionId');
 
 -- ------------------------------------------------------------------------------------------------------------- S6a refund cases (0033)
 -- The eligible-capture paths are exercised end to end by test/refund-cases.e2e-spec.ts; here, the guards that need no capture fixture.
@@ -1266,7 +1271,7 @@ SELECT pg_temp.assert_eq('S6f', 'R6F-5: one external record and one confirmation
 SELECT pg_temp.assert_eq('S6f', 'R-3b: a confirmation needs the external record (FK); the recorder never confirms (guard)',
   (SELECT (contype = 'f')::text FROM pg_constraint WHERE conrelid = 'recovery_surplus_confirmation'::regclass AND contype = 'f' LIMIT 1), 'true');
 SELECT pg_temp.assert_eq('S6f', 'R6F-7 / FC: no recovery or FinancialLoss table beyond the approved eight',
-  (SELECT count(*)::text FROM information_schema.tables WHERE table_schema = 'public' AND (table_name ~ '^recovery_' OR table_name ~* 'financial_loss|write_?off')), '10'); -- + S6h-B: financial_loss, financial_loss_adjustment
+  (SELECT count(*)::text FROM information_schema.tables WHERE table_schema = 'public' AND (table_name ~ '^recovery_' OR table_name ~* 'financial_loss|write_?off')), '11'); -- + S6h-B: financial_loss, financial_loss_adjustment; + S0-C14: recovery_restriction_suspension_event
 SELECT pg_temp.assert_eq('S6f', 'every recovery ledger table is append-only (an update/delete guard on each)',
   (SELECT count(DISTINCT tgrelid)::text FROM pg_trigger WHERE tgname LIKE '%_10_append_only' AND tgrelid::regclass::text IN ('recovery_review', 'recovery_payment', 'recovery_surplus',
     'recovery_surplus_external', 'recovery_surplus_confirmation', 'recovery_surplus_refund')), '6');
@@ -1379,6 +1384,37 @@ SELECT pg_temp.assert_eq('S0-C12', 'D-B: a recovery payment''s capture-specific 
               FROM pg_proc WHERE proname = 'billing_refund_case_insert_guard')
        AND (SELECT prosrc LIKE '%late_capture%' AND prosrc LIKE '%l.amount <> i.total%' AND prosrc LIKE '%NOT EXISTS (SELECT 1 FROM recovery_payment%'
               FROM pg_proc WHERE proname = 'billing_recovery_capture_refundable'))::text), 'true');
+
+-- ------------------------------------------------------------------------------------------------------------- S0-C14 WP B (0050)
+-- Behaviour across real processes and real rows: test/s0c14-overlap.e2e-spec.ts. Here, the guards and shapes that need no fixture.
+SELECT pg_temp.assert_eq('S0-C14', 'items 5, 6: the obligation and direct write-off inserts carry the local waiting-effect guard',
+  (SELECT count(*)::text FROM pg_trigger WHERE (tgname, tgrelid::regclass::text) IN (('recovery_obligation_08_refund_live', 'recovery_obligation'), ('financial_loss_08_refund_live', 'financial_loss'))), '2');
+SELECT pg_temp.assert_eq('S0-C14', 'item 7: the channel insert guard checks the collection freeze right after its Organization and obligation locks, before anything else',
+  (SELECT (position('billing_recovery_obligation_frozen' IN prosrc) > position('billing.recovery:' IN prosrc)
+       AND position('billing_recovery_obligation_frozen' IN prosrc) < position('recovery_obligation_closed' IN prosrc)
+       AND prosrc LIKE '%recovery_channel_invoice%' AND prosrc LIKE '%settlement_channel_open%' AND prosrc LIKE '%recovery_channel_outstanding%')::text
+     FROM pg_proc WHERE proname = 'billing_recovery_channel_insert_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C14', 'item 5: the live relay statuses are exactly the approved set (NULL, pending, authorized, dispatching, submitted, unknown, discrepancy; succeeded until completion)',
+  (SELECT (prosrc LIKE '%"attemptStatus" IS NULL%' AND prosrc LIKE '%(''authorization_pending'', ''authorized'', ''dispatching'', ''submitted'', ''unknown'', ''discrepancy'')%'
+       AND prosrc LIKE '%''succeeded'' AND r.status <> ''completed''%')::text FROM pg_proc WHERE proname = 'billing_loss_refund_live'), 'true');
+SELECT pg_temp.expect_error('S0-C14', 'items 10, 11: a suspension of an unknown obligation is refused', $$INSERT INTO recovery_restriction_suspension_event
+  ("suspensionId", kind, "obligationId", "organizationId", "companyId", "disputeId", "refundCaseId", "reasonCode", "actorUserId", "receiptId", "consumeRef")
+  VALUES (gen_random_uuid(), 'suspended', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'refund_chargeback_overlap',
+          gen_random_uuid(), gen_random_uuid(), gen_random_uuid())$$, '23514', 'recovery_restriction_suspension_evidence');
+SELECT pg_temp.assert_eq('S0-C14', 'items 10, 11: each kind has its one closed reason code (a CHECK; the evidence guard runs first on an insert)',
+  (SELECT (pg_get_constraintdef(oid) LIKE '%suspended%refund_chargeback_overlap%' AND pg_get_constraintdef(oid) LIKE '%revoked%owner_reinstated_restriction%')::text
+     FROM pg_constraint WHERE conname = 'recovery_restriction_suspension_event_kind'), 'true');
+SELECT pg_temp.assert_eq('S0-C14', 'the suspension evidence is append-only (update, delete and truncate guards)',
+  (SELECT count(*)::text FROM pg_trigger WHERE tgrelid = 'recovery_restriction_suspension_event'::regclass AND tgname IN
+    ('recovery_restriction_suspension_event_10_append_only', 'recovery_restriction_suspension_event_11_no_truncate')), '2');
+SELECT pg_temp.assert_eq('S0-C14', 'item 10: T3 excludes an obligation with an active suspension; T1 and T2 are unchanged',
+  (SELECT (prosrc LIKE '%NOT billing_recovery_restriction_suspended(ro.id)%' AND prosrc LIKE '%''T1''%' AND prosrc LIKE '%''T2''%')::text
+     FROM pg_proc WHERE proname = 'billing_assistance_restrictions'), 'true');
+SELECT pg_temp.expect_error('S0-C14', 'item 12: a waiting case names a verified loss', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId")
+  VALUES ('chargeback_effect_waiting', gen_random_uuid(), gen_random_uuid())$$, '23514', 'reconciliation_case_waiting_evidence');
+SELECT pg_temp.assert_eq('S0-C14', 'item 12: no resolution kind is added (effect_applied and refund_completed already exist)',
+  (SELECT (pg_get_constraintdef(oid) NOT LIKE '%effect_waiting%' AND pg_get_constraintdef(oid) LIKE '%chargeback_returned%')::text FROM pg_constraint
+    WHERE conname = 'reconciliation_case_resolution_kind'), 'true');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

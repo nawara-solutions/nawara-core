@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnAppl
 import { DbService, PollLoop, describeFailure, isUniqueViolation, pgConstraint, type DrainOutcome, type Queryable } from '@nawara/service-kit';
 import { BillingAudit } from '../audit/billing-audit.js';
 import type { TransitionContext } from '../domain/actors.js';
+import { FinancialWorkerGate } from './financial-safety.js';
 import { PAYMENT_DISPUTE_CLIENT, type PaymentDisputeClient } from './payment-dispute-client.js';
 
 /** The worker's system identity (Audit catalog: `subscription_purchase.reversed`). */
@@ -364,14 +365,21 @@ export class DisputeLossService {
 
 @Injectable()
 export class DisputeLossWorkerService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
-  constructor(private readonly worker: DisputeLossService) {}
+  /** Core V2 S0-C14 item 14: set at shutdown, so a gate opened late never starts a stopped worker. */
+  private stopping = false;
+  constructor(private readonly worker: DisputeLossService, private readonly gate: FinancialWorkerGate) {}
+  /** Core V2 S0-C14 item 14: no pass before the financial reconciliation safety check passes (never after a mismatch); bootstrap is not blocked. */
   onApplicationBootstrap(): void {
-    this.worker.start();
+    void this.gate.whenPassed().then(() => {
+      if (!this.stopping) this.worker.start();
+    });
   }
   onModuleDestroy(): void {
+    this.stopping = true;
     void this.worker.stop();
   }
   async beforeApplicationShutdown(): Promise<void> {
+    this.stopping = true;
     await this.worker.stop();
   }
   async onApplicationShutdown(): Promise<void> {

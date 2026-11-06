@@ -441,6 +441,16 @@ The Owner resolved the R6H-5 contract gap (register PAY-13 G) with the narrowly 
 | Meaning | the Owner's authorization of a FULL refund of exactly that captured movement (its amount and currency), under the bound refund case and payment. Billing and Payment validate the identical binding: Billing binds the case to the capture; Payment re-verifies the capture fact, its exposure and the case under its locks before consuming. Auth never verifies that the fact exists (Payment's evidence, not Auth's) |
 | Not added | AUTH-03b: Q8 stays fail-closed (R6H-9). No new purpose, operation or route |
 
+## 17g. S0-C14 amendment: recovery-restriction suspension and revocation receipts (S0 §1.5 S0-C14 items 10, 11; register AUTH-01 H; IMPLEMENTED in Auth for development and simulation only)
+
+| Item | Contract |
+|---|---|
+| `Binding` | `recovery_restriction_suspend`: `audience: 'billing-service'`, `companyId`, `suspensionId` (chosen by Billing before issuance, as a fraud-hold placement's id is, so a retry finds the same suspension), `obligationId`, `organizationId`, `disputeId`, `refundCaseId`, `reasonCode` = `refund_chargeback_overlap`. `recovery_restriction_revoke`: the same fields, `suspensionId` naming the active suspension, `reasonCode` = `owner_reinstated_restriction`. Each reason vocabulary is closed (the Owner's WP A finalization, 2026-11-06); any other value or free text is `receipt_binding_invalid` |
+| Step-up | `billing.recovery_restriction.suspend` and `billing.recovery_restriction.revoke`, factor-only, Auth-local, each consumed only by its own operation's issuance |
+| Separation | each canonical binding separates every field, and suspension from revocation; billing-service alone consumes them (F-7 as amended in §17b) |
+| Meaning | the Owner's authorization of ONE suspension of T3 for ONE recovery obligation in a refund and chargeback overlap, or of ONE revocation of an active suspension. It moves no money and never clears, forgives or resolves the debt; Billing re-derives eligibility. Declaring them activates no Billing operation |
+| Not added | No migration, route or new receipt rule: lifetime, single consumption and lookup are unchanged. ADR-0067 is not edited; F-22 gains these two operations |
+
 ## 18. Related documents
 
 - [ADR-0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md), [ADR-0035](../adr/0035-financial-service-boundaries.md)

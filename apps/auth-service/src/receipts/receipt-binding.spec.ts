@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import {
-  RECEIPT_AUDIENCES, RECEIPT_DOMAINS, RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type RefundBinding,
+  RECEIPT_AUDIENCES, RECEIPT_DOMAINS, RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, RECOVERY_RESTRICTION_REVOKE_REASONS, RECOVERY_RESTRICTION_SUSPEND_REASONS, requestHash, secretDigest, type RefundBinding,
 } from './receipt-binding.js';
 import { ReceiptError } from './receipt-errors.js';
 
@@ -140,7 +140,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     });
 
     it('each operation consumes its own step-up purpose, never the other one', () => {
-      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external', late_settlement_apply: 'billing.late_settlement.apply', provider_fact_associate: 'payment.provider_fact.associate', recovery_write_off: 'billing.recovery.write_off' });
+      expect(RECEIPT_PURPOSES).toEqual({ refund: 'refund.authorize', dispute_decision: 'payment.dispute.decide', fraud_hold_place: 'billing.fraud_hold.place', fraud_hold_release: 'billing.fraud_hold.release', recovery_surplus_external: 'billing.recovery_surplus.record_external', late_settlement_apply: 'billing.late_settlement.apply', provider_fact_associate: 'payment.provider_fact.associate', recovery_write_off: 'billing.recovery.write_off', recovery_restriction_suspend: 'billing.recovery_restriction.suspend', recovery_restriction_revoke: 'billing.recovery_restriction.revoke' });
     });
   });
 
@@ -154,7 +154,7 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     it('parses exactly their own fields, for billing-service only', () => {
       expect(parseBinding(place())).toEqual(place());
       expect(parseBinding(release())).toEqual(release());
-      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service', provider_fact_associate: 'payment-service', recovery_write_off: 'billing-service' });
+      expect(RECEIPT_AUDIENCES).toEqual({ refund: 'payment-service', dispute_decision: 'payment-service', fraud_hold_place: 'billing-service', fraud_hold_release: 'billing-service', recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service', provider_fact_associate: 'payment-service', recovery_write_off: 'billing-service', recovery_restriction_suspend: 'billing-service', recovery_restriction_revoke: 'billing-service' });
     });
 
     it('refuses anything unknown, missing, mistyped or for another audience', () => {
@@ -224,6 +224,43 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
       const other = '44444444-4444-4444-8444-444444444444';
       const all = [c(), c({ lateSettlementId: other }), c({ assistanceRequestId: other }), c({ beneficiaryUserId: other }), c({ reasonCode: 'cash_not_returned_evidenced' }), c({ companyId: other })];
       expect(new Set(all).size).toBe(all.length);
+    });
+  });
+
+  describe('recovery-restriction suspension and revocation (S0-C14 WP A, items 10, 11; AUTH-01 H; the Owner\'s WP A finalization)', () => {
+    const other = '99999999-9999-4999-8999-999999999999';
+    const suspend = () => ({
+      operation: 'recovery_restriction_suspend', audience: 'billing-service', companyId: '11111111-1111-4111-8111-111111111111', suspensionId: '66666666-6666-4666-8666-666666666666',
+      obligationId: '22222222-2222-4222-8222-222222222222', organizationId: '33333333-3333-4333-8333-333333333333', disputeId: '44444444-4444-4444-8444-444444444444',
+      refundCaseId: '55555555-5555-4555-8555-555555555555', reasonCode: 'refund_chargeback_overlap',
+    });
+    const revoke = () => ({ ...suspend(), operation: 'recovery_restriction_revoke', reasonCode: 'owner_reinstated_restriction' });
+    it('each parses exactly its fields, with its one closed reason code, billing-service only', () => {
+      expect(parseBinding(suspend())).toEqual(suspend());
+      expect(parseBinding(revoke())).toEqual(revoke());
+      expect(RECOVERY_RESTRICTION_SUSPEND_REASONS).toEqual(['refund_chargeback_overlap']);
+      expect(RECOVERY_RESTRICTION_REVOKE_REASONS).toEqual(['owner_reinstated_restriction']);
+    });
+    it('refuses anything unknown, missing, mistyped, an unknown or swapped reason, free text or another audience', () => {
+      const bad: Array<[string, unknown]> = [
+        ['payment audience', { ...suspend(), audience: 'payment-service' }], ['a suspension without its id', (({ suspensionId: _s, ...o }) => o)(suspend())],
+        ['a revocation without a suspension id', (({ suspensionId: _s, ...o }) => o)(revoke())], ['a free-text reason', { ...suspend(), reasonCode: 'Owner forgives' }],
+        ['an unknown reason', { ...suspend(), reasonCode: 'owner_review' }], ['the revoke reason on a suspension', { ...suspend(), reasonCode: 'owner_reinstated_restriction' }],
+        ['the suspend reason on a revocation', { ...revoke(), reasonCode: 'refund_chargeback_overlap' }], ['the open reason field', { ...(({ reasonCode: _r, ...o }) => o)(suspend()), reason: 'refund_chargeback_overlap' }],
+        ['a missing reason', (({ reasonCode: _r, ...o }) => o)(suspend())], ['a missing dispute', (({ disputeId: _d, ...o }) => o)(suspend())],
+        ['a missing refund case', (({ refundCaseId: _r, ...o }) => o)(revoke())], ['a non-uuid obligation', { ...suspend(), obligationId: 'o' }],
+        ['an upper-case uuid', { ...suspend(), suspensionId: '66666666-6666-4666-8666-66666666666A' }], ['an expiry', { ...suspend(), expiresAt: '2027-01-01' }],
+        ['an amount', { ...suspend(), amount: 100 }], ['a forgiveness flag', { ...revoke(), forgive: true }],
+      ];
+      for (const [what, b] of bad) expect(code(() => parseBinding(b)), what).toBe('receipt_binding_invalid');
+    });
+    it('the canonical forms separate suspension and revocation and every bound field, the suspension id included', () => {
+      const s = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...suspend(), ...o }));
+      const r = (o: Record<string, unknown> = {}) => canonicalBinding(parseBinding({ ...revoke(), ...o }));
+      const all = [s(), s({ suspensionId: other }), s({ companyId: other }), s({ obligationId: other }), s({ organizationId: other }), s({ disputeId: other }), s({ refundCaseId: other }),
+        r(), r({ suspensionId: other }), r({ obligationId: other })];
+      expect(new Set(all).size).toBe(all.length);
+      expect(s()).toContain('"suspensionId":"66666666-6666-4666-8666-666666666666"');
     });
   });
 

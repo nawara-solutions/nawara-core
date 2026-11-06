@@ -6,6 +6,7 @@ import { idempotencyKey } from '../fees/fee-input.js';
 import { RefundOwner, RefundOwnerGuard, type VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { ACKNOWLEDGEMENT_REASONS, CASE_TYPES } from './reconciliation-cases.js';
 import { ReconciliationService } from './reconciliation.service.js';
+import { RecoverySuspensionService } from './recovery-suspension.service.js';
 
 const ID = { name: 'id', format: 'uuid' };
 const R401 = { status: 401, description: 'no bearer, a bearer Auth refuses, or a SERVICE token (never forwarded to Auth)' };
@@ -23,7 +24,7 @@ const asBody = (body: unknown): Record<string, unknown> => (body && typeof body 
 @Controller('billing/admin')
 @UseGuards(RefundOwnerGuard)
 export class ReconciliationController {
-  constructor(private readonly reconciliation: ReconciliationService) {}
+  constructor(private readonly reconciliation: ReconciliationService, private readonly suspensions: RecoverySuspensionService) {}
 
   @Get('reconciliation-cases')
   @Header('Cache-Control', 'no-store')
@@ -104,6 +105,54 @@ export class ReconciliationController {
   @ApiResponse({ status: 503, description: 'recovery_authorization_unresolved (repeat the same request) | recovery_authorization_unavailable' })
   async writeOff(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const r = await this.reconciliation.writeOff(owner, id.toLowerCase(), asBody(body), ownerContext(owner));
+    res.status(r.created ? 201 : 200);
+    return r.body;
+  }
+
+  @Post('recovery-obligations/:id/restriction-suspensions')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: "S0-C14 item 10 (BIL-28 H): suspend T3 for ONE recovery obligation in a refund and chargeback overlap, with Auth's recovery_restriction_suspend receipt (factor-only step-up).",
+    description: 'Body {suspensionId, receiptSecret}. The suspension id is chosen before the receipt and bound into it; the receipt also binds the Company, the obligation, '
+      + 'its Organization, the loss\'s dispute, the completed refund case of the overlap and reasonCode refund_chargeback_overlap (all from Billing\'s records, never the request). '
+      + 'T3 no longer applies to that obligation. It never forgives, writes off or resolves the debt: the outstanding amount, the collection freeze, the overlap case, T1 and '
+      + 'T2 are unchanged. One active suspension per obligation; no expiry. The same request again is answered once (200).',
+  })
+  @ApiParam(ID)
+  @ApiResponse({ status: 201, description: 'The suspension: {obligationId, suspensionId, status: suspended, reasonCode, receiptId, recordedBy, recordedAt}.' })
+  @ApiResponse({ status: 200, description: 'The same request again (same suspension id and receipt): answered, nothing consumed again.' })
+  @ApiResponse({ status: 400, description: 'invalid_recovery_request' })
+  @ApiResponse(R401)
+  @ApiResponse(R403)
+  @ApiResponse({ status: 404, description: 'not_found: unknown, or another Company\'s or Platform\'s obligation (one answer)' })
+  @ApiResponse({ status: 409, description: 'recovery_restriction_not_suspendable (not open in an overlap, already suspended, or the id is used) | recovery_authorization_refused' })
+  @ApiResponse({ status: 503, description: 'recovery_authorization_unresolved (repeat the same request) | recovery_authorization_unavailable | auth_unavailable' })
+  async suspend(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    const r = await this.suspensions.suspend(owner, id.toLowerCase(), asBody(body), ownerContext(owner));
+    res.status(r.created ? 201 : 200);
+    return r.body;
+  }
+
+  @Post('recovery-obligations/:id/restriction-suspensions/:suspensionId/revocation')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: "S0-C14 item 11 (BIL-28 H): revoke an ACTIVE T3 suspension, with Auth's recovery_restriction_revoke receipt (factor-only step-up).",
+    description: 'Body {receiptSecret}. The receipt binds the suspension\'s Company, obligation, Organization, dispute and refund case, the suspension id and reasonCode '
+      + 'owner_reinstated_restriction. T3 applies again to NEW assistance requests only, never retroactively. A later fresh suspension is allowed.',
+  })
+  @ApiParam(ID)
+  @ApiParam({ name: 'suspensionId', format: 'uuid' })
+  @ApiResponse({ status: 201, description: 'The revocation: {obligationId, suspensionId, status: revoked, reasonCode, receiptId, recordedBy, recordedAt}.' })
+  @ApiResponse({ status: 200, description: 'The same request again: answered, nothing consumed again.' })
+  @ApiResponse({ status: 400, description: 'invalid_recovery_request' })
+  @ApiResponse(R401)
+  @ApiResponse(R403)
+  @ApiResponse({ status: 404, description: 'not_found: unknown, or another Company\'s or Platform\'s obligation (one answer)' })
+  @ApiResponse({ status: 409, description: 'recovery_suspension_not_active | recovery_authorization_refused' })
+  @ApiResponse({ status: 503, description: 'recovery_authorization_unresolved (repeat the same request) | recovery_authorization_unavailable | auth_unavailable' })
+  async revoke(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Param('suspensionId') suspensionId: string, @Body() body: unknown,
+    @Res({ passthrough: true }) res: Response) {
+    const r = await this.suspensions.revoke(owner, id.toLowerCase(), suspensionId.toLowerCase(), asBody(body), ownerContext(owner));
     res.status(r.created ? 201 : 200);
     return r.body;
   }

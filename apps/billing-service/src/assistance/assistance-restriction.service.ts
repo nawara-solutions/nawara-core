@@ -37,7 +37,12 @@ export class AssistanceRestrictionService {
     if (reader.kind === 'service') await this.scope.assertInScope(reader.service, organizationId);
     else if (!(await this.humanMayRead(reader, organizationId))) throw notFound();
     const rows = await organizationRestrictions(this.db, organizationId);
-    return { restrictions: rows.map((r) => ({ kind: r.kind, sourceId: r.sourceId, since: r.since.toISOString() })) };
+    // Core V2 S0-C14 items 10, 13 (BIL-26 H): an open obligation whose T3 the Owner suspended has no T3 row; it is listed here, its debt open
+    const suspended = (await this.db.query<{ obligationId: string; since: Date }>(
+      `SELECT o.id AS "obligationId", (SELECT max(s."recordedAt") FROM recovery_restriction_suspension_event s WHERE s."obligationId" = o.id AND s.kind = 'suspended') AS since
+         FROM recovery_obligation o WHERE o."organizationId" = $1 AND o.status = 'open' AND billing_recovery_restriction_suspended(o.id) ORDER BY since, o.id`, [organizationId])).rows;
+    return { restrictions: rows.map((r) => ({ kind: r.kind, sourceId: r.sourceId, since: r.since.toISOString() })),
+      suspended: suspended.map((x) => ({ kind: 'T3' as const, obligationId: x.obligationId, since: x.since.toISOString() })) };
   }
 
   private async humanMayRead(reader: Extract<RestrictionReader, { kind: 'user' }>, organizationId: string): Promise<boolean> {

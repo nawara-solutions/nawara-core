@@ -451,8 +451,16 @@ class RestrictionDto {
   @ApiProperty({ format: 'date-time', description: 'settleBy (T1) or the obligation\'s opening (T2, T3).' }) since!: string;
 }
 
+class SuspendedRestrictionDto {
+  @ApiProperty({ enum: ['T3'] }) kind!: 'T3';
+  @ApiProperty({ format: 'uuid', description: 'The open recovery obligation whose T3 the Owner suspended (its debt is unchanged and still owed).' }) obligationId!: string;
+  @ApiProperty({ format: 'date-time', description: 'When the active suspension was recorded.' }) since!: string;
+}
+
 class RestrictionsDto {
   @ApiProperty({ type: [RestrictionDto], description: 'Ordered by kind, then since, then sourceId. Empty when unrestricted.' }) restrictions!: RestrictionDto[];
+  @ApiProperty({ type: [SuspendedRestrictionDto], description: 'Core V2 S0-C14: open recovery obligations whose T3 the Owner suspended. Not a restriction; never a sign the debt ended.' })
+  suspended!: SuspendedRestrictionDto[];
 }
 
 /**
@@ -471,7 +479,9 @@ export class OrganizationRestrictionsController {
   @RequireServiceOperation('restriction.read')
   @ApiOperation({
     summary: "An Organization's financial restrictions (T1, T2, T3): the Owner of its Platform, its administrator, or a service holding restriction.read.",
-    description: 'Restrictions block NEW assistance requests only; every discharge action stays available. Nothing here creates, clears or stores a restriction.',
+    description: 'Restrictions block NEW assistance requests only and never block a discharge action. A new recovery settlement is refused separately while a refund '
+      + 'and chargeback overlap exists on that obligation (S0-C14 C7). Nothing here creates, clears or stores a restriction. `suspended` lists open recovery obligations '
+      + 'whose T3 the Owner suspended: their debt stays owed.',
   })
   @ApiParam({ name: 'organizationId', format: 'uuid' })
   @ApiResponse({ status: 200, type: RestrictionsDto })

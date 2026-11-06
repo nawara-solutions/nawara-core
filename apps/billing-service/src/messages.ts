@@ -580,6 +580,26 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Ce dossier de rapprochement n'est résolu que par sa preuve financière, jamais par un accusé de réception.",
     ar: 'لا يُحل ملف التسوية هذا إلا بدليله المالي، وليس بإقرار.',
   },
+  recoveryCollectionFrozen: { // Core V2 S0-C14 item 7
+    en: 'This recovery obligation is in a refund and chargeback overlap: no new settlement can start. The debt stays open; a settlement already started continues.',
+    fr: "Cette obligation de recouvrement fait l'objet d'un chevauchement entre un remboursement et une rétrofacturation : aucun nouveau règlement ne peut commencer. La dette reste ouverte ; un règlement déjà commencé se poursuit.",
+    ar: 'التزام الاسترداد هذا في حالة تداخل بين استرداد مبلغ ورد مبلغ متنازع عليه: لا يمكن بدء تسوية جديدة. يبقى الدين قائمًا، وتستمر أي تسوية بدأت بالفعل.',
+  },
+  recoveryRestrictionNotSuspendable: { // Core V2 S0-C14 item 10
+    en: 'This recovery obligation cannot be suspended: it is not open in a refund and chargeback overlap, it already has an active suspension, or this suspension id is used.',
+    fr: "Cette obligation de recouvrement ne peut pas être suspendue : elle n'est pas ouverte dans un chevauchement entre un remboursement et une rétrofacturation, elle a déjà une suspension active, ou cet identifiant de suspension est déjà utilisé.",
+    ar: 'لا يمكن تعليق التزام الاسترداد هذا: فهو ليس مفتوحًا في تداخل بين استرداد مبلغ ورد مبلغ متنازع عليه، أو لديه تعليق نشط بالفعل، أو أن معرّف التعليق هذا مستخدم.',
+  },
+  recoverySuspensionNotActive: { // Core V2 S0-C14 item 11
+    en: 'This suspension is not active for this recovery obligation: it does not exist or was already revoked.',
+    fr: "Cette suspension n'est pas active pour cette obligation de recouvrement : elle n'existe pas ou a déjà été révoquée.",
+    ar: 'هذا التعليق غير نشط لالتزام الاسترداد هذا: فهو غير موجود أو أُلغي بالفعل.',
+  },
+  reconciliationCaseInOverlap: { // Core V2 S0-C14 item 9
+    en: 'A refund and chargeback overlap exists on this movement: it cannot be acknowledged as having no financial effect.',
+    fr: "Un chevauchement entre un remboursement et une rétrofacturation existe sur ce mouvement : il ne peut pas être reconnu comme sans effet financier.",
+    ar: 'يوجد تداخل بين استرداد مبلغ ورد مبلغ متنازع عليه في هذه الحركة: لا يمكن الإقرار بأنها بلا أثر مالي.',
+  },
   reconciliationCaseResolved: { // Core V2 S6h-B
     en: 'This reconciliation case is already resolved.',
     fr: 'Ce dossier de rapprochement est déjà résolu.',

@@ -135,6 +135,10 @@ describe('BILLING_MESSAGES', () => {
       [en('invalidReconciliationRequest'), 'The reconciliation request is invalid.'], // Core V2 S6h-B
       [en('reconciliationCaseNotAcknowledgeable'), 'This reconciliation case is resolved only by its financial evidence, never by an acknowledgement.'], // Core V2 S6h-B
       [en('reconciliationCaseResolved'), 'This reconciliation case is already resolved.'], // Core V2 S6h-B
+      [en('recoveryCollectionFrozen'), 'This recovery obligation is in a refund and chargeback overlap: no new settlement can start. The debt stays open; a settlement already started continues.'], // Core V2 S0-C14
+      [en('recoveryRestrictionNotSuspendable'), 'This recovery obligation cannot be suspended: it is not open in a refund and chargeback overlap, it already has an active suspension, or this suspension id is used.'], // Core V2 S0-C14
+      [en('recoverySuspensionNotActive'), 'This suspension is not active for this recovery obligation: it does not exist or was already revoked.'], // Core V2 S0-C14
+      [en('reconciliationCaseInOverlap'), 'A refund and chargeback overlap exists on this movement: it cannot be acknowledged as having no financial effect.'], // Core V2 S0-C14
       [en('writeOffNotPermitted'), 'This recovery obligation cannot be written off: it is recovered, already written off, or its outstanding amount changed since the authorization.'], // Core V2 S6h-B
       [en('recoveryAuthorizationUnavailable'), 'The external repayment record is not available; nothing was changed.'], // Core V2 S6f
       [en('invalidLateSettlementRequest'), 'The late settlement request is invalid.'], // Core V2 S6g

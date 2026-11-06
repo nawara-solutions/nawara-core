@@ -58,7 +58,7 @@ specifications to be confirmed during implementation review.
 | D3 | No new refund case while a payment dispute is open; existing refund attempts continue through reconciliation; no financial fact is discarded |
 | D4 | Full-purchase refunds only in initial Core V2; partial-amount refunds deferred; unexpected partial provider outcomes are still recorded and reconciled |
 | D5 | Assisted chargeback recovery is the base amount only; Nawara absorbs provider and chargeback fees |
-| D6 | No new Pay with School requests while the Organization is inactive; settlement, full cash return, disputes, reconciliation and recovery remain dischargeable |
+| D6 | No new Pay with School requests while the Organization is inactive; settlement, full cash return, disputes, reconciliation and recovery remain dischargeable *(S0-C14 item 7: on one obligation, a NEW recovery settlement channel is refused during a refund and chargeback overlap; channels already started and the recording of verified money stay)* |
 | D7 | Money-command idempotency retention (class M) of 90 days, backed by permanent business and financial uniqueness |
 | D8 | The AR-04.6 technical direction, subject to the safeguards of §4 |
 
@@ -650,8 +650,7 @@ status change still needs its own explicit owner authorization.
       acceptance. ADR-0049 is unedited; its catalog rule governs item 6.
 - **S0-C14 Refund and chargeback overlap precedence (2026-11-06, ADOPTED CONTRACT FOR CONTROLLED DEVELOPMENT AND SIMULATION IMPLEMENTATION ONLY, the Owner's S0-C14 Step 0 GO:
   corrected items 1 to 15, labelled C1 to C15 in the Owner's review and distinct from ADR-0035's clarifications; clarification of FC-4, B10, R6F-4, R6F-8, R6H-2, S0-C9 item 6 and BIL-34 F;
-  an Owner-approved narrow amendment of S0 §3.5, FC-9, I-11, DN-1.2, BIL-26 part G and the Billing README in item 7; findings DO-50, DO-51, DO-52). NOT IMPLEMENTED: this entry changes no
-  code and no behaviour, and each step of item 19 needs its own Owner GO. Not production-certified, not real-money ready.** Assigns no liability. FC-1, FC-5, S0-C9 to S0-C13 and every
+  an Owner-approved narrow amendment of S0 §3.5, FC-9, I-11, DN-1.2, BIL-26 part G and the Billing README in item 7; findings DO-50, DO-51, DO-52). IMPLEMENTED for Core V2 DEVELOPMENT AND SIMULATION ONLY (S0-C14 WP A to D, 2026-11-06, the Owner's WP GOs; local branch, integration checkpoint pending): not production-certified and not real-money ready. The certification verdict (item 20) awaits the Owner's review.** Assigns no liability. FC-1, FC-5, S0-C9 to S0-C13 and every
   recovery invariant not named here are unchanged and govern. Before this entry the outcome of a refund and a chargeback on one captured movement depended on arrival order (item 18), and no adopted
   rule set precedence between FC-4, B10, R6D-1 and R6F-4.
   1. *Terms (C1).* A **recovery obligation** is the recorded debt. **Collection permission** is whether a new settlement channel may start. **T3** is the derived restriction on new
@@ -684,10 +683,12 @@ status change still needs its own explicit owner authorization.
      has no resolution kind under this entry.
   9. *Acknowledgement (C9).* Acknowledging a review closes only that review. `reviewed_no_financial_effect` is refused while an overlap exists on that movement.
   10. *Suspension (C10).* The live Owner of an obligation's Company and Platform may suspend its T3 with a `recovery_restriction_suspend` receipt, while the obligation is open and an overlap exists
-      on it. A suspension changes T3 for that obligation only. It has no expiry. An open or uncertain channel does not block it. The debt, the freeze, T1, T2, a write-off and the overlap case are
+      on it. *(The Owner's WP A finalization, 2026-11-06: the receipt binds the Company, the suspension id (chosen before the receipt), the obligation, its Organization, the loss's dispute, the
+      completed refund case of the overlap and the closed reason code `refund_chargeback_overlap`; register AUTH-01 H.)* A suspension changes T3 for that obligation only. It has no expiry. An open or uncertain channel does not block it. The debt, the freeze, T1, T2, a write-off and the overlap case are
       untouched, and an unused suspension right never lapses: if the Owner never acts, T3, the freeze and the case stay. Evidence is append-only, one `suspended` and at most one `revoked` per
       suspension id, at most one active per obligation, each with a unique receipt and `consumeRef`; the database re-derives eligibility under the Organization lock.
-  11. *Revocation (C11).* That Owner may revoke an active suspension with a `recovery_restriction_revoke` receipt. T3 then applies to new requests only. There is no automatic revocation.
+  11. *Revocation (C11).* That Owner may revoke an active suspension with a `recovery_restriction_revoke` receipt *(the same fields, the active suspension's id, and the closed reason code
+      `owner_reinstated_restriction`)*. T3 then applies to new requests only. There is no automatic revocation.
   12. *Waiting visibility (C12).* Each waiting effect opens one `chargeback_effect_waiting` case, which cannot be acknowledged. It resolves only as: `effect_applied`, when the obligation or direct
       write-off of that loss exists; or `refund_completed`, naming the completed refund of the same captured movement, when the effect will not be applied. Otherwise it stays open. Overlap cases
       are unaffected. `effect_applied` is never used when no effect was applied. No new resolution value is needed. The database check for this type is stricter than the existing
@@ -730,8 +731,9 @@ status change still needs its own explicit owner authorization.
       contract provides otherwise. The debt stays open and visible. This is not forgiveness, a write-off, a release or a final financial
       resolution, and no read may imply one. **Owner decision, 2026-11-06:** this is an INTERIM development and simulation policy, and it is an explicit
       blocker for real-money readiness until a separately approved resolution policy exists.
-  18. *Findings (post-workshop validation, 2026-11-06, at `2ae3dea`, simulation provider, real processes, each scenario run twice; the observation register is kept outside this repository).* All open until
-      implemented and certified. Every database invariant held in every run: each step was lawful, and the guards check only at insert.
+  18. *Findings (post-workshop validation, 2026-11-06, at `2ae3dea`, simulation provider, real processes, each scenario run twice; the observation register is kept outside this repository).* Every database
+      invariant held in every run: each step was lawful, and the guards check only at insert. **Status (2026-11-06): remediated for DEVELOPMENT AND SIMULATION ONLY** by the
+      implementation of items 4 to 14 (WP A to C) and certified locally in the tested scope (WP D, item 20); each stays open for production and real money.
 
       | Finding | Classification | Observed | Governed by |
       |---|---|---|---|
@@ -739,7 +741,8 @@ status change still needs its own explicit owner authorization.
       | DO-50 | **Reproduced defect**, in one ordering; the other two conform | Direct, write-off pass first, then an in-flight refund: write-off stands and no overlap case opens. Acknowledging `second_reversal_cause` then left no open case | Items 5, 6, 8, 9 |
       | DO-51 | **Confirmed visibility gap; policy interpretation resolved by this entry** | Assisted, refund first, then loss: debt protection works as adopted, but only a `recovery_review` row, no case and no read route | Item 8: S0-C9 item 6 covers this path |
 
-  19. *Implementation dependency plan (each step needs its own Owner GO; development and simulation only).*
+  19. *Implementation dependency plan (each step needs its own Owner GO; development and simulation only).* Status 2026-11-06: steps 0 to 7 done locally (WP A: steps 1, 2; WP B:
+      steps 3, 4, 6; WP C: step 5; WP D: step 7); step 8 is the integration checkpoint, separately authorized.
 
       | Step | Work | Depends on |
       |---|---|---|
@@ -776,7 +779,7 @@ status change still needs its own explicit owner authorization.
       | V15 | Refund after a chargeback attempted at Payment | Admitted |
       | V16 | Acknowledge `second_reversal_cause` during an overlap | Reason accepted, or the overlap closes |
       | V17 | Payment holds an attempt with no relay | Effect does not wait |
-      | V18 | Two Owners suspend at once | More than one active suspension |
+      | V18 | Two suspension requests at once (Auth holds one Owner per Company: that Owner's two receipts) | More than one active suspension |
       | V19 | Suspension or revocation races an assistance request, two processes | T3 applied retroactively, or read mid-change |
       | V20 | Waiting case on each exit, then a real overlap | Wrong resolution (`effect_applied` with no effect), or no overlap case afterwards |
       | V21 | Reads for the Owner, the Organization administrator and another Company | Wrong status or disclosure, or a read implies the debt ended |
@@ -792,12 +795,21 @@ status change still needs its own explicit owner authorization.
       | V31 | Labelled fixture: an attempt at Payment with no Billing relay | Effect commits, or nothing flags the mismatch |
       | V32 | Recording proxy on Payment's refund call | The relay row is not committed when the call arrives |
 
+      **Local result (WP D and the Owner's final concurrency proof, 2026-11-06, development and simulation, one host):** V1 to V32 pass across real Auth, Payment, Audit and two
+      Billing processes, except V4, V5 and the `unknown`/`discrepancy` part of V13, which pass in-process on real PostgreSQL.
+      - **Forced interleavings** (the order is imposed and proven from the database: `pg_stat_activity`, `pg_blocking_pids`, `pg_locks`; no waiter fairness is assumed, because the transaction that goes
+        first holds the contended lock while paused on a separate test gate). V1: a worker paused at its `INSERT` after a clean PAY-08 read while the late refund completes; the
+        database refuses it (0039's `recovery_obligation_refunded` fires before 0050's guard). V9 and V19: both orders each, with real Organization-lock contention. V24: both
+        transaction orders, with real payment-row contention. V30: a worker paused at the Organization lock while a relay commits. V26, V28 and V12: a controlled sequence.
+      - **Natural concurrency** (the outcome is checked, not each ordering): V3, V18, and V24's stress part.
+      - **Certification limitation (deferred by the Owner, 2026-11-06):** the direct write-off's insert window is not forced. V2 proves the write-off waits while a refund is live, and the database
+        guards exist, but no test pauses a write-off at its insert while a refund completes.
   21. *Assumptions register.* None is database-enforced across the two databases. **A1, A3, A4 and A6 are not proven by the tests cited for them in the Owner's review.**
 
       | Assumption | Status | Proof required |
       |---|---|---|
-      | A1 Billing commits the relay before calling Payment | **Not proven.** Code order only; V27 does not test it | V32 |
-      | A2 After a chargeback, Payment refuses every new refund (I1) | Application rule under a row lock | V15, V24 |
+      | A1 Billing commits the relay before calling Payment | Code order; **locally evidenced by V32** (every relay call of two processes arrived after its row was committed) | V32 (done locally) |
+      | A2 After a chargeback, Payment refuses every new refund (I1) | Application rule under a row lock; **locally evidenced by V15 and by V24 forced in both transaction orders** (real payment-row contention). V24's stress part submitted 66 admission requests: that is a count of requests, not of lock races, and few of them contended. Not exhaustive | V15, V24 (done locally) |
       | A3 Only Billing creates refunds for its payments | **Not proven.** Policy and producer check; no test confirmed | A named test at certification; V31 covers only the failure case |
       | A4 A dead relay status comes only from Payment's own statement | **Not proven.** V28 proves an effect stays safe if A4 is false, not that A4 holds | A named test at certification |
       | A5 Neither database is rewound independently | **Not provable by Core** | V14, V22, V23 reduce it; `G-FIN-RESTORE` governs |
@@ -1088,4 +1100,5 @@ task.
 - RabbitMQ `user_id` enforcement is assumed standard broker behaviour until proven by the S1 certification test.
 - Real-provider idempotency windows and debit timing are deferred with the provider.
 - Accepted ADRs 0007, 0049 and 0060 carry no reciprocal notes yet; the relationships are recorded in 0068, 0069 and this record.
-- S0-C14 item 17: an unresolved recovery obligation can have no new collection route during an overlap. This is neither forgiveness nor a final financial resolution. D9 and D15 stay unresolved.
+- S0-C14 item 17: an unresolved recovery obligation can have no new collection route during an overlap. This is neither forgiveness nor a final financial resolution. It is an INTERIM development
+  and simulation policy and an explicit BLOCKER for real-money readiness until a separately approved resolution policy exists (the Owner's decision, 2026-11-06). D9 and D15 stay unresolved.

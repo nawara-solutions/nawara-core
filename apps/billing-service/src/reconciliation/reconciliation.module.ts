@@ -8,6 +8,7 @@ import { HttpPaymentReconciliationClient, PAYMENT_RECONCILIATION_CLIENT, type Pa
 import { ReconciliationCases } from './reconciliation-cases.js';
 import { ReconciliationController } from './reconciliation.controller.js';
 import { ReconciliationService, ReconciliationWorkerService } from './reconciliation.service.js';
+import { RecoverySuspensionService } from './recovery-suspension.service.js';
 
 /**
  * Core V2 S6h-B reconciliation (register BIL-33, BIL-34, EVT-10; the Owner's R6H-1 to R6H-12). PRODUCTION REFUSAL, first line: in production
@@ -23,6 +24,7 @@ export class ReconciliationModule {
       controllers: [ReconciliationController],
       providers: [
         ReconciliationCases, LateSuccessService, ReconciliationService, RefundCommandIdempotency, RefundOwnerGuard,
+        RecoverySuspensionService, // Core V2 S0-C14 WP C (items 10, 11): the Owner's T3 suspension and its revocation
         ...(opts.worker === false ? [] : [ReconciliationWorkerService]),
         {
           provide: PAYMENT_RECONCILIATION_CLIENT,
