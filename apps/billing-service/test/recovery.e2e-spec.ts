@@ -2378,6 +2378,207 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       expect(out.kind).toBe('mismatch');
       expect((out as { findings: string[] }).findings).toContain(`relay_unknown_to_payment payment=${p.paymentId} relay=${r.attemptId}`);
     });
+
+    describe('Core V2 S0-C15A: unresolved refund and chargeback exposure (BIL-33 N, DO-72)', () => {
+      const exposureCase = (disputeId: string) => one(`SELECT c.id, c.detail, c.amount, c."paymentId", r.kind, r."refundCaseId" FROM reconciliation_case c
+        LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id WHERE c."caseType" = 'chargeback_refund_exposure' AND c."evidenceKey" = $1`, [disputeId]);
+      const reviewOf2 = (type: string, evidence: string) => one(`SELECT c.id, r.kind, r.reason FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+        WHERE c."caseType" = $1 AND c."evidenceKey" = $2`, [type, evidence]);
+      /** Payment's `refund_discrepancy` item for attempt `id` (PAY-12), as its reconciliation read states it. */
+      const discrepancyItem = (paymentId: string, id: string) => paymentItems.items.set('refund_discrepancy', [...(paymentItems.items.get('refund_discrepancy') ?? []),
+        { kind: 'refund_discrepancy', id, paymentId, factId: null, amount: 4200, currency: 'TND', detail: {}, at: new Date().toISOString() } as PaymentItem]);
+      /** PAY-08 with a verified allocation on `attemptId`, or none. */
+      const answer = (paymentId: string, attemptId: string, allocated: number) => pay08.answers.set(paymentId, {
+        attempts: [{ refundAttemptId: attemptId, status: 'discrepancy', approvedBy: { userId: U.owner } }], refusals: [], unallocatedFacts: [],
+        authorizations: [{ refundAuthorizationId: randomUUID(), refundAttemptId: attemptId, refundCaseId: randomUUID(), approvedAmount: 100, currency: 'TND', completedAt: null,
+          allocations: allocated > 0 ? [{ factId: randomUUID(), amount: allocated, currency: 'TND' }] : [] }] });
+      /** Char-4's shape: a refund attempt in discrepancy and a partial chargeback of the same movement, with both review cases open. */
+      const exposed = async (allocated = 60) => {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        expect(await atPayment(p.paymentId, r.attemptId, 'discrepancy')).toBe('discrepancy');
+        const disputeId = await lose(p.paymentId, 70);
+        await recovery().visit(disputeId);
+        discrepancyItem(p.paymentId, r.attemptId);
+        answer(p.paymentId, r.attemptId, allocated);
+        await reconciliation().drainOnce();
+        return { p, r, disputeId };
+      };
+      const count = async (sql: string, params: unknown[]) => Number((await one(sql, params)).n);
+      const openedAudits = (caseId: string) => count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.reconciliation_case.opened' AND payload->'resource'->>'id' = $1`, [caseId]);
+
+      it('item 4: the case opens once, states the chargeback amount, and claims verified money only from a verified allocation on the movement; replays add nothing', async () => {
+        const e = await exposed(60);
+        const c = await exposureCase(e.disputeId);
+        expect(c).toMatchObject({ detail: 'refund_money_verified', amount: '70', paymentId: e.p.paymentId, kind: null });
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'chargeback_refund_exposure' AND "evidenceKey" = $1`, [e.disputeId])).toBe(1);
+        expect(await openedAudits(c.id)).toBe(1);
+        const listed = (await send(request(server()).get('/billing/admin/reconciliation-cases?status=open&type=chargeback_refund_exposure'), 'owner-tok', null)).body.items as { id: string; detail: string; reviewOnly: boolean }[];
+        expect(listed.find((x) => x.id === c.id)).toMatchObject({ detail: 'refund_money_verified', reviewOnly: false });
+      });
+
+      it('evidence correction: no allocation, Payment unavailable, or an unmatched refund_discrepancy proves no money: the case still opens, as refund_evidence_unresolved', async () => {
+        const none = await exposed(0);
+        expect(await exposureCase(none.disputeId)).toMatchObject({ detail: 'refund_evidence_unresolved', kind: null });
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        await atPayment(p.paymentId, r.attemptId, 'discrepancy');
+        const disputeId = await lose(p.paymentId, 70);
+        pay08.answers.set(p.paymentId, 'down');
+        await reconciliation().drainOnce();
+        expect(await exposureCase(disputeId)).toMatchObject({ detail: 'refund_evidence_unresolved', kind: null });
+        const u = await assistedPaid();
+        const unmatched = await lose(u.paymentId, 70);
+        discrepancyItem(u.paymentId, randomUUID()); // an attempt Billing holds no relay for: association uncertain, fail closed
+        pay08.answers.delete(u.paymentId);
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        expect(await exposureCase(unmatched)).toMatchObject({ detail: 'refund_evidence_unresolved', kind: null });
+      });
+
+      it('R6: under exposure the service refuses the two claiming reasons and keeps provider_statement_reviewed; the exposure case stays open', async () => {
+        const e = await exposed();
+        const partial = (await reviewOf2('partial_chargeback', e.disputeId))!;
+        const disc = (await reviewOf2('refund_discrepancy', e.r.attemptId))!;
+        for (const id of [partial.id, disc.id]) {
+          for (const reason of ['reviewed_no_financial_effect', 'duplicate_evidence_reviewed']) {
+            const a = await acknowledge(id, reason);
+            expect([a.status, a.body.code], reason).toEqual([409, 'reconciliation_case_in_exposure']);
+          }
+        }
+        expect((await acknowledge(partial.id, 'provider_statement_reviewed')).status).toBe(200);
+        expect((await acknowledge(disc.id, 'provider_statement_reviewed')).status).toBe(200);
+        expect(await exposureCase(e.disputeId)).toMatchObject({ kind: null });
+      });
+
+      it('R7: the database refuses the same two reasons past the application, through the same function', async () => {
+        const e = await exposed();
+        const partial = (await reviewOf2('partial_chargeback', e.disputeId))!;
+        for (const reason of ['reviewed_no_financial_effect', 'duplicate_evidence_reviewed']) {
+          await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, 'acknowledged', $2, $3)`, [partial.id, U.owner, reason]))
+            .rejects.toMatchObject({ constraint: 'reconciliation_case_exposure_acknowledgement' });
+          expect((await one(`SELECT billing_acknowledgement_refused_by_exposure($1, $2) AS r`, [partial.id, reason])).r).toBe(true);
+        }
+        expect((await one(`SELECT billing_acknowledgement_refused_by_exposure($1, 'provider_statement_reviewed') AS r`, [partial.id])).r).toBe(false);
+        await admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, 'acknowledged', $2, 'provider_statement_reviewed')`, [partial.id, U.owner]);
+      });
+
+      it('R8: the exposure case itself is never acknowledged, by the route or by SQL, and its row is append-only', async () => {
+        const e = await exposed();
+        const c = (await exposureCase(e.disputeId))!;
+        for (const reason of ['reviewed_no_financial_effect', 'provider_statement_reviewed', 'duplicate_evidence_reviewed']) {
+          const a = await acknowledge(c.id, reason);
+          expect([a.status, a.body.code], reason).toEqual([409, 'reconciliation_case_not_acknowledgeable']);
+          await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "resolvedByUserId", reason) VALUES ($1, 'acknowledged', $2, $3)`, [c.id, U.owner, reason])).rejects.toThrow();
+        }
+        await expect(admin.query(`UPDATE reconciliation_case SET detail = 'refund_money_verified' WHERE id = $1`, [c.id])).rejects.toThrow();
+        await expect(admin.query(`INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", detail) VALUES ('chargeback_refund_exposure', $1, $2, 'made_up')`, [e.disputeId, COMPANY]))
+          .rejects.toMatchObject({ constraint: 'reconciliation_case_exposure_evidence' });
+      });
+
+      it('R13: outside an exposure every reason keeps working: a partial chargeback alone, a partial refund alone, a partial chargeback beside an in-flight refund', async () => {
+        const a = await assistedPaid();
+        const alone = await lose(a.paymentId, 70);
+        await recovery().visit(alone);
+        await reconciliation().drainOnce();
+        expect(await exposureCase(alone)).toBeUndefined();
+        expect((await acknowledge((await reviewOf2('partial_chargeback', alone))!.id, 'reviewed_no_financial_effect')).status).toBe(200);
+        const b = await assistedPaid();
+        const rb = await relayed(b.paymentId);
+        await atPayment(b.paymentId, rb.attemptId, 'discrepancy');
+        discrepancyItem(b.paymentId, rb.attemptId);
+        await reconciliation().drainOnce();
+        expect((await acknowledge((await reviewOf2('refund_discrepancy', rb.attemptId))!.id, 'duplicate_evidence_reviewed')).status).toBe(200);
+        const c = await assistedPaid();
+        await relayed(c.paymentId); // live, no verified money yet
+        const flight = await lose(c.paymentId, 70);
+        await recovery().visit(flight);
+        await reconciliation().drainOnce();
+        expect(await exposureCase(flight)).toBeUndefined();
+        expect((await acknowledge((await reviewOf2('partial_chargeback', flight))!.id, 'reviewed_no_financial_effect')).status).toBe(200);
+      });
+
+      /** A verified loss bound to ANOTHER capture of the payment (a late capture): an ordinary refund of the payment is not its movement. */
+      const loseOtherCapture = async (paymentId: string, amount: number) => {
+        const id = randomUUID();
+        const disputeId = randomUUID();
+        await t.bus.deliver({ id, name: 'payment.dispute.lost', payload: { disputeId, paymentId, paymentRequestId: randomUUID(), producer: 'billing-service', organizationId: null, purpose: 'assisted_settlement',
+          amount, currency: 'TND', lostAt: new Date().toISOString(), chargeback: { factId: randomUUID(), amount, currency: 'TND' }, liveMode: false, captureFactId: randomUUID(), captureBasis: 'late_capture',
+        }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } } as never);
+        return disputeId;
+      };
+
+      it('R14: a relay of another capture is no exposure; an unknown relay fails closed; a refund completed on another capture closes nothing', async () => {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        await atPayment(p.paymentId, r.attemptId, 'discrepancy');
+        discrepancyItem(p.paymentId, r.attemptId);
+        const other = await loseOtherCapture(p.paymentId, 70);
+        await reconciliation().drainOnce();
+        expect((await one(`SELECT billing_loss_unresolved_exposure($1) AS e`, [other])).e).toBe(false);
+        expect(await exposureCase(other)).toBeUndefined();
+
+        const q = await assistedPaid();
+        const rq = await relayed(q.paymentId);
+        const late = await loseOtherCapture(q.paymentId, 70);
+        discrepancyItem(q.paymentId, randomUUID());
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        const c = (await exposureCase(late))!;
+        expect(c).toMatchObject({ detail: 'refund_evidence_unresolved', kind: null });
+        await completed(rq, q); // the ordinary refund completes: another capture than the loss's
+        await reconciliation().drainOnce();
+        expect(await overlapCase(late)).toBeUndefined();
+        expect(await exposureCase(late)).toMatchObject({ kind: null });
+        await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId") VALUES ($1, 'refund_completed', $2)`, [c.id, rq.caseId]))
+          .rejects.toMatchObject({ constraint: 'reconciliation_case_resolution_evidence' });
+      });
+
+      it('R15 and the exit: an earlier acknowledgement stays as recorded, the case opens from the facts; refund_completed needs the same movement AND the overlap case', async () => {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        const disputeId = await lose(p.paymentId, 70);
+        await recovery().visit(disputeId);
+        await reconciliation().drainOnce();
+        const partial = (await reviewOf2('partial_chargeback', disputeId))!;
+        expect((await acknowledge(partial.id, 'reviewed_no_financial_effect')).status).toBe(200); // legitimate then: no refund evidence yet
+        const before = await reviewOf2('partial_chargeback', disputeId);
+        await atPayment(p.paymentId, r.attemptId, 'discrepancy');
+        discrepancyItem(p.paymentId, r.attemptId);
+        answer(p.paymentId, r.attemptId, 60);
+        await reconciliation().drainOnce();
+        const c = (await exposureCase(disputeId))!;
+        expect(c).toMatchObject({ detail: 'refund_money_verified', kind: null });
+        expect(await reviewOf2('partial_chargeback', disputeId)).toEqual(before);
+        await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId") VALUES ($1, 'refund_completed', $2)`, [c.id, r.caseId])).rejects.toThrow();
+        await completed(r, p);
+        // the case completed, the overlap case does not exist yet: the database still refuses
+        expect(await overlapCase(disputeId)).toBeUndefined();
+        await expect(admin.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId") VALUES ($1, 'refund_completed', $2)`, [c.id, r.caseId]))
+          .rejects.toMatchObject({ constraint: 'reconciliation_case_resolution_evidence' });
+        await reconciliation().drainOnce();
+        expect(await overlapCase(disputeId)).toMatchObject({ kind: null });
+        expect(await exposureCase(disputeId)).toMatchObject({ kind: 'refund_completed', refundCaseId: r.caseId });
+      });
+
+      it('S0-C14 stays as it was: with a completed refund the overlap governs; provider_statement_reviewed and duplicate_evidence_reviewed still acknowledge an overlap review (A2)', async () => {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        const disputeId = await lose(p.paymentId, 70);
+        await recovery().visit(disputeId);
+        await completed(r, p);
+        await reconciliation().drainOnce();
+        expect(await overlapCase(disputeId)).toMatchObject({ kind: null });
+        expect(await exposureCase(disputeId)).toBeUndefined();
+        const partial = (await reviewOf2('partial_chargeback', disputeId))!;
+        const a = await acknowledge(partial.id, 'reviewed_no_financial_effect');
+        expect([a.status, a.body.code]).toEqual([409, 'reconciliation_case_in_overlap']);
+        expect((await acknowledge(partial.id, 'duplicate_evidence_reviewed')).status).toBe(200);
+      });
+    });
+
   });
 
   it('production mounts no recovery route and no worker', () => {

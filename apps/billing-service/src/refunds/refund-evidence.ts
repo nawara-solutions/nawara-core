@@ -57,6 +57,22 @@ export function judgeRefundEvidence(read: PaymentRefunds | null, relays: Readonl
   return { clean: true };
 }
 
+/**
+ * Core V2 S0-C15A item 4: what an exposure case may state about its refund evidence, recorded once at opening. `refund_money_verified` only when
+ * Payment's fresh read shows a verified allocation on a relay of the loss's movement. Anything else (a discrepancy with no allocation, a
+ * `refund_discrepancy` Billing holds no relay for, Payment unavailable) proves no money and stays `refund_evidence_unresolved`: the case still opens,
+ * so the Owner sees it, and it claims only what is established.
+ */
+export type ExposureEvidenceClass = 'refund_money_verified' | 'refund_evidence_unresolved';
+
+export function judgeExposureEvidence(read: PaymentRefunds | null, relays: ReadonlyMap<string, boolean>): ExposureEvidenceClass {
+  if (read === null) return 'refund_evidence_unresolved';
+  for (const z of read.authorizations) {
+    if (relays.get(z.refundAttemptId) === true && z.allocations.some((a) => a.amount > 0)) return 'refund_money_verified';
+  }
+  return 'refund_evidence_unresolved';
+}
+
 @Injectable()
 export class RefundEvidenceReader {
   constructor(
@@ -84,5 +100,19 @@ export class RefundEvidenceReader {
       return { clean: false, reason: 'payment_unavailable' };
     }
     return judgeRefundEvidence(read, relays);
+  }
+
+  /** S0-C15A item 4: the evidence class of the exposure of `disputeId`, from one fresh read. Any failure is `refund_evidence_unresolved`, never a refusal to open. */
+  async classifyExposure(disputeId: string): Promise<ExposureEvidenceClass> {
+    const loss = (await this.db.query<{ paymentId: string }>(`SELECT "paymentId" FROM payment_dispute_loss WHERE "disputeId" = $1`, [disputeId])).rows[0];
+    if (!loss) return 'refund_evidence_unresolved';
+    const { rows } = await this.db.query<{ id: string; onMovement: boolean }>(
+      `SELECT x.id, billing_refund_case_on_loss_movement(x."refundCaseId", $2) AS "onMovement" FROM refund_authorization_relay x WHERE x."paymentId" = $1`,
+      [loss.paymentId, disputeId]);
+    try {
+      return judgeExposureEvidence(await this.payment.refunds(loss.paymentId), new Map(rows.map((r) => [r.id, r.onMovement])));
+    } catch {
+      return 'refund_evidence_unresolved';
+    }
   }
 }

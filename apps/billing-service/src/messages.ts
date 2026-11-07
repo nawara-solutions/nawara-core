@@ -600,6 +600,11 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "Un chevauchement entre un remboursement et une rétrofacturation existe sur ce mouvement : il ne peut pas être reconnu comme sans effet financier.",
     ar: 'يوجد تداخل بين استرداد مبلغ ورد مبلغ متنازع عليه في هذه الحركة: لا يمكن الإقرار بأنها بلا أثر مالي.',
   },
+  reconciliationCaseInExposure: { // Core V2 S0-C15A item 6
+    en: 'Refund evidence beside a chargeback on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.',
+    fr: "Des éléments de remboursement à côté d'une rétrofacturation sur ce mouvement ne sont pas résolus : ce motif ne peut pas être indiqué. Un relevé du prestataire examiné peut toujours être enregistré.",
+    ar: 'أدلة الاسترداد بجانب رد المبلغ المتنازع عليه في هذه الحركة غير محسومة: لا يمكن ذكر هذا السبب. ولا يزال من الممكن تسجيل مراجعة كشف مزود الخدمة.',
+  },
   reconciliationCaseResolved: { // Core V2 S6h-B
     en: 'This reconciliation case is already resolved.',
     fr: 'Ce dossier de rapprochement est déjà résolu.',
