@@ -4,13 +4,14 @@ import pg from 'pg';
 import request from 'supertest';
 import { Logger } from '@nestjs/common';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { DbService, OutboxService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
+import { DbService, OutboxRelayService, OutboxService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptService } from '../src/attempts/attempt.service.js';
 import { ownerAuthorityUnavailable, type OwnerCompanyAuthority, type VerifiedOwner } from '../src/disputes/owner-company.authority.js';
 import { WebhookService } from '../src/webhooks/webhook.service.js';
 import { PaymentAudit } from '../src/audit/payment-audit.js';
 import { CAPTURE_RECOVERY_MAX_ATTEMPTS, CaptureReconciler, captureInfrastructurePauseMs, captureRecoveryWaitSeconds, classifyCaptureRecoveryFailure } from '../src/payments/capture-reconciler.js';
+import { AttemptResolver } from '../src/attempts/attempt-resolver.js';
 import { ExpirySweeper } from '../src/payments/expiry-sweeper.js';
 import { ProviderRegistry } from '../src/providers/provider-registry.js';
 import { WebhookRetriever } from '../src/webhooks/webhook-retrier.js';
@@ -111,6 +112,10 @@ describeWithEnv('wrong-amount captures (Core V2 S0-C12) — real PostgreSQL', ['
       },
     });
     await t.app.get(CaptureReconciler).stop(); // driven pass by pass below (deterministic): no background passes
+    await t.app.get(AttemptResolver).stop(); // the same: an open attempt is settled only by each test's own provider evidence, never by a timed background pass
+    await t.app.get(ExpirySweeper).stop(); // the same: expiry runs only through the explicit sweepOnce() calls below
+    await t.app.get(WebhookRetriever).stop(); // the same: stored deliveries are retried only through the explicit drainOnce() calls below
+    await t.app.get(OutboxRelayService).relay.stop(); // the same: no timed relay transaction can consume a db.tx failure a test injects; outbox rows are asserted directly
   });
   afterAll(async () => {
     await t?.app.close();
