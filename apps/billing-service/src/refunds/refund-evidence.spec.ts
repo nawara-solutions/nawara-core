@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PaymentRefunds } from './payment-refund-client.js';
-import { judgeRefundEvidence } from './refund-evidence.js';
+import { judgeExposureEvidence, judgeRefundEvidence } from './refund-evidence.js';
 
 const A = '11111111-1111-4111-8111-111111111111'; // a relay of the loss's captured movement
 const B = '22222222-2222-4222-8222-222222222222'; // a relay of ANOTHER capture of the same payment
@@ -50,5 +50,19 @@ describe('judgeRefundEvidence (Core V2 S0-C14 item 6)', () => {
   it('fail closed (V29): Payment\'s 404 and an answer without the producer\'s unallocated facts prove nothing', () => {
     expect(judgeRefundEvidence(null, relays)).toEqual({ clean: false, reason: 'payment_not_found' });
     expect(judgeRefundEvidence(read({ unallocatedFacts: null }), relays)).toEqual({ clean: false, reason: 'unallocated_facts_unknown' });
+  });
+});
+
+describe('Core V2 S0-C15A item 4: what an exposure case may claim about its refund evidence', () => {
+  const money = [{ factId: X, amount: 60, currency: 'TND' }];
+  it('money is claimed only from a verified allocation on a relay of the movement', () => {
+    expect(judgeExposureEvidence(read({ authorizations: [auth(A, { allocations: money })] }), relays)).toBe('refund_money_verified');
+  });
+  it('another capture, an unknown attempt, no allocation, an unallocated fact or no answer prove no money', () => {
+    expect(judgeExposureEvidence(read({ authorizations: [auth(B, { allocations: money })] }), relays)).toBe('refund_evidence_unresolved');
+    expect(judgeExposureEvidence(read({ authorizations: [auth(X, { allocations: money })] }), relays)).toBe('refund_evidence_unresolved');
+    expect(judgeExposureEvidence(read({ authorizations: [auth(A)] }), relays)).toBe('refund_evidence_unresolved');
+    expect(judgeExposureEvidence(read({ unallocatedFacts: [{ factId: X, refundAttemptId: A, amount: 60, currency: 'TND', state: 'pending' } as never] }), relays)).toBe('refund_evidence_unresolved');
+    expect(judgeExposureEvidence(null, relays)).toBe('refund_evidence_unresolved');
   });
 });
