@@ -317,6 +317,7 @@ export class ReconciliationService {
       (r) => ({ caseType: 'chargeback_refund_overlap', evidenceKey: r.id, paymentRequestId: r.paymentRequestId, paymentId: r.paymentId, captureFactId: r.captureFactId,
         amount: Number(r.amount), currency: r.currency, detail: 'refund_and_chargeback' }));
     await this.discoverWaiting(tally);
+    await this.discoverExposure(tally);
     // recovery surpluses: owed to the Organization until resolved (R-2); the case is the Owner's visibility, the obligation's Company
     for (const r of (await this.db.query<{ id: string; amount: string; currency: string; companyId: string; platformId: string; organizationId: string }>(
       `SELECT s.id, s.amount, trim(s.currency) AS currency, o."companyId", o."platformId", s."organizationId" FROM recovery_surplus s JOIN recovery_obligation o ON o.id = s."obligationId"
@@ -355,6 +356,24 @@ export class ReconciliationService {
       if (verdict.clean) continue;
       await this.db.tx(async (q) => this.caseFor(q, { caseType: 'chargeback_effect_waiting', evidenceKey: l.disputeId, paymentRequestId: l.paymentRequestId,
         paymentId: l.paymentId, captureFactId: l.captureFactId, amount: Number(l.amount), currency: l.currency, detail: verdict.reason }, tally));
+    }
+  }
+
+  /**
+   * Core V2 S0-C15A items 1, 4 (BIL-33 N, DO-72): one `chargeback_refund_exposure` case per verified chargeback beside unresolved refund evidence of
+   * its captured movement, whatever was acknowledged before: it comes from the facts, not from review state. The case's `detail` records what the
+   * evidence proves at opening; a failed read still opens it. It moves nothing, and two workers open it once (`reconciliation_case_once`).
+   */
+  private async discoverExposure(tally: { opened: number }): Promise<void> {
+    const { rows } = await this.db.query<{ disputeId: string; paymentRequestId: string; paymentId: string; captureFactId: string | null; amount: string; currency: string }>(
+      `SELECT l."disputeId", l."paymentRequestId", l."paymentId", l."captureFactId", l."chargebackAmount" AS amount, trim(l."chargebackCurrency") AS currency
+         FROM payment_dispute_loss l WHERE billing_loss_unresolved_exposure(l."disputeId")
+          AND NOT EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = 'chargeback_refund_exposure' AND k."evidenceKey" = l."disputeId")
+        ORDER BY l."recordedAt", l."disputeId"`);
+    for (const l of rows) {
+      const detail = await this.evidence.classifyExposure(l.disputeId);
+      await this.db.tx(async (q) => this.caseFor(q, { caseType: 'chargeback_refund_exposure', evidenceKey: l.disputeId, paymentRequestId: l.paymentRequestId,
+        paymentId: l.paymentId, captureFactId: l.captureFactId, amount: Number(l.amount), currency: l.currency, detail }, tally));
     }
   }
 
@@ -432,6 +451,9 @@ export class ReconciliationService {
                 -- Core V2 S0-C14 item 12: the effect exists, or else the completed refund of the loss's captured movement; otherwise it stays open
                 WHEN 'chargeback_effect_waiting' THEN coalesce((SELECT 'effect' WHERE billing_loss_effect_applied(c."evidenceKey")),
                   billing_loss_completed_refund(c."evidenceKey")::text)
+                -- Core V2 S0-C15A item 5: the completed refund of the same movement, once its overlap case exists; otherwise it stays open
+                WHEN 'chargeback_refund_exposure' THEN (SELECT billing_loss_completed_refund(c."evidenceKey")::text
+                  WHERE EXISTS (SELECT 1 FROM reconciliation_case k WHERE k."caseType" = 'chargeback_refund_overlap' AND k."evidenceKey" = c."evidenceKey"))
                 ELSE (SELECT r.id::text FROM refund_case r WHERE r."paymentId" = c."paymentId" AND r.status = 'completed'
                   AND (c."captureFactId" IS NULL OR r."captureFactId" = c."captureFactId") LIMIT 1)
               END AS ref,
@@ -439,7 +461,7 @@ export class ReconciliationService {
                 THEN 'applied' END AS via
          FROM reconciliation_case c WHERE NOT EXISTS (SELECT 1 FROM reconciliation_case_resolution r WHERE r."caseId" = c.id)
           AND c."caseType" IN ('late_assisted_settlement', 'recovery_surplus', 'contradictory_effect', 'authorization_pending', 'late_success', 'unmatched_capture', 'unrouted_settlement',
-            'chargeback_effect_waiting')`);
+            'chargeback_effect_waiting', 'chargeback_refund_exposure')`);
     for (const c of rows) {
       if (!c.ref) continue;
       const ctx = workerContext(c.evidenceKey);
@@ -531,6 +553,8 @@ export class ReconciliationService {
     } catch (e) {
       // the overlap was recorded after the check: the database refused the acknowledgement (S0-C14 item 9)
       if (pgConstraint(e) === 'reconciliation_case_overlap_acknowledgement') throw billingError(409, 'reconciliation_case_in_overlap', BILLING_MESSAGES.reconciliationCaseInOverlap);
+      // the evidence was recorded after the check: the database refused it too (S0-C15A item 6)
+      if (pgConstraint(e) === 'reconciliation_case_exposure_acknowledgement') throw billingError(409, 'reconciliation_case_in_exposure', BILLING_MESSAGES.reconciliationCaseInExposure);
       throw e;
     }
   }
@@ -541,6 +565,10 @@ export class ReconciliationService {
       // Core V2 S0-C14 item 9: an overlap on the case's movement means money did move; the database refuses this reason too
       if (reason === 'reviewed_no_financial_effect' && (await q.query<{ o: boolean }>(`SELECT billing_case_movement_overlap($1) AS o`, [id])).rows[0]!.o) {
         throw billingError(409, 'reconciliation_case_in_overlap', BILLING_MESSAGES.reconciliationCaseInOverlap);
+      }
+      // Core V2 S0-C15A item 6: the database's own rule, called rather than restated
+      if ((await q.query<{ r: boolean }>(`SELECT billing_acknowledgement_refused_by_exposure($1, $2) AS r`, [id, reason])).rows[0]!.r) {
+        throw billingError(409, 'reconciliation_case_in_exposure', BILLING_MESSAGES.reconciliationCaseInExposure);
       }
       if (!(await this.cases.resolve(q, id, 'acknowledged', { userId: owner.userId, reason }, ctx))) {
         throw billingError(409, 'reconciliation_case_resolved', BILLING_MESSAGES.reconciliationCaseResolved);

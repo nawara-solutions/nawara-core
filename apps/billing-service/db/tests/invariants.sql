@@ -1416,6 +1416,20 @@ SELECT pg_temp.assert_eq('S0-C14', 'item 12: no resolution kind is added (effect
   (SELECT (pg_get_constraintdef(oid) NOT LIKE '%effect_waiting%' AND pg_get_constraintdef(oid) LIKE '%chargeback_returned%')::text FROM pg_constraint
     WHERE conname = 'reconciliation_case_resolution_kind'), 'true');
 
+-- ------------------------------------------------------------------------------------------------------------- S0-C15A (0051)
+SELECT pg_temp.expect_error('S0-C15A', 'item 4: an exposure case names a verified loss with a chargeback fact', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", detail)
+  VALUES ('chargeback_refund_exposure', gen_random_uuid(), gen_random_uuid(), 'refund_evidence_unresolved')$$, '23514', 'reconciliation_case_exposure_evidence');
+SELECT pg_temp.assert_eq('S0-C15A', 'item 4: the evidence classes are closed', (SELECT (prosrc LIKE '%''refund_money_verified'', ''refund_evidence_unresolved''%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_exposure_case_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C15A', 'item 6: exactly the two claiming reasons are refused; provider_statement_reviewed is not',
+  (SELECT (prosrc LIKE '%''reviewed_no_financial_effect'', ''duplicate_evidence_reviewed''%' AND prosrc NOT LIKE '%provider_statement_reviewed%')::text FROM pg_proc WHERE proname = 'billing_acknowledgement_refused_by_exposure'), 'true');
+SELECT pg_temp.assert_eq('S0-C15A', 'item 6: the resolution guard calls the one rule, and S0-C14 item 9 still stands beside it',
+  (SELECT (prosrc LIKE '%billing_acknowledgement_refused_by_exposure(c.id, NEW.reason)%' AND prosrc LIKE '%NEW.reason = ''reviewed_no_financial_effect'' AND billing_case_movement_overlap(c.id)%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C15A', 'item 2: an exposure is not an overlap: the freeze and the restrictions never read it',
+  (SELECT count(*)::text FROM pg_proc WHERE proname IN ('billing_recovery_obligation_frozen', 'billing_assistance_restrictions', 'billing_loss_overlap', 'billing_loss_refund_live') AND prosrc LIKE '%exposure%'), '0');
+SELECT pg_temp.assert_eq('S0-C15A', 'item 4: acknowledgement stays limited to the three review-only types',
+  (SELECT (prosrc LIKE '%WHEN ''acknowledged'' THEN c."caseType" IN (''refund_discrepancy'', ''partial_chargeback'', ''second_reversal_cause'')%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C15A', 'item 5: no resolution kind is added', (SELECT (pg_get_constraintdef(oid) NOT LIKE '%exposure%')::text FROM pg_constraint WHERE conname = 'reconciliation_case_resolution_kind'), 'true');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail
