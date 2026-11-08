@@ -604,6 +604,7 @@ describeWithEnv(
         expect(await rawRefund(r.attemptId, 100, txn)).toBe(200);
         await completedCase(r.caseId);
         await settle();
+        await mirrored(r.attemptId, 'succeeded'); // Billing's existing relay mirror of Payment's attempt (not S0-C15B) settles before the baseline
         const raw = JSON.stringify({ eventId: `c15b_${randomUUID()}`, type: 'refund.succeeded', reference: r.attemptId, providerTransactionId: txn, amount: 150, currency: 'TND' });
         expect(await signedRaw(raw)).toBe(200);
         expect(await signedRaw(raw)).toBe(200); // the same notification again: nothing more anywhere
