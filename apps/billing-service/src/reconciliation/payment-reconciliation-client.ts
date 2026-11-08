@@ -4,7 +4,8 @@ export const PAYMENT_RECONCILIATION_CLIENT = Symbol('BILLING_PAYMENT_RECONCILIAT
 
 /** Core V2 S6h-B: the kinds of Payment's evidence Billing reconciles (PAY-12's producer read, `payment.reconciliation.read`). */
 export const PAYMENT_ITEM_KINDS = ['late_success', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback', 'capture_refund_unavailable',
-  'fact_conflict'] as const; // Core V2 S0-C11 item 8 (BIL-33 I)
+  'fact_conflict', // Core V2 S0-C11 item 8 (BIL-33 I)
+  'dispute_conflict_presence'] as const; // Core V2 S0-C15B (B-D1): Payment's redacted, producer-only existence of a preserved dispute conflict
 export type PaymentItemKind = (typeof PAYMENT_ITEM_KINDS)[number];
 
 /** One item of Payment's evidence, as Payment states it (never derived): its id is the evidence's own identity. */
@@ -37,6 +38,8 @@ function item(kind: PaymentItemKind, v: unknown): PaymentItem | null {
   if (typeof r.kind === 'string' && r.kind !== kind) {
     return { kind, id: r.id, paymentId: r.paymentId, factId: null, amount: null, currency: null, detail: {}, at: null, otherKind: r.kind.slice(0, 64) };
   }
+  // Core V2 S0-C15B (B-D1): the presence item is identity, payment and time only; anything else it might carry is never read or kept
+  if (kind === 'dispute_conflict_presence') return { kind, id: r.id, paymentId: r.paymentId, factId: null, amount: null, currency: null, detail: {}, at: typeof r.at === 'string' ? r.at : null };
   const amount = r.amount === null || r.amount === undefined ? null : r.amount;
   if (amount !== null && (typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount < 1)) return null;
   const currency = typeof r.currency === 'string' && /^[A-Z]{3}$/.test(r.currency) ? r.currency : null;

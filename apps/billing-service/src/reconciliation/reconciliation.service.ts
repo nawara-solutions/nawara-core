@@ -212,6 +212,8 @@ export class ReconciliationService {
     // only that payment's own observation (never the other payment, its Company, the fact's id or its figures). Refund contradictions are excluded.
     // Payment unanswerable: nothing is inferred; Payment's own item stays visible and the next pass reads again.
     await this.page('fact_conflict', async (i) => {
+      // Core V2 S0-C15B (DO-57): a contradicted REFUND fact is its own case, opened only when Payment's reads agree (B-D6)
+      if (i.factId && i.detail.refundAttemptId !== undefined && i.detail.refundAttemptId !== null) return this.refundContest(i, tally);
       if (!i.factId || i.detail.refundAttemptId) return;
       let read: CaptureReadOutcome;
       try {
@@ -235,6 +237,60 @@ export class ReconciliationService {
       await this.db.tx(async (q) => this.caseFor(q, { caseType: 'unmatched_capture', evidenceKey: i.factId!, paymentId: i.paymentId, captureFactId: i.factId,
         amount: i.amount, currency: i.currency, detail: /^[a-z_]{1,64}$/.test(reason) ? reason : null }, tally));
     });
+    await this.readDisputeConflicts(tally);
+  }
+
+  /**
+   * Core V2 S0-C15B (DO-57; B-D6, B-D8): one `refund_fact_contested` case per contested refund fact of Billing's own payment. Payment's producer item states
+   * the recorded contradiction; its PAY-08 refunds read must state the SAME fact as a refund of the SAME payment and refund attempt (allocated, or not yet).
+   * Anything else (Payment unanswerable, 404, the fact absent or under another attempt, a malformed item) is a TECHNICAL inconsistency: nothing is opened,
+   * nothing existing changes, one warning is logged and the next pass reads again; Payment's own Owner item stays the visible record meanwhile. The case's
+   * figures are the VERIFIED fact's; the contested amounts stay at Payment. The case and its evidence are one transaction (the database refuses one without
+   * the other at commit).
+   */
+  private async refundContest(i: PaymentItem, tally: { opened: number }): Promise<void> {
+    const factId = i.factId!;
+    const attemptId = typeof i.detail.refundAttemptId === 'string' && UUID.test(i.detail.refundAttemptId) ? i.detail.refundAttemptId : null;
+    const inconsistent = (why: string) => this.log.warn(`payment_evidence_inconsistent kind=fact_conflict item=${i.id} reason=${why} — nothing opened; the next pass reads again`);
+    if (!attemptId) return inconsistent('refund_attempt_unreadable');
+    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [factId])).rows.length > 0) return;
+    let read: Awaited<ReturnType<PaymentRefundClient['refunds']>>;
+    try {
+      read = await this.captures.refunds(i.paymentId);
+    } catch {
+      return inconsistent('payment_unavailable');
+    }
+    if (read === null) return inconsistent('payment_not_found');
+    const allocated = read.authorizations.filter((z) => z.refundAttemptId === attemptId).flatMap((z) => z.allocations).find((a) => a.factId === factId);
+    const pending = allocated ? undefined : (read.unallocatedFacts ?? []).find((f) => f.factId === factId && f.refundAttemptId === attemptId);
+    const fact = allocated ?? pending;
+    if (!fact) return inconsistent(read.unallocatedFacts === null ? 'unallocated_facts_unknown' : 'fact_not_stated');
+    if (!Number.isSafeInteger(fact.amount) || fact.amount < 1 || !/^[A-Z]{3}$/.test(fact.currency)) return inconsistent('fact_figures_unusable');
+    // a refusal by this database (a constraint) or a failure opens nothing and changes nothing: logged, retried on the next pass, never skipped silently
+    await this.db.tx(async (q) => {
+      const relay = (await q.query<{ captureFactId: string | null }>(
+        `SELECT r."captureFactId" FROM refund_authorization_relay x JOIN refund_case r ON r.id = x."refundCaseId" WHERE x.id = $1 AND x."paymentId" = $2`, [attemptId, i.paymentId])).rows[0];
+      const caseId = await this.cases.openForPayment(q, { caseType: 'refund_fact_contested', evidenceKey: factId, paymentId: i.paymentId, captureFactId: relay?.captureFactId ?? null,
+        amount: fact.amount, currency: fact.currency, detail: allocated ? 'contested_after_allocation' : 'contested_unallocated' });
+      if (!caseId) return; // opened by another pass, or no Company Owner exists to see it
+      await q.query(`INSERT INTO reconciliation_contest_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId") VALUES ($1, $2, $3, $4)`,
+        [caseId, i.paymentId, factId, relay ? attemptId : null]);
+      tally.opened++;
+    }).catch((e: unknown) => this.log.warn(`refund_contest_open_failure item=${i.id} ${describeFailure(e)} — nothing opened; the next pass reads again`));
+  }
+
+  /**
+   * Core V2 S0-C15B (DO-56; B-D1): one `dispute_conflict_observed` case per preserved dispute conflict of Billing's own payment, from Payment's REDACTED
+   * producer item (identity, payment, time). Read last and on its own: a Payment that does not know the kind yet (400) skips only this kind (B-D11).
+   */
+  private async readDisputeConflicts(tally: { opened: number }): Promise<void> {
+    try {
+      await this.page('dispute_conflict_presence', async (i) => {
+        await this.db.tx(async (q) => this.caseFor(q, { caseType: 'dispute_conflict_observed', evidenceKey: i.id, paymentId: i.paymentId }, tally));
+      });
+    } catch (e) {
+      this.log.warn(`payment_dispute_conflict_read_unavailable ${describeFailure(e)} — nothing inferred; the other kinds were read; the next pass reads again`);
+    }
   }
 
   private async caseFor(q: Queryable, c: Parameters<ReconciliationCases['openForPayment']>[1], tally: { opened: number }): Promise<string | null> {
@@ -555,6 +611,8 @@ export class ReconciliationService {
       if (pgConstraint(e) === 'reconciliation_case_overlap_acknowledgement') throw billingError(409, 'reconciliation_case_in_overlap', BILLING_MESSAGES.reconciliationCaseInOverlap);
       // the evidence was recorded after the check: the database refused it too (S0-C15A item 6)
       if (pgConstraint(e) === 'reconciliation_case_exposure_acknowledgement') throw billingError(409, 'reconciliation_case_in_exposure', BILLING_MESSAGES.reconciliationCaseInExposure);
+      // the contested evidence was recorded after the check (S0-C15B)
+      if (pgConstraint(e) === 'reconciliation_case_contest_acknowledgement') throw billingError(409, 'reconciliation_case_contested', BILLING_MESSAGES.reconciliationCaseContested);
       throw e;
     }
   }
@@ -569,6 +627,10 @@ export class ReconciliationService {
       // Core V2 S0-C15A item 6: the database's own rule, called rather than restated
       if ((await q.query<{ r: boolean }>(`SELECT billing_acknowledgement_refused_by_exposure($1, $2) AS r`, [id, reason])).rows[0]!.r) {
         throw billingError(409, 'reconciliation_case_in_exposure', BILLING_MESSAGES.reconciliationCaseInExposure);
+      }
+      // Core V2 S0-C15B (B-D4): contested provider evidence on the movement; the database's own rule, called rather than restated
+      if ((await q.query<{ r: boolean }>(`SELECT billing_acknowledgement_refused_by_contest($1, $2) AS r`, [id, reason])).rows[0]!.r) {
+        throw billingError(409, 'reconciliation_case_contested', BILLING_MESSAGES.reconciliationCaseContested);
       }
       if (!(await this.cases.resolve(q, id, 'acknowledged', { userId: owner.userId, reason }, ctx))) {
         throw billingError(409, 'reconciliation_case_resolved', BILLING_MESSAGES.reconciliationCaseResolved);

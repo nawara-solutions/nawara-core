@@ -604,7 +604,12 @@ export const BILLING_MESSAGES = defineMessages({
     en: 'Refund evidence beside a chargeback on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.',
     fr: "Des éléments de remboursement à côté d'une rétrofacturation sur ce mouvement ne sont pas résolus : ce motif ne peut pas être indiqué. Un relevé du prestataire examiné peut toujours être enregistré.",
     ar: 'أدلة الاسترداد بجانب رد المبلغ المتنازع عليه في هذه الحركة غير محسومة: لا يمكن ذكر هذا السبب. ولا يزال من الممكن تسجيل مراجعة كشف مزود الخدمة.',
+  },  reconciliationCaseContested: { // Core V2 S0-C15B (B-D4)
+    en: 'Contested provider evidence on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.',
+    fr: "Des éléments contestés du prestataire sur ce mouvement ne sont pas résolus : ce motif ne peut pas être indiqué. Un relevé du prestataire examiné peut toujours être enregistré.",
+    ar: 'أدلة مزود الخدمة المتنازع عليها في هذه الحركة غير محسومة: لا يمكن ذكر هذا السبب. ولا يزال من الممكن تسجيل مراجعة كشف مزود الخدمة.',
   },
+
   reconciliationCaseResolved: { // Core V2 S6h-B
     en: 'This reconciliation case is already resolved.',
     fr: 'Ce dossier de rapprochement est déjà résolu.',

@@ -136,11 +136,17 @@ export class RefundEvidenceService {
       const stored = existing[0]!;
       const same = stored.refundAttemptId === a.id && stored.paymentId === a.paymentId && Number(stored.amount) === s.amount && stored.currency === s.currency;
       if (!same) {
-        await q.query(
+        const { rows: recorded } = await q.query<{ id: string }>(
           `INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", "refundAttemptId", provider, amount, currency, source, "webhookEventId")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT ON CONSTRAINT provider_transaction_fact_conflict_once DO NOTHING`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT ON CONSTRAINT provider_transaction_fact_conflict_once DO NOTHING RETURNING id`,
           [stored.id, a.paymentId, a.capturedAttemptId, a.id, a.provider, s.amount, s.currency, source, webhookEventId],
         );
+        // Core V2 S0-C15B (B-D5): the same audit action as a capture contradiction, once per recorded observation (only the insert that created the
+        // row writes it; the event id derives from the row), in this transaction. A replay of the same observation records nothing again.
+        if (recorded[0]) {
+          await this.audit.recordFactConflict(q, { id: recorded[0].id, factId: stored.id, paymentId: a.paymentId, attemptId: a.capturedAttemptId, refundAttemptId: a.id,
+            source, amount: s.amount }, await this.attempts.organizationOf(q, a.paymentId), ctx);
+        }
         this.log.warn(`provider_fact_conflict fact=${stored.id} refundAttempt=${a.id} provider=${a.provider} — a contradicting refund observation; kept for reconciliation, the fact is unchanged`);
       }
       const storedExact = stored.refundAttemptId === a.id && Number(stored.amount) === Number(a.amount) && stored.currency === a.currency.trim();

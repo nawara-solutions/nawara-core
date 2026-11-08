@@ -140,6 +140,7 @@ describe('BILLING_MESSAGES', () => {
       [en('recoverySuspensionNotActive'), 'This suspension is not active for this recovery obligation: it does not exist or was already revoked.'], // Core V2 S0-C14
       [en('reconciliationCaseInOverlap'), 'A refund and chargeback overlap exists on this movement: it cannot be acknowledged as having no financial effect.'], // Core V2 S0-C14
       [en('reconciliationCaseInExposure'), 'Refund evidence beside a chargeback on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.'], // Core V2 S0-C15A item 6
+      [en('reconciliationCaseContested'), 'Contested provider evidence on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.'], // Core V2 S0-C15B (B-D4)
       [en('writeOffNotPermitted'), 'This recovery obligation cannot be written off: it is recovered, already written off, or its outstanding amount changed since the authorization.'], // Core V2 S6h-B
       [en('recoveryAuthorizationUnavailable'), 'The external repayment record is not available; nothing was changed.'], // Core V2 S6f
       [en('invalidLateSettlementRequest'), 'The late settlement request is invalid.'], // Core V2 S6g
