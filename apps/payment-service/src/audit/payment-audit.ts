@@ -167,14 +167,15 @@ export class PaymentAudit {
     );
   }
 
-  async recordFactConflict(q: Queryable, c: { id: string; factId: string; paymentId: string; attemptId: string; source: 'webhook' | 'status_check'; amount: number },
+  async recordFactConflict(q: Queryable, c: { id: string; factId: string; paymentId: string; attemptId: string; refundAttemptId?: string; source: 'webhook' | 'status_check'; amount: number },
     organizationId: string | null, ctx: EventContext): Promise<void> {
     // a provider's observation, recorded by Payment: never attributed to whoever asked for the status read
     const actor = { type: 'system' as const, id: c.source === 'webhook' ? 'payment_webhook' : 'payment_status_read' };
     await this.writer.write(
       q,
       { action: 'provider_fact_conflict.recorded' satisfies ReconciliationAuditAction, actor, organizationId, resource: { type: 'provider_transaction_fact', id: c.factId }, outcome: 'succeeded',
-        changes: { conflict_id: c.id, payment_id: c.paymentId, attempt_id: c.attemptId, source: c.source, observed_amount: c.amount } },
+        changes: { conflict_id: c.id, payment_id: c.paymentId, attempt_id: c.attemptId, ...(c.refundAttemptId ? { refund_attempt_id: c.refundAttemptId } : {}), source: c.source,
+          observed_amount: c.amount } },
       { eventId: deterministicEventId(c.id, 'audit.provider_fact_conflict.recorded'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }

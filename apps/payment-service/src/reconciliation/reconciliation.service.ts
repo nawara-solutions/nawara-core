@@ -25,11 +25,19 @@ export const AUTHORIZATION_PENDING_ITEM_AFTER_MINUTES = 15;
 export const ITEM_KINDS = [
   'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
   'association', 'capture_refund_unavailable', 'capture_mismatch', 'multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict',
+  'dispute_conflict_presence',
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 /** Core V2 S0-C12 items 14(f), 15 and S0-C13 Part A: `multiple_captures`, `capture_recovery_exhausted` and `dispute_conflict` are the Owner's alone; a service read never reaches them. */
 const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict'];
+/**
+ * Core V2 S0-C15B (B-D1): `dispute_conflict_presence` is the PRODUCER's alone: the redacted existence of one preserved dispute conflict of its own
+ * payment (the observation's id, its payment and when it was observed). It never carries the reason, the notification, the dispute, a chargeback
+ * reference or any figure: those stay in the Owner-only `dispute_conflict` item (S0-C13 Part A), whose id it shares so the Owner can cross-reference.
+ */
+const PRODUCER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['dispute_conflict_presence'];
 export const PRODUCER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS.filter((k) => !OWNER_ONLY_ITEM_KINDS.includes(k));
+export const OWNER_ITEM_KINDS: readonly ItemKind[] = ITEM_KINDS.filter((k) => !PRODUCER_ONLY_ITEM_KINDS.includes(k));
 
 export type ItemScope = { kind: 'owner'; companyId: string } | { kind: 'producer'; producer: string };
 
@@ -141,6 +149,9 @@ const ITEM_SQL: Record<ItemKind, string> = {
         'chargeback', CASE WHEN o."chargebackTxnId" IS NULL THEN NULL ELSE jsonb_build_object('reference', o."chargebackTxnId", 'amount', o."chargebackAmount", 'currency', trim(o."chargebackCurrency")) END,
         'providerOccurredAt', o."providerOccurredAt") AS detail
     FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,
+  // Core V2 S0-C15B (B-D1): the same rows as `dispute_conflict`, REDACTED for the producer: identity, payment and time only; no figure, no detail
+  dispute_conflict_presence: `SELECT o.id, o."paymentId", NULL::uuid AS "factId", NULL::bigint AS amount, NULL::text AS currency, o."observedAt" AS at, '{}'::jsonb AS detail
+    FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,
 };
 
 /**
@@ -178,6 +189,7 @@ export class ReconciliationService {
   async items(scope: ItemScope, kind: string, after: string | undefined, limit: number): Promise<ReconciliationItem[]> {
     if (!(ITEM_KINDS as readonly string[]).includes(kind) || (after !== undefined && !UUID.test(after)) || !Number.isInteger(limit) || limit < 1 || limit > 200) throw invalid();
     if (scope.kind === 'producer' && !PRODUCER_ITEM_KINDS.includes(kind as ItemKind)) throw invalid(); // the same answer as a kind that does not exist
+    if (scope.kind === 'owner' && !OWNER_ITEM_KINDS.includes(kind as ItemKind)) throw invalid(); // S0-C15B: the redacted producer item is no Owner kind
     const base = ITEM_SQL[kind as ItemKind];
     const scopeSql = scope.kind === 'owner' ? `p."sellerType" = 'company' AND p."sellerId" = $1` : `p.producer = $1`;
     const { rows } = await this.db.query<Record<string, any>>(
@@ -207,8 +219,11 @@ export class ReconciliationService {
       this.db.query(`SELECT trim(currency) AS currency, sum(amount)::bigint AS amount, count(*)::int AS attempts FROM refund_attempt
                       WHERE "paymentId" = $1 AND status IN ('authorization_pending', 'authorized', 'dispatching', 'submitted', 'unknown') GROUP BY trim(currency) ORDER BY 1`, [p.id])
         .then((r) => r.rows.map((x) => ({ currency: x.currency, amount: Number(x.amount), attempts: x.attempts }))),
-      this.db.query<{ conflicts: number; blocked: number; discrepancies: number; late: number }>(
+      // `conflicts` counts provider FACT conflicts (capture and refund), unchanged; Core V2 S0-C15B (B-D7): `disputeConflicts` counts preserved dispute
+      // conflicts apart (a chargeback stated only there is in no balance figure above)
+      this.db.query<{ conflicts: number; disputeConflicts: number; blocked: number; discrepancies: number; late: number }>(
         `SELECT (SELECT count(*) FROM provider_transaction_fact_conflict WHERE "paymentId" = $1)::int AS conflicts,
+                (SELECT count(*) FROM payment_dispute_observation WHERE "paymentId" = $1 AND disposition = 'conflict')::int AS "disputeConflicts",
                 (SELECT count(*) FROM refund_fact_allocation_block b JOIN provider_transaction_fact f ON f.id = b."factId" WHERE f."paymentId" = $1)::int AS blocked,
                 (SELECT count(*) FROM refund_attempt WHERE "paymentId" = $1 AND status = 'discrepancy')::int AS discrepancies,
                 (SELECT count(*) FROM payment_late_success WHERE "paymentId" = $1)::int AS late`, [p.id]).then((r) => r.rows[0]!),

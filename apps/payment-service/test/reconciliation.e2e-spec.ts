@@ -460,4 +460,93 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
   it('production mounts no reconciliation route', () => {
     expect(ReconciliationModule.register({ isProduction: true, refunds: {} } as unknown as PaymentConfig)).toEqual({ module: ReconciliationModule });
   });
+  // Core V2 S0-C15B (B-D1, B-D5, B-D7): the redacted producer-only presence of a dispute conflict, the refund-conflict audit and the separate balance count
+  describe('Core V2 S0-C15B: dispute conflict presence, refund fact conflict audit, unresolved.disputeConflicts', () => {
+    /** A preserved dispute conflict (terminal contradiction: won, then lost with a chargeback) on a captured payment, through the signed pipeline. */
+    const disputeConflict = async () => {
+      const c = await captured();
+      const ref = `c15b-${randomUUID().slice(0, 8)}`;
+      for (const send of [{ event: 'opened', amount: 7000 }, { event: 'won', amount: 7000 }, { event: 'lost', amount: 7000, chargebackAmount: 7000 }]) {
+        await sim(`payments/${c.payment.id}/disputes`, { commandId: cmd(), disputeRef: ref, ...send }).expect(201);
+      }
+      const o = await one(`SELECT id FROM payment_dispute_observation WHERE "paymentId" = $1 AND disposition = 'conflict'`, [c.payment.id]);
+      expect(o, 'the conflict').toBeDefined();
+      return { ...c, observationId: o.id as string };
+    };
+
+    it('B-D1: the producer reads the redacted presence (identity, payment, time; no figure, reason, dispute or chargeback); its id is the Owner item\'s', async () => {
+      const c = await disputeConflict();
+      const res = await serviceItems('dispute_conflict_presence').expect(200);
+      const mine = (res.body.items as Row[]).filter((i) => i.paymentId === c.payment.id);
+      expect(mine).toHaveLength(1);
+      expect(mine[0]).toEqual({ kind: 'dispute_conflict_presence', id: c.observationId, paymentId: c.payment.id, paymentRequestId: c.payment.paymentRequestId, producer: 'billing-service',
+        organizationId: null, purpose: 'direct_purchase', factId: null, amount: null, currency: null, detail: {}, at: expect.any(String) });
+      const raw = JSON.stringify(mine[0]);
+      for (const secret of ['terminal_contradiction', 'simd_', 'simcb_', '7000', 'lost', 'reason', 'chargeback', 'disputeId']) expect(raw).not.toContain(secret);
+      const owner = (await itemsOf('dispute_conflict')).filter((i) => i.paymentId === c.payment.id);
+      expect(owner.map((i) => i.id)).toEqual([c.observationId]); // the Owner cross-references the same id, with the full Owner-only detail
+      expect(owner[0]!.detail).toMatchObject({ reason: 'terminal_contradiction', chargeback: { amount: 7000 } });
+    });
+
+    it('B-D1: the presence is no Owner kind, no ordinary Owner or member reads it, and the producer still cannot read the Owner-only dispute_conflict', async () => {
+      await disputeConflict();
+      expect((await ownerGet('/reconciliation-items?kind=dispute_conflict_presence&limit=200')).body.code).toBe('invalid_reconciliation_request');
+      expect((await ownerGet('/reconciliation-items?kind=dispute_conflict_presence&limit=200', 'member-jwt')).status).toBe(403);
+      expect((await serviceItems('dispute_conflict').expect(400)).body.code).toBe('invalid_reconciliation_request');
+      expect((await serviceItems('dispute_conflict_presence', other.token)).status).toBe(403); // no payment.reconciliation.read
+      // another producer's payments are never listed to Billing: the read is scoped through the payment's producer
+      expect(((await serviceItems('dispute_conflict_presence').expect(200)).body.items as Row[]).every((i) => i.producer === 'billing-service')).toBe(true);
+    });
+
+    it('T19 (cross-Company): Company A\'s notification naming Company B\'s dispute is a conflict of A\'s payment only; neither the producer presence nor A\'s Owner item names B; B\'s Owner reads nothing of A', async () => {
+      const b = await captured({ seller: { type: 'company', id: COMPANY2 } });
+      const a = await captured();
+      const ref = `c15b-x-${randomUUID().slice(0, 8)}`;
+      await sim(`payments/${b.payment.id}/disputes`, { commandId: cmd(), disputeRef: ref, event: 'opened', amount: 5000 }).expect(201);
+      const bDispute = await one(`SELECT id FROM payment_dispute WHERE "paymentId" = $1`, [b.payment.id]);
+      await sim(`payments/${a.payment.id}/disputes`, { commandId: cmd(), disputeRef: ref, event: 'opened', amount: 5000 }).expect(201);
+      const obs = await one(`SELECT id, reason FROM payment_dispute_observation WHERE "paymentId" = $1 AND disposition = 'conflict'`, [a.payment.id]);
+      expect(obs.reason).toBe('payment_mismatch');
+      const presence = ((await serviceItems('dispute_conflict_presence').expect(200)).body.items as Row[]).filter((i) => i.id === obs.id);
+      expect(presence).toEqual([expect.objectContaining({ paymentId: a.payment.id, detail: {}, amount: null })]);
+      const leaks = JSON.stringify(presence) + JSON.stringify(await itemsOf('dispute_conflict'));
+      for (const other of [b.payment.id, bDispute.id, COMPANY2]) expect(leaks).not.toContain(other);
+      expect((await itemsOf('dispute_conflict', 'owner2-jwt')).some((i) => i.id === obs.id)).toBe(false);
+      expect((await ownerGet(`/payments/${a.payment.id}/balance`, 'owner2-jwt')).status).toBe(404);
+      expect((await ownerGet(`/payments/${b.payment.id}/balance`, 'owner2-jwt').expect(200)).body.unresolved.disputeConflicts).toBe(0); // B's own exposure gains nothing
+    });
+
+    it('B-D7: unresolved.disputeConflicts counts dispute conflicts; unresolved.conflicts (provider fact conflicts) is unchanged', async () => {
+      const c = await disputeConflict();
+      const bal = (await ownerGet(`/payments/${c.payment.id}/balance`).expect(200)).body;
+      expect(bal.unresolved).toEqual({ conflicts: 0, disputeConflicts: 1, blocked: 0, discrepancies: 0, late: 0 });
+      expect(bal.currencies).toEqual([{ currency: 'TND', captured: 9000, refundedNet: 0, chargebackNet: 0, netRetained: 9000 }]); // the stated chargeback is in no figure
+    });
+
+    it('B-D5: a refund fact contradiction is audited once per recorded observation, with the existing action; a replay of the same notification adds nothing', async () => {
+      const z = await authorizedRefund();
+      const txn = `simr_c15b_${randomUUID()}`;
+      const refund = (amount: number, eventId = `c15b_${randomUUID()}`) => ({ eventId, type: 'refund.succeeded', reference: z.attemptId, providerTransactionId: txn, amount, currency: 'TND' });
+      await signed(refund(9000)).expect(200);
+      const contradiction = refund(15000);
+      await signed(contradiction).expect(200);
+      await signed(contradiction).expect(200); // the SAME notification again: the webhook key makes it a no-op
+      const fact = await one(`SELECT id, amount FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [txn]);
+      expect(Number(fact.amount)).toBe(9000); // the verified fact stays as first reported
+      const rows = (await admin.query(`SELECT id FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [fact.id])).rows;
+      expect(rows).toHaveLength(1);
+      const audits = (await admin.query(`SELECT payload, id FROM outbox WHERE name = 'audit.provider_fact_conflict.recorded' AND payload->'resource'->>'id' = $1`, [fact.id])).rows;
+      expect(audits).toHaveLength(1);
+      const capturedAttempt = (await one(`SELECT "capturedAttemptId" FROM refund_attempt WHERE id = $1`, [z.attemptId])).capturedAttemptId;
+      expect(audits[0].payload).toMatchObject({ action: 'provider_fact_conflict.recorded', outcome: 'succeeded', resource: { type: 'provider_transaction_fact', id: fact.id },
+        actor: { type: 'system', id: 'payment_webhook' } });
+      expect(audits[0].payload.changes).toEqual({ conflict_id: rows[0].id, payment_id: z.payment.id, attempt_id: capturedAttempt, refund_attempt_id: z.attemptId, source: 'webhook',
+        observed_amount: 15000 }); // no currency, no provider reference, no body
+      // another, distinct contradicting notification is another recorded observation: one more row, one more event, never a rewrite
+      await signed(refund(4000)).expect(200);
+      expect(await count(`SELECT count(*) AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [fact.id])).toBe(2);
+      expect(await count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.provider_fact_conflict.recorded' AND payload->'resource'->>'id' = $1`, [fact.id])).toBe(2);
+      expect((await one(`SELECT amount FROM provider_transaction_fact WHERE id = $1`, [fact.id])).amount).toBe(fact.amount);
+    });
+  });
 });

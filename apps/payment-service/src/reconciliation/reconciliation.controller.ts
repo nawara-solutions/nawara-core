@@ -5,7 +5,7 @@ import { CallerService, RequireServiceOperation, ServiceOperationGuard, ServiceO
 import { RECONCILIATION_READ_OPERATION } from '../authorization/caller-admission.policy.js';
 import type { VerifiedOwner } from '../disputes/owner-company.authority.js';
 import { operationNotPermitted } from '../errors.js';
-import { ITEM_KINDS, PRODUCER_ITEM_KINDS, ReconciliationService, type AssociationRow } from './reconciliation.service.js';
+import { OWNER_ITEM_KINDS, PRODUCER_ITEM_KINDS, ReconciliationService, type AssociationRow } from './reconciliation.service.js';
 
 const iso = (d: Date | null) => (d ? new Date(d).toISOString() : null);
 const representAssociation = (a: AssociationRow) => ({
@@ -39,7 +39,7 @@ export class ReconciliationOwnerController {
     description: 'Read-only evidence: nothing here creates, changes or resolves a fact. authorization_pending lists intents with no definitive Auth answer after '
       + '15 minutes (Q8: fail closed; never released on missing evidence). dispute_conflict (S0-C13 Part A, Owner only) lists preserved dispute conflicts: being listed never means the exposure cleared. capture_refund_unavailable lists the captures no original-payment refund can return.',
   })
-  @ApiQuery({ name: 'kind', required: true, enum: ITEM_KINDS })
+  @ApiQuery({ name: 'kind', required: true, enum: OWNER_ITEM_KINDS })
   @ApiQuery({ name: 'after', required: false, description: 'the last id of the previous page' })
   @ApiQuery({ name: 'limit', required: false, description: '1 to 200 (default 100)' })
   @ApiResponse({ status: 200, description: '{ items }' })
@@ -63,7 +63,9 @@ export class ReconciliationOwnerController {
 
   @Get('payments/:paymentId/balance')
   @Header('Cache-Control', 'no-store')
-  @ApiOperation({ summary: 'R6H-12 (FC-5): one payment of the Owner\'s Company: signed balance per currency, in-flight refunds and unresolved evidence, apart.' })
+  @ApiOperation({ summary: 'R6H-12 (FC-5): one payment of the Owner\'s Company: signed balance per currency, in-flight refunds and unresolved evidence, apart.',
+    description: '`unresolved.conflicts` counts provider fact conflicts (capture and refund); `unresolved.disputeConflicts` (Core V2 S0-C15B) counts preserved dispute '
+      + 'conflicts, whose stated chargebacks are in no balance figure.' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 404, description: "not_found: unknown, or another Company's (one answer)" })
   async paymentBalance(@Param('paymentId') paymentId: string, @Req() req: CallerRequest) {

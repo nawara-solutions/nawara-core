@@ -103,6 +103,7 @@ export type BillingErrorCode =
   | 'reconciliation_case_not_acknowledgeable'
   | 'reconciliation_case_in_overlap' // Core V2 S0-C14 item 9
   | 'reconciliation_case_in_exposure' // Core V2 S0-C15A item 6
+  | 'reconciliation_case_contested' // Core V2 S0-C15B (B-D4)
   | 'recovery_collection_frozen' // Core V2 S0-C14 item 7
   | 'recovery_restriction_not_suspendable' // Core V2 S0-C14 item 10
   | 'recovery_suspension_not_active' // Core V2 S0-C14 item 11

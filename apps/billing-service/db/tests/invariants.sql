@@ -1430,6 +1430,36 @@ SELECT pg_temp.assert_eq('S0-C15A', 'item 4: acknowledgement stays limited to th
   (SELECT (prosrc LIKE '%WHEN ''acknowledged'' THEN c."caseType" IN (''refund_discrepancy'', ''partial_chargeback'', ''second_reversal_cause'')%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
 SELECT pg_temp.assert_eq('S0-C15A', 'item 5: no resolution kind is added', (SELECT (pg_get_constraintdef(oid) NOT LIKE '%exposure%')::text FROM pg_constraint WHERE conname = 'reconciliation_case_resolution_kind'), 'true');
 
+-- ------------------------------------------------------------------------------------------------------------- S0-C15B (0052)
+SELECT pg_temp.expect_error('S0-C15B', 'a refund contest names its payment, the verified amount and a closed class', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail)
+  VALUES ('refund_fact_contested', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'contested_unallocated')$$, '23514', 'reconciliation_case_contest_shape');
+SELECT pg_temp.expect_error('S0-C15B', 'a refund contest class outside the two is refused (currency_mismatch is no contest, B-D8)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail)
+  VALUES ('refund_fact_contested', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'blocked_currency_mismatch')$$, '23514', 'reconciliation_case_contest_shape');
+SELECT pg_temp.expect_error('S0-C15B', 'a dispute conflict case can hold no figure (S0-C13 boundary, B-D1)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency)
+  VALUES ('dispute_conflict_observed', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 70, 'TND')$$, '23514', 'reconciliation_case_dispute_conflict_redacted');
+SELECT pg_temp.expect_error('S0-C15B', 'a dispute conflict case can hold no capture or detail', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", "captureFactId", detail)
+  VALUES ('dispute_conflict_observed', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'terminal_contradiction')$$, '23514', 'reconciliation_case_dispute_conflict_redacted');
+SELECT pg_temp.expect_error('S0-C15B', 'contest evidence belongs to an existing refund-contest case', $$INSERT INTO reconciliation_contest_evidence ("caseId", "paymentId", "refundFactId")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid())$$, '23514', 'reconciliation_contest_evidence_case');
+SELECT pg_temp.assert_eq('S0-C15B', 'B-D4: the rule refuses no-financial-effect on the movement and a duplicate only on the contested attempt''s own discrepancy; never a provider statement',
+  (SELECT (prosrc LIKE '%p_reason = ''reviewed_no_financial_effect'' AND billing_case_movement_contested(p_case)%' AND prosrc LIKE '%p_reason = ''duplicate_evidence_reviewed''%'
+     AND prosrc LIKE '%c."caseType" = ''refund_discrepancy''%' AND prosrc NOT LIKE '%provider_statement_reviewed%')::text FROM pg_proc WHERE proname = 'billing_acknowledgement_refused_by_contest'), 'true');
+SELECT pg_temp.assert_eq('S0-C15B', 'the resolution guard calls the contest rule, and S0-C15A item 6 and S0-C14 item 9 still stand beside it',
+  (SELECT (prosrc LIKE '%billing_acknowledgement_refused_by_contest(c.id, NEW.reason)%' AND prosrc LIKE '%billing_acknowledgement_refused_by_exposure(c.id, NEW.reason)%'
+     AND prosrc LIKE '%NEW.reason = ''reviewed_no_financial_effect'' AND billing_case_movement_overlap(c.id)%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C15B', 'B-D3: acknowledgement stays limited to the three review-only types (the new types are never acknowledged)',
+  (SELECT (prosrc LIKE '%WHEN ''acknowledged'' THEN c."caseType" IN (''refund_discrepancy'', ''partial_chargeback'', ''second_reversal_cause'')%'
+     AND prosrc NOT LIKE '%THEN c."caseType" = ''refund_fact_contested''%' AND prosrc NOT LIKE '%THEN c."caseType" = ''dispute_conflict_observed''%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
+SELECT pg_temp.assert_eq('S0-C15B', 'B-D3: no resolution kind is added', (SELECT (pg_get_constraintdef(oid) NOT LIKE '%contest%')::text FROM pg_constraint WHERE conname = 'reconciliation_case_resolution_kind'), 'true');
+SELECT pg_temp.assert_eq('S0-C15B', 'no financial rule reads a contest: the freeze, the restrictions, the overlap and the exposure are unchanged',
+  (SELECT count(*)::text FROM pg_proc WHERE proname IN ('billing_recovery_obligation_frozen', 'billing_assistance_restrictions', 'billing_loss_overlap', 'billing_loss_refund_live',
+     'billing_loss_unresolved_exposure', 'billing_case_movement_exposed') AND prosrc LIKE '%contest%'), '0');
+SELECT pg_temp.assert_eq('S0-C15B', 'contest evidence is append-only and its existence is checked at commit (deferred)',
+  (SELECT (count(*) FILTER (WHERE tgname IN ('reconciliation_contest_evidence_10_append_only', 'reconciliation_contest_evidence_11_no_truncate')) = 2
+     AND bool_or(tgname = 'reconciliation_case_09_contest_evidence' AND tgdeferrable AND tginitdeferred))::text
+     FROM pg_trigger WHERE tgname LIKE 'reconciliation_c%'), 'true');
+SELECT pg_temp.assert_eq('S0-C15B', 'one evidence row per refund fact', (SELECT count(*)::text FROM pg_constraint WHERE conname = 'reconciliation_contest_evidence_fact_once' AND contype = 'u'), '1');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

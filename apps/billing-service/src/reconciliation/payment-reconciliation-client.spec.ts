@@ -45,4 +45,10 @@ describe('HttpPaymentReconciliationClient (Core V2 S0-C12 item 9)', () => {
   it('a malformed item still fails the whole page (Billing never reads a gap as "no evidence")', async () => {
     await expect(read([{ ...late, id: 'not-a-uuid', kind: 'capture_mismatch' }])).rejects.toThrow(/malformed item/);
   });
+  it('Core V2 S0-C15B (B-D1): a dispute conflict presence keeps identity, payment and time only, whatever else an answer carries', async () => {
+    body = { items: [{ kind: 'dispute_conflict_presence', id: id(9), paymentId: PAYMENT, factId: FACT, amount: 7000, currency: 'TND',
+      detail: { reason: 'terminal_contradiction', chargeback: { reference: 'simcb_x', amount: 7000 } }, at: '2026-11-08T10:00:00.000Z' }] };
+    const [p] = await new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('dispute_conflict_presence', undefined, 100);
+    expect(p).toEqual({ kind: 'dispute_conflict_presence', id: id(9), paymentId: PAYMENT, factId: null, amount: null, currency: null, detail: {}, at: '2026-11-08T10:00:00.000Z' });
+  });
 });
