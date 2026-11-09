@@ -198,9 +198,33 @@ jobs:
       - name: verify least privilege, including the kit migrations under the runtime role
         run: bash infra/postgres/verify.sh --with-kit-migrations
 
-  e2e-real-broker:
-    name: Real RabbitMQ loops (Billing/Payment Stage 4, Auth to Notification Stage 16.5)
+  # Core V2 A1: the real-broker suites run as the explicitly assigned groups of test/e2e-real-broker/ci-groups.json, one job per group.
+  # Each group job is its own runner with its own PostgreSQL and RabbitMQ service containers, so the groups share no database, port,
+  # broker user or queue; inside a job the group's suites run in sequence exactly as before (vitest.config.ts, unchanged). This job
+  # refuses a suite that is in no group, in two groups or unknown (scripts/real-broker-groups.mjs, also run by `npm run check:repo`)
+  # and derives the matrix from the manifest, so a group can never be left out of the matrix.
+  e2e-real-broker-plan:
+    name: real-broker suite manifest
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: every real-broker suite is assigned to exactly one group
+        id: plan
+        run: node scripts/real-broker-groups.mjs plan >> "$GITHUB_OUTPUT"
+
+  e2e-real-broker:
+    name: Real RabbitMQ loops (group ${{ matrix.group }})
+    needs: e2e-real-broker-plan
+    runs-on: ubuntu-latest
+    strategy:
+      # Every group runs to its end, so a failure in one never hides the result of another.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.e2e-real-broker-plan.outputs.matrix) }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -238,8 +262,40 @@ jobs:
       # Core V2 S0-C14 WP D: audit-service too, spawned live by the overlap certification (s0c14-overlap-certification).
       - name: build service-kit, audit-contract, billing-service, payment-service, auth-service, notification-service, organization-service, audit-service
         run: npm run build -w @nawara/service-kit -w @nawara/audit-contract -w billing-service -w payment-service -w auth-service -w notification-service -w organization-service -w audit-service
-      - name: real-broker E2E
-        run: npm run test:e2e -w @nawara/e2e-real-broker
+      # The group's suites through the same `npm run test:e2e -w @nawara/e2e-real-broker` (vitest.config.ts: timeouts and sequence
+      # unchanged), plus a JUnit report; the step fails unless that report holds exactly the group's suites, every test passed.
+      - name: real-broker E2E (group ${{ matrix.group }}, its suites in sequence)
+        env:
+          GROUP: ${{ matrix.group }}
+        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"
+      - name: upload the group's JUnit report and timing
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: real-broker-report-${{ matrix.group }}
+          path: ${{ runner.temp }}/real-broker-report
+          retention-days: 14
+          if-no-files-found: error
+
+  # Core V2 A1: the groups together. It runs even when a group failed or was cancelled (it then reports what is missing) and succeeds
+  # only when every group of the manifest uploaded exactly one report, the reports together hold every discovered suite exactly once,
+  # and every test passed with none failed, errored or skipped. core-ci-passed needs it, the plan and the group jobs.
+  e2e-real-broker-verify:
+    name: real-broker reports complete
+    if: always()
+    needs: [e2e-real-broker-plan, e2e-real-broker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: real-broker-report-*
+          path: ${{ runner.temp }}/real-broker-reports
+      - name: every suite ran in exactly one group; every test passed, none skipped
+        run: node scripts/real-broker-groups.mjs verify "$RUNNER_TEMP/real-broker-reports"
 
   e2e-auth-organization:
     name: Stage 10.1 Auth/Organization human-admin wire contract over real HTTP
@@ -314,7 +370,7 @@ jobs:
   core-ci-passed:
     name: core-ci-passed
     if: always()
-    needs: [repo-checks, node, images, infra, e2e-real-broker, e2e-auth-organization, e2e-shared-platform]
+    needs: [repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]
     runs-on: ubuntu-latest
     steps:
       - name: every Core CI job succeeded

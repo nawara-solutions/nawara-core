@@ -11,6 +11,7 @@ import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow } from './lib/checks.mjs';
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
+import { checkAllReports as checkAllRbReports, checkManifest as checkRbManifest, checkRealBrokerGroups, checkRealBrokerJobs, checkVitestConfig as checkRbVitestConfig, discoverSuites as rbDiscoverSuites, loadManifest as rbLoadManifest, matrixOf as rbMatrixOf } from './real-broker-groups.mjs';
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
 import { BACKUP_DESTINATION_ENV, BACKUP_JOB, BACKUP_JOB_SECRETS, BACKUP_PACKAGE_RUN, BACKUP_PERMISSIONS, BACKUP_REMOTE_SCRIPT, BACKUP_SSH_ACTION, BACKUP_SSH_WITH, BACKUP_TAG, BACKUP_TAILSCALE_WITH, BACKUP_WORKFLOW, SSH_ACTION_INPUTS, checkDroneSshFiles } from './lib/checks.mjs';
 import { PROBE_ENV, PROBE_GUARD, PROBE_JOB, PROBE_SECRETS, PROBE_TAG, PROBE_TAILSCALE_WITH, PROBE_WORKFLOW, TAILSCALE_ACTION, TAILSCALE_ACTION_RELEASE, TAILSCALE_CLIENT_SHA256, TAILSCALE_CLIENT_VERSION } from './lib/checks.mjs';
@@ -398,7 +399,7 @@ test('I: the digest deployment keeps set -euo pipefail and no secret in the remo
 
 // ------------------------------------------------------------------------------ V2-A.3 (A3.2): the stable aggregate check
 const CORE_CI = workflow('core-ci.yml');
-const NEEDS_LINE = '    needs: [repo-checks, node, images, infra, e2e-real-broker, e2e-auth-organization, e2e-shared-platform]\n';
+const NEEDS_LINE = '    needs: [repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]\n';
 
 test('core-ci-passed: the real Core CI workflow has the aggregate, needing every other job', () => {
   assert.deepEqual(checkCiAggregate('core-ci.yml', CORE_CI), []);
@@ -416,20 +417,24 @@ test('core-ci-passed: removing the aggregate, renaming it or making it a matrix 
 });
 
 test('core-ci-passed: dropping any needed job, or adding a job it does not need, is refused', () => {
-  for (const id of ['repo-checks', 'node', 'images', 'infra', 'e2e-real-broker', 'e2e-auth-organization', 'e2e-shared-platform']) {
-    const dropped = swap(CORE_CI, NEEDS_LINE, NEEDS_LINE.replace(new RegExp(`${id}(, )?`), '').replace(', ]', ']'));
-    assert.match(checkCiAggregate('core-ci.yml', dropped).join(), new RegExp(`missing: ${id}`), id);
+  for (const id of ['repo-checks', 'node', 'images', 'infra', 'e2e-real-broker-plan', 'e2e-real-broker', 'e2e-real-broker-verify', 'e2e-auth-organization', 'e2e-shared-platform']) {
+    // Whole ids only (Core V2 A1: e2e-real-broker is a prefix of e2e-real-broker-plan and e2e-real-broker-verify).
+    const dropped = swap(CORE_CI, NEEDS_LINE, NEEDS_LINE.replace(new RegExp(`(?<=[[ ])${id}(, |(?=]))`), '').replace(', ]', ']'));
+    assert.equal(parse(dropped).jobs[CI_AGGREGATE].needs.length, 8, `${id}: exactly one need removed`);
+    assert.match(checkCiAggregate('core-ci.yml', dropped).join(), new RegExp(`\\(missing: ${id}\\)`), id);
   }
   const added = swap(CORE_CI, '  core-ci-passed:\n', '  new-suite:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n');
   assert.match(checkCiAggregate('core-ci.yml', added).join(), /missing: new-suite/);
 });
 
 test('core-ci-passed: it must always run (a skipped required check counts as passed)', () => {
-  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    if: always()\n', '')).join(), /must have "if: always\(\)"/);
+  // Anchored on the aggregate's own lines (Core V2 A1: the real-broker upload step and verify job also have if: always()).
+  const AGG_IF = '    name: core-ci-passed\n    if: always()\n';
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, AGG_IF, '    name: core-ci-passed\n')).join(), /must have "if: always\(\)"/);
   for (const weaker of ['success()', '!cancelled()', "always() && github.event_name == 'push'"]) {
-    assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    if: always()\n', `    if: ${weaker}\n`)).join(), /must have "if: always\(\)"/, weaker);
+    assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, AGG_IF, `    name: core-ci-passed\n    if: ${weaker}\n`)).join(), /must have "if: always\(\)"/, weaker);
   }
-  assert.deepEqual(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    if: always()\n', '    if: ${{ always() }}\n')), []);
+  assert.deepEqual(checkCiAggregate('core-ci.yml', swap(CORE_CI, AGG_IF, '    name: core-ci-passed\n    if: ${{ always() }}\n')), []);
 });
 
 test('core-ci-passed: weakening the verdict is refused', () => {
@@ -4161,4 +4166,125 @@ test('T-A3: the pre-lifecycle invariant holds on the repository and fails on eac
     ['auth-service', 'apps/auth-service/src/auth/x.ts', null, "@Controller('auth')\nclass Y {\n  @Post('admin/members/:id/suspend')\n  s() {}\n}\n"],
   ];
   for (const [where, rel, from, to] of allowed) assert.equal(mutate(where, rel, from, to), '', `${where} ${rel}: legitimate code must pass`);
+});
+
+// ================================================================================ Core V2 A1: the real-broker suites in isolated groups
+const RB_CONFIG = readFileSync(new URL('../test/e2e-real-broker/vitest.config.ts', import.meta.url), 'utf8');
+const RB_MANIFEST = rbLoadManifest();
+const RB_DISCOVERED = rbDiscoverSuites();
+const rbClone = () => JSON.parse(JSON.stringify(RB_MANIFEST));
+const rbXml = (suites) => `<?xml version="1.0" encoding="UTF-8" ?>\n<testsuites name="vitest tests">\n${suites.map(({ name, tests = 1, failures = 0, errors = 0, skipped = 0, body }) =>
+  `    <testsuite name="${name}" timestamp="t" hostname="h" tests="${tests}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="1.5">\n${body ?? Array.from({ length: tests }, (_, i) => `        <testcase classname="${name}" name="t${i}" time="0.1">\n        </testcase>\n`).join('')}    </testsuite>\n`).join('')}</testsuites>\n`;
+const rbReports = (manifest = RB_MANIFEST) => Object.fromEntries(manifest.groups.map((g) => [g.id, [rbXml(g.suites.map((name) => ({ name, tests: 2 })))]]));
+
+test('A1: the real manifest assigns every discovered real-broker suite to exactly one group; the matrix is the manifest', () => {
+  assert.deepEqual(checkRealBrokerGroups(), []);
+  assert.ok(RB_DISCOVERED.length > 0);
+  const assigned = RB_MANIFEST.groups.flatMap((g) => g.suites).sort();
+  assert.deepEqual(assigned, RB_DISCOVERED);
+  assert.deepEqual(rbMatrixOf(RB_MANIFEST), { group: RB_MANIFEST.groups.map((g) => g.id) });
+  assert.equal(RB_MANIFEST.groups.length, 4, 'the A1 experiment: four groups');
+});
+
+test('A1: a suite in no group, in two groups, twice in one group, or unknown is refused; so is a malformed manifest', () => {
+  const missing = rbClone(); missing.groups[3].suites.pop();
+  assert.match(checkRbManifest(missing, RB_DISCOVERED).join(), /is in no group: Core CI would never run it/);
+  const newSuite = [...RB_DISCOVERED, 'zz-new-suite.e2e-spec.ts'].sort();
+  assert.match(checkRbManifest(RB_MANIFEST, newSuite).join(), /zz-new-suite\.e2e-spec\.ts is in no group/, 'a newly added suite cannot silently disappear');
+  const twice = rbClone(); twice.groups[1].suites.push(twice.groups[0].suites[0]);
+  assert.match(checkRbManifest(twice, RB_DISCOVERED).join(), /is assigned twice \(groups "g1" and "g2"\)/);
+  const sameGroup = rbClone(); sameGroup.groups[3].suites.push(sameGroup.groups[3].suites[0]);
+  assert.match(checkRbManifest(sameGroup, RB_DISCOVERED).join(), /is assigned twice \(groups "g4" and "g4"\)/);
+  const unknown = rbClone(); unknown.groups[0].suites.push('gone.e2e-spec.ts');
+  assert.match(checkRbManifest(unknown, RB_DISCOVERED).join(), /gone\.e2e-spec\.ts does not exist/);
+  const dupId = rbClone(); dupId.groups[1].id = 'g1';
+  assert.match(checkRbManifest(dupId, RB_DISCOVERED).join(), /group id "g1" appears twice/);
+  const badId = rbClone(); badId.groups[0].id = 'G 1; rm';
+  assert.match(checkRbManifest(badId, RB_DISCOVERED).join(), /needs an id matching/);
+  const empty = rbClone(); empty.groups[0].suites = [];
+  assert.match(checkRbManifest(empty, RB_DISCOVERED).join(), /group "g1" has no suites/);
+  const traversal = rbClone(); traversal.groups[0].suites.push('../x.e2e-spec.ts');
+  assert.match(checkRbManifest(traversal, RB_DISCOVERED).join(), /is not a suite path/);
+  assert.match(checkRbManifest({}, RB_DISCOVERED).join(), /non-empty "groups" list/);
+  assert.match(checkRbManifest({ groups: [] }, RB_DISCOVERED).join(), /non-empty "groups" list/);
+});
+
+test('A1: a suite path that is a substring of another is refused (vitest selects files by substring)', () => {
+  const discovered = ['a.e2e-spec.ts', 'xa.e2e-spec.ts'];
+  assert.match(checkRbManifest({ groups: [{ id: 'g1', suites: ['a.e2e-spec.ts'] }, { id: 'g2', suites: ['xa.e2e-spec.ts'] }] }, discovered).join(), /a\.e2e-spec\.ts is a substring of xa\.e2e-spec\.ts/);
+});
+
+test('A1: the discovery mirrors vitest.config.ts; a changed include, an exclude list or file parallelism is refused', () => {
+  assert.deepEqual(checkRbVitestConfig(RB_CONFIG), []);
+  assert.match(checkRbVitestConfig(swap(RB_CONFIG, "include: ['**/*.e2e-spec.ts']", "include: ['*.e2e-spec.ts', 'x/**/*.ts']")).join(), /include must be exactly/);
+  assert.match(checkRbVitestConfig(swap(RB_CONFIG, "include: ['**/*.e2e-spec.ts'],", "include: ['**/*.e2e-spec.ts'],\n    exclude: ['s6b*'],")).join(), /an exclude list/);
+  assert.match(checkRbVitestConfig(swap(RB_CONFIG, 'fileParallelism: false', 'fileParallelism: true')).join(), /fileParallelism must stay false/);
+});
+
+test('A1: the plan, group and verify jobs of the real Core CI keep the guard; weakening any of them is refused', () => {
+  assert.deepEqual(checkRealBrokerJobs(parse(CORE_CI)), []);
+  const refused = (from, to, re, what) => assert.match(checkRealBrokerJobs(parse(swap(CORE_CI, from, to))).join(), re, what);
+  refused('      matrix: ${{ fromJSON(needs.e2e-real-broker-plan.outputs.matrix) }}\n', '      matrix:\n        group: [g1, g2, g3]\n', /matrix must be exactly the plan job's output/, 'a hand-written matrix');
+  refused('      fail-fast: false\n      matrix: ${{ fromJSON', '      fail-fast: true\n      matrix: ${{ fromJSON', /fail-fast must be false/, 'fail-fast');
+  refused('    name: real-broker reports complete\n    if: always()\n', '    name: real-broker reports complete\n', /must have "if: always\(\)"/, 'verify skipped after a failure');
+  refused('    needs: [e2e-real-broker-plan, e2e-real-broker]\n', '    needs: [e2e-real-broker-plan]\n', /must need e2e-real-broker$/m, 'verify before the groups');
+  refused('        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"\n', '        run: npm run test:e2e -w @nawara/e2e-real-broker\n', /exactly one unconditional step must run the group through the guard/, 'bypassing the guard');
+  refused('        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"\n', '        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"\n        continue-on-error: true\n', /must not continue on error/, 'continue-on-error');
+  refused('      - name: upload the group\'s JUnit report and timing\n        if: always()\n', '      - name: upload the group\'s JUnit report and timing\n', /must always upload its report/, 'upload only on success');
+  refused('        run: node scripts/real-broker-groups.mjs verify "$RUNNER_TEMP/real-broker-reports"\n', '        run: node scripts/real-broker-groups.mjs verify "$RUNNER_TEMP/real-broker-reports" || true\n', /swallows its failure|exactly one step must run/, 'a swallowed verdict');
+  refused('          pattern: real-broker-report-*\n', '          pattern: real-broker-report-g1\n', /must download every real-broker-report-\* artifact/, 'one report only');
+  refused('        run: node scripts/real-broker-groups.mjs plan >> "$GITHUB_OUTPUT"\n', '        run: echo \'matrix={"group":["g1"]}\' >> "$GITHUB_OUTPUT"\n', /exactly one step \(id "plan"\) must run/, 'an unchecked plan');
+  refused('    name: Real RabbitMQ loops (group ${{ matrix.group }})\n', '    name: Real RabbitMQ loops (group ${{ matrix.group }})\n    if: github.event_name == \'push\'\n', /must not be conditional/, 'a conditional group job');
+  const noVerify = CORE_CI.slice(0, CORE_CI.indexOf('  # Core V2 A1: the groups together.')) + CORE_CI.slice(CORE_CI.indexOf('  e2e-auth-organization:\n'));
+  assert.match(checkRealBrokerJobs(parse(noVerify)).join(), /job "e2e-real-broker-verify" is missing/);
+});
+
+test('A1: the reports pass only when every group reported once, holding exactly its suites, every test passed and none skipped', () => {
+  const ok = checkAllRbReports(RB_MANIFEST, RB_DISCOVERED, rbReports());
+  assert.deepEqual(ok.problems, []);
+  assert.equal(ok.rows.length, RB_DISCOVERED.length);
+  assert.equal(ok.tests, 2 * RB_DISCOVERED.length, 'the total is counted, never fixed');
+  const g = (id) => RB_MANIFEST.groups.find((x) => x.id === id);
+  const bad = (mutate, re, what) => { const r = rbReports(); mutate(r); assert.match(checkAllRbReports(RB_MANIFEST, RB_DISCOVERED, r).problems.join('\n'), re, what); };
+  bad((r) => { delete r.g3; }, /group "g3": no report \(the job is missing, was cancelled or crashed before reporting\)/, 'a missing or cancelled group');
+  bad((r) => { r.g2.push(r.g2[0]); }, /group "g2": 2 reports/, 'a duplicated report');
+  bad((r) => { r.g9 = [rbXml([{ name: 'x.e2e-spec.ts' }])]; }, /a report for unknown group "g9"/, 'an unknown group');
+  bad((r) => { r.g4 = [rbXml(g('g4').suites.slice(1).map((name) => ({ name })))]; }, new RegExp(`group "g4": ${g('g4').suites[0].replace(/\./g, '\\.')} did not run`), 'a suite that did not run');
+  bad((r) => { r.g1 = [rbXml([...g('g1').suites, g('g2').suites[0]].map((name) => ({ name })))]; }, /its report holds .* which is not assigned to it/, 'a suite selected by another group');
+  bad((r) => { r.g1 = [rbXml(g('g1').suites.map((name) => ({ name, tests: 3, failures: 1 })))]; }, /1 failed/, 'a failed test');
+  bad((r) => { r.g1 = [rbXml(g('g1').suites.map((name) => ({ name, tests: 1, body: `        <testcase classname="${name}" name="x" time="0">\n            <skipped/>\n        </testcase>\n` })))]; }, /skipped/, 'a skipped test (counter missing)');
+  bad((r) => { r.g1 = [rbXml(g('g1').suites.map((name) => ({ name, tests: 2, skipped: 1 })))]; }, /1 skipped/, 'a skipped test');
+  bad((r) => { r.g1 = [rbXml(g('g1').suites.map((name) => ({ name, tests: 1, errors: 1 })))]; }, /1 errored/, 'an errored suite');
+  bad((r) => { r.g1 = [rbXml(g('g1').suites.map((name) => ({ name, tests: 0, body: '' })))]; }, /ran no test/, 'a suite that ran nothing');
+  bad((r) => { r.g1 = [rbXml(g('g1').suites.map((name) => ({ name, tests: 5, body: `        <testcase classname="${name}" name="x" time="0">\n        </testcase>\n` })))]; }, /counts disagree/, 'declared and counted tests disagree');
+});
+
+test('A1: the verify command fails closed on a missing group report and passes on a complete set (real CLI, synthetic reports)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rbgroups-'));
+  try {
+    for (const [id, [xml]] of Object.entries(rbReports())) {
+      const sub = join(dir, `real-broker-report-${id}`);
+      spawnSync('mkdir', ['-p', sub]);
+      writeFileSync(join(sub, `${id}.junit.xml`), xml);
+      writeFileSync(join(sub, `${id}.timing.json`), JSON.stringify({ group: id, wallSeconds: 1, exitCode: 0 }));
+    }
+    const cli = (d) => spawnSync(process.execPath, [new URL('./real-broker-groups.mjs', import.meta.url).pathname, 'verify', d], { encoding: 'utf8', env: { ...process.env, GITHUB_STEP_SUMMARY: '' } });
+    const pass = cli(dir);
+    assert.equal(pass.status, 0, pass.stderr);
+    assert.match(pass.stdout, /every discovered suite ran exactly once/);
+    rmSync(join(dir, 'real-broker-report-g2'), { recursive: true });
+    const fail = cli(dir);
+    assert.equal(fail.status, 1);
+    assert.match(fail.stderr, /group "g2": no report/);
+    const none = cli(join(dir, 'does-not-exist'));
+    assert.equal(none.status, 1, 'no reports at all (every group missing) fails');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('A1: the plan command prints the matrix derived from the manifest', () => {
+  const r = spawnSync(process.execPath, [new URL('./real-broker-groups.mjs', import.meta.url).pathname, 'plan'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, `matrix=${JSON.stringify(rbMatrixOf(RB_MANIFEST))}\n`);
 });
