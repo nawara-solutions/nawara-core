@@ -1,4 +1,6 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,7 +45,8 @@ const AUTH_DIR = `${ROOT}apps/auth-service`;
 const BILLING_DIR = `${ROOT}apps/billing-service`;
 const PAYMENT_DIR = `${ROOT}apps/payment-service`;
 const AUDIT_DIR = `${ROOT}apps/audit-service`;
-/** Core V2 DO-73 T12: the main build (no DO-73, migrations to 0052) for the historical mixed-version proof; DO73_OLD_BILLING_DIR names it. */
+/** Core V2 DO-73 T12: the main build (no DO-73, migrations to 0052) for the historical mixed-version proof; DO73_OLD_BILLING_DIR names it. Unset (CI), T12 runs
+ * its repository-migrations mode instead (no old binary): see T12. */
 const OLD_BILLING_DIR = process.env.DO73_OLD_BILLING_DIR ?? '';
 const PORT = { auth: 13851, b1: 13852, b2: 13853, payment: 13854, audit: 13856, b3: 13857, b4: 13858 };
 const AUTH_URL = `http://127.0.0.1:${PORT.auth}`;
@@ -1084,24 +1087,49 @@ describeWithEnv(
       expect(await n(auditAdmin, `SELECT count(*) AS n FROM audit_record WHERE action = 'refund_fact.allocation_blocked'`)).toBe(blocks.length);
     }, T);
 
-    it('T12 (historical, mixed versions): blocks recorded while a Billing WITHOUT DO-73 (main, migrations to 0052) runs open nothing; after 0053 and the DO-73 Billing, their cases open at the first pass', async () => {
-      // the DO-73 Billing processes stop; a separate Billing database is served first by the main build (no DO-73), then migrated to 0053
+    /**
+     * T12, two modes (never skipped):
+     *  - MIXED VERSIONS (DO73_OLD_BILLING_DIR names a main build without DO-73, migrations to 0052): that OLD Billing process serves the history database
+     *    while the block is recorded; it never reads allocation_blocked.
+     *  - REPOSITORY MIGRATIONS (DO73_OLD_BILLING_DIR unset, as in CI): NO old binary runs. The history database is migrated with this repository's own
+     *    migrations through 0052 only (copied; 0053 excluded and checked absent). LABELLED TEST AID: the purchase and the refund relay are made by THIS
+     *    tree's Billing on that schema with its allocation_blocked read held unavailable (`hidden`); it is STOPPED before the refund notification, so the
+     *    block is recorded at Payment while no Billing process runs at all.
+     * Both modes then apply 0053 and start the DO-73 Billing, and prove the same outcome.
+     */
+    it(`T12 (historical, ${OLD_BILLING_DIR ? 'mixed versions: an old main Billing' : 'repository migrations to 0052, no old binary'}): a block recorded before 0053 opens exactly one case at the first DO-73 pass; Owner-visible, never acknowledgeable; no financial change; replays and passes idempotent`, async () => {
+      const mode = OLD_BILLING_DIR ? 'mixed_versions_old_binary' : 'repository_migrations_0052_no_old_binary';
       await billing1.stop();
       await billing2.stop();
       const histDb = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'e2ebillingdo73hist');
       const hist = new pg.Pool({ connectionString: histDb.url });
-      let old: LiveService | undefined;
+      const histN = async (sql: string, params: unknown[] = []) => Number((await hist.query(sql, params)).rows[0].n);
+      let pre: LiveService | undefined;
       let fresh: LiveService | undefined;
+      let pre0053Dir: string | undefined;
       try {
-        await runMigrations(histDb.url, [kitMigrationsDir, `${OLD_BILLING_DIR}/db/migrations/`]);
-        expect((await hist.query(`SELECT to_regclass('reconciliation_unallocated_evidence') AS t`)).rows[0].t).toBeNull();
+        if (OLD_BILLING_DIR) {
+          await runMigrations(histDb.url, [kitMigrationsDir, `${OLD_BILLING_DIR}/db/migrations/`]);
+        } else {
+          pre0053Dir = mkdtempSync(join(tmpdir(), 'do73-t12-pre0053-'));
+          const names = readdirSync(`${BILLING_DIR}/db/migrations/`).filter((f) => f.endsWith('.sql') && f < '0053').sort();
+          for (const f of names) copyFileSync(`${BILLING_DIR}/db/migrations/${f}`, join(pre0053Dir, f));
+          expect(names.at(-1), 'T12: the copied set ends at 0052').toMatch(/^0052_/);
+          expect(names.some((f) => f.startsWith('0053')), 'T12: 0053 is not copied').toBe(false);
+          await runMigrations(histDb.url, [kitMigrationsDir, pre0053Dir]);
+        }
+        // the exact boundary: 0052 applied, 0053 not, and none of its objects exist
+        expect(await histN(`SELECT count(*) AS n FROM schema_migrations WHERE name ~ '^0052_'`), 'T12: 0052 applied').toBe(1);
+        expect(await histN(`SELECT count(*) AS n FROM schema_migrations WHERE name ~ '^[0-9]{4}_' AND name >= '0053'`), 'T12: 0053 (or later) not applied').toBe(0);
+        expect((await hist.query(`SELECT to_regclass('reconciliation_unallocated_evidence') AS t, to_regproc('billing_acknowledgement_refused_by_unallocated') AS f`)).rows[0]).toEqual({ t: null, f: null });
         await hist.query(`INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, $2, 'TND', $3)`, [TEST_PLATFORM, COMPANY, randomUUID()]);
         const envOf = (port: number) => ({ ...billingEnv(port), DATABASE_URL: histDb.url });
-        old = spawnService('billing-main', OLD_BILLING_DIR, envOf(PORT.b3));
+        if (!OLD_BILLING_DIR) hidden.blocked = true; // TEST AID: the stand-in cannot read allocation_blocked
+        pre = spawnService(OLD_BILLING_DIR ? 'billing-main' : 'billing-pre0053-standin', OLD_BILLING_DIR || BILLING_DIR, envOf(PORT.b3));
         await waitForHealth(`http://127.0.0.1:${PORT.b3}/health`, 30_000);
-        await waitFor(async () => old!.tail().includes('financial_reconciliation_check_passed'), 30_000, `the main Billing to start\n${old.tail()}`);
+        await waitFor(async () => pre!.tail().includes('financial_reconciliation_check_passed'), 30_000, `the pre-0053 Billing to start\n${pre.tail()}`);
         const HB = `http://127.0.0.1:${PORT.b3}`;
-        // a direct purchase through the main Billing, then the refund relay and a verified EUR refund in flight
+        // a direct purchase, then the refund relay dispatched by Payment
         const pid = (await hist.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId")
           VALUES ('test-producer', 'company', $1, $2, 'Personal plan', 'active', 'personal', $3) RETURNING id`, [COMPANY, `h-${randomUUID().slice(0, 8)}`, TEST_PLATFORM])).rows[0].id;
         const prc = (await hist.query(`INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, $2, 'TND', $3, 'recurring', 'month', 1) RETURNING id`,
@@ -1111,41 +1139,82 @@ describeWithEnv(
         expect(inv.status, JSON.stringify(inv.json)).toBe(201);
         expect((await call(HB, 'POST', producerToken.token, `/billing/invoices/${inv.json.id}/issue`)).status).toBe(200);
         const pr = await call(HB, 'POST', producerToken.token, `/billing/invoices/${inv.json.id}/payment-requests`);
-        await waitFor(async () => (await hist.query(`SELECT "paymentId" FROM payment_request WHERE id = $1 AND status = 'requested'`, [pr.json.id])).rows[0]?.paymentId != null, 30_000, `the main Billing's payment\n${old.tail()}`);
+        await waitFor(async () => (await hist.query(`SELECT "paymentId" FROM payment_request WHERE id = $1 AND status = 'requested'`, [pr.json.id])).rows[0]?.paymentId != null, 30_000, `the pre-0053 Billing's payment\n${pre.tail()}`);
         const paymentId = (await hist.query(`SELECT "paymentId" FROM payment_request WHERE id = $1`, [pr.json.id])).rows[0].paymentId as string;
         const a = await attemptOf(paymentId, payerToken);
         await outcome(paymentId, a.id, { outcome: 'succeeded' });
-        await waitFor(async () => (await hist.query(`SELECT count(*)::int AS n FROM subscription_purchase WHERE "invoiceId" = $1`, [inv.json.id])).rows[0].n === 1, 45_000, `the purchase\n${old.tail()}`);
+        await waitFor(async () => (await histN(`SELECT count(*) AS n FROM subscription_purchase WHERE "invoiceId" = $1`, [inv.json.id])) === 1, 45_000, `the purchase\n${pre.tail()}`);
         const opened = await call(HB, 'POST', owners.a.token, '/billing/admin/refund-cases', { paymentId, reason: 'customer_request' });
         expect(opened.status, JSON.stringify(opened.json)).toBe(201);
         const rc = await receipt(owners.a, 'refund.authorize', { operation: 'refund', audience: 'payment-service', companyId: COMPANY, refundCaseId: opened.json.id, paymentId, amount: PRICE,
           currency: 'TND', reason: 'customer_request', legalOverride: false });
         expect((await call(HB, 'POST', owners.a.token, `/billing/admin/refund-cases/${opened.json.id}/authorizations`, { receiptSecret: rc.secret })).status).toBe(201);
         const attemptId = (await hist.query(`SELECT id FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [opened.json.id])).rows[0].id as string;
-        await waitFor(async () => (await one(paymentAdmin, `SELECT status FROM refund_attempt WHERE id = $1`, [attemptId]))?.status === 'submitted', 30_000, `dispatch\n${old.tail()}`);
+        await waitFor(async () => (await one(paymentAdmin, `SELECT status FROM refund_attempt WHERE id = $1`, [attemptId]))?.status === 'submitted', 30_000, `dispatch\n${pre.tail()}`);
+        if (!OLD_BILLING_DIR) { // the stand-in stops BEFORE the block exists: no Billing process runs while it is recorded
+          await pre.stop();
+          pre = undefined;
+          hidden.blocked = false;
+        }
         const txn = `simr_do73_hist_${randomUUID()}`;
-        expect(await signedRaw(factRaw(attemptId, PRICE, txn, 'EUR'))).toBe(200);
+        const raw = factRaw(attemptId, PRICE, txn, 'EUR');
+        expect(await signedRaw(raw)).toBe(200);
         await waitBlock(txn);
         const factId = await factIdOf(txn);
-        await settle(); // the main Billing passes (every 10 s): it never reads allocation_blocked
-        expect((await hist.query(`SELECT count(*)::int AS n FROM reconciliation_case WHERE "evidenceKey" = $1`, [factId])).rows[0].n).toBe(0);
-        await old.stop();
-        old = undefined;
+        await settle(); // mixed versions: the old Billing passes (every 10 s) and never reads allocation_blocked; repository mode: nothing runs
+        expect(await histN(`SELECT count(*) AS n FROM reconciliation_case WHERE "evidenceKey" = $1`, [factId]), 'T12: nothing opened before 0053').toBe(0);
+        if (pre) {
+          await pre.stop();
+          pre = undefined;
+        }
+        // the money on both sides, before 0053: discovery may change none of it
+        const histMoney = async () => ({
+          refundCases: (await hist.query(`SELECT id, status FROM refund_case WHERE "paymentId" = $1 ORDER BY id`, [paymentId])).rows,
+          purchases: (await hist.query(`SELECT s.id, r.cause FROM subscription_purchase s LEFT JOIN subscription_purchase_reversal r ON r."purchaseId" = s.id WHERE s."invoiceId" = $1 ORDER BY s.id`, [inv.json.id])).rows,
+          losses: await histN(`SELECT count(*) AS n FROM financial_loss`),
+          obligations: await histN(`SELECT count(*) AS n FROM recovery_obligation`),
+          resolutions: await histN(`SELECT count(*) AS n FROM reconciliation_case_resolution`),
+          paymentFacts: (await paymentAdmin.query(`SELECT id, kind, amount, currency FROM provider_transaction_fact WHERE "paymentId" = $1 ORDER BY id`, [paymentId])).rows,
+          paymentBlocks: (await paymentAdmin.query(`SELECT "factId", reason FROM refund_fact_allocation_block WHERE "factId" = $1`, [factId])).rows,
+          paymentAllocations: await n(paymentAdmin, `SELECT count(*) AS n FROM refund_allocation WHERE "paymentId" = $1`, [paymentId]),
+          paymentAttempts: (await paymentAdmin.query(`SELECT id, status, amount FROM refund_attempt WHERE "paymentId" = $1 ORDER BY id`, [paymentId])).rows,
+        });
+        const before = await histMoney();
         // the DO-73 migration and the DO-73 Billing
         await runMigrations(histDb.url, [kitMigrationsDir, `${BILLING_DIR}/db/migrations/`]);
+        expect(await histN(`SELECT count(*) AS n FROM schema_migrations WHERE name ~ '^0053_'`), 'T12: 0053 now applied').toBe(1);
         fresh = spawnService('billing-do73', BILLING_DIR, envOf(PORT.b4));
-        await waitForHealth(`http://127.0.0.1:${PORT.b4}/health`, 30_000);
-        await waitFor(async () => (await hist.query(`SELECT count(*)::int AS n FROM reconciliation_case WHERE "caseType" = 'refund_fact_unallocated' AND "evidenceKey" = $1`, [factId])).rows[0].n === 1,
-          60_000, `the historical case\n${fresh.tail()}`);
-        const c = (await hist.query(`SELECT c.detail, c.amount, c.currency, e."relayId", e."blockedReason" FROM reconciliation_case c JOIN reconciliation_unallocated_evidence e ON e."caseId" = c.id
-          WHERE c."evidenceKey" = $1`, [factId])).rows[0];
-        expect(c).toEqual({ detail: 'currency_mismatch', amount: String(PRICE), currency: 'EUR', relayId: attemptId, blockedReason: 'currency_mismatch' });
-        record('T12', 'historical', c);
+        const FB = `http://127.0.0.1:${PORT.b4}`;
+        await waitForHealth(`${FB}/health`, 30_000);
+        const caseQ = `SELECT c.id, c."companyId", c.detail, c.amount, c.currency, e."refundFactId", e."refundAttemptId", e."relayId", e."blockedReason" FROM reconciliation_case c
+          JOIN reconciliation_unallocated_evidence e ON e."caseId" = c.id WHERE c."caseType" = 'refund_fact_unallocated' AND c."evidenceKey" = $1`;
+        await waitFor(async () => (await hist.query(caseQ, [factId])).rows.length === 1, 60_000, `the historical case\n${fresh.tail()}`);
+        const c = (await hist.query(caseQ, [factId])).rows[0];
+        expect(c, 'T12: one case and its matching evidence').toMatchObject({ companyId: COMPANY, detail: 'currency_mismatch', amount: String(PRICE), currency: 'EUR',
+          refundFactId: factId, refundAttemptId: attemptId, relayId: attemptId, blockedReason: 'currency_mismatch' });
+        // Owner-visible; never acknowledgeable
+        const list = (await call(FB, 'GET', owners.a.token, '/billing/admin/reconciliation-cases?status=open&type=refund_fact_unallocated')).json?.items as { id: string }[];
+        expect(list.some((x) => x.id === c.id), 'T12: Owner-visible').toBe(true);
+        for (const reason of ['reviewed_no_financial_effect', 'provider_statement_reviewed', 'duplicate_evidence_reviewed']) {
+          const r = await call(FB, 'POST', owners.a.token, `/billing/admin/reconciliation-cases/${c.id}/acknowledgement`, { reason });
+          expect([r.status, r.json?.code], `T12: ${reason}`).toEqual([409, 'reconciliation_case_not_acknowledgeable']);
+        }
+        // a replay of the identical notification and repeated worker passes: still exactly one of each
+        expect(await signedRaw(raw)).toBe(200);
+        await settle();
+        expect(await histN(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_fact_unallocated' AND "evidenceKey" = $1`, [factId]), 'T12: one case').toBe(1);
+        expect(await histN(`SELECT count(*) AS n FROM reconciliation_unallocated_evidence WHERE "refundFactId" = $1`, [factId]), 'T12: one evidence row').toBe(1);
+        expect(await histN(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.reconciliation_case.opened' AND payload->'resource'->>'id' = $1`, [c.id]), 'T12: one Audit intent').toBe(1);
+        expect(await histN(`SELECT count(*) AS n FROM reconciliation_case_resolution WHERE "caseId" = $1`, [c.id]), 'T12: unresolved').toBe(0);
+        expect(await histMoney(), 'T12: no financial record changed on either side').toEqual(before);
+        record('T12', 'historical', { mode, case: c });
       } finally {
-        await old?.stop();
+        hidden.blocked = false;
+        await pre?.stop();
         await fresh?.stop();
         await hist.end();
         await histDb.drop();
+        if (pre0053Dir) rmSync(pre0053Dir, { recursive: true, force: true });
         // the suite's own Billing processes again (afterAll stops them)
         billing1 = spawnService('billing1', BILLING_DIR, billingEnv(PORT.b1));
         billing2 = spawnService('billing2', BILLING_DIR, billingEnv(PORT.b2));
