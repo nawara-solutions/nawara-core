@@ -604,7 +604,13 @@ export const BILLING_MESSAGES = defineMessages({
     en: 'Refund evidence beside a chargeback on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.',
     fr: "Des éléments de remboursement à côté d'une rétrofacturation sur ce mouvement ne sont pas résolus : ce motif ne peut pas être indiqué. Un relevé du prestataire examiné peut toujours être enregistré.",
     ar: 'أدلة الاسترداد بجانب رد المبلغ المتنازع عليه في هذه الحركة غير محسومة: لا يمكن ذكر هذا السبب. ولا يزال من الممكن تسجيل مراجعة كشف مزود الخدمة.',
-  },  reconciliationCaseContested: { // Core V2 S0-C15B (B-D4)
+  },
+  reconciliationCaseRefundUnallocated: { // Core V2 DO-73
+    en: 'Verified refund money that Payment could not allocate is recorded on this movement: this reason cannot be stated. A reviewed provider statement can still be recorded.',
+    fr: "Un remboursement vérifié que Payment n'a pas pu imputer est enregistré sur ce mouvement : ce motif ne peut pas être indiqué. Un relevé du prestataire examiné peut toujours être enregistré.",
+    ar: 'سُجِّل على هذه الحركة مبلغ استرداد متحقَّق منه تعذّر على خدمة الدفع تخصيصه: لا يمكن ذكر هذا السبب. ولا يزال من الممكن تسجيل مراجعة كشف مزود الخدمة.',
+  },
+  reconciliationCaseContested: { // Core V2 S0-C15B (B-D4)
     en: 'Contested provider evidence on this movement is unresolved: this reason cannot be stated. A reviewed provider statement can still be recorded.',
     fr: "Des éléments contestés du prestataire sur ce mouvement ne sont pas résolus : ce motif ne peut pas être indiqué. Un relevé du prestataire examiné peut toujours être enregistré.",
     ar: 'أدلة مزود الخدمة المتنازع عليها في هذه الحركة غير محسومة: لا يمكن ذكر هذا السبب. ولا يزال من الممكن تسجيل مراجعة كشف مزود الخدمة.',
@@ -730,5 +736,10 @@ export const BILLING_MESSAGES = defineMessages({
     en: 'Refund processing has begun for this case: it can no longer be cancelled.',
     fr: "Le traitement du remboursement a commencé pour ce dossier : il ne peut plus être annulé.",
     ar: 'بدأت معالجة الاسترداد لهذا الملف: لم يعد من الممكن إلغاؤه.',
+  },
+  refundCaseRefundEvidence: { // Core V2 DO-73 (U-2, O1)
+    en: 'Verified refund money is recorded on a refund attempt of this case: it cannot be cancelled. The reconciliation case stays visible.',
+    fr: "Un remboursement vérifié est enregistré sur une tentative de ce dossier : il ne peut pas être annulé. Le dossier de rapprochement reste visible.",
+    ar: 'سُجِّل مبلغ استرداد متحقَّق منه على محاولة استرداد لهذا الملف: لا يمكن إلغاؤه. يبقى ملف المطابقة ظاهراً.',
   },
 });

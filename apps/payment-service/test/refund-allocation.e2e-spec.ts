@@ -2,11 +2,13 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { RefundAllocationService } from '../src/refunds/refund-allocation.service.js';
 import { RefundWorker } from '../src/refunds/refund-worker.js';
+import { deterministicEventId } from '../src/events/deterministic-id.js';
+import { PaymentAudit } from '../src/audit/payment-audit.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
@@ -259,6 +261,152 @@ describeWithEnv('refund allocation and completion (Core V2 S6c) — real Postgre
       expect(await completions(caseId)).toHaveLength(1);
       const z = await authorization(attemptId);
       expect(Number(z.allocatedIntended)).toBe(Number((await admin.query(`SELECT sum(intended) AS s FROM refund_allocation WHERE "refundAuthorizationId" = $1`, [z.id])).rows[0].s));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────── Core V2 DO-73 (U-3, U-5)
+  describe('Core V2 DO-73: one refund_fact.allocation_blocked audit intent per newly recorded block (U-3); the allocation decision is unchanged', () => {
+    const blockAudits = async (factId: string) => (await admin.query(`SELECT id, payload FROM outbox WHERE name = 'audit.refund_fact.allocation_blocked' AND payload->'resource'->>'id' = $1`, [factId])).rows;
+    const factOf = async (txn: string) => (await admin.query(`SELECT * FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'refund'`, [txn])).rows[0];
+    const blockOf = async (factId: string) => (await admin.query(`SELECT reason FROM refund_fact_allocation_block WHERE "factId" = $1`, [factId])).rows;
+    const ctx = () => ({ actor: { type: 'system' as const, id: null }, cause: { type: 'refund_worker' as const, id: randomUUID() } });
+    const breakBlock = () => admin.query(`CREATE FUNCTION pg_temp_block_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '40001'; END $$;
+      CREATE TRIGGER zz_block_injected BEFORE INSERT ON refund_fact_allocation_block FOR EACH ROW EXECUTE FUNCTION pg_temp_block_fail();`);
+    const repairBlock = () => admin.query(`DROP TRIGGER zz_block_injected ON refund_fact_allocation_block; DROP FUNCTION pg_temp_block_fail();`);
+
+    it('P-1 currency_mismatch: one intent, deterministic id, identifiers + reason + amount only (never the currency); a redelivery and an `already blocked` answer write nothing', async () => {
+      const a = await dispatched();
+      const txn = `do73-eur-${a.attemptId}`;
+      await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' });
+      const f = await factOf(txn);
+      expect(await blockOf(f.id)).toEqual([{ reason: 'currency_mismatch' }]);
+      const rows = await blockAudits(f.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(deterministicEventId(f.id, 'audit.refund_fact.allocation_blocked'));
+      expect(rows[0].payload).toMatchObject({ action: 'refund_fact.allocation_blocked', actor: { type: 'system', id: 'payment_webhook' }, resource: { type: 'provider_transaction_fact', id: f.id } });
+      expect(rows[0].payload.changes).toEqual({ payment_id: a.paymentId, refund_attempt_id: a.attemptId, reason: 'currency_mismatch', amount: 9000 });
+      expect(JSON.stringify(rows[0].payload)).not.toMatch(/EUR|do73-eur/); // no currency, no provider refund id
+      await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' }); // the same notification again
+      expect(await t.app.get(RefundAllocationService).allocate(f.id, ctx())).toEqual({ kind: 'blocked', reason: 'currency_mismatch' });
+      await drain();
+      expect(await blockAudits(f.id)).toHaveLength(1);
+      expect(await allocations(a.attemptId)).toEqual([]); // the allocation decision is unchanged: never allocated
+    });
+
+    it('P-2 contested (U-3: every newly recorded block, contested included): one intent with reason contested', async () => {
+      const c = await dispatched();
+      await breakAllocation();
+      try {
+        await notify(c.attemptId, { txn: `do73-k-${c.attemptId}`, amount: 9000 });
+        await notify(c.attemptId, { txn: `do73-k-${c.attemptId}`, amount: 8000 });
+      } finally {
+        await repairAllocation();
+      }
+      await drain();
+      const f = await factOf(`do73-k-${c.attemptId}`);
+      expect(await blockOf(f.id)).toEqual([{ reason: 'contested' }]);
+      const rows = await blockAudits(f.id);
+      expect(rows.map((r) => r.payload.changes)).toEqual([{ payment_id: c.paymentId, refund_attempt_id: c.attemptId, reason: 'contested', amount: 9000 }]);
+      expect(rows[0].payload.actor).toEqual({ type: 'system', id: 'payment_webhook' }); // the contradicting notification's own allocation pass records the block
+    });
+
+    it('P-3 eight concurrent allocations of one fact that will block: one block row, one intent (the losers answer `blocked` and write nothing)', async () => {
+      const a = await dispatched();
+      const txn = `do73-race-${a.attemptId}`;
+      await breakBlock();
+      try {
+        await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' });
+      } finally {
+        await repairBlock();
+      }
+      const f = await factOf(txn);
+      expect(await blockOf(f.id)).toEqual([]); // still pending (backoff), nothing recorded
+      expect(await blockAudits(f.id)).toEqual([]);
+      const svc = t.app.get(RefundAllocationService);
+      const results = await Promise.all(Array.from({ length: 8 }, () => svc.allocate(f.id, ctx())));
+      expect(results.every((r) => r.kind === 'blocked' && r.reason === 'currency_mismatch')).toBe(true);
+      expect(await blockOf(f.id)).toHaveLength(1);
+      expect(await blockAudits(f.id)).toHaveLength(1);
+    });
+
+    it('P-4 no_authorization: a verified refund on an attempt Auth refused (never authorized nor dispatched): one block and one intent naming that attempt; nothing is allocated', async () => {
+      const p = await createPayment();
+      const att = (await request(server()).post(`/payment/payments/${p.id}/attempts`).set('authorization', 'Bearer buyer-jwt').set('idempotency-key', key()).send({}).expect(201)).body;
+      await sim(`payments/${p.id}/attempts/${att.id}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201);
+      const caseId = randomUUID();
+      const r = auth.issue({ operation: 'refund', audience: 'payment-service', companyId: COMPANY, refundCaseId: caseId, paymentId: p.id, amount: 9000, currency: 'TND', reason: 'duplicate_charge' }, OWNER);
+      const attemptId = randomUUID();
+      await request(server()).post(`/payment/payments/${p.id}/refunds`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key())
+        .send({ refundAttemptId: attemptId, refundCaseId: caseId, amount: 9000, currency: 'TND', reason: 'customer_request', legalOverride: false, receiptSecret: r.secret }).expect(409);
+      expect((await admin.query(`SELECT status FROM refund_attempt WHERE id = $1`, [attemptId])).rows[0].status).toBe('authorization_refused');
+      const txn = `do73-na-${attemptId}`;
+      await notify(attemptId, { txn, amount: 9000 });
+      const f = await factOf(txn);
+      expect(await blockOf(f.id)).toEqual([{ reason: 'no_authorization' }]);
+      expect((await blockAudits(f.id)).map((x) => x.payload.changes)).toEqual([{ payment_id: p.id, refund_attempt_id: attemptId, reason: 'no_authorization', amount: 9000 }]);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM refund_allocation WHERE "factId" = $1`, [f.id])).rows[0].n).toBe(0);
+      expect((await read(p.id)).unallocatedFacts).toEqual([expect.objectContaining({ factId: f.id, state: 'blocked', blockedReason: 'no_authorization', refundAttemptId: attemptId })]);
+    });
+
+    it('P-5 no backfill: a block recorded by an older Payment (no audit) gets no intent later: not on a redelivery, an `already blocked` answer or a worker pass', async () => {
+      const a = await dispatched();
+      const txn = `do73-hist-${a.attemptId}`;
+      await breakBlock();
+      try {
+        await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' });
+      } finally {
+        await repairBlock();
+      }
+      const f = await factOf(txn);
+      // LABELLED HISTORICAL FIXTURE: the block row exactly as a Payment WITHOUT DO-73 wrote it (the same insert, no audit intent)
+      await admin.query(`INSERT INTO refund_fact_allocation_block ("factId", reason) VALUES ($1, 'currency_mismatch')`, [f.id]);
+      const svc = t.app.get(RefundAllocationService);
+      expect(await svc.allocate(f.id, ctx())).toEqual({ kind: 'blocked', reason: 'currency_mismatch' });
+      await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' });
+      await drain();
+      expect(await svc.allocate(f.id, ctx())).toEqual({ kind: 'blocked', reason: 'currency_mismatch' });
+      expect(await blockAudits(f.id)).toEqual([]);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE payload::text LIKE '%' || $1 || '%' AND name LIKE 'audit.%allocation%'`, [f.id])).rows[0].n).toBe(0);
+    });
+
+    it('P-6 application emission vs outbox deduplication: eight concurrent allocations and a redelivery call the emitter ONCE; a forced second emission is absorbed by the outbox (one row)', async () => {
+      const a = await dispatched();
+      const txn = `do73-emit-${a.attemptId}`;
+      await breakBlock();
+      try {
+        await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' });
+      } finally {
+        await repairBlock();
+      }
+      const f = await factOf(txn);
+      const audit = t.app.get(PaymentAudit);
+      const spy = vi.spyOn(audit, 'recordAllocationBlock');
+      try {
+        const svc = t.app.get(RefundAllocationService);
+        await Promise.all(Array.from({ length: 8 }, () => svc.allocate(f.id, ctx())));
+        await notify(a.attemptId, { txn, amount: 9000, currency: 'EUR' });
+        await drain();
+        expect(spy, 'the application emits once: only the transaction that inserts the block row').toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await blockAudits(f.id)).toHaveLength(1);
+      // the second layer, separately: the deterministic event id makes a repeated emission of the same block a no-op in the outbox
+      const c = await admin.connect();
+      try {
+        await c.query('BEGIN');
+        await audit.recordAllocationBlock(c as never, { factId: f.id, paymentId: a.paymentId, refundAttemptId: a.attemptId, reason: 'currency_mismatch', amount: 9000 }, null, ctx());
+        await c.query('COMMIT');
+      } finally {
+        c.release();
+      }
+      expect(await blockAudits(f.id), 'outbox ON CONFLICT on the event id').toHaveLength(1);
+    });
+
+    it('U-5 test 4 (invariant): every currency_mismatch or no_authorization block in this database is on a MATCHED fact (it has its payment and refund attempt)', async () => {
+      expect((await admin.query(`SELECT count(*)::int AS n FROM refund_fact_allocation_block b JOIN provider_transaction_fact f ON f.id = b."factId"
+        WHERE b.reason IN ('currency_mismatch', 'no_authorization') AND (f."paymentId" IS NULL OR f."refundAttemptId" IS NULL)`)).rows[0].n).toBe(0);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM refund_fact_allocation_block b WHERE b.reason IN ('currency_mismatch', 'no_authorization')`)).rows[0].n).toBeGreaterThan(0);
     });
   });
 

@@ -161,8 +161,14 @@ describe('HttpPaymentRefundClient.refunds: refund evidence (Core V2 S0-C14 item 
       unallocatedFacts: [{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'blocked', blockedReason: 'x' },
         { factId: FACT, refundAttemptId: null, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }] });
     expect(r!.authorizations[0]!.allocations).toEqual([{ factId: FACT, amount: 5300, currency: 'TND' }]);
-    expect(r!.unallocatedFacts).toEqual([{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'blocked' },
-      { factId: FACT, refundAttemptId: null, amount: 100, currency: 'TND', state: 'pending' }]);
+    // Core V2 DO-73: the block reason is kept as Payment states it (a bounded code), or null while pending
+    expect(r!.unallocatedFacts).toEqual([{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'blocked', blockedReason: 'x' },
+      { factId: FACT, refundAttemptId: null, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }]);
+    // an answer without the reason, or with one that is not a bounded code, carries none (DO-73 then opens nothing)
+    const unreasoned = await read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'EUR', state: 'blocked' },
+      { factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'EUR', state: 'blocked', blockedReason: 'Not A Code!' }] });
+    expect(unreasoned!.unallocatedFacts).toEqual([{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'EUR', state: 'blocked' },
+      { factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'EUR', state: 'blocked' }]);
     const older = await read({ attempts: [], refusals: [], authorizations: [authorization()] });
     expect(older!.unallocatedFacts).toBeNull();
     expect(older!.authorizations[0]!.allocations).toEqual([]);

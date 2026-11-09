@@ -51,4 +51,14 @@ describe('HttpPaymentReconciliationClient (Core V2 S0-C12 item 9)', () => {
     const [p] = await new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('dispute_conflict_presence', undefined, 100);
     expect(p).toEqual({ kind: 'dispute_conflict_presence', id: id(9), paymentId: PAYMENT, factId: null, amount: null, currency: null, detail: {}, at: '2026-11-08T10:00:00.000Z' });
   });
+  it('Core V2 DO-73 (U-4): a blocked fact whose currency is not three capital letters is kept without figures; the page is not refused; a usable one keeps its figures', async () => {
+    body = { items: ['EURO', 'eur', 'EUR'].map((currency, i) => ({ kind: 'allocation_blocked', id: id(20 + i), paymentId: PAYMENT, factId: id(20 + i), amount: 900, currency,
+      detail: { reason: 'currency_mismatch' }, at: '2026-11-09T10:00:00.000Z' })) };
+    const page = await new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('allocation_blocked', undefined, 100);
+    expect(page.map((i) => [i.factId, i.amount, i.currency, i.detail])).toEqual([[id(20), null, null, { reason: 'currency_mismatch' }], [id(21), null, null, { reason: 'currency_mismatch' }],
+      [id(22), 900, 'EUR', { reason: 'currency_mismatch' }]]);
+    // an unusable currency on another kind (no DO-73 rule) still refuses the page, as before
+    body = { items: [{ ...late, currency: 'EURO' }] };
+    await expect(new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('late_success', undefined, 100)).rejects.toThrow(/malformed item/);
+  });
 });

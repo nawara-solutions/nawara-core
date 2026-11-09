@@ -1460,6 +1460,91 @@ SELECT pg_temp.assert_eq('S0-C15B', 'contest evidence is append-only and its exi
      FROM pg_trigger WHERE tgname LIKE 'reconciliation_c%'), 'true');
 SELECT pg_temp.assert_eq('S0-C15B', 'one evidence row per refund fact', (SELECT count(*)::text FROM pg_constraint WHERE conname = 'reconciliation_contest_evidence_fact_once' AND contype = 'u'), '1');
 
+-- ------------------------------------------------------------------------------------------------------------- DO-73 (0053)
+SELECT pg_temp.expect_error('DO-73', 'an unallocated refund names its payment', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", detail)
+  VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), 'currency_mismatch')$$, '23514', 'reconciliation_case_unallocated_shape');
+SELECT pg_temp.expect_error('DO-73', 'an unallocated refund names one of the two closed reasons (contested is S0-C15B''s)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail)
+  VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'EUR', 'contested')$$, '23514', 'reconciliation_case_unallocated_shape');
+SELECT pg_temp.expect_error('DO-73', 'an unallocated refund needs its reason', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency)
+  VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'EUR')$$, '23514', 'reconciliation_case_unallocated_shape');
+SELECT pg_temp.expect_error('DO-73', 'U-4: a currency that is not three capital letters is never held (char(3) would truncate)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail)
+  VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'eur', 'currency_mismatch')$$, '23514', 'reconciliation_case_unallocated_shape');
+SELECT pg_temp.expect_error('DO-73', 'a case with figures but no evidence never commits (deferred presence check)', $$
+  SET CONSTRAINTS reconciliation_case_09_unallocated_evidence IMMEDIATE;
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail)
+  VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'EUR', 'currency_mismatch')$$, '23514', 'reconciliation_case_unallocated_evidence_missing');
+SELECT pg_temp.expect_error('DO-73', 'a figure-less case without evidence never commits either', $$
+  SET CONSTRAINTS reconciliation_case_09_unallocated_evidence IMMEDIATE;
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail)
+  VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'no_authorization')$$, '23514', 'reconciliation_case_unallocated_evidence_missing');
+SELECT pg_temp.expect_error('DO-73', 'unallocated evidence belongs to an existing unallocated-refund case', $$INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason")
+  VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'currency_mismatch')$$, '23514', 'reconciliation_unallocated_evidence_case');
+SELECT pg_temp.assert_eq('DO-73', 'unallocated evidence holds one of the two closed reasons (a CHECK beside the case guard)',
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'reconciliation_unallocated_evidence_reason'), 'CHECK (("blockedReason" = ANY (ARRAY[''currency_mismatch''::text, ''no_authorization''::text])))');
+-- a case and its evidence in one transaction; then every bypass of the evidence's binding and of the case's fail-closed condition
+DO $$
+DECLARE cid uuid; pay uuid := gen_random_uuid(); fact uuid := gen_random_uuid(); att uuid := gen_random_uuid();
+BEGIN
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail)
+    VALUES ('refund_fact_unallocated', fact, gen_random_uuid(), pay, 100, 'EUR', 'currency_mismatch') RETURNING id INTO cid;
+  INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason") VALUES (cid, pay, fact, att, 'currency_mismatch');
+  CREATE TEMP TABLE do73_case AS SELECT cid AS id, pay AS "paymentId", fact AS "factId", att AS "attemptId";
+END $$;
+SELECT pg_temp.assert_eq('DO-73', 'a case and its evidence commit together; without a relay Billing holds, the relay and capture stay NULL',
+  (SELECT ("relayId" IS NULL AND "captureFactId" IS NULL AND "recordedAt" IS NOT NULL)::text FROM reconciliation_unallocated_evidence WHERE "caseId" = (SELECT id FROM do73_case)), 'true');
+SELECT pg_temp.expect_error('DO-73', 'one evidence row per refund fact', $$INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason")
+  SELECT id, "paymentId", "factId", "attemptId", 'currency_mismatch' FROM do73_case$$, '23505');
+SELECT pg_temp.expect_error('DO-73', 'one case per refund fact', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail)
+  SELECT 'refund_fact_unallocated', "factId", gen_random_uuid(), "paymentId", 100, 'EUR', 'currency_mismatch' FROM do73_case$$, '23505', 'reconciliation_case_once');
+SELECT pg_temp.expect_error('DO-73', 'unallocated evidence is append-only (update)', $$UPDATE reconciliation_unallocated_evidence SET "blockedReason" = 'no_authorization'$$, '23514');
+SELECT pg_temp.expect_error('DO-73', 'unallocated evidence is append-only (delete)', $$DELETE FROM reconciliation_unallocated_evidence$$, '23514');
+SELECT pg_temp.expect_error('DO-73', 'unallocated evidence is append-only (truncate)', $$TRUNCATE reconciliation_unallocated_evidence$$, '23514');
+SELECT pg_temp.expect_error('DO-73', 'the case itself is append-only', $$UPDATE reconciliation_case SET detail = 'no_authorization' WHERE id = (SELECT id FROM do73_case)$$, '23514');
+SELECT pg_temp.expect_error('DO-73', 'interim fail-closed: never acknowledged by direct SQL', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, reason, "resolvedByUserId")
+  SELECT id, 'acknowledged', 'provider_statement_reviewed', gen_random_uuid() FROM do73_case$$, '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('DO-73', 'interim fail-closed: never resolved as a recognized loss', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, "lossId")
+  SELECT id, 'loss_recognized', gen_random_uuid() FROM do73_case$$, '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('DO-73', 'interim fail-closed: never resolved as a completed refund', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId")
+  SELECT id, 'refund_completed', gen_random_uuid() FROM do73_case$$, '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('DO-73', 'the evidence names exactly its case''s payment', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail) VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'no_authorization') RETURNING id, "evidenceKey")
+  INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason") SELECT id, gen_random_uuid(), "evidenceKey", gen_random_uuid(), 'no_authorization' FROM c$$, '23514', 'reconciliation_unallocated_evidence_case');
+SELECT pg_temp.expect_error('DO-73', 'the evidence names exactly its case''s reason', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail) VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'no_authorization') RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason") SELECT id, "paymentId", "evidenceKey", gen_random_uuid(), 'currency_mismatch' FROM c$$, '23514', 'reconciliation_unallocated_evidence_case');
+SELECT pg_temp.expect_error('DO-73', 'the relay is derived, never supplied', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail) VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'no_authorization') RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "relayId", "blockedReason") SELECT id, "paymentId", "evidenceKey", gen_random_uuid(), gen_random_uuid(), 'no_authorization' FROM c$$,
+  '23514', 'reconciliation_unallocated_evidence_supplied');
+SELECT pg_temp.expect_error('DO-73', 'the capture is derived, never supplied', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail) VALUES ('refund_fact_unallocated', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'no_authorization') RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "captureFactId", "blockedReason") SELECT id, "paymentId", "evidenceKey", gen_random_uuid(), gen_random_uuid(), 'no_authorization' FROM c$$,
+  '23514', 'reconciliation_unallocated_evidence_supplied');
+SELECT pg_temp.expect_error('DO-73', 'evidence cannot belong to a case of another type (a contest)', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail) VALUES ('refund_fact_contested', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'contested_unallocated') RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason") SELECT id, "paymentId", "evidenceKey", gen_random_uuid(), 'currency_mismatch' FROM c$$, '23514', 'reconciliation_unallocated_evidence_case');
+SELECT pg_temp.assert_eq('DO-73', 'the acknowledgement rule refuses no-financial-effect on the movement and a duplicate only on the blocked attempt''s own discrepancy; never a provider statement',
+  (SELECT (prosrc LIKE '%p_reason = ''reviewed_no_financial_effect'' AND billing_case_movement_unallocated(p_case)%' AND prosrc LIKE '%p_reason = ''duplicate_evidence_reviewed''%'
+     AND prosrc LIKE '%c."caseType" = ''refund_discrepancy''%' AND prosrc NOT LIKE '%provider_statement_reviewed%')::text FROM pg_proc WHERE proname = 'billing_acknowledgement_refused_by_unallocated'), 'true');
+SELECT pg_temp.assert_eq('DO-73', 'the resolution guard calls the DO-73 rule, and S0-C15B, S0-C15A item 6 and S0-C14 item 9 still stand beside it',
+  (SELECT (prosrc LIKE '%billing_acknowledgement_refused_by_unallocated(c.id, NEW.reason)%' AND prosrc LIKE '%billing_acknowledgement_refused_by_contest(c.id, NEW.reason)%'
+     AND prosrc LIKE '%billing_acknowledgement_refused_by_exposure(c.id, NEW.reason)%' AND prosrc LIKE '%NEW.reason = ''reviewed_no_financial_effect'' AND billing_case_movement_overlap(c.id)%')::text
+     FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
+SELECT pg_temp.assert_eq('DO-73', 'interim fail-closed: acknowledgement stays limited to the three review-only types, and the new type is in no resolution branch',
+  (SELECT (prosrc LIKE '%WHEN ''acknowledged'' THEN c."caseType" IN (''refund_discrepancy'', ''partial_chargeback'', ''second_reversal_cause'')%'
+     AND prosrc NOT LIKE '%THEN c."caseType" = ''refund_fact_unallocated''%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard'), 'true');
+SELECT pg_temp.assert_eq('DO-73', 'no resolution kind is added', (SELECT (pg_get_constraintdef(oid) NOT LIKE '%unallocated%')::text FROM pg_constraint WHERE conname = 'reconciliation_case_resolution_kind'), 'true');
+SELECT pg_temp.assert_eq('DO-73', 'no financial rule reads an unallocated refund: the freeze, the restrictions, the overlap, the exposure and the waiting checks are unchanged',
+  (SELECT count(*)::text FROM pg_proc WHERE proname IN ('billing_recovery_obligation_frozen', 'billing_assistance_restrictions', 'billing_loss_overlap', 'billing_loss_refund_live',
+     'billing_loss_unresolved_exposure', 'billing_case_movement_exposed', 'billing_loss_effect_applied', 'billing_loss_completed_refund') AND prosrc LIKE '%unallocated%'), '0');
+SELECT pg_temp.assert_eq('DO-73', 'the cancellation guard keeps R6B-10 and adds the local evidence check (O1)',
+  (SELECT (prosrc LIKE '%refund_case_processing_started%' AND prosrc LIKE '%refund_case_refund_evidence_unallocated%' AND prosrc LIKE '%reconciliation_unallocated_evidence%')::text
+     FROM pg_proc WHERE proname = 'billing_refund_case_cancel_guard'), 'true');
+SELECT pg_temp.assert_eq('DO-73', 'unallocated evidence is append-only and its existence is checked at commit (deferred)',
+  (SELECT (count(*) FILTER (WHERE tgname IN ('reconciliation_unallocated_evidence_10_append_only', 'reconciliation_unallocated_evidence_11_no_truncate')) = 2
+     AND bool_or(tgname = 'reconciliation_case_09_unallocated_evidence' AND tgdeferrable AND tginitdeferred))::text
+     FROM pg_trigger WHERE tgname LIKE 'reconciliation_%'), 'true');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

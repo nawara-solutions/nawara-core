@@ -164,6 +164,8 @@ describe('BILLING_MESSAGES', () => {
       [en('refundRejectedByPayment', { reason: 'refund_dispute_open' }), 'The payment service refused this refund attempt (refund_dispute_open).'],
       [en('refundPaymentUnavailable'), 'The payment service did not confirm the refund attempt; its outcome will be confirmed from Payment, or retry with the same Idempotency-Key and receipt.'],
       [en('refundProcessingStarted'), 'Refund processing has begun for this case: it can no longer be cancelled.'],
+      [en('refundCaseRefundEvidence'), 'Verified refund money is recorded on a refund attempt of this case: it cannot be cancelled. The reconciliation case stays visible.'], // Core V2 DO-73
+      [en('reconciliationCaseRefundUnallocated'), 'Verified refund money that Payment could not allocate is recorded on this movement: this reason cannot be stated. A reviewed provider statement can still be recorded.'], // Core V2 DO-73
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

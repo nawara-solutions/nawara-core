@@ -135,7 +135,7 @@ export class RefundCaseController {
   @ApiResponse(R401)
   @ApiResponse(R403)
   @ApiResponse({ status: 404, description: 'an unknown case, or another Company\'s (one answer)' })
-  @ApiResponse({ status: 409, description: 'refund_case_not_open | refund_processing_started | idempotency_key_conflict' })
+  @ApiResponse({ status: 409, description: 'refund_case_not_open | refund_processing_started | refund_case_refund_evidence (Core V2 DO-73) | idempotency_key_conflict' })
   @ApiResponse(R503)
   async cancel(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const k = idempotencyKey(key);

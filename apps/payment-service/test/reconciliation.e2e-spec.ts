@@ -357,6 +357,53 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
     });
   });
 
+  // ─────────────────────────────────────────────────────────────────────────────────────────────── Core V2 DO-73 U-5 (associated facts)
+  describe('Core V2 DO-73 U-5: an associated refund fact is never blocked for currency_mismatch or no_authorization (PAY-08 unchanged)', () => {
+    const blocked = async () => (await serviceItems('allocation_blocked').expect(200)).body.items as Row[];
+    it('U-5 test 1: an unmatched EUR refund fact cannot be associated with a TND authorization; no block, no item, no allocation', async () => {
+      const z = await authorizedRefund();
+      const { fact } = await unmatched({ type: 'refund.succeeded', amount: 9000, currency: 'EUR' });
+      const res = await associate(fact.id, { targetType: 'refund_authorization', targetId: z.authorization.id,
+        receiptSecret: auth.issue(assocBinding(fact, 'refund_authorization', z.authorization.id), OWNER).secret });
+      expect(res.body.code).toBe('provider_fact_association_invalid');
+      await drainRefunds();
+      expect(await count(`SELECT count(*) AS n FROM refund_fact_allocation_block WHERE "factId" = $1`, [fact.id])).toBe(0);
+      expect(await count(`SELECT count(*) AS n FROM refund_allocation WHERE "factId" = $1`, [fact.id])).toBe(0);
+      expect((await blocked()).some((i) => i.factId === fact.id)).toBe(false);
+      // the database refuses the association itself (the guard, not only the service)
+      await expect(admin.query(`INSERT INTO provider_fact_association (id, "factId", "targetType", "paymentId", "refundAuthorizationId", "companyId", "requestedByUserId", "idempotencyKey", "receiptDigest")
+        VALUES (gen_random_uuid(), $1, 'refund_authorization', $2, $3, $4, $5, 'k-do73', repeat('a', 64))`, [fact.id, z.payment.id, z.authorization.id, COMPANY, OWNER]))
+        .rejects.toMatchObject({ constraint: 'provider_fact_association_match' });
+    });
+
+    it('U-5 test 2: an associated TND refund fact is absent from PAY-08 while pending (the DO-74 observation, unchanged here), then allocated normally; never blocked', async () => {
+      const z = await authorizedRefund();
+      const { fact } = await unmatched({ type: 'refund.succeeded', amount: 9000 });
+      await associate(fact.id, { targetType: 'refund_authorization', targetId: z.authorization.id,
+        receiptSecret: auth.issue(assocBinding(fact, 'refund_authorization', z.authorization.id), OWNER).secret }).expect(201);
+      const pending = (await request(server()).get(`/payment/payments/${z.payment.id}/refunds`).set('authorization', `Bearer ${billing.token}`).expect(200)).body;
+      expect((pending.unallocatedFacts as Row[]).some((f) => f.factId === fact.id)).toBe(false); // PAY-08 states only matched unallocated facts (U-5: unchanged)
+      await drainRefunds();
+      const after = (await request(server()).get(`/payment/payments/${z.payment.id}/refunds`).set('authorization', `Bearer ${billing.token}`).expect(200)).body;
+      expect((after.authorizations as Row[]).flatMap((a) => a.allocations as Row[]).some((a) => a.factId === fact.id)).toBe(true);
+      expect(await count(`SELECT count(*) AS n FROM refund_fact_allocation_block WHERE "factId" = $1`, [fact.id])).toBe(0);
+    });
+
+    it('U-5 test 3: an unmatched refund fact never associated is never blocked nor allocated, is no allocation_blocked item, and is in no PAY-08 answer', async () => {
+      const { fact } = await unmatched({ type: 'refund.succeeded', amount: 700, currency: 'EUR' });
+      await drainRefunds();
+      await drainRefunds();
+      expect(await count(`SELECT count(*) AS n FROM refund_fact_allocation_block WHERE "factId" = $1`, [fact.id])).toBe(0);
+      expect(await count(`SELECT count(*) AS n FROM refund_allocation WHERE "factId" = $1`, [fact.id])).toBe(0);
+      expect((await blocked()).some((i) => i.factId === fact.id)).toBe(false);
+    });
+
+    it('U-5 test 4 (invariant over this suite\'s data): no currency_mismatch or no_authorization block exists on an unmatched (associated) fact', async () => {
+      expect(await count(`SELECT count(*) AS n FROM refund_fact_allocation_block b JOIN provider_transaction_fact f ON f.id = b."factId"
+        WHERE b.reason IN ('currency_mismatch', 'no_authorization') AND f."paymentId" IS NULL`)).toBe(0);
+    });
+  });
+
   // ─────────────────────────────────────────────────────────────────────────────────────────────── captures, items, balances
 
   describe('captures without a refund path, Q8 items and balances (R6H-5, R6H-9, R6H-12)', () => {
