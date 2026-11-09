@@ -238,6 +238,7 @@ export class ReconciliationService {
         amount: i.amount, currency: i.currency, detail: /^[a-z_]{1,64}$/.test(reason) ? reason : null }, tally));
     });
     await this.readDisputeConflicts(tally);
+    await this.readUnallocated(tally);
   }
 
   /**
@@ -291,6 +292,67 @@ export class ReconciliationService {
     } catch (e) {
       this.log.warn(`payment_dispute_conflict_read_unavailable ${describeFailure(e)} — nothing inferred; the other kinds were read; the next pass reads again`);
     }
+  }
+
+  /**
+   * Core V2 DO-73 (BIL-33 P): one `refund_fact_unallocated` case per verified refund fact of Billing's own payment that Payment permanently blocked from
+   * allocation for `currency_mismatch` or `no_authorization` (a `contested` block is S0-C15B's `refund_fact_contested`; both may exist for one fact, U-1).
+   * Read on its own, after every other kind: a failure here skips only this kind and the next pass reads again.
+   */
+  private async readUnallocated(tally: { opened: number }): Promise<void> {
+    try {
+      await this.page('allocation_blocked', async (i) => this.refundUnallocated(i, tally));
+    } catch (e) {
+      this.log.warn(`payment_allocation_blocked_read_unavailable ${describeFailure(e)} — nothing inferred; the other kinds were read; the next pass reads again`);
+    }
+  }
+
+  /**
+   * Payment's producer item states the block and its reason; its PAY-08 refunds read must state the SAME fact of the SAME payment as `blocked` with the SAME
+   * reason, amount and currency, under a refund attempt (B-D6 pattern). Anything else (Payment unanswerable, 404, the fact absent, pending, under another
+   * reason or figures, a malformed item) is a TECHNICAL inconsistency: nothing is opened, nothing existing changes, one warning is logged and the next pass
+   * reads again; Payment's own Owner item stays the visible record meanwhile (U-6: the case opens once the reads agree). The figures are the verified
+   * fact's, never converted; a currency that is not three capital letters is not held here at all (U-4: Payment stays authoritative). The case and its
+   * evidence are one transaction (the database refuses one without the other at commit). Nothing financial is written.
+   */
+  private async refundUnallocated(i: PaymentItem, tally: { opened: number }): Promise<void> {
+    const reason = i.detail.reason;
+    if (reason === 'contested') return; // S0-C15B's case, from the fact conflict
+    const inconsistent = (why: string) => this.log.warn(`payment_evidence_inconsistent kind=allocation_blocked item=${i.id} reason=${why} — nothing opened; the next pass reads again`);
+    if (reason !== 'currency_mismatch' && reason !== 'no_authorization') return inconsistent('block_reason_unknown');
+    if (!i.factId || !UUID.test(i.factId) || i.factId !== i.id) return inconsistent('fact_unreadable');
+    const factId = i.factId;
+    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_fact_unallocated' AND "evidenceKey" = $1`, [factId])).rows.length > 0) return;
+    let read: Awaited<ReturnType<PaymentRefundClient['refunds']>>;
+    try {
+      read = await this.captures.refunds(i.paymentId);
+    } catch {
+      return inconsistent('payment_unavailable');
+    }
+    if (read === null) return inconsistent('payment_not_found');
+    if (read.unallocatedFacts === null) return inconsistent('unallocated_facts_unknown');
+    const fact = read.unallocatedFacts.find((f) => f.factId === factId);
+    if (!fact) return inconsistent('fact_not_stated');
+    if (fact.state !== 'blocked' || fact.blockedReason !== reason) return inconsistent('block_not_stated');
+    if (!fact.refundAttemptId) return inconsistent('refund_attempt_unknown');
+    const usable = /^[A-Z]{3}$/.test(fact.currency);
+    // both reads state the same figures; an item without figures (its currency unusable) agrees only with a PAY-08 fact whose currency is unusable too
+    if (!Number.isSafeInteger(fact.amount) || fact.amount < 1 || (usable ? fact.amount !== i.amount || fact.currency !== i.currency : i.amount !== null || i.currency !== null)) {
+      return inconsistent('fact_figures_disagree');
+    }
+    const figures = usable ? { amount: fact.amount, currency: fact.currency } : {}; // U-4: never truncated, never converted
+    const attemptId = fact.refundAttemptId;
+    // a refusal by this database (a constraint) or a failure opens nothing and changes nothing: logged, retried on the next pass, never skipped silently
+    await this.db.tx(async (q) => {
+      const relay = (await q.query<{ captureFactId: string | null }>(
+        `SELECT r."captureFactId" FROM refund_authorization_relay x JOIN refund_case r ON r.id = x."refundCaseId" WHERE x.id = $1 AND x."paymentId" = $2`, [attemptId, i.paymentId])).rows[0];
+      const caseId = await this.cases.openForPayment(q, { caseType: 'refund_fact_unallocated', evidenceKey: factId, paymentId: i.paymentId,
+        captureFactId: relay?.captureFactId ?? null, ...figures, detail: reason });
+      if (!caseId) return; // opened by another pass, or no Company Owner exists to see it
+      await q.query(`INSERT INTO reconciliation_unallocated_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId", "blockedReason") VALUES ($1, $2, $3, $4, $5)`,
+        [caseId, i.paymentId, factId, attemptId, reason]);
+      tally.opened++;
+    }).catch((e: unknown) => this.log.warn(`refund_unallocated_open_failure item=${i.id} ${describeFailure(e)} — nothing opened; the next pass reads again`));
   }
 
   private async caseFor(q: Queryable, c: Parameters<ReconciliationCases['openForPayment']>[1], tally: { opened: number }): Promise<string | null> {
@@ -613,6 +675,8 @@ export class ReconciliationService {
       if (pgConstraint(e) === 'reconciliation_case_exposure_acknowledgement') throw billingError(409, 'reconciliation_case_in_exposure', BILLING_MESSAGES.reconciliationCaseInExposure);
       // the contested evidence was recorded after the check (S0-C15B)
       if (pgConstraint(e) === 'reconciliation_case_contest_acknowledgement') throw billingError(409, 'reconciliation_case_contested', BILLING_MESSAGES.reconciliationCaseContested);
+      // the unallocated refund case was opened after the check (DO-73)
+      if (pgConstraint(e) === 'reconciliation_case_unallocated_acknowledgement') throw billingError(409, 'reconciliation_case_refund_unallocated', BILLING_MESSAGES.reconciliationCaseRefundUnallocated);
       throw e;
     }
   }
@@ -631,6 +695,10 @@ export class ReconciliationService {
       // Core V2 S0-C15B (B-D4): contested provider evidence on the movement; the database's own rule, called rather than restated
       if ((await q.query<{ r: boolean }>(`SELECT billing_acknowledgement_refused_by_contest($1, $2) AS r`, [id, reason])).rows[0]!.r) {
         throw billingError(409, 'reconciliation_case_contested', BILLING_MESSAGES.reconciliationCaseContested);
+      }
+      // Core V2 DO-73: verified refund money Payment could not allocate on the movement; the database's own rule, called rather than restated
+      if ((await q.query<{ r: boolean }>(`SELECT billing_acknowledgement_refused_by_unallocated($1, $2) AS r`, [id, reason])).rows[0]!.r) {
+        throw billingError(409, 'reconciliation_case_refund_unallocated', BILLING_MESSAGES.reconciliationCaseRefundUnallocated);
       }
       if (!(await this.cases.resolve(q, id, 'acknowledged', { userId: owner.userId, reason }, ctx))) {
         throw billingError(409, 'reconciliation_case_resolved', BILLING_MESSAGES.reconciliationCaseResolved);

@@ -99,7 +99,11 @@ export interface RefundAuthorizationSnapshot {
 }
 
 /** Core V2 S0-C14 item 6: a refund fact Payment holds but has not allocated (pending or blocked): refund evidence all the same. */
-export interface UnallocatedRefundFact { factId: string; refundAttemptId: string | null; amount: number; currency: string; state: 'pending' | 'blocked' }
+/**
+ * Core V2 DO-73: `blockedReason` is Payment's reason for a blocked fact (`null` while pending). `undefined` when Payment's answer does not carry it (or not a
+ * bounded code): that proves nothing about the block's reason, and DO-73 then opens nothing.
+ */
+export interface UnallocatedRefundFact { factId: string; refundAttemptId: string | null; amount: number; currency: string; state: 'pending' | 'blocked'; blockedReason?: string | null }
 
 export interface PaymentRefunds {
   attempts: RefundAttemptSnapshot[];
@@ -256,7 +260,10 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
           || typeof f.amount !== 'number' || !Number.isSafeInteger(f.amount) || typeof f.currency !== 'string' || (f.state !== 'pending' && f.state !== 'blocked')) {
           throw new Error('payment-service GET refunds: malformed unallocated fact');
         }
-        return { factId: f.factId, refundAttemptId: f.refundAttemptId as string | null, amount: f.amount, currency: f.currency, state: f.state };
+        // Core V2 DO-73: Payment's block reason, kept only as a bounded code (anything else proves nothing and is dropped)
+        const blockedReason = f.blockedReason === null ? null : typeof f.blockedReason === 'string' && /^[a-z][a-z_]{0,63}$/.test(f.blockedReason) ? f.blockedReason : undefined;
+        return { factId: f.factId, refundAttemptId: f.refundAttemptId as string | null, amount: f.amount, currency: f.currency, state: f.state,
+          ...(blockedReason !== undefined ? { blockedReason } : {}) };
       });
     }
     return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations, unallocatedFacts };

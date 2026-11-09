@@ -242,18 +242,33 @@ export class RefundCaseService {
    * R6A-6: `POST /billing/admin/refund-cases/:id/cancel` → `200` the case, `cancelled`. Only an `open` case (`409 refund_case_not_open`).
    * Core V2 S6b (R6B-10): refused (`409 refund_processing_started`) once refund processing has begun, i.e. unless EVERY relay of the case
    * is proven by Payment to have ended without a consumed receipt and without a dispatch (`authorization_expired`, `authorization_refused`,
-   * `rejected`); an unconfirmed relay is never treated as refused. The database enforces it too (migration 0034). The payment may get a new
+   * `rejected`); an unconfirmed relay is never treated as refused. The database enforces it too (migration 0034). Core V2 DO-73: also refused
+   * (`409 refund_case_refund_evidence`) while an unallocated refund case names one of its relays (migration 0053; Billing-local). The payment may get a new
    * case afterwards. Same authority as opening; the collapsed 404 otherwise.
    */
   async cancel(owner: VerifiedRefundOwner, key: string, id: string, ctx: TransitionContext) {
     this.refuseInProduction();
     const c0 = await this.authorizedCase(owner, id);
+    return this.cancelIn(owner, key, id, c0, ctx).catch((e: unknown) => {
+      // Core V2 DO-73 (U-2, O1): the unallocated refund case was opened after the check; the database refused the cancellation too
+      if ((e as { constraint?: string }).constraint === 'refund_case_refund_evidence_unallocated') {
+        throw billingError(409, 'refund_case_refund_evidence', BILLING_MESSAGES.refundCaseRefundEvidence);
+      }
+      throw e;
+    });
+  }
+
+  private async cancelIn(owner: VerifiedRefundOwner, key: string, id: string, c0: CaseRow, ctx: TransitionContext) {
     return this.idempotency.run(owner.userId, key, 'refund_case.cancel', { id }, async (q): Promise<RefundCommandResult> => {
       const current = (await q.query<{ status: string }>(`SELECT status FROM refund_case WHERE id = $1 FOR UPDATE`, [id])).rows[0]!;
       if (current.status !== 'open') throw billingError(409, 'refund_case_not_open', BILLING_MESSAGES.refundCaseNotOpen);
       const started = await q.query(`SELECT 1 FROM refund_authorization_relay WHERE "refundCaseId" = $1
           AND ("attemptStatus" IS NULL OR "attemptStatus" NOT IN ('authorization_expired', 'authorization_refused', 'rejected'))`, [id]);
       if (started.rows.length > 0) throw billingError(409, 'refund_processing_started', BILLING_MESSAGES.refundProcessingStarted);
+      // Core V2 DO-73 (U-2, O1): verified refund money Payment could not allocate is recorded on one of the case's relays. Billing-local: a fact Billing has
+      // not yet learned of cannot be seen here; the case then opens later, linked to this relay (the database checks this too)
+      const evidenced = await q.query(`SELECT 1 FROM reconciliation_unallocated_evidence e JOIN refund_authorization_relay r ON r.id = e."relayId" WHERE r."refundCaseId" = $1 LIMIT 1`, [id]);
+      if (evidenced.rows.length > 0) throw billingError(409, 'refund_case_refund_evidence', BILLING_MESSAGES.refundCaseRefundEvidence);
       await q.query(`UPDATE refund_case SET status = 'cancelled', "cancelledBy" = $2 WHERE id = $1`, [id, owner.userId]);
       const c = await this.load(q, id);
       await this.audit.record(q, 'refund_case.cancelled', {

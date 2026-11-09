@@ -86,6 +86,9 @@ export class RefundAllocationService {
       const reason: 'contested' | 'currency_mismatch' | 'no_authorization' | null = !z ? 'no_authorization' : contested ? 'contested' : fact.currency !== z.currency.trim() ? 'currency_mismatch' : null;
       if (reason) {
         await q.query(`INSERT INTO refund_fact_allocation_block ("factId", reason) VALUES ($1, $2)`, [fact.id, reason]);
+        // Core V2 DO-73 (U-3): exactly once per newly recorded block, in its transaction; the `already blocked` path above writes nothing
+        await this.audit.recordAllocationBlock(q, { factId: fact.id, paymentId: fact.paymentId!, refundAttemptId: fact.refundAttemptId!, reason, amount: Number(fact.amount) },
+          payment.organizationId, ctx);
         return { kind: 'blocked' as const, reason };
       }
       // V-3: once the case or the payment is complete (through any authorization), nothing more is intended: it is all excess

@@ -78,6 +78,7 @@ export type BillingErrorCode =
   | 'refund_rejected_by_payment'
   | 'refund_payment_unavailable'
   | 'refund_processing_started'
+  | 'refund_case_refund_evidence' // Core V2 DO-73 (U-2, O1)
   // Core V2 S6e-H fraud holds (register BIL-27)
   | 'invalid_fraud_hold_request'
   | 'fraud_hold_active'
@@ -104,6 +105,7 @@ export type BillingErrorCode =
   | 'reconciliation_case_in_overlap' // Core V2 S0-C14 item 9
   | 'reconciliation_case_in_exposure' // Core V2 S0-C15A item 6
   | 'reconciliation_case_contested' // Core V2 S0-C15B (B-D4)
+  | 'reconciliation_case_refund_unallocated' // Core V2 DO-73
   | 'recovery_collection_frozen' // Core V2 S0-C14 item 7
   | 'recovery_restriction_not_suspendable' // Core V2 S0-C14 item 10
   | 'recovery_suspension_not_active' // Core V2 S0-C14 item 11

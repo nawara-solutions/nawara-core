@@ -670,7 +670,8 @@ const SPEC = {
         'chargeback_effect_waiting', // Core V2 S0-C14 item 12 (BIL-33 M): a loss effect waiting on a live refund
         'chargeback_refund_exposure', // Core V2 S0-C15A item 4 (BIL-33 N): a verified chargeback beside unresolved refund evidence
         'refund_fact_contested', // Core V2 S0-C15B (BIL-33 O): a verified refund fact a provider observation contradicts (interim: never acknowledged)
-        'dispute_conflict_observed'] }, // Core V2 S0-C15B (BIL-33 O): a preserved dispute conflict of the payment, redacted (interim: never acknowledged)
+        'dispute_conflict_observed', // Core V2 S0-C15B (BIL-33 O): a preserved dispute conflict of the payment, redacted (interim: never acknowledged)
+        'refund_fact_unallocated'] }, // Core V2 DO-73 (BIL-33 P): a verified refund fact Payment could not allocate (interim: never acknowledged)
       evidence_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: false, min: 1, max: 9007199254740991 },
     },
@@ -903,6 +904,20 @@ const SPEC = {
       refund_attempt_id: { type: 'uuid', shape: 'value', required: false },
     },
     purpose: 'An authenticated provider observation contradicted a recorded capture or refund fact: the fact stays as first reported and is contested, with no commercial effect.',
+  },
+  // Core V2 DO-73 (U-3): a verified refund fact Payment permanently blocked from allocation (contested, in another currency than its authorization, or on
+  // an attempt that was never authorized), once per block, in the block's transaction. Version 1, no trusted scope. Identifiers, the reason code and the
+  // verified integer amount only: never the currency (the provider's own unvalidated text), a provider reference or the notification.
+  'refund_fact.allocation_blocked': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
+    resource: ['provider_transaction_fact'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
+      reason: { type: 'code', shape: 'value', required: true, values: ['contested', 'currency_mismatch', 'no_authorization'] },
+      amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },
+    },
+    purpose: 'A verified provider refund fact can never be allocated to its refund authorization: it is kept unchanged and unallocated for reconciliation, with no commercial effect.',
   },
   // Core V2 S0-C12 item 10: a verified late success of any kind (S4c F-4, S0-C11 item 6, S0-C12 items 2, 6, 7), in its row's transaction, once. Identifiers, the
   // observed integer amount and the payment's status at recording only; the currency stays on the row (S0-C12 item 10: never a non-ISO value here).

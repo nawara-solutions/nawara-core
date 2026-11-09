@@ -68,7 +68,7 @@ export class ReconciliationController {
   @ApiResponse(R401)
   @ApiResponse(R403)
   @ApiResponse({ status: 404, description: 'not_found' })
-  @ApiResponse({ status: 409, description: 'reconciliation_case_not_acknowledgeable | reconciliation_case_in_overlap | reconciliation_case_in_exposure | reconciliation_case_contested | reconciliation_case_resolved | idempotency_key_conflict' })
+  @ApiResponse({ status: 409, description: 'reconciliation_case_not_acknowledgeable | reconciliation_case_in_overlap | reconciliation_case_in_exposure | reconciliation_case_contested | reconciliation_case_refund_unallocated | reconciliation_case_resolved | idempotency_key_conflict' })
   async acknowledge(@RefundOwner() owner: VerifiedRefundOwner, @Param('id') id: string, @Headers('idempotency-key') key: unknown, @Body() body: unknown,
     @Res({ passthrough: true }) res: Response) {
     const r = await this.reconciliation.acknowledge(owner, idempotencyKey(key), id.toLowerCase(), asBody(body), ownerContext(owner));

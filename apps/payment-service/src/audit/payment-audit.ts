@@ -24,6 +24,9 @@ export type DisputeAuditAction = 'payment_dispute.opened' | 'payment_dispute.clo
 /** Core V2 S0-C13 Part A: a preserved conflict of a verified dispute notification (version 1, no trusted scope). */
 export type DisputeConflictAuditAction = 'payment_dispute.conflict_recorded';
 export type ReconciliationAuditAction = 'provider_fact.associated' | 'provider_fact_conflict.recorded';
+/** Core V2 DO-73 (U-3): a verified refund fact permanently blocked from allocation, once per block row (version 1, no trusted scope). */
+export type AllocationBlockAuditAction = 'refund_fact.allocation_blocked';
+export type AllocationBlockReason = 'contested' | 'currency_mismatch' | 'no_authorization';
 /** Core V2 S0-C12 item 10: late successes and wrong-amount capture facts (version 1, no trusted scope). */
 export type CaptureAuditAction = 'payment_late_success.recorded' | 'payment_capture_mismatch.recorded';
 /** S0-C12 item 10: the reason a capture fact differs from its payment (a code; the observed currency text never enters the audit record). */
@@ -98,6 +101,23 @@ export class PaymentAudit {
       { action: 'refund_authorization.completed', actor: auditActor(ctx), organizationId, resource: { type: 'refund_authorization', id: z.id }, outcome: 'succeeded',
         changes: { payment_id: z.paymentId, refund_case_id: z.refundCaseId, refund_attempt_id: z.refundAttemptId } } as never,
       { eventId: deterministicEventId(z.id, 'audit.refund_authorization.completed'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /**
+   * Core V2 DO-73 (U-3): the audit intent of ONE allocation block, in the block row's own transaction (under the payment row lock). The block's key is the
+   * fact (one row per fact, append-only), and the event id is derived from it: a second insert fails and rolls back with its intent, and a later
+   * `already blocked` answer writes nothing. Identifiers, the reason code and the verified integer amount only: never the currency (the provider's
+   * own unvalidated text), the provider refund id or the notification body. No backfill: a block recorded before this action has no record.
+   */
+  async recordAllocationBlock(q: Queryable, b: { factId: string; paymentId: string; refundAttemptId: string; reason: AllocationBlockReason; amount: number },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    await this.writer.write(
+      q,
+      { action: 'refund_fact.allocation_blocked' satisfies AllocationBlockAuditAction, actor: auditActor(ctx), organizationId,
+        resource: { type: 'provider_transaction_fact', id: b.factId }, outcome: 'succeeded',
+        changes: { payment_id: b.paymentId, refund_attempt_id: b.refundAttemptId, reason: b.reason, amount: b.amount } } as never,
+      { eventId: deterministicEventId(b.factId, 'audit.refund_fact.allocation_blocked'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
 
