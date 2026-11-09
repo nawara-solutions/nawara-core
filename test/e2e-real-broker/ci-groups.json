@@ -1,0 +1,54 @@
+{
+  "$comment": "Core V2 A1: Core CI runs the real-broker suites in these groups, each group in its own job with its own PostgreSQL and RabbitMQ, its suites in sequence (vitest.config.ts: fileParallelism false). Every *.e2e-spec.ts of this package must appear in exactly one group: scripts/real-broker-groups.mjs refuses a missing, duplicate or unknown suite (npm run check:repo, the plan job, every group job and the verify job). Balanced on the measured suite durations of Core CI run 42607924528 (seconds).",
+  "groups": [
+    {
+      "id": "g1",
+      "measuredSeconds": 1357.3,
+      "suites": [
+        "do73-unallocated-certification.e2e-spec.ts"
+      ]
+    },
+    {
+      "id": "g2",
+      "measuredSeconds": 1313.5,
+      "suites": [
+        "s-int-evidence-completeness.e2e-spec.ts",
+        "s-int-late-capture-disputes.e2e-spec.ts",
+        "s6b-refund-processing.e2e-spec.ts"
+      ]
+    },
+    {
+      "id": "g3",
+      "measuredSeconds": 1352.5,
+      "suites": [
+        "s0c15b-contest-certification.e2e-spec.ts",
+        "s0c14-overlap-certification.e2e-spec.ts"
+      ]
+    },
+    {
+      "id": "g4",
+      "measuredSeconds": 816.6,
+      "suites": [
+        "s0c15a-exposure-certification.e2e-spec.ts",
+        "s-int-assisted-loss-recovery.e2e-spec.ts",
+        "s6-financial-certification.e2e-spec.ts",
+        "s-int-pre-lifecycle-real-auth.e2e-spec.ts",
+        "stage21c3-certification.e2e-spec.ts",
+        "stage4-real-broker-dlq-replay.e2e-spec.ts",
+        "stage12-7-real-broker-subscription.e2e-spec.ts",
+        "s5b-assisted-settlement.e2e-spec.ts",
+        "stage21c2-auth-outbox-durability.e2e-spec.ts",
+        "s3s4-joint-checkpoint.e2e-spec.ts",
+        "s4f-simulation-settlement.e2e-spec.ts",
+        "a3m6-billing-consumer-refusals.e2e-spec.ts",
+        "stage4-real-broker-consumer-recovery.e2e-spec.ts",
+        "stage4-real-broker.e2e-spec.ts",
+        "stage4-real-broker-reconciliation.e2e-spec.ts",
+        "stage16-5-auth-notification.e2e-spec.ts",
+        "s-int-organization-reference.e2e-spec.ts",
+        "s-int-production-refusal.e2e-spec.ts",
+        "s4e-organization-payer.e2e-spec.ts"
+      ]
+    }
+  ]
+}
