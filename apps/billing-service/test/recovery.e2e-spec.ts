@@ -3671,6 +3671,38 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [dq])).toBe(1);
         expect(await count(`SELECT count(*) AS n FROM loss_effect_attestation WHERE "disputeId" = $1`, [dq])).toBe(1);
       });
+
+      // Core V2 R3-F1 (tenant isolation, Billing's OWN layer): the R3-F1 field travels only on cases Billing's Company filter returns. LABELLED TEST-ONLY
+      // MECHANISM: the fake Auth's Platform-ownership map is pointed at the foreign Owner's Company for this test (restored in `finally`), so the upstream
+      // live Platform check ALLOWS the foreign Owner; only Billing's `companyId` filter (list) and ownership check (read) stand. Nothing in production changes.
+      it('R3-F1 tenant isolation: with the upstream Platform check allowing a foreign Owner, Billing\'s own Company filter still hides the loss cases and their field', async () => {
+        const p = await directPurchase();
+        const r = await failedRelay(p.paymentId);
+        evidenceAt(p.paymentId, r.attemptId, 'unmatched_fact');
+        const disputeId = await loseAny(p.paymentId, p.amount);
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        const loss = (await admin.query(`SELECT id, "caseType", "platformId", "companyId" FROM reconciliation_case WHERE "evidenceKey" = $1
+          AND "caseType" IN ('chargeback_effect_waiting', 'chargeback_refund_exposure') ORDER BY "caseType"`, [disputeId])).rows as { id: string; caseType: string; platformId: string; companyId: string }[];
+        expect(loss.map((c) => c.caseType)).toEqual(['chargeback_effect_waiting', 'chargeback_refund_exposure']);
+        for (const c of loss) expect(c).toMatchObject({ platformId: PLATFORM, companyId: COMPANY });
+        const read = (id: string, bearer: string) => send(request(server()).get(`/billing/admin/reconciliation-cases/${id}`), bearer, null);
+        const list = async (bearer: string) => ((await send(request(server()).get('/billing/admin/reconciliation-cases?limit=200'), bearer, null).expect(200)).body.items as { id: string }[]).map((i) => i.id);
+        for (const c of loss) expect((await read(c.id, 'owner-tok').expect(200)).body.unreconciledFailedAttemptEvidence).toBe(true); // the Owner's own view
+        const platformAccess = async (bearer: string) => (await fetch(`${auth.url}/auth/platform-access/${PLATFORM}`, { headers: { authorization: `Bearer ${bearer}` } })).status;
+        expect(await platformAccess('foreign-owner-tok')).toBe(404); // both layers normally refuse the foreign Owner
+        auth.platforms.set(PLATFORM, OTHER_COMPANY);
+        try {
+          expect(await platformAccess('foreign-owner-tok'), 'the test-only mechanism is effective: upstream now ALLOWS the foreign Owner').toBe(200);
+          for (const c of loss) expect((await read(c.id, 'foreign-owner-tok')).status, `${c.caseType}: Billing's ownership check alone refuses`).toBe(404);
+          const foreign = await list('foreign-owner-tok');
+          for (const c of loss) expect(foreign, `${c.caseType}: Billing's Company filter alone excludes it`).not.toContain(c.id);
+        } finally {
+          auth.platforms.set(PLATFORM, COMPANY);
+        }
+        expect(await platformAccess('foreign-owner-tok')).toBe(404);
+        for (const c of loss) expect((await read(c.id, 'owner-tok').expect(200)).body.unreconciledFailedAttemptEvidence).toBe(true);
+      });
     });
   });
 

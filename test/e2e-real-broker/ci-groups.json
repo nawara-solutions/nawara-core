@@ -5,7 +5,8 @@
       "id": "g1",
       "measuredSeconds": 1357.3,
       "suites": [
-        "do73-unallocated-certification.e2e-spec.ts"
+        "do73-unallocated-certification.e2e-spec.ts",
+        "r3f1-visibility-certification.e2e-spec.ts"
       ]
     },
     {
