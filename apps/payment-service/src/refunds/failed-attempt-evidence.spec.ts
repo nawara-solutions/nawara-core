@@ -6,9 +6,9 @@ import type { ProviderCapabilities } from '../providers/provider.port.js';
 describe('failedAttemptEvidence: adapter matching authority (Core V2 R3)', () => {
   const service = (capabilities: Partial<ProviderCapabilities> | null, row?: Record<string, unknown>) => {
     const query = vi.fn(async () => ({ rows: [row ?? { fact: null, indexPending: false, malformed: false, notified: false }] }));
-    const s = Object.create(RefundAttemptService.prototype) as RefundAttemptService & Record<string, unknown>;
-    s.db = { query };
-    s.providers = { tryGet: () => (capabilities === null ? undefined : { capabilities }) };
+    const s = Object.create(RefundAttemptService.prototype) as Record<string, unknown>;
+    s['db'] = { query };
+    s['providers'] = { tryGet: () => (capabilities === null ? undefined : { capabilities }) };
     return { s: s as unknown as { evidenceAfterFailure(a: Record<string, unknown>): Promise<string> }, query };
   };
   const failed = { id: 'a', status: 'failed', provider: 'p', providerRefundId: 'ref' };
