@@ -501,7 +501,22 @@ export class RefundAttemptService {
             WHERE f."paymentId" = $1 AND f.kind = 'refund' AND NOT EXISTS (SELECT 1 FROM refund_allocation a WHERE a."factId" = f.id)
             ORDER BY f."observedAt", f.id`, [paymentId])).rows
       : null;
-    return { attempts, refusals, authorizations, allocations, unallocated };
+    // Core V2 DO-74 (observer side): for the producer only, per refund attempt of THIS payment, its own recorded observations that contradict a refund fact
+    // which is NOT this payment's (unmatched, or another payment's, possibly another Company's). Only this payment's own rows cross: the attempt, its own
+    // conflict ids, their count and the earliest observation time. The fact, its id, figures, provider reference, payment and Company never do, and
+    // whether the fact is unmatched or another payment's is deliberately not stated; one entry per attempt, however many such facts. A fact of this
+    // payment (its own, or associated to it) is S0-C15B's `refund_fact_contested` path and is never listed here. Read-only: nothing is associated,
+    // allocated, completed or changed.
+    const observationConflicts = includeRefusals
+      ? (await this.db.query<{ refundAttemptId: string; conflictIds: string[]; observations: number; firstObservedAt: Date }>(
+          `SELECT c."refundAttemptId", array_agg(c.id ORDER BY c.id) AS "conflictIds", count(*)::int AS observations, min(c."observedAt") AS "firstObservedAt"
+             FROM provider_transaction_fact_conflict c JOIN provider_transaction_fact f ON f.id = c."factId"
+            WHERE c."paymentId" = $1 AND c."refundAttemptId" IS NOT NULL AND f.kind = 'refund' AND f."paymentId" IS DISTINCT FROM c."paymentId"
+              AND NOT EXISTS (SELECT 1 FROM provider_fact_association s WHERE s."factId" = f.id AND s.status = 'associated' AND s."paymentId" = c."paymentId")
+            GROUP BY c."refundAttemptId"
+            ORDER BY min(c."observedAt"), c."refundAttemptId"`, [paymentId])).rows
+      : null;
+    return { attempts, refusals, authorizations, allocations, unallocated, observationConflicts };
   }
 }
 

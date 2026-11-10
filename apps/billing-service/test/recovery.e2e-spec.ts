@@ -3183,6 +3183,174 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         expect(await count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.reconciliation_case.opened'`)).toBe(before);
       });
     });
+
+    describe('Core V2 DO-74 (observer side): a refund attempt\'s own observation of a fact that is not its payment\'s stays Owner-visible and contested (BIL-33 Q)', () => {
+      const caseOf = (type: string, evidence: string) => one(`SELECT c.*, r.kind, r.reason FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+        WHERE c."caseType" = $1 AND c."evidenceKey" = $2`, [type, evidence]);
+      const evidenceOf = (caseId: string) => one(`SELECT "paymentId", "refundAttemptId", "observationId", "captureFactId" FROM reconciliation_observation_evidence WHERE "caseId" = $1`, [caseId]);
+      const now = () => new Date().toISOString();
+      const push = (kind: PaymentItemKind, item: PaymentItem) => paymentItems.items.set(kind, [...(paymentItems.items.get(kind) ?? []), item]);
+      /** Payment's producer item: an observation of THIS payment's attempt contradicting fact `factId` (not this payment's; Billing never stores it). */
+      const observation = (paymentId: string, refundAttemptId: unknown, factId = randomUUID(), id = randomUUID()) => {
+        push('fact_conflict', { kind: 'fact_conflict', id, paymentId, factId, amount: 9000, currency: 'TND', detail: { attemptId: randomUUID(), refundAttemptId, source: 'webhook' }, at: now() } as PaymentItem);
+        return id;
+      };
+      const discrepancy = (paymentId: string, id: string) => push('refund_discrepancy',
+        { kind: 'refund_discrepancy', id, paymentId, factId: null, amount: 4200, currency: 'TND', detail: {}, at: now() } as PaymentItem);
+      /** PAY-08 (producer view): the attempt in discrepancy, the contradicted fact NOT stated, and `observationConflicts` as given. */
+      const pay08Observed = (paymentId: string, attemptId: string, observationConflicts: PaymentRefunds['observationConflicts']) => pay08.answers.set(paymentId, {
+        attempts: [{ refundAttemptId: attemptId, status: 'discrepancy', approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [], observationConflicts });
+      const own = (attemptId: string, ids: string[]) => [{ refundAttemptId: attemptId, conflictIds: ids, observations: ids.length }];
+      const buy = (kind: 'assisted' | 'direct') => (kind === 'assisted' ? assistedPaid() : directPurchase());
+      const openedAudits = async (caseId: string) => count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.reconciliation_case.opened' AND payload->'resource'->>'id' = $1`, [caseId]);
+      /** Every financial record and every earlier case or resolution of a payment: DO-74 may only ADD its own case and evidence. */
+      const records = async (p: { paymentId: string; paymentRequestId: string }) => ({
+        refundCases: (await admin.query(`SELECT * FROM refund_case WHERE "paymentId" = $1 ORDER BY id`, [p.paymentId])).rows,
+        relays: (await admin.query(`SELECT * FROM refund_authorization_relay WHERE "paymentId" = $1 ORDER BY id`, [p.paymentId])).rows,
+        purchases: (await admin.query(`SELECT s.*, r.cause FROM subscription_purchase s LEFT JOIN subscription_purchase_reversal r ON r."purchaseId" = s.id WHERE s."paymentRequestId" = $1 ORDER BY s.id`, [p.paymentRequestId])).rows,
+        losses: (await admin.query(`SELECT * FROM financial_loss WHERE "paymentId" = $1 ORDER BY id`, [p.paymentId])).rows,
+        disputeLosses: (await admin.query(`SELECT * FROM payment_dispute_loss WHERE "paymentId" = $1 ORDER BY "disputeId"`, [p.paymentId])).rows,
+        obligations: (await admin.query(`SELECT o.* FROM recovery_obligation o JOIN payment_dispute_loss l ON l."disputeId" = o."disputeId" WHERE l."paymentId" = $1 ORDER BY o.id`, [p.paymentId])).rows,
+        earlierCases: (await admin.query(`SELECT c.*, r.kind, r.reason, r."resolvedAt", r."resolvedByUserId" FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id
+          WHERE (c."paymentId" = $1 OR c."paymentRequestId" = $2) AND c."caseType" <> 'refund_observation_conflict' ORDER BY c.id`, [p.paymentId, p.paymentRequestId])).rows,
+      });
+
+      for (const kind of ['assisted', 'direct'] as const) {
+        it(`D1/D2 (${kind}): reads that agree open ONE figure-free case per observing attempt, bound to Billing's own relay and capture; repeated observations and passes add nothing; the Owner sees it and can close neither it nor the attempt's discrepancy as a duplicate or as having no financial effect; nothing financial moves`, async () => {
+          const p = await buy(kind);
+          const r = await relayed(p.paymentId);
+          discrepancy(p.paymentId, r.attemptId);
+          await reconciliation().drainOnce();
+          const disc = (await caseOf('refund_discrepancy', r.attemptId))!;
+          const before = await records(p);
+          const factId = randomUUID();
+          const first = observation(p.paymentId, r.attemptId, factId);
+          pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [first]));
+          await reconciliation().drainOnce();
+          const c = (await caseOf('refund_observation_conflict', r.attemptId))!;
+          expect(c).toMatchObject({ paymentId: p.paymentId, amount: null, currency: null, detail: null, kind: null });
+          const capture = (await one(`SELECT "captureFactId" FROM refund_case WHERE id = $1`, [r.caseId])).captureFactId;
+          expect(c.captureFactId).toBe(capture);
+          expect(await evidenceOf(c.id)).toEqual({ paymentId: p.paymentId, refundAttemptId: r.attemptId, observationId: first, captureFactId: capture });
+          expect(JSON.stringify(await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id]))).not.toContain(factId); // nothing of the fact is held
+          expect(JSON.stringify(await evidenceOf(c.id))).not.toContain(factId);
+          // repeated notifications (new observation ids of the same attempt) and further passes: the same case, nothing more
+          const second = observation(p.paymentId, r.attemptId, factId);
+          const third = observation(p.paymentId, r.attemptId, randomUUID());
+          pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [first, second, third]));
+          await reconciliation().drainOnce();
+          await reconciliation().drainOnce();
+          expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_observation_conflict' AND "paymentId" = $1`, [p.paymentId])).toBe(1);
+          expect(await count(`SELECT count(*) AS n FROM reconciliation_observation_evidence WHERE "paymentId" = $1`, [p.paymentId])).toBe(1);
+          expect(await openedAudits(c.id)).toBe(1);
+          const listed = (await send(request(server()).get('/billing/admin/reconciliation-cases?status=open&type=refund_observation_conflict'), 'owner-tok', null)).body.items as Record<string, unknown>[];
+          expect(listed.find((x) => x.id === c.id)).toMatchObject({ evidenceId: r.attemptId, amount: null, currency: null, detail: null, reviewOnly: false, status: 'open' });
+          for (const reason of ['reviewed_no_financial_effect', 'provider_statement_reviewed', 'duplicate_evidence_reviewed']) {
+            const a = await acknowledge(c.id, reason);
+            expect([a.status, a.body.code], reason).toEqual([409, 'reconciliation_case_not_acknowledgeable']);
+          }
+          // the R1 defect, corrected: the observing attempt's own discrepancy cannot be closed as a duplicate, nor as having no financial effect
+          for (const reason of ['duplicate_evidence_reviewed', 'reviewed_no_financial_effect']) {
+            const a = await acknowledge(disc.id, reason);
+            expect([a.status, a.body.code], reason).toEqual([409, 'reconciliation_case_contested']);
+          }
+          expect((await acknowledge(disc.id, 'provider_statement_reviewed')).status).toBe(200); // still available
+          const after = await records(p);
+          expect({ ...after, earlierCases: after.earlierCases.filter((x) => x.id !== disc.id) }).toEqual({ ...before, earlierCases: before.earlierCases.filter((x) => x.id !== disc.id) });
+          expect(await caseOf('refund_fact_contested', factId)).toBeUndefined(); // never S0-C15B's case: the fact is not this payment's
+        });
+      }
+
+      it('D9 (B-D6): every disagreement or unavailable read opens nothing and changes nothing; the same evidence opens its case once the reads agree (retry never discards it)', async () => {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        const id = observation(p.paymentId, r.attemptId);
+        const before = await records(p);
+        const nothing = async (why: string) => {
+          await reconciliation().drainOnce();
+          expect(await caseOf('refund_observation_conflict', r.attemptId), why).toBeUndefined();
+          expect(await records(p), why).toEqual(before);
+        };
+        pay08.answers.set(p.paymentId, 'down'); await nothing('Payment unavailable');
+        pay08.answers.set(p.paymentId, null); await nothing('Payment 404 for Billing\'s own payment');
+        pay08Observed(p.paymentId, r.attemptId, null); await nothing('an older Payment (field absent)');
+        pay08Observed(p.paymentId, r.attemptId, 'malformed'); await nothing('a malformed field');
+        pay08Observed(p.paymentId, r.attemptId, []); await nothing('no observation stated');
+        pay08Observed(p.paymentId, r.attemptId, own(randomUUID(), [id])); await nothing('the observation stated under ANOTHER attempt');
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [randomUUID()])); await nothing('the attempt stated without THIS observation');
+        const odd = observation(p.paymentId, 'not-a-uuid');
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [odd])); await nothing('an item with an unreadable attempt');
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [id]));
+        await reconciliation().drainOnce();
+        expect(await caseOf('refund_observation_conflict', r.attemptId)).toMatchObject({ kind: null });
+        expect(await records(p)).toEqual(before);
+      });
+
+      it('D5 (control): a contradiction of the payment\'s OWN fact stays S0-C15B\'s refund_fact_contested; no observation case opens', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const factId = randomUUID();
+        observation(p.paymentId, r.attemptId, factId);
+        pay08.answers.set(p.paymentId, { attempts: [{ refundAttemptId: r.attemptId, status: 'succeeded', approvedBy: { userId: U.owner } }], refusals: [], unallocatedFacts: [],
+          authorizations: [{ refundAuthorizationId: randomUUID(), refundAttemptId: r.attemptId, refundCaseId: r.caseId, approvedAmount: p.amount, currency: 'TND', completedAt: now(),
+            allocations: [{ factId, amount: p.amount, currency: 'TND' }] }], observationConflicts: [] });
+        await reconciliation().drainOnce();
+        expect(await caseOf('refund_fact_contested', factId)).toMatchObject({ detail: 'contested_after_allocation' });
+        expect(await caseOf('refund_observation_conflict', r.attemptId)).toBeUndefined();
+      });
+
+      it('an attempt Billing holds no relay of (or a relay of another payment) opens nothing, and no case without its evidence ever commits', async () => {
+        const p = await assistedPaid();
+        const q = await assistedPaid();
+        const rq = await relayed(q.paymentId);
+        const stranger = randomUUID();
+        const a = observation(p.paymentId, stranger);
+        const b = observation(p.paymentId, rq.attemptId); // the other payment's relay, named under p
+        pay08.answers.set(p.paymentId, { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [],
+          observationConflicts: [...own(stranger, [a]), ...own(rq.attemptId, [b])] });
+        await reconciliation().drainOnce();
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_observation_conflict' AND ("evidenceKey" = $1 OR "evidenceKey" = $2)`, [stranger, rq.attemptId])).toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case c WHERE c."caseType" = 'refund_observation_conflict'
+          AND NOT EXISTS (SELECT 1 FROM reconciliation_observation_evidence e WHERE e."caseId" = c.id)`)).toBe(0);
+      });
+
+      it('D8 (in-process): two reconciliation passes at once open ONE case, ONE evidence row and ONE audit intent', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const id = observation(p.paymentId, r.attemptId);
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [id]));
+        await Promise.all([reconciliation().drainOnce(), reconciliation().drainOnce(), reconciliation().drainOnce()]);
+        const c = (await caseOf('refund_observation_conflict', r.attemptId))!;
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_observation_evidence WHERE "refundAttemptId" = $1`, [r.attemptId])).toBe(1);
+        expect(await openedAudits(c.id)).toBe(1);
+      });
+
+      it('D14 (in place): an acknowledgement recorded before the case opened stands; historical cases and financial records are untouched', async () => {
+        const p = await assistedPaid();
+        const r = await relayed(p.paymentId);
+        discrepancy(p.paymentId, r.attemptId);
+        await reconciliation().drainOnce();
+        const disc = (await caseOf('refund_discrepancy', r.attemptId))!;
+        expect((await acknowledge(disc.id, 'duplicate_evidence_reviewed')).status).toBe(200); // before DO-74 knew of the observation
+        const before = await records(p);
+        const id = observation(p.paymentId, r.attemptId);
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [id]));
+        await reconciliation().drainOnce();
+        expect(await caseOf('refund_observation_conflict', r.attemptId)).toMatchObject({ kind: null });
+        expect(await records(p)).toEqual(before); // the earlier acknowledgement stands, unchanged
+        expect((await caseOf('refund_discrepancy', r.attemptId))).toMatchObject({ kind: 'acknowledged', reason: 'duplicate_evidence_reviewed' });
+      });
+
+      it('a payment Billing holds no Company sale of opens nothing: no case, evidence or audit intent', async () => {
+        const paymentId = randomUUID();
+        const attemptId = randomUUID();
+        const id = observation(paymentId, attemptId);
+        pay08Observed(paymentId, attemptId, own(attemptId, [id]));
+        await reconciliation().drainOnce();
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1`, [paymentId])).toBe(0);
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_observation_evidence WHERE "paymentId" = $1`, [paymentId])).toBe(0);
+      });
+    });
   });
 
   it('production mounts no recovery route and no worker', () => {

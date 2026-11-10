@@ -30,6 +30,7 @@
       "measuredSeconds": 816.6,
       "suites": [
         "s0c15a-exposure-certification.e2e-spec.ts",
+        "do74-observation-certification.e2e-spec.ts",
         "s-int-assisted-loss-recovery.e2e-spec.ts",
         "s6-financial-certification.e2e-spec.ts",
         "s-int-pre-lifecycle-real-auth.e2e-spec.ts",

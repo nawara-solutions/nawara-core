@@ -265,7 +265,16 @@ export class ReconciliationService {
     const allocated = read.authorizations.filter((z) => z.refundAttemptId === attemptId).flatMap((z) => z.allocations).find((a) => a.factId === factId);
     const pending = allocated ? undefined : (read.unallocatedFacts ?? []).find((f) => f.factId === factId && f.refundAttemptId === attemptId);
     const fact = allocated ?? pending;
-    if (!fact) return inconsistent(read.unallocatedFacts === null ? 'unallocated_facts_unknown' : 'fact_not_stated');
+    if (!fact) {
+      // Core V2 DO-74 (observer side): the contradicted fact is not this payment's (unmatched, or another payment's); Payment states the observation
+      // under this attempt instead, and the case is the attempt's, with nothing of the fact
+      if (read.observationConflicts === 'malformed') return inconsistent('observation_conflicts_malformed');
+      if (read.observationConflicts) {
+        const own = read.observationConflicts.find((o) => o.refundAttemptId === attemptId);
+        if (own && own.conflictIds.includes(i.id)) return this.observationConflict(i, attemptId, inconsistent, tally);
+      }
+      return inconsistent(read.unallocatedFacts === null ? 'unallocated_facts_unknown' : 'fact_not_stated');
+    }
     if (!Number.isSafeInteger(fact.amount) || fact.amount < 1 || !/^[A-Z]{3}$/.test(fact.currency)) return inconsistent('fact_figures_unusable');
     // a refusal by this database (a constraint) or a failure opens nothing and changes nothing: logged, retried on the next pass, never skipped silently
     await this.db.tx(async (q) => {
@@ -278,6 +287,27 @@ export class ReconciliationService {
         [caseId, i.paymentId, factId, relay ? attemptId : null]);
       tally.opened++;
     }).catch((e: unknown) => this.log.warn(`refund_contest_open_failure item=${i.id} ${describeFailure(e)} — nothing opened; the next pass reads again`));
+  }
+
+  /**
+   * Core V2 DO-74 (observer side; BIL-33 Q): one `refund_observation_conflict` case per refund attempt of Billing's own payment whose own provider observation
+   * contradicts a refund fact that is NOT its payment's. Called only when Payment's producer item and PAY-08's `observationConflicts` agree (the same
+   * attempt, the item's own observation listed under it). Its identity is the attempt (Billing's own relay), so repeated notifications and passes open no
+   * second case. It holds no figures and nothing of the fact. The attempt must be Billing's own relay of the payment: otherwise nothing opens (logged,
+   * retried). The case and its evidence are one transaction (the database refuses one without the other at commit). Nothing financial is written.
+   */
+  private async observationConflict(i: PaymentItem, attemptId: string, inconsistent: (why: string) => void, tally: { opened: number }): Promise<void> {
+    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_observation_conflict' AND "evidenceKey" = $1`, [attemptId])).rows.length > 0) return;
+    await this.db.tx(async (q) => {
+      const relay = (await q.query<{ captureFactId: string | null }>(
+        `SELECT r."captureFactId" FROM refund_authorization_relay x JOIN refund_case r ON r.id = x."refundCaseId" WHERE x.id = $1 AND x."paymentId" = $2`, [attemptId, i.paymentId])).rows[0];
+      if (!relay) return inconsistent('refund_attempt_unknown_to_billing');
+      const caseId = await this.cases.openForPayment(q, { caseType: 'refund_observation_conflict', evidenceKey: attemptId, paymentId: i.paymentId, captureFactId: relay.captureFactId });
+      if (!caseId) return; // opened by another pass, or no Company Owner exists to see it
+      await q.query(`INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") VALUES ($1, $2, $3, $4)`,
+        [caseId, i.paymentId, attemptId, i.id]);
+      tally.opened++;
+    }).catch((e: unknown) => this.log.warn(`refund_observation_open_failure item=${i.id} ${describeFailure(e)} — nothing opened; the next pass reads again`));
   }
 
   /**

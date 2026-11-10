@@ -145,6 +145,7 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
         AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SUPPORTED_CURRENCIES: 'TND,EUR', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
+        PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000', // DO-74 adds attempts for one buyer; the file asserts no rate limit (as disputes/wrong-amount suites)
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create', 'payment.reconciliation.read'], allowedPlatforms: [TEST_PLATFORM] },
           'other-producer': { operations: ['payment.create', 'payment.read'], allowedPlatforms: [TEST_PLATFORM] },
@@ -594,6 +595,155 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       expect(await count(`SELECT count(*) AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [fact.id])).toBe(2);
       expect(await count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.provider_fact_conflict.recorded' AND payload->'resource'->>'id' = $1`, [fact.id])).toBe(2);
       expect((await one(`SELECT amount FROM provider_transaction_fact WHERE id = $1`, [fact.id])).amount).toBe(fact.amount);
+    });
+  });
+
+  describe('Core V2 DO-74 (observer side): PAY-08 observationConflicts, the producer\'s own observations of a fact that is not its payment\'s', () => {
+    /** A refund relayed by the producer (S6b) and dispatched; optionally failed. Seller `company` (its Owner `ownerId`). */
+    const refundOf = async (o: { fail?: boolean; company?: string; ownerId?: string } = {}) => {
+      const company = o.company ?? COMPANY;
+      const { payment } = await captured({ seller: { type: 'company', id: company } });
+      const caseId = randomUUID();
+      const r = auth.issue({ ...refundBinding(payment.id, caseId), companyId: company }, o.ownerId ?? OWNER);
+      const res = await request(server()).post(`/payment/payments/${payment.id}/refunds`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key())
+        .send({ refundAttemptId: randomUUID(), refundCaseId: caseId, amount: 9000, currency: 'TND', reason: 'customer_request', legalOverride: false, receiptSecret: r.secret });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      const attemptId = res.body.refundAttemptId as string;
+      await drainRefunds();
+      expect((await one(`SELECT status FROM refund_attempt WHERE id = $1`, [attemptId])).status).toBe('submitted');
+      if (o.fail) await sim(`refunds/${attemptId}/outcomes`, { commandId: cmd(), outcome: 'failed', failureCode: 'card_closed' }).expect(201);
+      const z = await one(`SELECT * FROM refund_authorization WHERE "refundAttemptId" = $1`, [attemptId]);
+      return { payment, attemptId, z };
+    };
+    const ownRef = async (attemptId: string) => (await one(`SELECT "providerRefundId" FROM refund_attempt WHERE id = $1`, [attemptId])).providerRefundId as string;
+    /** The provider reports, for `attemptId` (its own reference), a refund under provider id `txn`: a signed notification with a new id each time. */
+    const observe = async (attemptId: string, txn: string, amount = 9000, eventId = `do74_${randomUUID()}`) =>
+      (await signed({ eventId, type: 'refund.succeeded', reference: attemptId, providerTransactionId: txn, amount, currency: 'TND' })).status;
+    const pay08 = (pid: string, token = billing.token) => request(server()).get(`/payment/payments/${pid}/refunds`).set('authorization', `Bearer ${token}`);
+    const conflictIds = async (pid: string) => (await admin.query(`SELECT id FROM provider_transaction_fact_conflict WHERE "paymentId" = $1 ORDER BY id`, [pid])).rows.map((r) => r.id as string);
+    const money = async (pid: string) => ({
+      allocations: await count(`SELECT count(*) AS n FROM refund_allocation WHERE "paymentId" = $1`, [pid]),
+      authorizations: (await admin.query(`SELECT "allocatedIntended"::int AS i, "completedAt" IS NOT NULL AS c FROM refund_authorization WHERE "paymentId" = $1`, [pid])).rows,
+      associations: await count(`SELECT count(*) AS n FROM provider_fact_association WHERE "paymentId" = $1`, [pid]),
+      facts: (await admin.query(`SELECT id, "paymentId", amount::int FROM provider_transaction_fact WHERE "paymentId" = $1 ORDER BY id`, [pid])).rows,
+    });
+
+    it('R1: the attempt\'s own refund first reported under an unknown reference, then by the attempt: ONE entry of the attempt\'s own rows; repeated notifications only add ids; nothing financial changes', async () => {
+      const r = await refundOf();
+      const txn = await ownRef(r.attemptId);
+      const { fact } = await unmatched({ type: 'refund.succeeded', amount: 9000, txn });
+      expect(fact.paymentId).toBeNull();
+      const before = await money(r.payment.id);
+      expect((await pay08(r.payment.id).expect(200)).body.observationConflicts).toEqual([]);
+      const eventId = `do74_${randomUUID()}`;
+      expect(await observe(r.attemptId, txn, 9000, eventId)).toBe(200);
+      expect((await one(`SELECT status FROM refund_attempt WHERE id = $1`, [r.attemptId])).status).toBe('discrepancy');
+      const first = await pay08(r.payment.id).expect(200);
+      const ids1 = await conflictIds(r.payment.id);
+      expect(ids1).toHaveLength(1);
+      expect(first.body.observationConflicts).toEqual([{ refundAttemptId: r.attemptId, conflictIds: ids1, observations: 1, firstObservedAt: expect.any(String) }]);
+      expect(Object.keys(first.body.observationConflicts[0]).sort()).toEqual(['conflictIds', 'firstObservedAt', 'observations', 'refundAttemptId']);
+      expect(JSON.stringify(first.body)).not.toContain(fact.id); // never the fact's id
+      // here the provider reference IS the attempt's own (it was dispatched under it): it appears only as that attempt's own providerRefundId
+      expect(JSON.stringify({ ...first.body, attempts: first.body.attempts.map((x: Row) => ({ ...x, providerRefundId: null })) })).not.toContain(txn);
+      expect(first.body.unallocatedFacts).toEqual([]); // S0-C14's evidence field is unchanged: the fact is not this payment's
+      // the same notification again: nothing; a new notification id of the same report: one more own observation in the SAME entry
+      expect(await observe(r.attemptId, txn, 9000, eventId)).toBe(200);
+      expect(await conflictIds(r.payment.id)).toEqual(ids1);
+      expect(await observe(r.attemptId, txn)).toBe(200);
+      expect(await observe(r.attemptId, txn, 4000)).toBe(200);
+      const ids3 = await conflictIds(r.payment.id);
+      expect(ids3).toHaveLength(3);
+      const later = (await pay08(r.payment.id).expect(200)).body.observationConflicts;
+      expect(later).toEqual([{ refundAttemptId: r.attemptId, conflictIds: ids3, observations: 3, firstObservedAt: first.body.observationConflicts[0].firstObservedAt }]);
+      expect(await money(r.payment.id)).toEqual(before); // nothing associated, allocated, completed or changed
+      expect((await one(`SELECT "paymentId", "refundAttemptId", amount::int FROM provider_transaction_fact WHERE id = $1`, [fact.id]))).toEqual({ paymentId: null, refundAttemptId: null, amount: 9000 });
+    });
+
+    it('R2 (control): a contradiction of the payment\'s OWN fact is S0-C15B\'s path and is never listed', async () => {
+      const r = await refundOf();
+      const txn = await ownRef(r.attemptId);
+      await sim(`refunds/${r.attemptId}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201);
+      expect(await observe(r.attemptId, txn, 15000)).toBe(200);
+      expect(await conflictIds(r.payment.id)).toHaveLength(1);
+      expect((await pay08(r.payment.id).expect(200)).body.observationConflicts).toEqual([]);
+    });
+
+    it('cross-payment, same Company: B\'s attempt reports A\'s refund: B sees only its own rows; A\'s view and money are unchanged; nothing of either crosses', async () => {
+      const a = await refundOf();
+      const aTxn = await ownRef(a.attemptId);
+      await sim(`refunds/${a.attemptId}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201);
+      const aFact = await one(`SELECT id FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [aTxn]);
+      const b = await refundOf();
+      const aBefore = { view: (await pay08(a.payment.id).expect(200)).body, money: await money(a.payment.id) };
+      const bBefore = await money(b.payment.id);
+      expect(await observe(b.attemptId, aTxn)).toBe(200);
+      const bView = (await pay08(b.payment.id).expect(200)).body;
+      expect(bView.observationConflicts).toEqual([{ refundAttemptId: b.attemptId, conflictIds: await conflictIds(b.payment.id), observations: 1, firstObservedAt: expect.any(String) }]);
+      for (const foreign of [aFact.id, aTxn, a.payment.id, a.attemptId, a.z.id]) expect(JSON.stringify(bView), foreign).not.toContain(foreign);
+      const aAfter = (await pay08(a.payment.id).expect(200)).body;
+      expect(aAfter).toEqual(aBefore.view); // A's PAY-08 gains nothing (O-2 stays open: A's own visibility is not this package's)
+      for (const foreign of [b.payment.id, b.attemptId]) expect(JSON.stringify(aAfter)).not.toContain(foreign);
+      expect(await money(a.payment.id)).toEqual(aBefore.money);
+      expect(await money(b.payment.id)).toEqual(bBefore);
+    });
+
+    it('cross-Company: Company B\'s attempt reports Company A\'s refund: B\'s producer view names nothing of A; another producer and a non-producer read no field', async () => {
+      const a = await refundOf();
+      const aTxn = await ownRef(a.attemptId);
+      await sim(`refunds/${a.attemptId}/outcomes`, { commandId: cmd(), outcome: 'succeeded' }).expect(201);
+      const aFact = await one(`SELECT id FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [aTxn]);
+      const b = await refundOf({ company: COMPANY2, ownerId: OWNER2 });
+      expect(await observe(b.attemptId, aTxn)).toBe(200);
+      const bView = (await pay08(b.payment.id).expect(200)).body;
+      expect(bView.observationConflicts).toHaveLength(1);
+      for (const foreign of [aFact.id, aTxn, a.payment.id, a.attemptId, a.z.id, COMPANY]) expect(JSON.stringify(bView), foreign).not.toContain(foreign);
+      // only the producer: another producer gets the collapsed 404 (unchanged), and the field is never part of any other caller's answer
+      expect((await pay08(b.payment.id, other.token)).status).toBe(404);
+      const buyer = await request(server()).get(`/payment/payments/${b.payment.id}/refunds`).set('authorization', 'Bearer buyer-jwt');
+      if (buyer.status === 200) expect(buyer.body.observationConflicts).toBeUndefined();
+      // DISCLOSED, PRE-EXISTING (not widened here): Payment's existing fact_conflict item for B (Owner B and Billing's producer read) carries the contradicted
+      // fact's opaque id; it carries B's own observed figures, never A's figures, reference, payment or Company
+      const bItems = (await itemsOf('fact_conflict', 'owner2-jwt')).filter((i) => i.paymentId === b.payment.id);
+      expect(bItems).toHaveLength(1);
+      expect(bItems[0]!.factId).toBe(aFact.id);
+      for (const foreign of [aTxn, a.payment.id, a.attemptId, COMPANY]) expect(JSON.stringify(bItems), foreign).not.toContain(foreign);
+      expect((await itemsOf('fact_conflict', 'owner-jwt')).some((i) => i.paymentId === b.payment.id)).toBe(false); // A's Owner sees nothing of B
+    });
+
+    it('LATENT (F-29 stand-in): a fact associated to THIS payment is its own, so its contradiction is never listed', async () => {
+      const r = await refundOf({ fail: true });
+      const txn = await ownRef(r.attemptId);
+      const { fact } = await unmatched({ type: 'refund.succeeded', amount: 9000, txn });
+      const res = await associate(fact.id, { targetType: 'refund_authorization', targetId: r.z.id, receiptSecret: auth.issue(assocBinding(fact, 'refund_authorization', r.z.id), OWNER).secret });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(await observe(r.attemptId, txn)).toBe(200);
+      expect(await conflictIds(r.payment.id)).toHaveLength(1);
+      expect((await pay08(r.payment.id).expect(200)).body.observationConflicts).toEqual([]);
+    });
+
+    it('two attempts of one payment, each with its own observation: one entry per attempt, in a stable order, each with only its own ids', async () => {
+      const r1 = await refundOf({ fail: true });
+      const t1 = await ownRef(r1.attemptId);
+      await unmatched({ type: 'refund.succeeded', amount: 9000, txn: t1 });
+      // a second authorized attempt of the same payment, admitted after the first failed (S6b), before the first one's observation
+      const caseId = randomUUID();
+      const sec = auth.issue(refundBinding(r1.payment.id, caseId), OWNER);
+      const res = await request(server()).post(`/payment/payments/${r1.payment.id}/refunds`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key())
+        .send({ refundAttemptId: randomUUID(), refundCaseId: caseId, amount: 9000, currency: 'TND', reason: 'customer_request', legalOverride: false, receiptSecret: sec.secret });
+      expect(res.status, JSON.stringify(res.body)).toBe(201); // the first attempt FAILED at the provider before its observation: a new authorized attempt is admitted
+      const a2 = res.body.refundAttemptId as string;
+      await drainRefunds();
+      const t2 = await ownRef(a2);
+      await unmatched({ type: 'refund.succeeded', amount: 9000, txn: t2 });
+      // PRE-EXISTING, REPORTED (not DO-74's, unchanged here): a report on the FAILED first attempt while the second is live cannot move it to `discrepancy`
+      // (refund_attempt_one_effective) and the webhook answers 500 for the provider to retry; the fact and the observation committed first and stay
+      expect(await observe(r1.attemptId, t1)).toBe(500);
+      expect((await one(`SELECT status FROM refund_attempt WHERE id = $1`, [r1.attemptId])).status).toBe('failed');
+      expect(await observe(a2, t2)).toBe(200);
+      const v = (await pay08(r1.payment.id).expect(200)).body.observationConflicts as Row[];
+      expect(v.map((e) => e.refundAttemptId as string).sort((x, y) => x.localeCompare(y))).toEqual([r1.attemptId, a2].sort((x, y) => x.localeCompare(y)));
+      for (const e of v) expect(e.conflictIds).toHaveLength(1);
     });
   });
 });

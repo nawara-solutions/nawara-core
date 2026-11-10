@@ -182,4 +182,32 @@ describe('HttpPaymentRefundClient.refunds: refund evidence (Core V2 S0-C14 item 
     expect(await read({ code: 'not_found' }, 404)).toBeNull();
     await expect(read({}, 503)).rejects.toThrow();
   });
+
+  // Core V2 DO-74 (observer side): the producer's own observations; parsed on their own so a bad field never changes S0-C14's reading of the rest
+  const C1 = '77777777-7777-4777-8777-777777777771';
+  const C2 = '77777777-7777-4777-8777-777777777772';
+  const ATTEMPT2 = '33333333-3333-4333-8333-333333333334';
+  it('DO-74: observationConflicts is parsed per attempt with its own observation ids and count; absent is null (proves nothing)', async () => {
+    const r = await read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [],
+      observationConflicts: [{ refundAttemptId: ATTEMPT, conflictIds: [C1, C2], observations: 2, firstObservedAt: '2026-11-10T10:00:00.000Z' },
+        { refundAttemptId: ATTEMPT2, conflictIds: [C1], observations: 1, firstObservedAt: null, factId: FACT, amount: 100 }] });
+    // only the attempt, its ids and their count are kept: anything else Payment might add is never read
+    expect(r!.observationConflicts).toEqual([{ refundAttemptId: ATTEMPT, conflictIds: [C1, C2], observations: 2 }, { refundAttemptId: ATTEMPT2, conflictIds: [C1], observations: 1 }]);
+    expect((await read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] }))!.observationConflicts).toBeNull();
+    expect((await read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [], observationConflicts: [] }))!.observationConflicts).toEqual([]);
+  });
+
+  it('DO-74: a malformed observationConflicts is \'malformed\' and never throws: the rest of the answer (S0-C14 evidence) is kept unchanged', async () => {
+    const base = { attempts: [], refusals: [], authorizations: [authorization({ allocations: [{ factId: FACT, amount: 5300, currency: 'TND' }] })],
+      unallocatedFacts: [{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }] };
+    for (const bad of [{}, 'x', [null], [{ refundAttemptId: 'x', conflictIds: [C1], observations: 1 }], [{ refundAttemptId: ATTEMPT, conflictIds: [], observations: 0 }],
+      [{ refundAttemptId: ATTEMPT, conflictIds: ['NOT-A-UUID'], observations: 1 }], [{ refundAttemptId: ATTEMPT, conflictIds: [C1, C1], observations: 2 }],
+      [{ refundAttemptId: ATTEMPT, conflictIds: [C1, C2], observations: 3 }], [{ refundAttemptId: ATTEMPT, conflictIds: C1, observations: 1 }],
+      [{ refundAttemptId: ATTEMPT, conflictIds: [C1], observations: 1 }, { refundAttemptId: ATTEMPT, conflictIds: [C2], observations: 1 }]]) {
+      const r = await read({ ...base, observationConflicts: bad });
+      expect(r!.observationConflicts, JSON.stringify(bad)).toBe('malformed');
+      expect(r!.authorizations[0]!.allocations).toEqual([{ factId: FACT, amount: 5300, currency: 'TND' }]);
+      expect(r!.unallocatedFacts).toEqual([{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }]);
+    }
+  });
 });
