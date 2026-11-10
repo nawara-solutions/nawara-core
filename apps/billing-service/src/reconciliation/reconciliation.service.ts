@@ -42,10 +42,14 @@ export function writeOffConsumeRef(obligationId: string, secret: string): string
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${(8 | (parseInt(h[16]!, 16) & 3)).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
+/** Core V2 R3-F1: the loss cases (evidence = the dispute loss) whose reads state `unreconciledFailedAttemptEvidence`. */
+export const R3_F1_CASE_TYPES: readonly CaseType[] = ['chargeback_refund_overlap', 'chargeback_effect_waiting', 'chargeback_refund_exposure'];
+
 interface CaseRow {
   id: string; caseType: CaseType; evidenceKey: string; companyId: string; platformId: string | null; organizationId: string | null; paymentId: string | null;
   paymentRequestId: string | null; captureFactId: string | null; amount: string | null; currency: string | null; detail: string | null; openedAt: Date;
   l4Purchase: boolean | null;
+  unreconciledFailedAttemptEvidence: boolean | null;
   kind: string | null; refundCaseId: string | null; lossId: string | null; recoveryPaymentId: string | null; resolvedByUserId: string | null; reason: string | null;
   resolvedAt: Date | null;
 }
@@ -60,6 +64,10 @@ const CASE_SELECT = `SELECT c.id, c."caseType", c."evidenceKey", c."companyId", 
                WHERE a."captureFactId" = c."captureFactId" AND pr."paymentId" = c."paymentId")
       OR EXISTS (SELECT 1 FROM payment_late_success s JOIN subscription_purchase p ON p."lateSuccessId" = s."lateSuccessId"
                   WHERE s."factId" = c."captureFactId" AND s."paymentId" = c."paymentId")) END AS "l4Purchase",
+    -- Core V2 R3-F1 (read-only): whether the loss's captured movement holds an R3 failure-evidence marker (0055), derived when read from Billing's own
+    -- markers; only on the three loss cases whose evidence is the loss (the case itself, its status and its resolution are never rewritten)
+    CASE WHEN c."caseType" IN ('chargeback_refund_overlap', 'chargeback_effect_waiting', 'chargeback_refund_exposure')
+      THEN billing_loss_movement_marked(c."evidenceKey") END AS "unreconciledFailedAttemptEvidence",
     r.kind, r."refundCaseId", r."lossId", r."recoveryPaymentId", r."resolvedByUserId", r.reason, r."resolvedAt"
   FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id`;
 const representCase = (c: CaseRow) => ({
@@ -67,6 +75,9 @@ const representCase = (c: CaseRow) => ({
   paymentRequestId: c.paymentRequestId, captureFactId: c.captureFactId, amount: c.amount === null ? null : Number(c.amount), currency: c.currency, detail: c.detail,
   status: c.kind ? 'resolved' : 'open', reviewOnly: REVIEW_ONLY.includes(c.caseType), openedAt: iso(c.openedAt),
   ...(c.caseType === 'capture_contradiction' ? { l4Purchase: c.l4Purchase } : {}),
+  // Core V2 R3-F1: failed-attempt refund evidence is RECORDED on this loss's movement and no approved evidence-resolution path has reconciled it (none
+  // exists). It asserts no further refund, double payment, liability or ownership; it carries no fact, figure or provider reference.
+  ...(R3_F1_CASE_TYPES.includes(c.caseType) ? { unreconciledFailedAttemptEvidence: c.unreconciledFailedAttemptEvidence === true } : {}),
   resolution: c.kind ? { kind: c.kind, refundCaseId: c.refundCaseId, lossId: c.lossId, recoveryPaymentId: c.recoveryPaymentId,
     resolvedBy: c.resolvedByUserId ? { userId: c.resolvedByUserId } : null, reason: c.reason, resolvedAt: iso(c.resolvedAt) } : null,
 });

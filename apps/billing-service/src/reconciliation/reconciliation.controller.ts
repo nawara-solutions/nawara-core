@@ -12,6 +12,10 @@ const ID = { name: 'id', format: 'uuid' };
 const R401 = { status: 401, description: 'no bearer, a bearer Auth refuses, or a SERVICE token (never forwarded to Auth)' };
 const R403 = { status: 403, description: 'operation_not_permitted: not an Owner' };
 const R503 = { status: 503, description: 'auth_timeout | auth_unavailable: nothing was changed' };
+/** Core V2 R3-F1 (read-only): the one field the loss cases add; derived when read, never stored, never a resolution or acknowledgement rule. */
+const F1_FIELD = 'chargeback_refund_overlap, chargeback_effect_waiting and chargeback_refund_exposure cases also state unreconciledFailedAttemptEvidence (boolean): '
+  + 'true when failed-attempt refund evidence (an R3 marker) is recorded on the loss\'s captured movement and no approved evidence-resolution path has reconciled it. '
+  + 'It asserts no further refund, double payment, liability or ownership, carries no fact, figure or provider reference, and changes no status, resolution or acknowledgement.';
 const ownerContext = (owner: VerifiedRefundOwner) => requestTransitionContext({ type: 'user', id: owner.userId, userKind: 'owner' });
 const asBody = (body: unknown): Record<string, unknown> => (body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {});
 
@@ -33,7 +37,7 @@ export class ReconciliationController {
   @ApiQuery({ name: 'type', required: false, enum: CASE_TYPES })
   @ApiQuery({ name: 'after', required: false, description: 'the last id of the previous page' })
   @ApiQuery({ name: 'limit', required: false, description: '1 to 200 (default 100)' })
-  @ApiResponse({ status: 200, description: '{ items }' })
+  @ApiResponse({ status: 200, description: `{ items }. ${F1_FIELD}` })
   @ApiResponse({ status: 400, description: 'invalid_reconciliation_request' })
   @ApiResponse(R401)
   @ApiResponse(R403)
@@ -46,7 +50,7 @@ export class ReconciliationController {
   @Header('Cache-Control', 'no-store')
   @ApiOperation({ summary: 'BIL-33: one reconciliation case of the Owner\'s Company.' })
   @ApiParam(ID)
-  @ApiResponse({ status: 200 })
+  @ApiResponse({ status: 200, description: F1_FIELD })
   @ApiResponse(R401)
   @ApiResponse(R403)
   @ApiResponse({ status: 404, description: 'not_found: unknown, or another Company\'s or Platform\'s (one answer)' })
