@@ -13,6 +13,17 @@ const auth = (attemptId: string, o: { allocations?: { factId: string; amount: nu
 
 /** Core V2 S0-C14 item 6 (a): the remote half of a waiting effect's resumption, judged from one fresh PAY-08 answer. */
 describe('judgeRefundEvidence (Core V2 S0-C14 item 6)', () => {
+  it('DO-74: observationConflicts never change a verdict (present, empty, malformed or absent): S0-C14 and S0-C15A read exactly what they read before', () => {
+    const answers = [read(), read({ attempts: [attempt(A, 'failed')] }), read({ attempts: [attempt(A, 'discrepancy')] }), read({ attempts: [attempt(X, 'failed')] }),
+      read({ authorizations: [auth(A, { allocations: [{ factId: X, amount: 1, currency: 'TND' }] })] }), read({ unallocatedFacts: null })];
+    for (const base of answers) {
+      for (const o of [[{ refundAttemptId: A, conflictIds: [X], observations: 1 }], [], 'malformed' as const, null]) {
+        expect(judgeRefundEvidence({ ...base, observationConflicts: o }, relays)).toEqual(judgeRefundEvidence(base, relays));
+        expect(judgeExposureEvidence({ ...base, observationConflicts: o }, relays)).toEqual(judgeExposureEvidence(base, relays));
+      }
+    }
+  });
+
   it('clean only when nothing is attempted, or every attempt of the movement is dead with no refund evidence', () => {
     expect(judgeRefundEvidence(read(), relays)).toEqual({ clean: true });
     for (const s of ['authorization_expired', 'authorization_refused', 'failed'] as const) expect(judgeRefundEvidence(read({ attempts: [attempt(A, s)] }), relays), s).toEqual({ clean: true });

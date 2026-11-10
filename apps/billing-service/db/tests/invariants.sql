@@ -1545,6 +1545,118 @@ SELECT pg_temp.assert_eq('DO-73', 'unallocated evidence is append-only and its e
      AND bool_or(tgname = 'reconciliation_case_09_unallocated_evidence' AND tgdeferrable AND tginitdeferred))::text
      FROM pg_trigger WHERE tgname LIKE 'reconciliation_%'), 'true');
 
+-- ------------------------------------------------------------------------------------------------------------- DO-74 (0054)
+SELECT pg_temp.expect_error('DO-74', 'an observation conflict names its payment', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId")
+  VALUES ('refund_observation_conflict', gen_random_uuid(), gen_random_uuid())$$, '23514', 'reconciliation_case_observation_shape');
+SELECT pg_temp.expect_error('DO-74', 'an observation conflict holds no figures (nothing of the fact crosses)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency)
+  VALUES ('refund_observation_conflict', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 'TND')$$, '23514', 'reconciliation_case_observation_shape');
+SELECT pg_temp.expect_error('DO-74', 'an observation conflict holds no detail', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", detail)
+  VALUES ('refund_observation_conflict', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'unattributed')$$, '23514', 'reconciliation_case_observation_shape');
+SELECT pg_temp.expect_error('DO-74', 'a case without evidence never commits (deferred presence check)', $$
+  SET CONSTRAINTS reconciliation_case_09_observation_evidence IMMEDIATE;
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId") VALUES ('refund_observation_conflict', gen_random_uuid(), gen_random_uuid(), gen_random_uuid())$$,
+  '23514', 'reconciliation_case_observation_evidence_missing');
+-- LABELLED FIXTURE: two refund cases and their relays, inserted with triggers and foreign keys off (session_replication_role), since a real relay needs a
+-- paid payment request; the rows obey every CHECK. Then the case and its evidence through the real guards.
+DO $$
+DECLARE pay uuid := gen_random_uuid(); pay2 uuid := gen_random_uuid(); cap uuid := gen_random_uuid(); rc uuid := gen_random_uuid(); rc2 uuid := gen_random_uuid();
+        r1 uuid := gen_random_uuid(); r2 uuid := gen_random_uuid(); cid uuid; disc uuid; other uuid; disc2 uuid;
+BEGIN
+  PERFORM set_config('session_replication_role', 'replica', true);
+  INSERT INTO refund_case (id, "paymentId", "paymentRequestId", "invoiceId", eligibility, "companyId", "platformId", amount, currency, reason, "openedBy", "captureFactId", "captureBasis")
+    VALUES (rc, pay, gen_random_uuid(), gen_random_uuid(), 'capture_specific', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'customer_request', gen_random_uuid(), cap, 'duplicate_capture'),
+           (rc2, pay2, gen_random_uuid(), gen_random_uuid(), 'capture_specific', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'customer_request', gen_random_uuid(), gen_random_uuid(), 'duplicate_capture');
+  INSERT INTO refund_authorization_relay (id, "refundCaseId", "paymentId", "requestedBy", "idempotencyKey", "requestHash")
+    VALUES (r1, rc, pay, gen_random_uuid(), 'k-do74-0001', repeat('a', 64)), (r2, rc2, pay2, gen_random_uuid(), 'k-do74-0002', repeat('a', 64));
+  PERFORM set_config('session_replication_role', 'origin', true);
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", "captureFactId") VALUES ('refund_observation_conflict', r1, gen_random_uuid(), pay, cap) RETURNING id INTO cid;
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") VALUES (cid, pay, r1, gen_random_uuid());
+  -- the observing attempt's own discrepancy, another capture's review on the same payment, and another payment's discrepancy (controls)
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency) VALUES ('refund_discrepancy', r1, gen_random_uuid(), pay, 100, 'TND') RETURNING id INTO disc;
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", "captureFactId", amount, currency) VALUES ('partial_chargeback', gen_random_uuid(), gen_random_uuid(), pay, gen_random_uuid(), 70, 'TND') RETURNING id INTO other;
+  INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency) VALUES ('refund_discrepancy', r2, gen_random_uuid(), pay2, 100, 'TND') RETURNING id INTO disc2;
+  CREATE TEMP TABLE do74_fx AS SELECT cid AS id, pay AS "paymentId", pay2, cap, r1, r2, disc, other, disc2;
+END $$;
+SELECT pg_temp.assert_eq('DO-74', 'a case and its evidence commit together; the capture is derived from Billing''s own relay',
+  (SELECT ("captureFactId" = (SELECT cap FROM do74_fx) AND "recordedAt" IS NOT NULL)::text FROM reconciliation_observation_evidence WHERE "caseId" = (SELECT id FROM do74_fx)), 'true');
+SELECT pg_temp.expect_error('DO-74', 'one case per observing attempt (stable identity across notifications and passes)', $$INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId")
+  SELECT 'refund_observation_conflict', r1, gen_random_uuid(), "paymentId" FROM do74_fx$$, '23505', 'reconciliation_case_once');
+SELECT pg_temp.expect_error('DO-74', 'one evidence row per case', $$INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId")
+  SELECT id, "paymentId", r1, gen_random_uuid() FROM do74_fx$$, '23505');
+SELECT pg_temp.expect_error('DO-74', 'observation evidence belongs to an existing observation-conflict case', $$INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId")
+  SELECT gen_random_uuid(), "paymentId", r1, gen_random_uuid() FROM do74_fx$$, '23514', 'reconciliation_observation_evidence_case');
+SELECT pg_temp.expect_error('DO-74', 'the evidence names exactly its case''s observing attempt', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId") SELECT 'refund_observation_conflict', gen_random_uuid(), gen_random_uuid(), "paymentId" FROM do74_fx RETURNING id, "paymentId")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") SELECT c.id, c."paymentId", f.r1, gen_random_uuid() FROM c, do74_fx f$$,
+  '23514', 'reconciliation_observation_evidence_case');
+SELECT pg_temp.expect_error('DO-74', 'the evidence names exactly its case''s payment', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId") SELECT 'refund_observation_conflict', gen_random_uuid(), gen_random_uuid(), "paymentId" FROM do74_fx RETURNING id, "evidenceKey")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") SELECT id, gen_random_uuid(), "evidenceKey", gen_random_uuid() FROM c$$,
+  '23514', 'reconciliation_observation_evidence_case');
+SELECT pg_temp.expect_error('DO-74', 'the observing attempt must be one of Billing''s own relays (the guard, before the foreign key)', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId") SELECT 'refund_observation_conflict', gen_random_uuid(), gen_random_uuid(), "paymentId" FROM do74_fx RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") SELECT id, "paymentId", "evidenceKey", gen_random_uuid() FROM c$$,
+  '23514', 'reconciliation_observation_evidence_attempt');
+SELECT pg_temp.assert_eq('DO-74', 'the observing attempt is also a foreign key to Billing''s relays',
+  (SELECT (pg_get_constraintdef(oid) LIKE 'FOREIGN KEY ("refundAttemptId") REFERENCES refund_authorization_relay(id)%')::text FROM pg_constraint
+    WHERE conrelid = 'reconciliation_observation_evidence'::regclass AND contype = 'f' AND pg_get_constraintdef(oid) LIKE '%refundAttemptId%'), 'true');
+SELECT pg_temp.expect_error('DO-74', 'the observing attempt cannot be a relay of another payment', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId") SELECT 'refund_observation_conflict', r2, gen_random_uuid(), "paymentId" FROM do74_fx RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") SELECT id, "paymentId", "evidenceKey", gen_random_uuid() FROM c$$,
+  '23514', 'reconciliation_observation_evidence_attempt');
+SELECT pg_temp.expect_error('DO-74', 'the capture is derived, never supplied', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId") SELECT 'refund_observation_conflict', r2, gen_random_uuid(), pay2 FROM do74_fx RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId", "captureFactId") SELECT id, "paymentId", "evidenceKey", gen_random_uuid(), gen_random_uuid() FROM c$$,
+  '23514', 'reconciliation_observation_evidence_supplied');
+SELECT pg_temp.expect_error('DO-74', 'the case cannot name another capture than its relay', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", "captureFactId") SELECT 'refund_observation_conflict', r2, gen_random_uuid(), pay2, gen_random_uuid() FROM do74_fx RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") SELECT id, "paymentId", "evidenceKey", gen_random_uuid() FROM c$$,
+  '23514', 'reconciliation_observation_evidence_capture');
+SELECT pg_temp.expect_error('DO-74', 'evidence cannot belong to a case of another type (a refund contest)', $$
+  WITH c AS (INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "paymentId", amount, currency, detail) SELECT 'refund_fact_contested', r2, gen_random_uuid(), pay2, 100, 'TND', 'contested_unallocated' FROM do74_fx RETURNING id, "evidenceKey", "paymentId")
+  INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") SELECT id, "paymentId", "evidenceKey", gen_random_uuid() FROM c$$,
+  '23514', 'reconciliation_observation_evidence_case');
+SELECT pg_temp.expect_error('DO-74', 'observation evidence is append-only (update)', $$UPDATE reconciliation_observation_evidence SET "observationId" = gen_random_uuid()$$, '23514');
+SELECT pg_temp.expect_error('DO-74', 'observation evidence is append-only (delete)', $$DELETE FROM reconciliation_observation_evidence$$, '23514');
+SELECT pg_temp.expect_error('DO-74', 'observation evidence is append-only (truncate)', $$TRUNCATE reconciliation_observation_evidence$$, '23514');
+SELECT pg_temp.expect_error('DO-74', 'the case itself is append-only', $$UPDATE reconciliation_case SET "captureFactId" = NULL WHERE id = (SELECT id FROM do74_fx)$$, '23514');
+SELECT pg_temp.expect_error('DO-74', 'interim fail-closed: never acknowledged by direct SQL (any reason)', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, reason, "resolvedByUserId")
+  SELECT id, 'acknowledged', 'provider_statement_reviewed', gen_random_uuid() FROM do74_fx$$, '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('DO-74', 'interim fail-closed: never resolved as a completed refund', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, "refundCaseId")
+  SELECT id, 'refund_completed', gen_random_uuid() FROM do74_fx$$, '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('DO-74', 'interim fail-closed: never resolved as a recognized loss', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, "lossId")
+  SELECT id, 'loss_recognized', gen_random_uuid() FROM do74_fx$$, '23514', 'reconciliation_case_resolution_evidence');
+SELECT pg_temp.expect_error('DO-74', 'no financial effect cannot be stated on the observing attempt''s discrepancy (direct SQL)', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, reason, "resolvedByUserId")
+  SELECT disc, 'acknowledged', 'reviewed_no_financial_effect', gen_random_uuid() FROM do74_fx$$, '23514', 'reconciliation_case_contest_acknowledgement');
+SELECT pg_temp.expect_error('DO-74', 'a duplicate cannot be stated on the observing attempt''s own discrepancy (the R1 defect, direct SQL)', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, reason, "resolvedByUserId")
+  SELECT disc, 'acknowledged', 'duplicate_evidence_reviewed', gen_random_uuid() FROM do74_fx$$, '23514', 'reconciliation_case_contest_acknowledgement');
+SELECT pg_temp.assert_eq('DO-74', 'the service calls the same rule: it refuses both reasons and allows a reviewed provider statement',
+  (SELECT (billing_acknowledgement_refused_by_contest(disc, 'reviewed_no_financial_effect') AND billing_acknowledgement_refused_by_contest(disc, 'duplicate_evidence_reviewed')
+     AND NOT billing_acknowledgement_refused_by_contest(disc, 'provider_statement_reviewed'))::text FROM do74_fx), 'true');
+SELECT pg_temp.assert_eq('DO-74', 'scope: another capture''s review on the same payment and another payment''s discrepancy are not contested by it',
+  (SELECT (NOT billing_acknowledgement_refused_by_contest(other, 'reviewed_no_financial_effect') AND NOT billing_acknowledgement_refused_by_contest(disc2, 'duplicate_evidence_reviewed')
+     AND NOT billing_acknowledgement_refused_by_contest(disc2, 'reviewed_no_financial_effect'))::text FROM do74_fx), 'true');
+SELECT pg_temp.expect_ok('DO-74', 'a reviewed provider statement on the observing attempt''s discrepancy stays available', $$INSERT INTO reconciliation_case_resolution ("caseId", kind, reason, "resolvedByUserId")
+  SELECT disc, 'acknowledged', 'provider_statement_reviewed', gen_random_uuid() FROM do74_fx$$);
+SELECT pg_temp.assert_eq('DO-74', 'the contest rule keeps S0-C15B''s clauses and adds the observation evidence; never a provider statement',
+  (SELECT (prosrc LIKE '%billing_case_movement_contested(p_case)%' AND prosrc LIKE '%reconciliation_contest_evidence%' AND prosrc LIKE '%reconciliation_observation_evidence%'
+     AND prosrc NOT LIKE '%provider_statement_reviewed%')::text FROM pg_proc WHERE proname = 'billing_acknowledgement_refused_by_contest'), 'true');
+SELECT pg_temp.assert_eq('DO-74', 'the contested movement keeps S0-C15B''s two types and adds the observation conflict',
+  (SELECT (prosrc LIKE '%''refund_fact_contested'', ''dispute_conflict_observed'', ''refund_observation_conflict''%')::text FROM pg_proc WHERE proname = 'billing_case_movement_contested'), 'true');
+SELECT pg_temp.assert_eq('DO-74', 'interim fail-closed: the new type is in no resolution branch and no resolution kind is added',
+  (SELECT (prosrc NOT LIKE '%refund_observation_conflict%')::text FROM pg_proc WHERE proname = 'billing_reconciliation_resolution_guard')
+   || (SELECT (pg_get_constraintdef(oid) NOT LIKE '%observation%')::text FROM pg_constraint WHERE conname = 'reconciliation_case_resolution_kind'), 'truetrue');
+SELECT pg_temp.assert_eq('DO-74', 'no financial rule reads an observation conflict: the freeze, restrictions, overlap, exposure, waiting and cancellation checks are unchanged',
+  (SELECT count(*)::text FROM pg_proc WHERE proname IN ('billing_recovery_obligation_frozen', 'billing_assistance_restrictions', 'billing_loss_overlap', 'billing_loss_refund_live',
+     'billing_loss_unresolved_exposure', 'billing_case_movement_exposed', 'billing_loss_effect_applied', 'billing_loss_completed_refund', 'billing_refund_case_cancel_guard',
+     'billing_case_movement_unallocated', 'billing_case_movement_overlap') AND prosrc LIKE '%observation%'), '0');
+SELECT pg_temp.assert_eq('DO-74', 'observation evidence is append-only and its existence is checked at commit (deferred)',
+  (SELECT (count(*) FILTER (WHERE tgname IN ('reconciliation_observation_evidence_10_append_only', 'reconciliation_observation_evidence_11_no_truncate')) = 2
+     AND bool_or(tgname = 'reconciliation_case_09_observation_evidence' AND tgdeferrable AND tginitdeferred))::text
+     FROM pg_trigger WHERE tgname LIKE 'reconciliation_%'), 'true');
+SELECT pg_temp.assert_eq('DO-74', 'the evidence holds nothing of the contradicted fact (no fact id, figure or provider reference column)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'reconciliation_observation_evidence' AND column_name ~* '(fact|amount|currency|provider|txn)' AND column_name <> 'captureFactId'), '0');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

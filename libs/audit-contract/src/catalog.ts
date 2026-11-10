@@ -671,7 +671,8 @@ const SPEC = {
         'chargeback_refund_exposure', // Core V2 S0-C15A item 4 (BIL-33 N): a verified chargeback beside unresolved refund evidence
         'refund_fact_contested', // Core V2 S0-C15B (BIL-33 O): a verified refund fact a provider observation contradicts (interim: never acknowledged)
         'dispute_conflict_observed', // Core V2 S0-C15B (BIL-33 O): a preserved dispute conflict of the payment, redacted (interim: never acknowledged)
-        'refund_fact_unallocated'] }, // Core V2 DO-73 (BIL-33 P): a verified refund fact Payment could not allocate (interim: never acknowledged)
+        'refund_fact_unallocated', // Core V2 DO-73 (BIL-33 P): a verified refund fact Payment could not allocate (interim: never acknowledged)
+        'refund_observation_conflict'] }, // Core V2 DO-74 (BIL-33 Q): a refund attempt's own observation contradicting a fact not of its payment (no figures; interim: never acknowledged)
       evidence_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: false, min: 1, max: 9007199254740991 },
     },

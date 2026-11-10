@@ -114,7 +114,16 @@ export interface PaymentRefunds {
    * (a non-producer view, or a Payment older than S6c): the answer then proves nothing about refund evidence, and callers fail closed.
    */
   unallocatedFacts: UnallocatedRefundFact[] | null;
+  /**
+   * Core V2 DO-74 (observer side): per refund attempt of this payment, its own observations that contradict a refund fact which is not this payment's.
+   * `null` when Payment's answer does not carry the field (a non-producer view, or a Payment older than DO-74): it proves nothing. `'malformed'` when it is
+   * present but unusable: also proves nothing, and only this field is discarded (S0-C14 and every other reader keep the rest of the answer unchanged).
+   */
+  observationConflicts?: ObservationConflict[] | 'malformed' | null;
 }
+
+/** Core V2 DO-74: the observing payment's own rows only: its attempt, its own conflict (observation) ids and their count. Nothing of the fact. */
+export interface ObservationConflict { refundAttemptId: string; conflictIds: string[]; observations: number }
 
 /** Core V2 S0-C11 item 7c (PAY-16): a payment's settling capture, as Payment's committed records state it. */
 export interface SettlingCapture { paymentId: string; attemptId: string; factId: string; amount: number; currency: string; conflicted: boolean }
@@ -266,6 +275,27 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
           ...(blockedReason !== undefined ? { blockedReason } : {}) };
       });
     }
-    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations, unallocatedFacts };
+    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations, unallocatedFacts, observationConflicts: parseObservationConflicts(r.body.observationConflicts) };
   }
+}
+
+/**
+ * Core V2 DO-74: Payment's `observationConflicts`, parsed on its own. Absent: `null`. Anything malformed (a non-array, a non-UUID id, an empty or
+ * duplicated id list, a count that is not the list's length) is `'malformed'` and never throws: a bad DO-74 field cannot turn the rest of PAY-08 (S0-C14's
+ * evidence) into an unavailable answer.
+ */
+export function parseObservationConflicts(raw: unknown): ObservationConflict[] | 'malformed' | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return 'malformed';
+  const out: ObservationConflict[] = [];
+  const attempts = new Set<string>();
+  for (const e of raw as Record<string, unknown>[]) {
+    if (!e || typeof e !== 'object' || typeof e.refundAttemptId !== 'string' || !UUID.test(e.refundAttemptId) || attempts.has(e.refundAttemptId)) return 'malformed';
+    if (!Array.isArray(e.conflictIds) || e.conflictIds.length < 1 || !e.conflictIds.every((x) => typeof x === 'string' && UUID.test(x))) return 'malformed';
+    const ids = e.conflictIds as string[];
+    if (new Set(ids).size !== ids.length || e.observations !== ids.length) return 'malformed';
+    attempts.add(e.refundAttemptId);
+    out.push({ refundAttemptId: e.refundAttemptId, conflictIds: ids, observations: ids.length });
+  }
+  return out;
 }

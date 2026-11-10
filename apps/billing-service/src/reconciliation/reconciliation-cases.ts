@@ -17,7 +17,9 @@ export const CASE_TYPES = ['late_assisted_settlement', 'recovery_surplus', 'late
   'refund_fact_contested', // a verified refund fact a provider observation contradicts (DO-57)
   'dispute_conflict_observed', // a preserved dispute conflict of the payment, redacted (DO-56)
   // Core V2 DO-73 (BIL-33 P). INTERIM FAIL-CLOSED, as S0-C15B's: a verified refund fact Payment could not allocate (currency_mismatch, no_authorization)
-  'refund_fact_unallocated'] as const;
+  'refund_fact_unallocated',
+  // Core V2 DO-74 (BIL-33 Q). INTERIM FAIL-CLOSED, as S0-C15B's: a refund attempt's own observation contradicting a refund fact not of its payment; no figures
+  'refund_observation_conflict'] as const;
 export type CaseType = (typeof CASE_TYPES)[number];
 /** R6H-2: the ONLY types the Owner may acknowledge: their evidence moves no money Billing could act on; every other type needs its evidence. */
 export const REVIEW_ONLY: readonly CaseType[] = ['refund_discrepancy', 'partial_chargeback', 'second_reversal_cause'];
