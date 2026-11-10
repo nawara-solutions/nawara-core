@@ -120,6 +120,19 @@ export interface PaymentRefunds {
    * present but unusable: also proves nothing, and only this field is discarded (S0-C14 and every other reader keep the rest of the answer unchanged).
    */
   observationConflicts?: ObservationConflict[] | 'malformed' | null;
+  /**
+   * Core V2 R3 (PAY-08 I): per FAILED refund attempt of this payment, what Payment can state about refund evidence left after the failure. `null` when
+   * absent (a non-producer view, or a Payment older than R3), `'malformed'` when present but unusable: both prove nothing, and S0-C14 treats a failed attempt
+   * of the movement as not clean. Parsed on its own: a bad field never turns the rest of the answer unavailable.
+   */
+  failedAttemptEvidence?: FailedAttemptEvidence[] | 'malformed' | null;
+}
+
+export const FAILED_ATTEMPT_EVIDENCE_STATES = ['unmatched_fact', 'notification_pending', 'none', 'unknown'] as const;
+export type FailedAttemptEvidenceState = (typeof FAILED_ATTEMPT_EVIDENCE_STATES)[number];
+export interface FailedAttemptEvidence {
+  refundAttemptId: string;
+  state: FailedAttemptEvidenceState;
 }
 
 /** Core V2 DO-74: the observing payment's own rows only: its attempt, its own conflict (observation) ids and their count. Nothing of the fact. */
@@ -275,7 +288,8 @@ export class HttpPaymentRefundClient implements PaymentRefundClient {
           ...(blockedReason !== undefined ? { blockedReason } : {}) };
       });
     }
-    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations, unallocatedFacts, observationConflicts: parseObservationConflicts(r.body.observationConflicts) };
+    return { attempts: attempts as RefundAttemptSnapshot[], refusals, authorizations, unallocatedFacts, observationConflicts: parseObservationConflicts(r.body.observationConflicts),
+      failedAttemptEvidence: parseFailedAttemptEvidence(r.body.failedAttemptEvidence) };
   }
 }
 
@@ -296,6 +310,24 @@ export function parseObservationConflicts(raw: unknown): ObservationConflict[] |
     if (new Set(ids).size !== ids.length || e.observations !== ids.length) return 'malformed';
     attempts.add(e.refundAttemptId);
     out.push({ refundAttemptId: e.refundAttemptId, conflictIds: ids, observations: ids.length });
+  }
+  return out;
+}
+
+/**
+ * Core V2 R3: Payment's `failedAttemptEvidence`, parsed on its own. Absent: `null`. Anything malformed (a non-array, a non-UUID or repeated attempt, a state
+ * outside the four) is `'malformed'` and never throws.
+ */
+export function parseFailedAttemptEvidence(raw: unknown): FailedAttemptEvidence[] | 'malformed' | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return 'malformed';
+  const out: FailedAttemptEvidence[] = [];
+  const seen = new Set<string>();
+  for (const e of raw as Record<string, unknown>[]) {
+    if (!e || typeof e !== 'object' || typeof e.refundAttemptId !== 'string' || !UUID.test(e.refundAttemptId) || seen.has(e.refundAttemptId)) return 'malformed';
+    if (!(FAILED_ATTEMPT_EVIDENCE_STATES as readonly unknown[]).includes(e.state)) return 'malformed';
+    seen.add(e.refundAttemptId);
+    out.push({ refundAttemptId: e.refundAttemptId, state: e.state as FailedAttemptEvidenceState });
   }
   return out;
 }

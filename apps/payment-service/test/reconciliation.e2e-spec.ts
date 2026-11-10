@@ -746,4 +746,146 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       for (const e of v) expect(e.conflictIds).toHaveLength(1);
     });
   });
+
+  describe('Core V2 R3 (PAY-08 I): failedAttemptEvidence, the refund evidence left after a FAILED attempt\'s own provider refund reference', () => {
+    const refundOf = async (o: { fail?: boolean } = {}) => {
+      const { payment } = await captured({ seller: { type: 'company', id: COMPANY } });
+      const caseId = randomUUID();
+      const r = auth.issue({ ...refundBinding(payment.id, caseId), companyId: COMPANY }, OWNER);
+      const res = await request(server()).post(`/payment/payments/${payment.id}/refunds`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key())
+        .send({ refundAttemptId: randomUUID(), refundCaseId: caseId, amount: 9000, currency: 'TND', reason: 'customer_request', legalOverride: false, receiptSecret: r.secret });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      const attemptId = res.body.refundAttemptId as string;
+      await drainRefunds();
+      if (o.fail ?? true) await sim(`refunds/${attemptId}/outcomes`, { commandId: cmd(), outcome: 'failed', failureCode: 'card_closed' }).expect(201);
+      const ref = (await one(`SELECT "providerRefundId" FROM refund_attempt WHERE id = $1`, [attemptId])).providerRefundId as string;
+      return { payment, attemptId, ref };
+    };
+    const pay08 = async (pid: string) => (await request(server()).get(`/payment/payments/${pid}/refunds`).set('authorization', `Bearer ${billing.token}`).expect(200)).body;
+    const stateOf = async (pid: string, attemptId: string) => ((await pay08(pid)).failedAttemptEvidence as { refundAttemptId: string; state: string }[]).find((e) => e.refundAttemptId === attemptId)?.state;
+    const notice = (txn: string, o: { amount?: unknown; reference?: string; eventId?: string } = {}) =>
+      ({ eventId: o.eventId ?? `r3_${randomUUID()}`, type: 'refund.succeeded', reference: o.reference ?? randomUUID(), providerTransactionId: txn, amount: o.amount ?? 9000, currency: 'TND' });
+    const indexOf = async (eventId: string) => one(`SELECT "evidenceIndex", "providerTransactionId", "rawBody" FROM webhook_event WHERE "providerEventId" = $1`, [eventId]);
+    const pendingRefundRows = () => count(`SELECT count(*) AS n FROM webhook_event WHERE "eventType" = 'refund.succeeded' AND "evidenceIndex" = 'pending'`);
+
+    it('a failed attempt with nothing after it is `none`; only failed attempts are listed; only the producer sees the field; nothing else crosses', async () => {
+      const r = await refundOf();
+      const live = await refundOf({ fail: false });
+      const body = await pay08(r.payment.id);
+      expect(body.failedAttemptEvidence).toEqual([{ refundAttemptId: r.attemptId, state: 'none' }]);
+      expect((await pay08(live.payment.id)).failedAttemptEvidence).toEqual([]); // a submitted attempt is not listed
+      // the payer reads PAY-08 too (200), never the producer's field
+      const payer = await request(server()).get(`/payment/payments/${r.payment.id}/refunds`).set('authorization', 'Bearer buyer-jwt');
+      expect(payer.status, JSON.stringify(payer.body)).toBe(200);
+      expect(payer.body.attempts).toHaveLength(1);
+      expect(payer.body.failedAttemptEvidence).toBeUndefined();
+      expect((await request(server()).get(`/payment/payments/${r.payment.id}/refunds`).set('authorization', `Bearer ${other.token}`)).body.failedAttemptEvidence).toBeUndefined();
+    });
+
+    it('R3: an unmatched refund under the failed attempt\'s own reference is `unmatched_fact`; the field never carries the fact, its id, figures or reference', async () => {
+      const r = await refundOf();
+      const { fact } = await unmatched({ type: 'refund.succeeded', amount: 9000, txn: r.ref });
+      expect(fact.paymentId).toBeNull();
+      const body = await pay08(r.payment.id);
+      expect(body.failedAttemptEvidence).toEqual([{ refundAttemptId: r.attemptId, state: 'unmatched_fact' }]);
+      for (const leak of [fact.id, r.ref]) expect(JSON.stringify(body.failedAttemptEvidence), leak).not.toContain(leak);
+      expect(body.unallocatedFacts).toEqual([]); // the fact is still not this payment's: nothing is associated or allocated
+      expect(await count(`SELECT count(*) AS n FROM provider_fact_association WHERE "factId" = $1`, [fact.id])).toBe(0);
+    });
+
+    it('grace window, replay and contradiction: a signed notification not yet a fact is `notification_pending`; then `unmatched_fact`; replays and a contradicting amount change nothing', async () => {
+      const r = await refundOf();
+      const n1 = notice(r.ref);
+      await signed(n1).expect(200);
+      expect(await indexOf(n1.eventId)).toMatchObject({ evidenceIndex: 'reference', providerTransactionId: r.ref });
+      expect(await count(`SELECT count(*) AS n FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [r.ref])).toBe(0);
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('notification_pending');
+      await ageWebhook(n1.eventId, UNMATCHED_FACT_GRACE_MS / 1000 + 1);
+      await signed(n1).expect(200); // the retrier's redelivery: now the unmatched fact
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('unmatched_fact');
+      await signed(n1).expect(200); // replay of the same notification
+      const n2 = notice(r.ref, { amount: 4000 }); // the same refund, another notification, another amount
+      await signed(n2).expect(200);
+      expect(await count(`SELECT count(*) AS n FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [r.ref])).toBe(1);
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('unmatched_fact');
+    });
+
+    it('a signed notification naming the reference with an unusable amount makes the attempt `unknown` (fail-closed), never `none`', async () => {
+      const r = await refundOf();
+      const bad = notice(r.ref, { amount: 'ninety' });
+      await signed(bad).expect(200);
+      expect(await indexOf(bad.eventId)).toMatchObject({ evidenceIndex: 'reference_malformed', providerTransactionId: r.ref });
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('unknown');
+    });
+
+    it('B-1 option A: unparseable signed evidence, or a refund with no transaction reference, is kept as received and attributed to nobody; other attempts stay `none`', async () => {
+      const r = await refundOf();
+      const raw = `{"not":"a notification","n":"${randomUUID()}"}`; // valid JSON, signed, but no notification the adapter can read
+      const status = (await request(server()).post('/payment/webhooks/simulation').set('content-type', 'application/json')
+        .set('x-simulation-signature', createHmac('sha256', SECRET).update(raw).digest('hex')).send(raw)).status;
+      expect(status).toBe(200);
+      const unparseable = await one(`SELECT "evidenceIndex", "providerTransactionId", "rawBody" FROM webhook_event WHERE "rawBody" = $1`, [Buffer.from(raw)]);
+      expect(unparseable).toMatchObject({ evidenceIndex: 'unparseable', providerTransactionId: null });
+      expect(Buffer.from(unparseable.rawBody).toString()).toBe(raw); // the signed evidence, exactly as received
+      const noRef = { eventId: `r3_${randomUUID()}`, type: 'refund.succeeded', reference: randomUUID(), amount: 9000, currency: 'TND' };
+      await signed(noRef).expect(200);
+      expect(await indexOf(noRef.eventId)).toMatchObject({ evidenceIndex: 'no_reference', providerTransactionId: null });
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('none'); // no provider-wide hold
+    });
+
+    it('the index is written once and the signed evidence never changes (database guard)', async () => {
+      const r = await refundOf();
+      const n1 = notice(r.ref);
+      await signed(n1).expect(200);
+      await expect(admin.query(`UPDATE webhook_event SET "evidenceIndex" = 'no_reference', "providerTransactionId" = NULL WHERE "providerEventId" = $1`, [n1.eventId]))
+        .rejects.toMatchObject({ constraint: 'webhook_event_evidence_index_once' });
+      await expect(admin.query(`UPDATE webhook_event SET "evidenceIndex" = 'pending', "providerTransactionId" = NULL WHERE "providerEventId" = $1`, [n1.eventId]))
+        .rejects.toMatchObject({ constraint: 'webhook_event_evidence_index_once' });
+      await expect(admin.query(`UPDATE webhook_event SET "rawBody" = 'x' WHERE "providerEventId" = $1`, [n1.eventId])).rejects.toThrow();
+    });
+
+    it('historical backfill: any unindexed refund notification makes failed attempts `unknown`; bounded batches resume; an interrupted batch writes nothing; an unknown provider stays pending', async () => {
+      const r = await refundOf();
+      const o2 = await refundOf();
+      // LABELLED FIXTURE: notifications stored BEFORE 0028 (pending), inserted as the receipt path did then: one naming r's reference, one unparseable
+      const stored = async (body: string) => (await admin.query(`INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('simulation', $1, 'refund.succeeded', $2) RETURNING id`,
+        [`hist_${randomUUID()}`, Buffer.from(body)])).rows[0].id as string;
+      const h1 = await stored(JSON.stringify(notice(r.ref)));
+      const h2 = await stored('{"broken"');
+      const ghost = (await admin.query(`INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('ghost', $1, 'refund.succeeded', $2) RETURNING id`,
+        [`hist_${randomUUID()}`, Buffer.from('{}')])).rows[0].id as string;
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('unknown');
+      expect(await stateOf(o2.payment.id, o2.attemptId)).toBe('unknown'); // partial indexing is never absence
+      const { backfillEvidenceIndex, WebhookEvidenceBackfill } = await import('../src/webhooks/evidence-backfill.js');
+      const { DbService } = await import('@nawara/service-kit');
+      const db = t.app.get(DbService);
+      // an interruption mid-batch (the parser fails outside the row's own handling): the transaction rolls back, nothing is written
+      await expect(backfillEvidenceIndex(db, () => { throw new Error('interrupted'); }, 10)).rejects.toThrow('interrupted');
+      expect(await pendingRefundRows()).toBe(3);
+      const backfill = t.app.get(WebhookEvidenceBackfill);
+      const b1 = await backfill.batch(1);
+      expect(b1).toMatchObject({ indexed: 1 });
+      expect(await stateOf(o2.payment.id, o2.attemptId)).toBe('unknown'); // still incomplete for this provider
+      const b2 = await backfill.batch(10);
+      expect(b2.indexed + b1.indexed).toBe(2);
+      expect(b2.skipped).toBe(1); // the ghost provider's row: not parseable here, left pending
+      expect((await one(`SELECT "evidenceIndex" FROM webhook_event WHERE id = $1`, [ghost])).evidenceIndex).toBe('pending');
+      expect((await one(`SELECT "evidenceIndex", "providerTransactionId" FROM webhook_event WHERE id = $1`, [h1]))).toEqual({ evidenceIndex: 'reference', providerTransactionId: r.ref });
+      expect((await one(`SELECT "evidenceIndex" FROM webhook_event WHERE id = $1`, [h2])).evidenceIndex).toBe('unparseable');
+      expect(await stateOf(r.payment.id, r.attemptId)).toBe('notification_pending');
+      expect(await stateOf(o2.payment.id, o2.attemptId)).toBe('none');
+      expect((await backfill.batch(10)).indexed).toBe(0); // idempotent: nothing left to index here
+    });
+
+    it('a fact under the reference that is bound to ANOTHER payment makes the attempt `unknown`; that payment\'s own answer names nothing of this one', async () => {
+      const a = await refundOf();
+      const b = await refundOf({ fail: false });
+      // B's attempt reports a refund under A's failed attempt's reference: the fact is B's
+      const n = notice(a.ref, { reference: b.attemptId });
+      await signed(n).expect(200);
+      expect((await one(`SELECT "paymentId" FROM provider_transaction_fact WHERE "providerTxnId" = $1`, [a.ref])).paymentId).toBe(b.payment.id);
+      expect(await stateOf(a.payment.id, a.attemptId)).toBe('unknown');
+      expect(JSON.stringify(await pay08(b.payment.id))).not.toContain(a.attemptId);
+    });
+  });
 });

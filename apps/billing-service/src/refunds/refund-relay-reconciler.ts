@@ -3,6 +3,7 @@ import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara
 import { PAYMENT_REFUND_CLIENT, type PaymentRefundClient } from './payment-refund-client.js';
 import { RefundAuthorizationService, type RelayRow } from './refund-authorization.service.js';
 import { RefundCompletionService } from './refund-completion.service.js';
+import { recordFailureEvidence } from './refund-evidence.js';
 import { randomUUID } from 'node:crypto';
 
 const BATCH_SIZE = 50;
@@ -90,9 +91,13 @@ export class RefundRelayReconciler {
             continue;
           }
           const next = attempt ? { status: attempt.status as string, refusal: null } : { status: 'rejected', refusal: refusal!.code as string };
-          if (next.status === relay.attemptStatus) continue;
-          const after = await this.relays.mirror(relay.id, next.status, next.refusal);
-          if (after.attemptStatus !== relay.attemptStatus) changed++;
+          if (next.status !== relay.attemptStatus) {
+            const after = await this.relays.mirror(relay.id, next.status, next.refusal);
+            if (after.attemptStatus !== relay.attemptStatus) changed++;
+          }
+          // Core V2 R3: a failed relay stays in this pass's lease rotation; Payment's positive risk for it becomes its durable, append-only marker (once)
+          await recordFailureEvidence(this.db, relay.paymentId, Array.isArray(refunds?.failedAttemptEvidence)
+            ? refunds!.failedAttemptEvidence.filter((e) => e.refundAttemptId === relay.id) : null, this.logger);
         } catch (e) {
           this.logger.warn(`refund_relay_reconcile_failure relay=${relay.id} ${describeFailure(e)} — retried on a later pass`);
         }

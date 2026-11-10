@@ -59,6 +59,13 @@ export interface ProviderCapabilities {
    * separately approved value (S0-C12 item 19, B5). Anything else is answered as a retryable failure, the evidence kept.
    */
   quarantineAcknowledgement: 'simulated_received_200';
+  /**
+   * Core V2 R3: the adapter's EXPLICIT declaration that its refund ids are unique per provider id and that a verified refund notification's provider
+   * transaction id is the refund id its dispatch returned, so an exact `(provider, providerRefundId)` = `(provider, providerTxnId)` match is evidence of risk
+   * (never ownership or allocation). Absent: no matching authority; every failed attempt of the adapter reads `unknown` (fail-closed). Only the simulation
+   * adapter declares it; a real adapter never acquires it implicitly (its contract is open decision O-1).
+   */
+  refundReferenceScope?: 'provider';
 }
 
 /** Options for one attempt, opaque to payment-service and validated by the adapter (SDD section 9.1, endpoint 3). */

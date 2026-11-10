@@ -28,6 +28,7 @@ import { RefundRelayReconciler } from '../src/refunds/refund-relay-reconciler.js
 import { FinancialSafetyCheck } from '../src/refunds/financial-safety.js';
 import { RecoveryModule } from '../src/recovery/recovery.module.js';
 import { RecoveryService } from '../src/recovery/recovery.service.js';
+import { DbService } from '@nawara/service-kit';
 import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
 import { ReconciliationModule } from '../src/reconciliation/reconciliation.module.js';
 import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
@@ -72,6 +73,8 @@ const captureAsPayment = async (paymentId: string, factId: string): Promise<Capt
 
 /** Core V2 S0-C14: Payment's PAY-08 answers, per payment (a `null` answer is Payment's 404). */
 const pay08 = { answers: new Map<string, PaymentRefunds | null | 'down'>(), down: false, calls: [] as string[] };
+/** Core V2 R3: the relays Billing mirrors as failed for a payment (set once the suite's database exists). */
+let localFailedRelays: (paymentId: string) => Promise<string[]> = async () => [];
 
 /** Core V2 S6d: Payment's refund port, authorizing every relayed attempt (the S6b/S6c Payment behaviour is certified in its own suites). */
 const relayAnswer = { unknown: false, bodies: [] as Record<string, unknown>[], status: null as null | string }; // Core V2 DO-73: `status` overrides Payment's answer (an Auth-refused attempt)
@@ -85,7 +88,12 @@ const refundsAtPayment: PaymentRefundClient = {
   refunds: async (paymentId) => {
     const a = pay08.answers.get(paymentId);
     if (pay08.down || a === 'down') throw new Error('payment unavailable');
-    return a === undefined ? { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] } : a;
+    if (a !== undefined) return a;
+    // Core V2 R3: the default is a Payment that checked every failed attempt of the payment and found no refund evidence after its failure (`none`); the
+    // relays Billing mirrors as failed are listed as Payment's failed attempts, as a current Payment answers
+    const failed = await localFailedRelays(paymentId);
+    return { attempts: failed.map((id) => ({ refundAttemptId: id, status: 'failed' as const, approvedBy: null })), refusals: [], authorizations: [], unallocatedFacts: [],
+      failedAttemptEvidence: failed.map((id) => ({ refundAttemptId: id, state: 'none' as const })) };
   },
   capture: async (paymentId, factId) => {
     captureAt.calls.push([paymentId, factId]);
@@ -301,6 +309,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
     db = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'billings6f');
     await runMigrations(db.url, [kitMigrationsDir, billingMigrationsDir]);
     admin = new pg.Pool({ connectionString: db.url, max: 12 });
+    localFailedRelays = async (paymentId) => (await admin.query(`SELECT id FROM refund_authorization_relay WHERE "paymentId" = $1 AND "attemptStatus" = 'failed' ORDER BY id`, [paymentId])).rows.map((r) => r.id as string);
     await admin.query(`INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, $2, 'TND', $3)`, [PLATFORM, COMPANY, randomUUID()]);
     delegation = (await admin.query(`INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES ($1, $2, $3) RETURNING id`, [PLATFORM, operator, randomUUID()])).rows[0].id;
     await setCap(5000);
@@ -1991,7 +2000,9 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
     };
     /** Payment states the attempt's status (PAY-08) and the real relay reconciler mirrors it. */
     const atPayment = async (paymentId: string, attemptId: string, status: 'failed' | 'succeeded' | 'authorized' | 'unknown' | 'discrepancy') => {
-      pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status, approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [] });
+      // Core V2 R3: a current Payment states, for a failed attempt, that it found no refund evidence after the failure (`none`)
+      pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status, approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [],
+        failedAttemptEvidence: status === 'failed' ? [{ refundAttemptId: attemptId, state: 'none' }] : [] });
       await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]); // LABELLED TEST AID: the reconciler's lease, not a status
       await relayReconciler().reconcileOnce();
       return (await one(`SELECT "attemptStatus" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).attemptStatus as string;
@@ -2123,9 +2134,18 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       await relayed(p.paymentId);
       const disputeId = await lose(p.paymentId, p.amount);
       const a = await one(`SELECT s."assistanceRequestId", a."platformId", a."baseAmount", a.currency FROM subscription_purchase s JOIN assistance_request a ON a.id = s."assistanceRequestId" WHERE s.id = $1`, [p.purchaseId]);
-      await expect(admin.query(`INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [disputeId, a.assistanceRequestId, p.purchaseId, ORG, COMPANY, a.platformId, a.baseAmount, a.currency]))
-        .rejects.toMatchObject({ constraint: 'recovery_obligation_refund_live' });
+      // Core V2 R3: WITH this transaction's attestation of a clean read, so the refusal can only be S0-C14's own local check (the live relay)
+      const cl = await admin.connect();
+      try {
+        await cl.query('BEGIN');
+        await cl.query(`INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES ($1, 'recovery_obligation', '{}', now())`, [disputeId]);
+        await expect(cl.query(`INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [disputeId, a.assistanceRequestId, p.purchaseId, ORG, COMPANY, a.platformId, a.baseAmount, a.currency]))
+          .rejects.toMatchObject({ constraint: 'recovery_obligation_refund_live', message: expect.stringContaining('is live or completed (S0-C14') });
+      } finally {
+        await cl.query('ROLLBACK');
+        cl.release();
+      }
     });
 
     it('DO-50 / V2: a direct purchase lost while its refund is live: reversal as adopted, the write-off WAITS; the refund completes: no write-off ever, overlap case; acknowledging no financial effect is refused (V16)', async () => {
@@ -3349,6 +3369,307 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         await reconciliation().drainOnce();
         expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1`, [paymentId])).toBe(0);
         expect(await count(`SELECT count(*) AS n FROM reconciliation_observation_evidence WHERE "paymentId" = $1`, [paymentId])).toBe(0);
+      });
+    });
+    describe('Core V2 R3: credible refund evidence after a FAILED attempt holds the loss\'s automatic effect (markers, attestations, both effect paths)', () => {
+      /** Payment's PAY-08 answer for a failed attempt: its state after the failure (`absent`: an older Payment; `malformed`: an unusable field). */
+      const evidenceAt = (paymentId: string, attemptId: string, state: 'unmatched_fact' | 'notification_pending' | 'none' | 'unknown' | 'absent' | 'malformed') => {
+        pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status: 'failed', approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [],
+          ...(state === 'absent' ? {} : { failedAttemptEvidence: state === 'malformed' ? 'malformed' : [{ refundAttemptId: attemptId, state }] }) } as PaymentRefunds);
+      };
+      const failedRelay = async (paymentId: string) => {
+        const r = await relayed(paymentId);
+        expect(await atPayment(paymentId, r.attemptId, 'failed')).toBe('failed');
+        return r;
+      };
+      const markerOf = (relayId: string) => one(`SELECT "firstState", "paymentId" FROM refund_relay_failure_evidence WHERE "relayId" = $1`, [relayId]);
+      const exposureCase = (disputeId: string) => one(`SELECT c.id, c.detail FROM reconciliation_case c WHERE c."caseType" = 'chargeback_refund_exposure' AND c."evidenceKey" = $1`, [disputeId]);
+      const moneyOf = async (paymentId: string, disputeId: string) => ({
+        losses: (await admin.query(`SELECT id, kind, amount FROM financial_loss WHERE "disputeId" = $1 OR "paymentId" = $2 ORDER BY id`, [disputeId, paymentId])).rows,
+        obligations: (await admin.query(`SELECT id, status, "baseAmount" FROM recovery_obligation WHERE "disputeId" = $1 ORDER BY id`, [disputeId])).rows,
+        effects: (await admin.query(`SELECT outcome FROM dispute_loss_effect WHERE "disputeId" = $1`, [disputeId])).rows,
+        relays: (await admin.query(`SELECT id, "attemptStatus" FROM refund_authorization_relay WHERE "paymentId" = $1 ORDER BY id`, [paymentId])).rows,
+      });
+      /** The obligation insert the recovery worker makes, for a direct SQL attempt. */
+      const obligationSql = async (p: { purchaseId: string }, disputeId: string) => {
+        const a = await one(`SELECT s."assistanceRequestId", a."platformId", a."baseAmount", a.currency FROM subscription_purchase s JOIN assistance_request a ON a.id = s."assistanceRequestId" WHERE s.id = $1`, [p.purchaseId]);
+        return { sql: `INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          params: [disputeId, a.assistanceRequestId, p.purchaseId, ORG, COMPANY, a.platformId, a.baseAmount, a.currency] };
+      };
+      const attestSql = `INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES ($1, $2, $3, now())`;
+      /** A session of a non-superuser runtime role (DML only, not the owner), as billing_app. */
+      const asApp = async () => {
+        await admin.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'r3_app_test') THEN CREATE ROLE r3_app_test NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF; END $$`);
+        await admin.query(`GRANT USAGE ON SCHEMA public TO r3_app_test; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO r3_app_test`);
+        const c = await admin.connect();
+        await c.query('SET ROLE r3_app_test');
+        return c;
+      };
+      const tx = async <T>(c: pg.PoolClient, f: () => Promise<T>) => {
+        await c.query('BEGIN');
+        try {
+          const v = await f();
+          await c.query('COMMIT');
+          return v;
+        } catch (e) {
+          await c.query('ROLLBACK');
+          throw e;
+        }
+      };
+      const waiters = () => count(`SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple')`);
+      const waitFor = async (cond: () => Promise<boolean>, ms: number) => {
+        const end = Date.now() + ms;
+        while (!(await cond())) {
+          if (Date.now() > end) throw new Error('condition not reached');
+          await new Promise((res) => setTimeout(res, 25));
+        }
+      };
+
+      it('R3 direct: an unmatched refund under the failed attempt\'s reference holds the write-off; the marker, the waiting case and the exposure case are recorded; the reversal stands', async () => {
+        const p = await directPurchase();
+        const r = await failedRelay(p.paymentId);
+        evidenceAt(p.paymentId, r.attemptId, 'unmatched_fact');
+        const disputeId = await loseAny(p.paymentId, p.amount);
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        const m = await moneyOf(p.paymentId, disputeId);
+        expect(m.losses).toEqual([]);
+        expect(m.effects).toEqual([{ outcome: 'reversed_purchase' }]); // S6d's purchase effect is not R3's to hold
+        expect(await waitingCase(disputeId)).toMatchObject({ detail: 'refund_evidence_after_failure', kind: null });
+        expect(await markerOf(r.attemptId)).toEqual({ firstState: 'unmatched_fact', paymentId: p.paymentId });
+        expect(await exposureCase(disputeId)).toBeTruthy();
+        expect(await count(`SELECT count(*) AS n FROM loss_effect_attestation WHERE "disputeId" = $1`, [disputeId])).toBe(0);
+      });
+
+      it('R3 assisted: a signed notification still pending holds the obligation; the marker records it once across passes', async () => {
+        const p = await assistedPaid();
+        const r = await failedRelay(p.paymentId);
+        evidenceAt(p.paymentId, r.attemptId, 'notification_pending');
+        const disputeId = await lose(p.paymentId, p.amount);
+        expect(await recovery().visit(disputeId)).toBe('waiting');
+        expect(await recovery().visit(disputeId)).toBe('waiting');
+        expect((await moneyOf(p.paymentId, disputeId)).obligations).toEqual([]);
+        expect(await markerOf(r.attemptId)).toEqual({ firstState: 'notification_pending', paymentId: p.paymentId });
+        evidenceAt(p.paymentId, r.attemptId, 'unmatched_fact'); // pending became a fact: the marker keeps its first state, nothing is added
+        await recovery().visit(disputeId);
+        expect(await count(`SELECT count(*) AS n FROM refund_relay_failure_evidence WHERE "relayId" = $1`, [r.attemptId])).toBe(1);
+        expect((await markerOf(r.attemptId))!.firstState).toBe('notification_pending');
+        evidenceAt(p.paymentId, r.attemptId, 'none'); // a later "none" never clears a marker
+        expect(await recovery().visit(disputeId)).toBe('waiting');
+        expect((await moneyOf(p.paymentId, disputeId)).obligations).toEqual([]);
+      });
+
+      it('fail-closed: unknown, absent (older Payment) and malformed evidence hold both effects and record no marker; `none` lets the effect proceed with its attestation', async () => {
+        for (const state of ['unknown', 'absent', 'malformed'] as const) {
+          const p = await assistedPaid();
+          const r = await failedRelay(p.paymentId);
+          evidenceAt(p.paymentId, r.attemptId, state);
+          const disputeId = await lose(p.paymentId, p.amount);
+          expect(await recovery().visit(disputeId), state).toBe('waiting');
+          expect(await markerOf(r.attemptId), state).toBeUndefined();
+          const d = await directPurchase();
+          const rd = await failedRelay(d.paymentId);
+          evidenceAt(d.paymentId, rd.attemptId, state);
+          const dd = await loseAny(d.paymentId, d.amount);
+          await reconciliation().drainOnce();
+          expect((await moneyOf(d.paymentId, dd)).losses, state).toEqual([]);
+          expect(await waitingCase(dd), state).toMatchObject({ detail: 'failure_evidence_unknown' });
+        }
+        const p = await assistedPaid();
+        const r = await failedRelay(p.paymentId);
+        evidenceAt(p.paymentId, r.attemptId, 'none');
+        const disputeId = await lose(p.paymentId, p.amount);
+        expect(await recovery().visit(disputeId)).toBe('opened');
+        expect(await one(`SELECT effect, "clearRelays", "clearedByRead", xact IS NOT NULL AS x FROM loss_effect_attestation WHERE "disputeId" = $1`, [disputeId]))
+          .toEqual({ effect: 'recovery_obligation', clearRelays: [r.attemptId], clearedByRead: [r.attemptId], x: true });
+      });
+
+      it('a Payment answer that OMITS a relay Billing holds as failed proves nothing about it: both effects wait (`failure_evidence_unknown`), nothing is written', async () => {
+        const p = await assistedPaid();
+        await failedRelay(p.paymentId);
+        pay08.answers.set(p.paymentId, { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [], failedAttemptEvidence: [] });
+        const disputeId = await lose(p.paymentId, p.amount);
+        expect(await recovery().visit(disputeId)).toBe('waiting');
+        await reconciliation().drainOnce();
+        expect(await waitingCase(disputeId)).toMatchObject({ detail: 'failure_evidence_unknown' });
+        const d = await directPurchase();
+        await failedRelay(d.paymentId);
+        pay08.answers.set(d.paymentId, { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [], failedAttemptEvidence: [] });
+        const dd = await loseAny(d.paymentId, d.amount);
+        await reconciliation().drainOnce();
+        expect((await moneyOf(d.paymentId, dd)).losses).toEqual([]);
+        expect(await waitingCase(dd)).toMatchObject({ detail: 'failure_evidence_unknown' });
+        expect(await count(`SELECT count(*) AS n FROM loss_effect_attestation WHERE "disputeId" IN ($1, $2)`, [disputeId, dd])).toBe(0);
+      });
+
+      it('an ABSENT read is never taken as clean: the recovery decision refuses `evidence === null` for a loss that would otherwise open an obligation', async () => {
+        const p = await assistedPaid();
+        const disputeId = await lose(p.paymentId, p.amount);
+        const f = await one(`SELECT e."purchaseId", s."assistanceRequestId", a."organizationId", a."platformId", b."companyId", a."baseAmount", a.currency, false AS refunded
+          FROM payment_dispute_loss l JOIN dispute_loss_effect e ON e."disputeId" = l."disputeId" JOIN subscription_purchase s ON s.id = e."purchaseId"
+          JOIN assistance_request a ON a.id = s."assistanceRequestId" LEFT JOIN billing_platform b ON b."platformId" = a."platformId" WHERE l."disputeId" = $1`, [disputeId]);
+        // the real decision, reached with NO read at all (LABELLED TEST AID: the private method called directly, after the capture-loss step visit performs)
+        const decide = (recovery() as unknown as { decide: (d: string, f: unknown, e: null, ctx: unknown) => Promise<string> }).decide.bind(recovery());
+        const { recordCaptureLoss } = await import('../src/refunds/dispute-loss.service.js');
+        await recordCaptureLoss(t.app.get(DbService), disputeId);
+        expect(await decide(disputeId, f, null, { actor: { type: 'system', id: 'test' }, cause: { type: 'sweep', id: disputeId }, correlationId: 'r3-null' })).toBe('waiting');
+        expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [disputeId])).toBe(0);
+      });
+
+      it('Payment unavailable holds the effect (no marker, no attestation); once Payment answers `none` the effect proceeds; a later risk is LATE evidence: the effect stands, the exposure case opens', async () => {
+        const d = await directPurchase();
+        const r = await failedRelay(d.paymentId);
+        pay08.answers.set(d.paymentId, 'down');
+        const disputeId = await loseAny(d.paymentId, d.amount);
+        await reconciliation().drainOnce();
+        expect((await moneyOf(d.paymentId, disputeId)).losses).toEqual([]);
+        expect(await waitingCase(disputeId)).toMatchObject({ detail: 'payment_unavailable' });
+        evidenceAt(d.paymentId, r.attemptId, 'none');
+        await reconciliation().drainOnce();
+        const before = await moneyOf(d.paymentId, disputeId);
+        expect(before.losses).toHaveLength(1);
+        expect(await exposureCase(disputeId)).toBeUndefined();
+        // the provider's refund surfaces after the write-off committed: the relay reconciler records the marker; the exposure case opens; nothing is rewritten
+        evidenceAt(d.paymentId, r.attemptId, 'unmatched_fact');
+        await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [r.attemptId]); // LABELLED TEST AID: the reconciler's lease
+        await relayReconciler().reconcileOnce();
+        expect(await markerOf(r.attemptId)).toMatchObject({ firstState: 'unmatched_fact' });
+        await reconciliation().drainOnce();
+        expect(await exposureCase(disputeId)).toBeTruthy();
+        expect(await moneyOf(d.paymentId, disputeId)).toEqual(before);
+      });
+
+      it('database, as a non-superuser runtime role: no, stale, foreign, other-effect, incomplete or reused attestations and an existing marker are refused; a valid one is accepted', async () => {
+        const p = await assistedPaid();
+        const r = await failedRelay(p.paymentId);
+        const disputeId = await lose(p.paymentId, p.amount);
+        const other = await assistedPaid();
+        const otherDispute = await lose(other.paymentId, other.amount);
+        const o = await obligationSql(p, disputeId);
+        const app = await asApp();
+        try {
+          const refused = async (f: () => Promise<unknown>, constraint: string, why?: string) => {
+            const e = await tx(app, async () => f()).then(() => null, (x: unknown) => x as { constraint?: string; message?: string });
+            expect(e, `${constraint} ${why ?? ''}`).toMatchObject({ constraint, ...(why ? { message: expect.stringContaining(why) } : {}) });
+          };
+          await refused(() => app.query(o.sql, o.params), 'recovery_obligation_refund_live', 'effect_not_attested'); // no attestation
+          await tx(app, () => app.query(attestSql, [disputeId, 'recovery_obligation', [r.attemptId]])); // committed in an EARLIER transaction
+          await refused(() => app.query(o.sql, o.params), 'recovery_obligation_refund_live', 'effect_not_attested');
+          await refused(async () => { await app.query(attestSql, [otherDispute, 'recovery_obligation', []]); await app.query(o.sql, o.params); }, 'recovery_obligation_refund_live', 'effect_not_attested');
+          await refused(async () => { await app.query(attestSql, [disputeId, 'direct_chargeback_write_off', [r.attemptId]]); await app.query(o.sql, o.params); }, 'recovery_obligation_refund_live', 'effect_not_attested');
+          await refused(() => app.query(attestSql, [disputeId, 'recovery_obligation', []]), 'loss_effect_attestation_relays'); // the failed relay not cleared
+          await refused(() => app.query(`INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES ($1, 'recovery_obligation', $2, now() - interval '200 seconds')`,
+            [disputeId, [r.attemptId]]), 'loss_effect_attestation_stale');
+          await refused(() => app.query(`INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES ($1, $2, 'unmatched_fact')`, [r.attemptId, other.paymentId]),
+            'refund_relay_failure_evidence_payment'); // a marker naming another payment
+          // the valid decision, as the worker makes it: attestation and effect in one transaction
+          await tx(app, async () => { await app.query(attestSql, [disputeId, 'recovery_obligation', [r.attemptId]]); await app.query(o.sql, o.params); });
+          expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [disputeId])).toBe(1);
+          // a marker on the OTHER loss's movement holds its effect even with a valid attestation
+          const r2 = await failedRelay(other.paymentId);
+          await tx(app, () => app.query(`INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES ($1, $2, 'unmatched_fact')`, [r2.attemptId, other.paymentId]));
+          const o2 = await obligationSql(other, otherDispute);
+          await refused(async () => { await app.query(attestSql, [otherDispute, 'recovery_obligation', [r2.attemptId]]); await app.query(o2.sql, o2.params); },
+            'recovery_obligation_refund_live', 'refund_evidence_after_failure');
+          for (const stmt of [`UPDATE refund_relay_failure_evidence SET "firstState" = 'notification_pending' WHERE "relayId" = '${r2.attemptId}'`,
+            `DELETE FROM refund_relay_failure_evidence WHERE "relayId" = '${r2.attemptId}'`, `UPDATE loss_effect_attestation SET "clearedByRead" = '{}'`, `DELETE FROM loss_effect_attestation`]) {
+            const e = await tx(app, () => app.query(stmt)).then(() => null, (x: unknown) => x as { code?: string });
+            expect(e?.code, stmt).toBe('23514');
+          }
+          const t1 = await tx(app, () => app.query('TRUNCATE refund_relay_failure_evidence')).then(() => null, (x: unknown) => x as { code?: string });
+          expect(t1?.code).toBe('42501');
+        } finally {
+          await app.query('RESET ROLE');
+          app.release();
+        }
+      });
+
+      it('commit order 1: a marker committed while an effect transaction waits on the relay lock refuses the effect; commit order 2: an effect committed first stands and the later marker opens the exposure case', async () => {
+        // order 1
+        const p = await assistedPaid();
+        const r = await failedRelay(p.paymentId);
+        const disputeId = await lose(p.paymentId, p.amount);
+        const o = await obligationSql(p, disputeId);
+        const marker = await admin.connect();
+        const effect = await admin.connect();
+        try {
+          await marker.query('BEGIN');
+          await marker.query(`SELECT 1 FROM refund_authorization_relay WHERE id = $1 FOR UPDATE`, [r.attemptId]);
+          await marker.query(`INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES ($1, $2, 'unmatched_fact')`, [r.attemptId, p.paymentId]);
+          await effect.query('BEGIN');
+          await effect.query(attestSql, [disputeId, 'recovery_obligation', [r.attemptId]]);
+          const pending = effect.query(o.sql, o.params).then(() => null, (e: unknown) => e as { constraint?: string; message?: string });
+          await waitFor(async () => (await waiters()) >= 1, 5_000);
+          await marker.query('COMMIT');
+          const e = await pending;
+          expect(e).toMatchObject({ constraint: 'recovery_obligation_refund_live', message: expect.stringContaining('refund_evidence_after_failure') });
+          await effect.query('ROLLBACK');
+        } finally {
+          marker.release();
+          effect.release();
+        }
+        expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [disputeId])).toBe(0);
+        // order 2
+        const q = await assistedPaid();
+        const rq = await failedRelay(q.paymentId);
+        const dq = await lose(q.paymentId, q.amount);
+        const oq = await obligationSql(q, dq);
+        const effect2 = await admin.connect();
+        const marker2 = await admin.connect();
+        try {
+          await effect2.query('BEGIN');
+          await effect2.query(attestSql, [dq, 'recovery_obligation', [rq.attemptId]]);
+          await effect2.query(oq.sql, oq.params);
+          await marker2.query('BEGIN');
+          const locked = marker2.query(`SELECT 1 FROM refund_authorization_relay WHERE id = $1 FOR UPDATE`, [rq.attemptId]);
+          await waitFor(async () => (await waiters()) >= 1, 5_000);
+          await effect2.query('COMMIT');
+          await locked;
+          await marker2.query(`INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES ($1, $2, 'notification_pending')`, [rq.attemptId, q.paymentId]);
+          await marker2.query('COMMIT');
+        } finally {
+          effect2.release();
+          marker2.release();
+        }
+        const before = await moneyOf(q.paymentId, dq);
+        expect(before.obligations).toHaveLength(1);
+        await reconciliation().drainOnce();
+        expect(await exposureCase(dq)).toBeTruthy();
+        expect(await moneyOf(q.paymentId, dq)).toEqual(before);
+      });
+
+      it('a relay status changing concurrently (failed to discrepancy) while an effect waits on its lock refuses the effect; two concurrent workers open one obligation and one attestation', async () => {
+        const p = await assistedPaid();
+        const r = await failedRelay(p.paymentId);
+        const disputeId = await lose(p.paymentId, p.amount);
+        const o = await obligationSql(p, disputeId);
+        const mirror = await admin.connect();
+        const effect = await admin.connect();
+        try {
+          await mirror.query('BEGIN');
+          await mirror.query(`SELECT 1 FROM refund_authorization_relay WHERE id = $1 FOR UPDATE`, [r.attemptId]);
+          await mirror.query(`UPDATE refund_authorization_relay SET "attemptStatus" = 'discrepancy' WHERE id = $1`, [r.attemptId]);
+          await effect.query('BEGIN');
+          await effect.query(attestSql, [disputeId, 'recovery_obligation', [r.attemptId]]);
+          const pending = effect.query(o.sql, o.params).then(() => null, (e: unknown) => e as { constraint?: string });
+          await waitFor(async () => (await waiters()) >= 1, 5_000);
+          await mirror.query('COMMIT');
+          expect(await pending).toMatchObject({ constraint: 'recovery_obligation_refund_live' });
+          await effect.query('ROLLBACK');
+        } finally {
+          mirror.release();
+          effect.release();
+        }
+        expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [disputeId])).toBe(0);
+        // two workers on one clean loss
+        const q = await assistedPaid();
+        const rq = await failedRelay(q.paymentId);
+        evidenceAt(q.paymentId, rq.attemptId, 'none');
+        const dq = await lose(q.paymentId, q.amount);
+        const both = await Promise.all([recovery().visit(dq), recovery().visit(dq)]);
+        expect(both.sort()).toEqual(['already', 'opened']);
+        expect(await count(`SELECT count(*) AS n FROM recovery_obligation WHERE "disputeId" = $1`, [dq])).toBe(1);
+        expect(await count(`SELECT count(*) AS n FROM loss_effect_attestation WHERE "disputeId" = $1`, [dq])).toBe(1);
       });
     });
   });

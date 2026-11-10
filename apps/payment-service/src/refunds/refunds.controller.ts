@@ -85,7 +85,7 @@ export class RefundsController {
   @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
   @RequireServiceOperation('payment.read')
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'PAY-08: the refund attempts of a payment and their authoritative state, the refund authorizations with their verified allocations and completion; for its producer, also the refused refund attempt ids, the refund facts not allocated (pending or blocked) and, per refund attempt, its own observations that contradict a refund fact which is not this payment\'s (observationConflicts: the attempt, its own conflict ids, their count and first time; never the fact, its figures, reference or owner).' })
+  @ApiOperation({ summary: 'PAY-08: the refund attempts of a payment and their authoritative state, the refund authorizations with their verified allocations and completion; for its producer, also the refused refund attempt ids, the refund facts not allocated (pending or blocked) and, per refund attempt, its own observations that contradict a refund fact which is not this payment\'s (observationConflicts: the attempt, its own conflict ids, their count and first time; never the fact, its figures, reference or owner) and, per failed refund attempt, one state of the refund evidence left after its failure (failedAttemptEvidence: unmatched_fact, notification_pending, none or unknown; never a fact, notification, figure, reference or owner).' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted' })
@@ -95,7 +95,7 @@ export class RefundsController {
     const payment = await this.payments.findById(paymentId.toLowerCase());
     if (!payment || !req.caller) throw notFound();
     const relation = await this.authorization.assertCanRead(payment, req.caller);
-    const { attempts, refusals, authorizations, allocations, unallocated, observationConflicts } = await this.refunds.listForPayment(payment.id, relation === 'producer');
+    const { attempts, refusals, authorizations, allocations, unallocated, observationConflicts, failedAttemptEvidence } = await this.refunds.listForPayment(payment.id, relation === 'producer');
     return {
       paymentId: payment.id,
       attempts: attempts.map(representRefundAttempt),
@@ -112,6 +112,8 @@ export class RefundsController {
       // Core V2 DO-74 (observer side): the producer's only; this payment's own rows alone (see listForPayment)
       ...(observationConflicts ? { observationConflicts: observationConflicts.map((o) => ({ refundAttemptId: o.refundAttemptId, conflictIds: o.conflictIds,
         observations: o.observations, firstObservedAt: iso(o.firstObservedAt) })) } : {}),
+      // Core V2 R3 (PAY-08 I): the producer's only; per failed attempt of this payment, its id and one state (see listForPayment)
+      ...(failedAttemptEvidence ? { failedAttemptEvidence: failedAttemptEvidence.map((e) => ({ refundAttemptId: e.refundAttemptId, state: e.state })) } : {}),
     };
   }
 }

@@ -100,6 +100,7 @@ export class SimulationPaymentProvider implements PaymentProvider {
     sessionExpiry: true,
     quarantineAcknowledgement: 'simulated_received_200', // S0-C12 item 16: `{ received: true }`, 200, only after the record committed
     paymentFatalCodes: [],
+    refundReferenceScope: 'provider', // Core V2 R3: `simr_<attemptId>` is unique per provider and its notifications carry it (simulation only)
   };
 
   constructor(

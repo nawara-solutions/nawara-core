@@ -14,7 +14,8 @@
       "suites": [
         "s-int-evidence-completeness.e2e-spec.ts",
         "s-int-late-capture-disputes.e2e-spec.ts",
-        "s6b-refund-processing.e2e-spec.ts"
+        "s6b-refund-processing.e2e-spec.ts",
+        "r3-failure-evidence-certification.e2e-spec.ts"
       ]
     },
     {

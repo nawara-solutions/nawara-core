@@ -6,6 +6,7 @@ import { webhookContext } from '../events/payment-events.js';
 import type { AttemptRow } from '../attempts/attempt.types.js';
 import type { FetchStatusResult, ParsedWebhookBody, PaymentProvider, RefundStatusResult } from '../providers/provider.port.js';
 import { RefundEvidenceService } from '../refunds/refund-evidence.service.js';
+import { indexEvidence, isUnattributable } from './evidence-index.js';
 import { DisputeIngestionService } from '../disputes/dispute-ingestion.service.js';
 import { isDisputeNotificationType, parseDisputeNotice } from '../disputes/dispute.types.js';
 import { WEBHOOK_RETRY_MAX_ATTEMPTS, type WebhookEventRow } from './webhook-event.types.js';
@@ -55,12 +56,18 @@ export class WebhookService {
     // one left mid-flight (a crash between A and B) is reprocessed, never swallowed.
     const eventType = verified.parsed?.type ?? 'unknown';
     const providerEventId = verified.parsed?.providerEventId ?? `unparseable:${hashOf(rawBody)}`;
+    // Core V2 R3 (0028): the notification's refund evidence, indexed once at receipt from the already-verified parse (the signed body is kept as received)
+    const evidence = indexEvidence(verified.parsed);
     const inserted = await this.db.tx(async (q) => {
       try {
         const { rows } = await q.query<WebhookEventRow>(
-          `INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody") VALUES ($1,$2,$3,$4) RETURNING *`,
-          [provider.id, providerEventId, eventType, rawBody],
+          `INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody", "evidenceIndex", "providerTransactionId") VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+          [provider.id, providerEventId, eventType, rawBody, evidence.evidenceIndex, evidence.providerTransactionId],
         );
+        // Core V2 R3 (B-1, option A): unattributable signed evidence is preserved and logged once, with no content (no body, reference, amount or signature)
+        if (rows[0] && isUnattributable(evidence, eventType)) {
+          this.logger.warn(`webhook_unattributable_refund_evidence event=${rows[0].id} provider=${provider.id} index=${evidence.evidenceIndex} — kept as received; attributed to no payment or Company`);
+        }
         return rows[0];
       } catch (e) {
         if (!isUniqueViolation(e, 'webhook_event_provider_id_unique')) throw e;
