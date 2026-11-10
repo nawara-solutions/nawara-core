@@ -27,10 +27,15 @@ function healthFor(name, env) {
   if (!state.pg || !env?.some((e) => e.startsWith('DATABASE_URL='))) return 'healthy';
   return urlPassword(env) === state.pg.roles.auth_app?.password ? 'healthy' : 'unhealthy';
 }
-const c = (name) => state.containers[name];
+/** A container reference as Docker accepts it: its name or its id (what `docker run -d` printed). */
+const nameOf = (ref) => (state.containers[ref] ? ref : Object.keys(state.containers).find((n) => state.containers[n].id === ref));
+const c = (ref) => state.containers[nameOf(ref)];
+/** The anonymous volumes Docker created for a container (`anonymousOf` is the container's name). */
+const anonymousOf = (name) => Object.entries(state.volumes ?? {}).filter(([, v]) => v.anonymousOf !== undefined && v.anonymousOf === name);
 
-function inspectContainer(fmt, name) {
-  const x = c(name);
+function inspectContainer(fmt, ref) {
+  const x = c(ref);
+  const name = nameOf(ref);
   if (!x) exit(1);
   if (fmt === undefined) { out('[{}]\n'); exit(0); }
   const nets = Object.keys(x.networks).sort();
@@ -63,6 +68,12 @@ function inspectContainer(fmt, name) {
       () => `${x.extras ?? `false|||||||${x.ports.length ? 'ports' : ''}|||0|0|`}||${imageFacts(x.imageId)}`],
     ['{{range .Config.Env}}{{.}}{{"\\n"}}{{end}}', () => (x.env ?? []).map((e) => `${e}\n`).join('')],
     ['{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\\n"}}{{end}}', () => nets.map((_, k) => `172.18.0.${k + 2}\n`).join('')],
+    // --- deploy-tests/lib/disposable-postgres.mjs: every mount as Docker reports it (named and bind mounts, then the anonymous volumes)
+    ['{{json .Mounts}}', () => JSON.stringify([
+      ...(x.mountSpecs ?? []).map((m) => ({ Type: m.type, Name: m.name ?? '', Source: m.source ?? '', Destination: m.dest, RW: m.rw })),
+      ...anonymousOf(name).map(([v, a]) => ({ Type: 'volume', Name: v, Source: '', Destination: a.dest, RW: true })),
+      ...(state.extraMountsOf?.[name] ?? []),
+    ])],
   ];
   const hit = known.find(([f]) => f === fmt);
   if (!hit) { process.stderr.write(`fake docker: unsupported inspect format ${fmt}\n`); exit(2); }
@@ -116,8 +127,10 @@ function run(args) {
   state.runs = [...(state.runs ?? []), { name, image, network: get('--network')[0], env }];
   // The postgres image declares VOLUME /var/lib/postgresql/data: without a -v for it, Docker creates an anonymous volume that only
   // `docker rm -v` removes together with the container.
+  // Like Docker: a 64-hex name and the `com.docker.volume.anonymous` label.
   if (image.startsWith('postgres:') && !get('-v').some((v) => v.split(':')[1] === '/var/lib/postgresql/data')) {
-    state.volumes = { ...(state.volumes ?? {}), [`anon-${name}-${state.calls.length}`]: { anonymousOf: name } };
+    const anon = createHash('sha256').update(`${name}-${state.calls.length}`).digest('hex');
+    state.volumes = { ...(state.volumes ?? {}), [anon]: { anonymousOf: name, dest: '/var/lib/postgresql/data', labels: { 'com.docker.volume.anonymous': '' } } };
   }
   state.containers[name] = {
     id: `id-${name}-${state.calls.length}`, image, imageId: image.startsWith('sha256:') ? image : `sha256:${'0'.repeat(64)}`,
@@ -353,11 +366,33 @@ switch (cmd) {
   case 'stop': { const n = rest[rest.length - 1]; if (c(n)) c(n).running = false; exit(0); break; }
   case 'rename': state.containers[rest[1]] = c(rest[0]); delete state.containers[rest[0]]; exit(0); break;
   case 'rm': {
-    const names = rest.filter((a) => !a.startsWith('-'));
+    const names = rest.filter((a) => !a.startsWith('-')).map((r) => nameOf(r) ?? r);
     const withVolumes = rest.some((a) => a === '-v' || a === '--volumes' || (/^-[a-z]+$/.test(a) && a.includes('v')));
+    const failing = names.find((n) => state.failContainerRm?.[n]);
+    if (failing) { process.stderr.write(`Error response from daemon: simulated failure removing ${failing}\n`); exit(1); }
     for (const n of names) delete state.containers[n];
     if (withVolumes) for (const [v, x] of Object.entries(state.volumes ?? {})) if (names.includes(x.anonymousOf)) delete state.volumes[v];
     exit(0); break;
+  }
+  case 'volume': { // inspect (exists? / its labels) and rm, over state.volumes (anonymous ones from `run`, named ones a test declares)
+    const [sub, ...a] = rest;
+    const fmt = a[0] === '-f' ? a[1] : undefined; const name = fmt ? a[2] : a[0];
+    const v = state.volumes?.[name];
+    if (sub === 'inspect') {
+      if (!v) { process.stderr.write(`Error response from daemon: get ${name}: no such volume\n`); exit(1); }
+      if (fmt === undefined) { out('[{}]\n'); exit(0); }
+      if (fmt === '{{json .Labels}}') { out(`${JSON.stringify(v.labels ?? null)}\n`); exit(0); }
+      process.stderr.write(`fake docker: unsupported volume inspect format ${fmt}\n`); exit(2);
+    }
+    if (sub === 'rm') {
+      if (!v) { process.stderr.write(`Error response from daemon: get ${name}: no such volume\n`); exit(1); }
+      const inUse = (v.anonymousOf !== undefined && state.containers[v.anonymousOf])
+        || Object.values(state.containers).some((x) => (x.mountSpecs ?? []).some((m) => m.type === 'volume' && m.name === name));
+      if (inUse) { process.stderr.write(`Error response from daemon: remove ${name}: volume is in use\n`); exit(1); }
+      delete state.volumes[name]; exit(0);
+    }
+    exit(2);
+    break;
   }
   case 'logs': { // R2: the drill service's own log lines (drill.appLogs), for the frozen-backup diagnostics; nothing for other containers
     const n = rest[rest.length - 1];

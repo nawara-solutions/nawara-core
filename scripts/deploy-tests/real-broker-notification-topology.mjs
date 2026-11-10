@@ -20,6 +20,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { ACTIVATION_FILE, generateTopicPermissions, generatedBlockOf, renderProvisionTopicGrants } from '../lib/topic-permissions.mjs';
 import { bounded, cleanupAll, exited, stopChild, withCleanup } from './lib/owned-process.mjs';
+import { anonymousDataVolume, removeWithAnonymousVolume } from './lib/disposable-postgres.mjs';
 
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, '../..');
@@ -55,7 +56,8 @@ const env = {
 const BROKER = env.RABBITMQ_CONTAINER;
 const PG = `${run}-pg`;
 const IMAGE = 'rabbitmq:3.13.7-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc';
-const created = { containers: [], network: undefined, volume: undefined };
+// pg / pgDataVolume: the PostgreSQL container and the anonymous volume Docker gave its data directory (removed with it, `rm -f -v`)
+const created = { containers: [], network: undefined, volume: undefined, pg: undefined, pgDataVolume: undefined };
 /** The run's own resources, on disk as soon as each exists: a stopped run is cleaned up by these ids, never by a name pattern. */
 const record = () => {
   if (process.env.RBNOTIF_MANIFEST) writeFileSync(process.env.RBNOTIF_MANIFEST, `${JSON.stringify({ pid: process.pid, run, work, ...created })}\n`);
@@ -195,7 +197,10 @@ before(async () => {
   record();
   assert.equal(r.code, 0, r.out);
   const password = randomBytes(18).toString('hex');
-  created.containers.push(docker('run', '-d', '--name', PG, '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16-alpine').trim());
+  created.pg = docker('run', '-d', '--name', PG, '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16-alpine').trim();
+  created.containers.push(created.pg);
+  record();
+  created.pgDataVolume = anonymousDataVolume(created.pg); // fail closed: a volume this run cannot name is one it cannot prove it removed
   record();
   pgUrl = `postgres://postgres:${password}@127.0.0.1:${docker('port', PG, '5432/tcp').trim().split('\n')[0].split(':').pop()}/postgres`;
   // the image's init phase answers `pg_isready` on a temporary server and then restarts it: retry until the real server takes the DDL
@@ -223,7 +228,9 @@ after(async () => {
   await cleanupAll([
     ['stop the Notification child', async () => { await stopNotification(); }],
     ...[...open].reverse().map((x, i) => [`close broker connection ${i}`, () => x.close().catch((e) => { if (!/closed/i.test(String(e?.message))) throw e; })]),
-    ...[...created.containers].reverse().map((id) => [`remove container ${id.slice(0, 12)}`, rm('rm', '-f', id)]),
+    ...[...created.containers].reverse().map((id) => (id === created.pg
+      ? [`remove container ${id.slice(0, 12)} with its anonymous data volume`, async () => removeWithAnonymousVolume(id, created.pgDataVolume)]
+      : [`remove container ${id.slice(0, 12)}`, rm('rm', '-f', id)])),
     ...(created.volume ? [[`remove volume ${created.volume}`, rm('volume', 'rm', created.volume)]] : []),
     ...(created.network ? [[`remove network ${created.network}`, rm('network', 'rm', created.network)]] : []),
     ['remove the root-owned latch', rm('run', '--rm', '-v', `${work}:/w`, '--entrypoint', 'sh', IMAGE, '-c', 'rm -rf /w/latch')],
@@ -231,6 +238,7 @@ after(async () => {
     ['confirm every resource is gone', async () => {
       for (const id of created.containers) assert.ok(!exists('container', id), `container ${id} was not removed`);
       if (created.volume) assert.ok(!exists('volume', created.volume), 'volume not removed');
+      if (created.pgDataVolume) assert.ok(!exists('volume', created.pgDataVolume), 'PostgreSQL anonymous data volume not removed');
       if (created.network) assert.ok(!exists('network', created.network), 'network not removed');
       assert.ok(!existsSync(work), 'work directory not removed');
     }],
