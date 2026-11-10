@@ -1657,6 +1657,117 @@ SELECT pg_temp.assert_eq('DO-74', 'observation evidence is append-only and its e
 SELECT pg_temp.assert_eq('DO-74', 'the evidence holds nothing of the contradicted fact (no fact id, figure or provider reference column)',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'reconciliation_observation_evidence' AND column_name ~* '(fact|amount|currency|provider|txn)' AND column_name <> 'captureFactId'), '0');
 
+-- ------------------------------------------------------------------------------------------------------------- R3 (0055)
+-- A non-superuser runtime role like billing_app (DML only, not the owner): every statement below marked "as app" runs as it.
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'r3_app_test') THEN CREATE ROLE r3_app_test NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF; END $$;
+GRANT USAGE ON SCHEMA public TO r3_app_test;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO r3_app_test;
+GRANT INSERT ON results TO r3_app_test;
+CREATE FUNCTION pg_temp.as_app(stmt text) RETURNS void LANGUAGE plpgsql AS $f$ BEGIN EXECUTE 'SET LOCAL ROLE r3_app_test'; EXECUTE stmt; END $f$;
+-- one attestation and the guard's verdict in ONE transaction (the guard reads the current transaction's attestation)
+CREATE FUNCTION pg_temp.r3_attested(d uuid, eff text, cleared uuid[], verdict_for text) RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+  INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES (d, eff, cleared, now());
+  RETURN coalesce(billing_loss_effect_refusal(d, verdict_for), 'allowed');
+END $f$;
+-- LABELLED FIXTURE: a payment with one refund case, a FAILED relay and a LIVE relay of its movement, and a verified loss recorded 10 minutes ago; a second payment
+-- with a failed relay and its own loss. Inserted with triggers and foreign keys off (session_replication_role); the rows obey every CHECK.
+DO $$
+DECLARE pay uuid := gen_random_uuid(); pay2 uuid := gen_random_uuid(); rc uuid := gen_random_uuid(); rc2 uuid := gen_random_uuid();
+        rf uuid := gen_random_uuid(); rl uuid := gen_random_uuid(); r2 uuid := gen_random_uuid(); d uuid := gen_random_uuid(); d2 uuid := gen_random_uuid();
+BEGIN
+  PERFORM set_config('session_replication_role', 'replica', true);
+  INSERT INTO refund_case (id, "paymentId", "paymentRequestId", "invoiceId", eligibility, "companyId", "platformId", amount, currency, reason, "openedBy", "receiptId")
+    VALUES (rc, pay, gen_random_uuid(), gen_random_uuid(), 'non_entitlement', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'customer_request', gen_random_uuid(), gen_random_uuid()),
+           (rc2, pay2, gen_random_uuid(), gen_random_uuid(), 'non_entitlement', gen_random_uuid(), gen_random_uuid(), 100, 'TND', 'customer_request', gen_random_uuid(), gen_random_uuid());
+  INSERT INTO refund_authorization_relay (id, "refundCaseId", "paymentId", "requestedBy", "idempotencyKey", "requestHash", "attemptStatus", "statusAt")
+    VALUES (rf, rc, pay, gen_random_uuid(), 'k-r3-0001', repeat('a', 64), 'failed', now()), (rl, rc, pay, gen_random_uuid(), 'k-r3-0002', repeat('a', 64), 'submitted', now()),
+           (r2, rc2, pay2, gen_random_uuid(), 'k-r3-0003', repeat('a', 64), 'failed', now());
+  INSERT INTO payment_dispute_loss ("disputeId", "paymentId", "paymentRequestId", "disputeAmount", currency, "chargebackFactId", "chargebackAmount", "chargebackCurrency", "lostAt", source, "captureBasis", "recordedAt")
+    VALUES (d, pay, gen_random_uuid(), 100, 'TND', gen_random_uuid(), 100, 'TND', now(), 'reconciliation', 'settling_capture', now() - interval '10 minutes'),
+           (d2, pay2, gen_random_uuid(), 100, 'TND', gen_random_uuid(), 100, 'TND', now(), 'reconciliation', 'settling_capture', now() - interval '10 minutes');
+  PERFORM set_config('session_replication_role', 'origin', true);
+  CREATE TEMP TABLE r3_fx AS SELECT pay, pay2, rf, rl, r2, d, d2;
+  GRANT SELECT ON r3_fx TO r3_app_test;
+END $$;
+
+-- the movement and its failed relays
+SELECT pg_temp.assert_eq('R3', 'the movement''s failed relays are exactly the failed relay (the live one and another payment''s are not)',
+  (SELECT (billing_loss_movement_failed_relays(d) = ARRAY[rf])::text FROM r3_fx), 'true');
+-- attestations: derived columns, coverage, freshness, binding (as app)
+SELECT pg_temp.expect_error('R3', 'as app: the movement, its failed relays and the transaction are never supplied', $$SELECT pg_temp.as_app(format(
+  'INSERT INTO loss_effect_attestation ("disputeId", effect, "paymentId", "clearedByRead", "paymentReadStartedAt") VALUES (%L, ''direct_chargeback_write_off'', %L, ARRAY[%L]::uuid[], now())',
+  (SELECT d FROM r3_fx), (SELECT pay2 FROM r3_fx), (SELECT rf FROM r3_fx)))$$, '23514', 'loss_effect_attestation_supplied');
+SELECT pg_temp.expect_error('R3', 'as app: a failed relay of the movement the read did not clear is refused', $$SELECT pg_temp.as_app(format(
+  'INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES (%L, ''recovery_obligation'', ''{}'', now())', (SELECT d FROM r3_fx)))$$,
+  '23514', 'loss_effect_attestation_relays');
+SELECT pg_temp.expect_error('R3', 'as app: a stale read (older than 120 seconds) is refused', $$SELECT pg_temp.as_app(format(
+  'INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES (%L, ''recovery_obligation'', ARRAY[%L]::uuid[], now() - interval ''200 seconds'')',
+  (SELECT d FROM r3_fx), (SELECT rf FROM r3_fx)))$$, '23514', 'loss_effect_attestation_stale');
+SELECT pg_temp.expect_error('R3', 'a read that started before the loss was recorded is refused', $$INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt")
+  SELECT d, 'recovery_obligation', ARRAY[rf], (SELECT "recordedAt" FROM payment_dispute_loss WHERE "disputeId" = d) - interval '1 second' FROM r3_fx$$, '23514', 'loss_effect_attestation_stale');
+SELECT pg_temp.expect_error('R3', 'a read in the future is refused', $$INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt")
+  SELECT d, 'recovery_obligation', ARRAY[rf], now() + interval '1 hour' FROM r3_fx$$, '23514', 'loss_effect_attestation_stale');
+SELECT pg_temp.expect_error('R3', 'an attestation of an unknown loss is refused', $$INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt")
+  VALUES (gen_random_uuid(), 'recovery_obligation', '{}', now())$$, '23514', 'loss_effect_attestation_loss');
+SELECT pg_temp.expect_error('R3', 'an attestation names one of the two approved effects only', $$INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt")
+  SELECT d, 'over_return', ARRAY[rf], now() FROM r3_fx$$, '23514', 'loss_effect_attestation_effect');
+SELECT pg_temp.expect_error('R3', 'one attestation per (dispute, effect) in ONE transaction', $$SELECT pg_temp.r3_attested(d, 'recovery_obligation', ARRAY[rf], 'recovery_obligation'),
+  pg_temp.r3_attested(d, 'recovery_obligation', ARRAY[rf], 'recovery_obligation') FROM r3_fx$$, '23505', 'loss_effect_attestation_once');
+-- the guard's verdict: only this transaction's attestation of this dispute and effect, covering the movement, and no marker
+SELECT pg_temp.assert_eq('R3', 'as app: without an attestation the effect is refused (not attested)',
+  (SELECT billing_loss_effect_refusal(d, 'direct_chargeback_write_off') FROM r3_fx), 'effect_not_attested');
+SELECT pg_temp.assert_eq('R3', 'with this transaction''s attestation the effect may proceed (as far as R3 is concerned)',
+  (SELECT pg_temp.r3_attested(d, 'direct_chargeback_write_off', ARRAY[rf], 'direct_chargeback_write_off') FROM r3_fx), 'allowed');
+SELECT pg_temp.assert_eq('R3', 'a committed attestation of an EARLIER transaction is never reused',
+  (SELECT billing_loss_effect_refusal(d, 'direct_chargeback_write_off') FROM r3_fx), 'effect_not_attested');
+SELECT pg_temp.assert_eq('R3', 'a new decision after a committed (no-op) one attests again: retries are never blocked',
+  (SELECT pg_temp.r3_attested(d, 'direct_chargeback_write_off', ARRAY[rf], 'direct_chargeback_write_off') FROM r3_fx), 'allowed');
+SELECT pg_temp.assert_eq('R3', 'an attestation of the other effect does not authorize this one',
+  (SELECT pg_temp.r3_attested(d, 'recovery_obligation', ARRAY[rf], 'direct_chargeback_write_off') FROM r3_fx), 'effect_not_attested');
+SELECT pg_temp.assert_eq('R3', 'an attestation of another loss does not authorize this one',
+  (SELECT pg_temp.r3_attested(d2, 'direct_chargeback_write_off', ARRAY[r2], 'direct_chargeback_write_off') = 'allowed'
+      AND billing_loss_effect_refusal(d, 'direct_chargeback_write_off') = 'effect_not_attested' FROM r3_fx)::text, 'true');
+SELECT pg_temp.assert_eq('R3', 'the attestation derives the loss''s payment, capture and failed relays and this transaction',
+  (SELECT bool_and("paymentId" = (SELECT pay FROM r3_fx) AND "clearRelays" = ARRAY[(SELECT rf FROM r3_fx)] AND "captureBasis" = 'settling_capture' AND xact IS NOT NULL)::text
+     FROM loss_effect_attestation WHERE "disputeId" = (SELECT d FROM r3_fx)), 'true');
+SELECT pg_temp.expect_error('R3', 'as app: an attestation is append-only (update)', $$SELECT pg_temp.as_app('UPDATE loss_effect_attestation SET "clearedByRead" = ''{}''')$$, '23514');
+SELECT pg_temp.expect_error('R3', 'as app: an attestation is append-only (delete)', $$SELECT pg_temp.as_app('DELETE FROM loss_effect_attestation')$$, '23514');
+-- markers (as app)
+SELECT pg_temp.expect_error('R3', 'as app: a marker of a relay of ANOTHER payment is refused', $$SELECT pg_temp.as_app(format(
+  'INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES (%L, %L, ''unmatched_fact'')', (SELECT rf FROM r3_fx), (SELECT pay2 FROM r3_fx)))$$,
+  '23514', 'refund_relay_failure_evidence_payment');
+SELECT pg_temp.expect_error('R3', 'as app: a marker of a relay whose attempt has not failed is refused', $$SELECT pg_temp.as_app(format(
+  'INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES (%L, %L, ''unmatched_fact'')', (SELECT rl FROM r3_fx), (SELECT pay FROM r3_fx)))$$,
+  '23514', 'refund_relay_failure_evidence_status');
+SELECT pg_temp.expect_error('R3', 'a marker states only a risk (unknown and none are never recorded)', $$INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState")
+  SELECT rf, pay, 'unknown' FROM r3_fx$$, '23514', 'refund_relay_failure_evidence_state');
+SELECT pg_temp.assert_eq('R3', 'before any marker the movement shows no unresolved exposure from R3', (SELECT billing_loss_unresolved_exposure(d)::text FROM r3_fx), 'false');
+SELECT pg_temp.expect_ok('R3', 'as app: Payment''s positive risk for the failed relay is recorded once', $$SELECT pg_temp.as_app(format(
+  'INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState") VALUES (%L, %L, ''unmatched_fact'')', (SELECT rf FROM r3_fx), (SELECT pay FROM r3_fx)))$$);
+SELECT pg_temp.expect_error('R3', 'one marker per relay (stable identity across reads, notifications and passes)', $$INSERT INTO refund_relay_failure_evidence ("relayId", "paymentId", "firstState")
+  SELECT rf, pay, 'notification_pending' FROM r3_fx$$, '23505');
+SELECT pg_temp.expect_error('R3', 'as app: a marker is append-only (update)', $$SELECT pg_temp.as_app('UPDATE refund_relay_failure_evidence SET "firstState" = ''notification_pending''')$$, '23514');
+SELECT pg_temp.expect_error('R3', 'as app: a marker is append-only (delete)', $$SELECT pg_temp.as_app('DELETE FROM refund_relay_failure_evidence')$$, '23514');
+SELECT pg_temp.expect_error('R3', 'as app: a marker cannot be truncated (no privilege)', $$SELECT pg_temp.as_app('TRUNCATE refund_relay_failure_evidence')$$, '42501');
+SELECT pg_temp.expect_error('R3', 'even the owner cannot truncate markers (trigger)', $$TRUNCATE refund_relay_failure_evidence$$, '23514');
+SELECT pg_temp.assert_eq('R3', 'with a marker on the movement the effect is refused even WITH this transaction''s attestation',
+  (SELECT pg_temp.r3_attested(d, 'recovery_obligation', ARRAY[rf], 'recovery_obligation') FROM r3_fx), 'refund_evidence_after_failure');
+SELECT pg_temp.assert_eq('R3', 'a marker of one payment never holds another payment''s loss',
+  (SELECT pg_temp.r3_attested(d2, 'recovery_obligation', ARRAY[r2], 'recovery_obligation') FROM r3_fx), 'allowed');
+SELECT pg_temp.assert_eq('R3', 'late evidence: the marker opens the movement''s unresolved exposure (the existing case), nothing rewritten',
+  (SELECT billing_loss_unresolved_exposure(d)::text FROM r3_fx), 'true');
+-- wiring
+SELECT pg_temp.assert_eq('R3', 'both approved effect guards consult the R3 refusal first, then S0-C14''s checks, under the existing constraint names',
+  (SELECT bool_and(prosrc LIKE '%billing_loss_effect_refusal%' AND prosrc LIKE '%billing_loss_refund_live%' AND prosrc LIKE '%_refund_live''%'
+       AND position('billing_loss_effect_refusal' IN prosrc) < position('billing_loss_refund_live' IN prosrc))::text
+     FROM pg_proc WHERE proname IN ('billing_recovery_obligation_refund_live_guard', 'billing_financial_loss_refund_live_guard')), 'true');
+SELECT pg_temp.assert_eq('R3', 'the refusal share-locks the movement''s relays before reading markers and attestations',
+  (SELECT (prosrc LIKE '%FOR SHARE%' AND position('FOR SHARE' IN prosrc) < position('billing_loss_movement_marked' IN prosrc))::text FROM pg_proc WHERE proname = 'billing_loss_effect_refusal'), 'true');
+SELECT pg_temp.assert_eq('R3', 'markers and attestations hold nothing of Payment''s facts or notifications (no fact, figure, provider or reference column)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('refund_relay_failure_evidence', 'loss_effect_attestation')
+      AND column_name ~* '(fact|amount|currency|provider|txn|reference|company)' AND column_name <> 'captureFactId'), '0');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

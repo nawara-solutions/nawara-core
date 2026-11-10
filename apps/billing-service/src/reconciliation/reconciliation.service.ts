@@ -546,12 +546,14 @@ export class ReconciliationService {
                OR (EXISTS (SELECT 1 FROM dispute_loss_effect e WHERE e."disputeId" = l."disputeId" AND e.outcome = 'reversed_purchase')
                    AND NOT EXISTS (SELECT 1 FROM financial_loss f WHERE f.kind = 'direct_chargeback_write_off' AND f."paymentId" = l."paymentId")))`);
     for (const l of rows) {
+      let attested: { readStartedAt: Date; clearedByRead: string[] } | null = null;
       if (!l.refunded) {
         const verdict = await this.evidence.check(l.disputeId);
         if (!verdict.clean) {
           this.log.warn(`direct_write_off_waiting dispute=${l.disputeId} reason=${verdict.reason} — nothing recorded; the next pass decides again`);
           continue;
         }
+        attested = verdict;
       }
       try {
         await this.db.tx(async (q) => {
@@ -561,6 +563,10 @@ export class ReconciliationService {
               currency: l.currency, detail: 'refund_and_chargeback' }, tally);
             return;
           }
+          // Core V2 R3: this transaction's attestation of the clean read; the database refuses the write-off without it, or beside a risk marker
+          if (!attested) return;
+          await q.query(`INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES ($1, 'direct_chargeback_write_off', $2, $3)`,
+            [l.disputeId, attested.clearedByRead, attested.readStartedAt]);
           const loss = (await q.query<{ id: string }>(
             `INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "organizationId", "paymentId", "disputeId", amount, currency)
              VALUES ('direct_chargeback_write_off', $1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING RETURNING id`, // once per evidence, and once per capture (0049)

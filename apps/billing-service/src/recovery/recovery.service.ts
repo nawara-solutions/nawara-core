@@ -19,7 +19,7 @@ import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authori
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { captureLossOf, recordCaptureLoss } from '../refunds/dispute-loss.service.js';
 import { FinancialWorkerGate } from '../refunds/financial-safety.js';
-import { RefundEvidenceReader, type RefundEvidenceVerdict } from '../refunds/refund-evidence.js';
+import { RefundEvidenceReader, type RefundEvidenceDecision } from '../refunds/refund-evidence.js';
 
 /** The worker's system identity (Audit catalog: `recovery_obligation.opened`). */
 export const RECOVERY_WORKER = 'recovery_worker';
@@ -145,7 +145,7 @@ export class RecoveryService {
     // before S0-C10 writes it here; the dispute loss worker wrote it for every later loss)
     await recordCaptureLoss(this.db, disputeId);
     // the remote half, read before the transaction (never inside it: no lock spans Billing and Payment); a refunded payment is a review anyway
-    const evidence: RefundEvidenceVerdict | null = f.refunded ? null : await this.evidence.check(disputeId);
+    const evidence: RefundEvidenceDecision | null = f.refunded ? null : await this.evidence.check(disputeId);
     try {
       return await this.decide(disputeId, f, evidence, ctx);
     } catch (e) {
@@ -159,7 +159,7 @@ export class RecoveryService {
   }
 
   private async decide(disputeId: string, f: { purchaseId: string; assistanceRequestId: string; organizationId: string; platformId: string; companyId: string | null;
-    baseAmount: string; currency: string; refunded: boolean }, evidence: RefundEvidenceVerdict | null, ctx: TransitionContext): Promise<'opened' | 'review' | 'waiting' | 'already'> {
+    baseAmount: string; currency: string; refunded: boolean }, evidence: RefundEvidenceDecision | null, ctx: TransitionContext): Promise<'opened' | 'review' | 'waiting' | 'already'> {
     return this.db.tx(async (q) => {
       await lockOrganization(q, f.organizationId);
       const seen = (await q.query(`SELECT 1 FROM recovery_obligation WHERE "disputeId" = $1 UNION ALL SELECT 1 FROM recovery_review WHERE "disputeId" = $1`, [disputeId])).rows.length;
@@ -180,9 +180,11 @@ export class RecoveryService {
             : otherFirst ? 'repeated_loss'
               : cap.withinCap && cap.chargebackAmount < cap.gross ? 'partial_chargeback' : 'chargeback_exceeds_capture';
       if (!reason && !f.companyId) throw new Error('platform_not_configured');
-      // Core V2 S0-C14 items 5, 6: the obligation waits while a refund of the movement may still exist (nothing is written)
-      if (!reason && evidence && !evidence.clean) {
-        this.log.warn(`recovery_obligation_waiting dispute=${disputeId} reason=${evidence.reason} — no obligation and no T3 yet; the next pass decides again`);
+      // Core V2 S0-C14 items 5, 6: the obligation waits while a refund of the movement may still exist (nothing is written). Core V2 R3: an obligation
+      // is never opened without a clean read of this decision (an absent read is refused explicitly, never taken as clean)
+      const clean = evidence && evidence.clean ? evidence : null;
+      if (!reason && !clean) {
+        this.log.warn(`recovery_obligation_waiting dispute=${disputeId} reason=${evidence && !evidence.clean ? evidence.reason : 'evidence_unread'} — no obligation and no T3 yet; the next pass decides again`);
         return 'waiting' as const;
       }
       if (reason) {
@@ -190,6 +192,9 @@ export class RecoveryService {
         this.log.warn(`recovery_review dispute=${disputeId} reason=${reason} — no obligation, no T3; kept for reconciliation (S6h)`);
         return 'review' as const;
       }
+      // Core V2 R3: this transaction's attestation of the clean read; the database refuses the obligation without it, or beside a risk marker
+      await q.query(`INSERT INTO loss_effect_attestation ("disputeId", effect, "clearedByRead", "paymentReadStartedAt") VALUES ($1, 'recovery_obligation', $2, $3)`,
+        [disputeId, clean!.clearedByRead, clean!.readStartedAt]); // `clean` is set: the refusal above is the ONE gate (no reason means a clean read)
       const o = (await q.query<{ id: string }>(
         `INSERT INTO recovery_obligation ("disputeId", "assistanceRequestId", "purchaseId", "organizationId", "companyId", "platformId", "baseAmount", currency)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,

@@ -516,9 +516,52 @@ export class RefundAttemptService {
             GROUP BY c."refundAttemptId"
             ORDER BY min(c."observedAt"), c."refundAttemptId"`, [paymentId])).rows
       : null;
-    return { attempts, refusals, authorizations, allocations, unallocated, observationConflicts };
+    // Core V2 R3 (PAY-08 I): for the producer only, per FAILED refund attempt of THIS payment, whether credible refund evidence remains after its failure
+    const failedAttemptEvidence = includeRefusals ? await this.failedAttemptEvidence(attempts) : null;
+    return { attempts, refusals, authorizations, allocations, unallocated, observationConflicts, failedAttemptEvidence };
+  }
+
+  /**
+   * Core V2 R3 (PAY-08 I): one state per failed attempt of the payment, from the attempt's OWN provider refund reference, compared EXACTLY with the
+   * provider's refund facts and stored signed notifications of the SAME provider, and only for an adapter that declares `refundReferenceScope`. A match is
+   * evidence of risk, never ownership: nothing is associated, allocated or attributed. Only the attempt's id and the state cross; never a fact or
+   * notification id, a figure, a provider reference, a payment or a Company.
+   *   `unmatched_fact`        a verified refund fact under that reference that names no payment or attempt and is not associated;
+   *   `unknown`               the adapter declares no matching authority, a fact under that reference is bound elsewhere or associated, a notification
+   *                           naming it has an unusable amount or currency, or the provider still has unindexed refund notifications (0028 backfill);
+   *   `notification_pending`  a signature-verified refund notification naming that reference that is not this attempt's own processed report;
+   *   `none`                  checked, and none of the above (or the attempt holds no provider reference: nothing can name it).
+   */
+  private async failedAttemptEvidence(attempts: RefundAttemptRow[]): Promise<{ refundAttemptId: string; state: FailedAttemptEvidenceState }[]> {
+    const out: { refundAttemptId: string; state: FailedAttemptEvidenceState }[] = [];
+    for (const a of attempts) {
+      if (a.status !== 'failed') continue;
+      out.push({ refundAttemptId: a.id, state: await this.evidenceAfterFailure(a) });
+    }
+    return out;
+  }
+
+  private async evidenceAfterFailure(a: RefundAttemptRow): Promise<FailedAttemptEvidenceState> {
+    if (a.providerRefundId === null) return 'none';
+    if (this.providers.tryGet(a.provider)?.capabilities.refundReferenceScope !== 'provider') return 'unknown';
+    const r = (await this.db.query<{ fact: { unmatched: boolean } | null; indexPending: boolean; malformed: boolean; notified: boolean }>(
+      `SELECT (SELECT json_build_object('unmatched', f."paymentId" IS NULL AND f."refundAttemptId" IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM provider_fact_association s WHERE s."factId" = f.id))
+                 FROM provider_transaction_fact f WHERE f.provider = $1 AND f."providerTxnId" = $2 AND f.kind = 'refund') AS fact,
+              EXISTS (SELECT 1 FROM webhook_event w WHERE w.provider = $1 AND w."eventType" = 'refund.succeeded' AND w."evidenceIndex" = 'pending') AS "indexPending",
+              EXISTS (SELECT 1 FROM webhook_event w WHERE w.provider = $1 AND w."eventType" = 'refund.succeeded' AND w."providerTransactionId" = $2
+                       AND w."evidenceIndex" = 'reference_malformed') AS malformed,
+              EXISTS (SELECT 1 FROM webhook_event w WHERE w.provider = $1 AND w."eventType" = 'refund.succeeded' AND w."providerTransactionId" = $2
+                       AND w."evidenceIndex" = 'reference' AND w.outcome IS DISTINCT FROM 'refund_attempt:' || $3::text) AS notified`,
+      [a.provider, a.providerRefundId, a.id])).rows[0]!;
+    if (r.fact) return r.fact.unmatched ? 'unmatched_fact' : 'unknown';
+    if (r.indexPending || r.malformed) return 'unknown';
+    return r.notified ? 'notification_pending' : 'none';
   }
 }
+
+/** Core V2 R3 (PAY-08 I): what Payment can state about a failed refund attempt's own provider reference after its failure. */
+export type FailedAttemptEvidenceState = 'unmatched_fact' | 'notification_pending' | 'none' | 'unknown';
 
 /** What a verified request may insert: the capture it returns and the attempt its refund facts are bound to. */
 interface Verified { captureFactId: string; provider: string; capturedAttemptId: string }

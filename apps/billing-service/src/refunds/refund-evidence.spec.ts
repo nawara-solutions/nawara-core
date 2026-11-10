@@ -26,7 +26,29 @@ describe('judgeRefundEvidence (Core V2 S0-C14 item 6)', () => {
 
   it('clean only when nothing is attempted, or every attempt of the movement is dead with no refund evidence', () => {
     expect(judgeRefundEvidence(read(), relays)).toEqual({ clean: true });
-    for (const s of ['authorization_expired', 'authorization_refused', 'failed'] as const) expect(judgeRefundEvidence(read({ attempts: [attempt(A, s)] }), relays), s).toEqual({ clean: true });
+    for (const s of ['authorization_expired', 'authorization_refused'] as const) expect(judgeRefundEvidence(read({ attempts: [attempt(A, s)] }), relays), s).toEqual({ clean: true });
+    // Core V2 R3: a FAILED attempt of the movement is dead only when Payment states `none` for its refund evidence after the failure
+    expect(judgeRefundEvidence(read({ attempts: [attempt(A, 'failed')], failedAttemptEvidence: [{ refundAttemptId: A, state: 'none' }] }), relays)).toEqual({ clean: true });
+  });
+
+  it('Core V2 R3: a failed attempt of the movement waits on credible evidence after its failure, and on anything Payment cannot state (fail-closed)', () => {
+    const failed = (fae: PaymentRefunds['failedAttemptEvidence'], more: Partial<PaymentRefunds> = {}) => judgeRefundEvidence(read({ attempts: [attempt(A, 'failed')], failedAttemptEvidence: fae, ...more }), relays);
+    expect(failed([{ refundAttemptId: A, state: 'unmatched_fact' }])).toEqual({ clean: false, reason: 'refund_evidence_after_failure' });
+    expect(failed([{ refundAttemptId: A, state: 'notification_pending' }])).toEqual({ clean: false, reason: 'refund_evidence_after_failure' });
+    expect(failed([{ refundAttemptId: A, state: 'unknown' }])).toEqual({ clean: false, reason: 'failure_evidence_unknown' });
+    for (const fae of [null, undefined, 'malformed' as const, [], [{ refundAttemptId: X, state: 'none' as const }]]) {
+      expect(failed(fae), JSON.stringify(fae)).toEqual({ clean: false, reason: 'failure_evidence_unknown' }); // absent, malformed, or no statement for THIS attempt
+    }
+    // a risk is reported before an unknown, whatever the order
+    const two = '44444444-4444-4444-8444-444444444444';
+    const rel2 = new Map([[A, true], [two, true]]);
+    expect(judgeRefundEvidence(read({ attempts: [attempt(A, 'failed'), attempt(two, 'failed')], failedAttemptEvidence: [{ refundAttemptId: A, state: 'unknown' }, { refundAttemptId: two, state: 'unmatched_fact' }] }), rel2))
+      .toEqual({ clean: false, reason: 'refund_evidence_after_failure' });
+    // a failed attempt of ANOTHER capture never holds; nothing failed on the movement needs no statement
+    expect(judgeRefundEvidence(read({ attempts: [attempt(B, 'failed')], failedAttemptEvidence: [{ refundAttemptId: B, state: 'unmatched_fact' }] }), relays)).toEqual({ clean: true });
+    expect(judgeRefundEvidence(read({ attempts: [attempt(A, 'authorization_expired')], failedAttemptEvidence: null }), relays)).toEqual({ clean: true });
+    // S0-C14's earlier reasons keep their precedence
+    expect(failed([{ refundAttemptId: A, state: 'unmatched_fact' }], { unallocatedFacts: null })).toEqual({ clean: false, reason: 'unallocated_facts_unknown' });
   });
 
   it('every live status of the movement waits (V25)', () => {

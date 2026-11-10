@@ -900,7 +900,7 @@ describeWithEnv(
       expect(await observationCase(r.attemptId)).toBeUndefined();
     }, T);
 
-    it('D12 (R3, UNCHANGED AND STILL AN OPEN RISK): an unmatched refund naming a FAILED attempt\'s own provider reference, never reported by the attempt, then a chargeback: no observation exists, so no case; S0-C14 applies the loss effect (the potential unsafe write-off is NOT addressed by DO-74)', async () => {
+    it('D12 (R3, NOW HELD BY CORE V2 R3): an unmatched refund naming a FAILED attempt\'s own provider reference, never reported by the attempt, then a chargeback: no observation exists, so no DO-74 case; the write-off is HELD (R3 certifies this fully)', async () => {
       const { p } = await buy('direct');
       const r = await relayed(p.paymentId, p.amount);
       const txn = await providerRef(r.attemptId);
@@ -914,9 +914,10 @@ describeWithEnv(
       await settle();
       expect(await observationCase(r.attemptId)).toBeUndefined();
       const s = await snapshot(p);
-      record('D12-R3', 'unchanged_risk', { losses: s.billing.losses, obligations: s.billing.obligations, unmatchedFact: await one(paymentAdmin, `SELECT "paymentId", amount FROM provider_transaction_fact WHERE id = $1`, [factId]),
+      record('D12-R3', 'held_by_r3', { losses: s.billing.losses, obligations: s.billing.obligations, unmatchedFact: await one(paymentAdmin, `SELECT "paymentId", amount FROM provider_transaction_fact WHERE id = $1`, [factId]),
         attemptProviderRefundIdEqualsFact: true, openCases: s.billing.openCases });
-      expect(s.billing.losses.length, 'R3: the direct write-off is applied although Payment holds an unmatched refund under the failed attempt\'s own provider reference').toBe(1);
+      expect(s.billing.losses.length, 'R3: the direct write-off is held while Payment holds an unmatched refund under the failed attempt\'s own provider reference').toBe(0);
+      expect(s.billing.openCases).toContain('chargeback_effect_waiting');
     }, T);
 
     it('D6 (cross-payment, same Company): B\'s attempt reports A\'s matched refund: B gets one case naming nothing of A; A\'s Billing view, cases and money are unchanged (O-2 stays open)', async () => {

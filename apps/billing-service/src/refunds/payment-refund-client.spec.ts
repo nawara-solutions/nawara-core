@@ -210,4 +210,22 @@ describe('HttpPaymentRefundClient.refunds: refund evidence (Core V2 S0-C14 item 
       expect(r!.unallocatedFacts).toEqual([{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }]);
     }
   });
+
+  // Core V2 R3 (PAY-08 I): per failed attempt, one state; parsed on its own; anything else Payment might add is never read
+  it('R3: failedAttemptEvidence keeps only the attempt and one of four states; absent is null', async () => {
+    const r = await read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [],
+      failedAttemptEvidence: [{ refundAttemptId: ATTEMPT, state: 'unmatched_fact', factId: FACT, amount: 100, providerTransactionId: 'simr_x' }, { refundAttemptId: ATTEMPT2, state: 'none' }] });
+    expect(r!.failedAttemptEvidence).toEqual([{ refundAttemptId: ATTEMPT, state: 'unmatched_fact' }, { refundAttemptId: ATTEMPT2, state: 'none' }]);
+    expect((await read({ attempts: [], refusals: [], authorizations: [], unallocatedFacts: [] }))!.failedAttemptEvidence).toBeNull();
+  });
+
+  it('R3: a malformed failedAttemptEvidence is \'malformed\' and never throws; the rest of the answer is kept', async () => {
+    const base = { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [{ factId: FACT, refundAttemptId: ATTEMPT, amount: 100, currency: 'TND', state: 'pending', blockedReason: null }] };
+    for (const bad of [{}, 'x', [null], [{ refundAttemptId: 'x', state: 'none' }], [{ refundAttemptId: ATTEMPT, state: 'clean' }], [{ refundAttemptId: ATTEMPT }],
+      [{ refundAttemptId: ATTEMPT, state: 'none' }, { refundAttemptId: ATTEMPT, state: 'unknown' }]]) {
+      const r = await read({ ...base, failedAttemptEvidence: bad });
+      expect(r!.failedAttemptEvidence, JSON.stringify(bad)).toBe('malformed');
+      expect(r!.unallocatedFacts).toHaveLength(1);
+    }
+  });
 });
