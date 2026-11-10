@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { LATCH_STATE, latchPath, removeTestLatch, writeTestLatch } from './lib/test-latch.mjs';
+import { anonymousDataVolume, removeWithAnonymousVolume } from './lib/disposable-postgres.mjs';
 import { ACTIVATION_FILE, generateTopicPermissions, generatedBlockOf, renderProvisionTopicGrants } from '../lib/topic-permissions.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
@@ -60,7 +61,8 @@ const env = {
 };
 const BROKER = env.RABBITMQ_CONTAINER;
 const PG = `${run}-pg`;
-const created = { containers: [], network: undefined, volume: undefined };
+// pg / pgDataVolume: the PostgreSQL container and the anonymous volume Docker gave its data directory (removed with it, `rm -f -v`)
+const created = { containers: [], network: undefined, volume: undefined, pg: undefined, pgDataVolume: undefined };
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const ctl = (...args) => docker('exec', '-u', 'rabbitmq', BROKER, 'rabbitmqctl', '-q', ...args);
 const SCRIPT = join(root, 'infra/rabbitmq/provision.sh');
@@ -87,7 +89,9 @@ before(async () => {
   if (spawnSync('docker', ['network', 'inspect', env.CORE_NETWORK]).status === 0) created.network = env.CORE_NETWORK;
   if (spawnSync('docker', ['volume', 'inspect', env.RABBITMQ_VOLUME]).status === 0) created.volume = env.RABBITMQ_VOLUME;
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  created.containers.push(docker('run', '-d', '--name', PG, '-e', `POSTGRES_PASSWORD=${pgPassword}`, '-p', '127.0.0.1::5432', 'postgres:16-alpine').trim());
+  created.pg = docker('run', '-d', '--name', PG, '-e', `POSTGRES_PASSWORD=${pgPassword}`, '-p', '127.0.0.1::5432', 'postgres:16-alpine').trim();
+  created.containers.push(created.pg);
+  created.pgDataVolume = anonymousDataVolume(created.pg); // fail closed: a volume this run cannot name is one it cannot prove it removed
   const port = docker('port', PG, '5432/tcp').trim().split('\n')[0].split(':').pop();
   pgUrl = `postgres://postgres:${pgPassword}@127.0.0.1:${port}/postgres`;
   for (let i = 0; i < 60; i++) {
@@ -97,13 +101,19 @@ before(async () => {
 });
 
 after(() => {
-  for (const id of created.containers.reverse()) spawnSync('docker', ['rm', '-f', id]);
+  const failures = []; // every step still runs; a failed one is reported below, never taken for a clean removal
+  for (const id of created.containers.reverse()) {
+    if (id === created.pg) {
+      try { removeWithAnonymousVolume(id, created.pgDataVolume); } catch (e) { failures.push(e.message); }
+    } else spawnSync('docker', ['rm', '-f', id]);
+  }
   if (created.volume) spawnSync('docker', ['volume', 'rm', created.volume]);
   if (created.network) spawnSync('docker', ['network', 'rm', created.network]);
   rmSync(env.BROKER_DIR, { recursive: true, force: true });
   rmSync(variants, { recursive: true, force: true });
   removeTestLatch(latchDir);
   rmSync(latchDir, { recursive: true, force: true });
+  assert.deepEqual(failures, [], `cleanup failed: ${failures.join('; ')}`);
   for (const id of created.containers) assert.notEqual(spawnSync('docker', ['container', 'inspect', id]).status, 0, `container ${id} was not removed`);
   if (created.volume) assert.notEqual(spawnSync('docker', ['volume', 'inspect', created.volume]).status, 0, 'the volume was not removed');
   if (created.network) assert.notEqual(spawnSync('docker', ['network', 'inspect', created.network]).status, 0, 'the network was not removed');
