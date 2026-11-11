@@ -41,7 +41,7 @@
     "oxlint-tsgolint": "^7.0.2001",
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
-    "typescript": "^6.0.2",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   }
 }
