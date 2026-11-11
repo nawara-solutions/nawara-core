@@ -2004,7 +2004,12 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status, approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [],
         failedAttemptEvidence: status === 'failed' ? [{ refundAttemptId: attemptId, state: 'none' }] : [] });
       await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]); // LABELLED TEST AID: the reconciler's lease, not a status
-      await relayReconciler().reconcileOnce();
+      // a pass leases at most BATCH_SIZE (50) relays, oldest first: in this long suite more than 50 earlier relays can be due again, so the passes continue until
+      // THIS relay was leased (its lease is set by the pass that read it), at most 20 passes; nothing is skipped and no time is waited
+      for (let pass = 0; pass < 20; pass++) {
+        await relayReconciler().reconcileOnce();
+        if ((await one(`SELECT "checkAfter" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).checkAfter !== null) break;
+      }
       return (await one(`SELECT "attemptStatus" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).attemptStatus as string;
     };
     /** Payment's verified completion of the case (the event), as Payment emits it. */
