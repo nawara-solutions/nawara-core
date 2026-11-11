@@ -1634,6 +1634,53 @@ function checkDashboardSemantics(file, d, text) {
 export const CI_AGGREGATE = 'core-ci-passed';
 const AGGREGATE_RESULT_RULE = 'all(.[]; .result == "success")';
 
+/** Core V2 Smart CI (Stage 0): the change-classification job's stable id and the classifier path Core CI must take from the BASE commit. */
+export const CI_CLASSIFY = 'classify';
+const CLASSIFIER_PATH = 'scripts/ci-lanes/classify.mjs';
+
+/**
+ * Core V2 Smart CI, STAGE 0 (SHADOW). The `classify` job only REPORTS a lane: it must be unconditional and single (no if, needs, matrix or
+ * continue-on-error), persist no credentials, use no secret, and run the classifier taken from the pull request's BASE commit
+ * (`git show "$BASE_SHA:scripts/ci-lanes/classify.mjs"`, BASE_SHA = the event's base sha), never the checked-out one, with the CI_FORCE_FULL
+ * override passed through. In Stage 0 no job may depend on the classification: only the aggregate needs `classify`, and no `if:` reads it, so
+ * every job runs. The workflow never uses `pull_request_target`. `allJobs` (the classifier's own job list) must equal the workflow's jobs.
+ */
+export function checkCiClassify(fileName, text, allJobs) {
+  const problems = [];
+  const doc = parse(text);
+  const on = doc?.on ?? doc?.true;
+  if (on && typeof on === 'object' && 'pull_request_target' in on) problems.push(`${fileName}: must not run on pull_request_target (untrusted code with privileges)`);
+  const jobs = doc?.jobs ?? {};
+  const job = jobs[CI_CLASSIFY];
+  if (!job) return [...problems, `${fileName}: the change-classification job "${CI_CLASSIFY}" is missing`];
+  const where = `${fileName} job "${CI_CLASSIFY}"`;
+  if (!String(job.name ?? '').startsWith('change classification')) problems.push(`${where}: its name must start with "change classification"`);
+  for (const key of ['if', 'needs', 'strategy', 'continue-on-error', 'permissions', 'secrets', 'container', 'uses']) {
+    if (key in job) problems.push(`${where}: must not set "${key}" (it must always run, alone, with the workflow's read-only token)`);
+  }
+  const steps = asArray(job.steps);
+  const checkout = steps.find((s) => String(s.uses ?? '').startsWith('actions/checkout@'));
+  if (!checkout || checkout.with?.['persist-credentials'] !== false || Number(checkout.with?.['fetch-depth']) !== 0) {
+    problems.push(`${where}: its checkout must set fetch-depth: 0 (the merge base) and persist-credentials: false`);
+  }
+  const run = steps.map((s) => String(s.run ?? '')).join('\n');
+  if (/\$\{\{\s*secrets\./.test(JSON.stringify(job))) problems.push(`${where}: must use no secret`);
+  if (!run.includes(`git show "$BASE_SHA:${CLASSIFIER_PATH}"`)) problems.push(`${where}: must run the classifier from the BASE commit (git show "$BASE_SHA:${CLASSIFIER_PATH}")`);
+  if (new RegExp(`node\\s+["']?(\\./)?${CLASSIFIER_PATH.replace(/[./]/g, (c) => `\\${c}`)}`).test(run)) problems.push(`${where}: must never run the checked-out classifier (the pull request would select its own lane)`);
+  const env = Object.assign({}, ...steps.map((s) => s.env ?? {}));
+  if (String(env.BASE_SHA ?? '').replace(/\s+/g, '') !== '${{github.event.pull_request.base.sha}}') problems.push(`${where}: BASE_SHA must be \${{ github.event.pull_request.base.sha }}`);
+  if (String(env.CI_FORCE_FULL ?? '').replace(/\s+/g, '') !== '${{vars.CI_FORCE_FULL}}') problems.push(`${where}: must pass the CI_FORCE_FULL emergency override (\${{ vars.CI_FORCE_FULL }})`);
+  for (const [id, other] of Object.entries(jobs)) {
+    if (id === CI_CLASSIFY) continue;
+    if (id !== CI_AGGREGATE && asArray(other?.needs).map(String).includes(CI_CLASSIFY)) problems.push(`${fileName} job "${id}": must not need "${CI_CLASSIFY}" in Stage 0 (shadow: every job runs)`);
+    if (/needs\.classify/.test(String(other?.if ?? ''))) problems.push(`${fileName} job "${id}": its condition must not read the classification in Stage 0 (shadow: every job runs)`);
+  }
+  const ids = Object.keys(jobs).filter((id) => id !== CI_AGGREGATE).sort();
+  const listed = [...asArray(allJobs)].map(String).sort();
+  if (JSON.stringify(ids) !== JSON.stringify(listed)) problems.push(`${fileName}: the classifier's job list (${listed.join(', ')}) must equal the workflow's jobs (${ids.join(', ')})`);
+  return problems;
+}
+
 /**
  * The aggregate must exist under its stable id and name, need EVERY other job of the workflow, always run (a skipped required check
  * counts as passed), and succeed only when every needed job succeeded. The workflow must report on every pull request to main: no

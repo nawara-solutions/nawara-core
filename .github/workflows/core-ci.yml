@@ -24,6 +24,50 @@ env:
   NODE_VERSION: '22'
 
 jobs:
+  # Core V2 Smart CI, STAGE 0 (SHADOW): reports the lane this change COULD use (docs or full) and why. Nothing reads its outputs: every job
+  # below still runs and core-ci-passed still requires every job to succeed. The classifier is taken from the pull request's BASE commit,
+  # never from the pull request itself, so a change cannot select its own classification; without one there (or on any error) the lane is
+  # full. No credentials are persisted and no secret is used. CI_FORCE_FULL (repository variable) = 1 forces full.
+  classify:
+    name: change classification (Smart CI Stage 0, shadow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: classify with the base commit's classifier (reported only; nothing is skipped)
+        id: lane
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
+        run: |
+          set -euo pipefail
+          trusted="$RUNNER_TEMP/classify-base.mjs"
+          if [ "$EVENT" = pull_request ] && git cat-file -e "$BASE_SHA:scripts/ci-lanes/classify.mjs" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/ci-lanes/classify.mjs" > "$trusted"
+            result="$(node "$trusted" "$EVENT" "$BASE_SHA" "$HEAD_SHA")" || result='{"lane":"full","reasons":["the base classifier failed: fail closed"]}'
+          else
+            result="$(jq -cn --arg e "$EVENT" '{lane:"full",reasons:["no base classifier for this event ("+$e+"): full"]}')"
+          fi
+          lane="$(jq -r '.lane' <<<"$result")"
+          case "$lane" in docs|full) ;; *) lane=full ;; esac
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Smart CI Stage 0 (shadow)"
+            echo "- Proposed lane: \`$lane\`"
+            jq -r '.reasons[] | "- Reason: \(.)"' <<<"$result"
+            echo "- Enforced in Stage 0: \`full\` (every Core CI job runs; core-ci-passed requires every job)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "smart-ci stage0 proposed lane=$lane result=$result"
+    outputs:
+      lane: ${{ steps.lane.outputs.lane }}
+
   repo-checks:
     name: repository checks
     runs-on: ubuntu-latest
@@ -370,7 +414,7 @@ jobs:
   core-ci-passed:
     name: core-ci-passed
     if: always()
-    needs: [repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]
+    needs: [classify, repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]
     runs-on: ubuntu-latest
     steps:
       - name: every Core CI job succeeded
