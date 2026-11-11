@@ -1999,17 +1999,24 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       return { caseId, attemptId };
     };
     /** Payment states the attempt's status (PAY-08) and the real relay reconciler mirrors it. */
+    /**
+     * LABELLED TEST AID: the relay reconciler reads THIS relay now. Its lease is cleared (the reconciler's lease, not a status), then passes run until this relay
+     * was leased (the pass that read it sets its lease). A pass leases at most BATCH_SIZE (50) relays, oldest first, and in this long suite more than 50 earlier
+     * relays can be due again in a slow run, so one pass is not enough. At most 20 passes; nothing is skipped and no time is waited.
+     */
+    const reconcileRelay = async (attemptId: string) => {
+      await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]);
+      for (let pass = 0; pass < 20; pass++) {
+        await relayReconciler().reconcileOnce();
+        if ((await one(`SELECT "checkAfter" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).checkAfter !== null) return;
+      }
+      throw new Error(`relay ${attemptId} was not read by 20 reconciler passes`);
+    };
     const atPayment = async (paymentId: string, attemptId: string, status: 'failed' | 'succeeded' | 'authorized' | 'unknown' | 'discrepancy') => {
       // Core V2 R3: a current Payment states, for a failed attempt, that it found no refund evidence after the failure (`none`)
       pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status, approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [],
         failedAttemptEvidence: status === 'failed' ? [{ refundAttemptId: attemptId, state: 'none' }] : [] });
-      await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]); // LABELLED TEST AID: the reconciler's lease, not a status
-      // a pass leases at most BATCH_SIZE (50) relays, oldest first: in this long suite more than 50 earlier relays can be due again, so the passes continue until
-      // THIS relay was leased (its lease is set by the pass that read it), at most 20 passes; nothing is skipped and no time is waited
-      for (let pass = 0; pass < 20; pass++) {
-        await relayReconciler().reconcileOnce();
-        if ((await one(`SELECT "checkAfter" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).checkAfter !== null) break;
-      }
+      await reconcileRelay(attemptId);
       return (await one(`SELECT "attemptStatus" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).attemptStatus as string;
     };
     /** Payment's verified completion of the case (the event), as Payment emits it. */
@@ -3733,8 +3740,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         expect(await exposureCase(disputeId)).toBeUndefined();
         // the provider's refund surfaces after the write-off committed: the relay reconciler records the marker; the exposure case opens; nothing is rewritten
         evidenceAt(d.paymentId, r.attemptId, 'unmatched_fact');
-        await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [r.attemptId]); // LABELLED TEST AID: the reconciler's lease
-        await relayReconciler().reconcileOnce();
+        await reconcileRelay(r.attemptId); // LABELLED TEST AID: the reconciler reads this relay now
         expect(await markerOf(r.attemptId)).toMatchObject({ firstState: 'unmatched_fact' });
         await reconciliation().drainOnce();
         expect(await exposureCase(disputeId)).toBeTruthy();
