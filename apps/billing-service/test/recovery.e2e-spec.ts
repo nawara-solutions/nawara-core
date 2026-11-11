@@ -1999,12 +1999,24 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       return { caseId, attemptId };
     };
     /** Payment states the attempt's status (PAY-08) and the real relay reconciler mirrors it. */
+    /**
+     * LABELLED TEST AID: the relay reconciler reads THIS relay now. Its lease is cleared (the reconciler's lease, not a status), then passes run until this relay
+     * was leased (the pass that read it sets its lease). A pass leases at most BATCH_SIZE (50) relays, oldest first, and in this long suite more than 50 earlier
+     * relays can be due again in a slow run, so one pass is not enough. At most 20 passes; nothing is skipped and no time is waited.
+     */
+    const reconcileRelay = async (attemptId: string) => {
+      await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]);
+      for (let pass = 0; pass < 20; pass++) {
+        await relayReconciler().reconcileOnce();
+        if ((await one(`SELECT "checkAfter" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).checkAfter !== null) return;
+      }
+      throw new Error(`relay ${attemptId} was not read by 20 reconciler passes`);
+    };
     const atPayment = async (paymentId: string, attemptId: string, status: 'failed' | 'succeeded' | 'authorized' | 'unknown' | 'discrepancy') => {
       // Core V2 R3: a current Payment states, for a failed attempt, that it found no refund evidence after the failure (`none`)
       pay08.answers.set(paymentId, { attempts: [{ refundAttemptId: attemptId, status, approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [],
         failedAttemptEvidence: status === 'failed' ? [{ refundAttemptId: attemptId, state: 'none' }] : [] });
-      await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [attemptId]); // LABELLED TEST AID: the reconciler's lease, not a status
-      await relayReconciler().reconcileOnce();
+      await reconcileRelay(attemptId);
       return (await one(`SELECT "attemptStatus" FROM refund_authorization_relay WHERE id = $1`, [attemptId])).attemptStatus as string;
     };
     /** Payment's verified completion of the case (the event), as Payment emits it. */
@@ -2903,6 +2915,203 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1 AND "caseType" IN ('refund_fact_contested', 'dispute_conflict_observed')`, [p.paymentId])).toBe(2);
         expect(await records(p)).toEqual(before);
       });
+
+      // ═════════════════════════════════════════════════════════════ Core V2 O-2 (BIL-33 T; PAY-12 M): the FACT OWNER's contested refund fact
+      /** Payment's fact-OWNER item (PAY-12 M): the owner's own fact, figures and attempt only; `over` replaces any field (for the malformed cases). */
+      const ownerItem = (paymentId: string, factId: string, refundAttemptId: unknown, amount: number | null, over: Partial<PaymentItem> = {}) => {
+        const i = { kind: 'refund_fact_contested', id: factId, paymentId, factId, amount, currency: amount === null ? null : 'TND', detail: { refundAttemptId }, at: now(), ...over } as PaymentItem;
+        push('refund_fact_contested', i);
+        return i;
+      };
+      const contestCases = (factId: string) => count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [factId]);
+
+      for (const allocated of [true, false]) {
+        it(`O2-I1 (${allocated ? 'after' : 'before'} allocation): the fact owner's item opens ONE S0-C15B case and ONE evidence row bound to Billing's own relay and capture, atomically; two workers and replays add nothing; no money moves`, async () => {
+          const p = await directPurchase();
+          const r = await relayed(p.paymentId);
+          const before = await records(p);
+          const factId = randomUUID();
+          pay08States(p.paymentId, r.attemptId, factId, p.amount, allocated);
+          ownerItem(p.paymentId, factId, r.attemptId, p.amount);
+          await Promise.all([reconciliation().drainOnce(), reconciliation().drainOnce()]);
+          await reconciliation().drainOnce();
+          const c = await caseOf('refund_fact_contested', factId);
+          expect(c).toMatchObject({ paymentId: p.paymentId, amount: String(p.amount), currency: 'TND', detail: allocated ? 'contested_after_allocation' : 'contested_unallocated', kind: null });
+          const capture = (await one(`SELECT "captureFactId" FROM refund_case WHERE id = $1`, [r.caseId])).captureFactId;
+          expect(await evidenceOf(c.id)).toEqual({ paymentId: p.paymentId, refundFactId: factId, refundAttemptId: r.attemptId, captureFactId: capture });
+          expect(await contestCases(factId)).toBe(1);
+          expect(await count(`SELECT count(*) AS n FROM reconciliation_contest_evidence WHERE "refundFactId" = $1`, [factId])).toBe(1);
+          expect(await openedAudits(c.id)).toBe(1);
+          expect(await records(p)).toEqual(before);
+        });
+      }
+
+      it('O2-I2 (fail closed): PAY-08 disagreement, figures, identity, own relay, an unavailable Payment and the DO-74 fallback each open NOTHING; agreement then opens the case', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const variants: [string, () => void][] = [
+          ['fact absent at PAY-08', () => pay08States(p.paymentId, r.attemptId, randomUUID(), p.amount)],
+          ['fact under another attempt', () => pay08States(p.paymentId, randomUUID(), current, p.amount)],
+          ['amount disagrees', () => pay08States(p.paymentId, r.attemptId, current, p.amount + 1)],
+          ['currency disagrees', () => pay08.answers.set(p.paymentId, { attempts: [], refusals: [], authorizations: [{ refundAuthorizationId: randomUUID(), refundAttemptId: r.attemptId,
+            refundCaseId: randomUUID(), approvedAmount: p.amount, currency: 'EUR', completedAt: now(), allocations: [{ factId: current, amount: p.amount, currency: 'EUR' }] }], unallocatedFacts: [] } as PaymentRefunds)],
+          ['unallocated facts unknown', () => pay08.answers.set(p.paymentId, { attempts: [], refusals: [], authorizations: [], unallocatedFacts: null } as PaymentRefunds)],
+          ['Payment unavailable', () => pay08.answers.set(p.paymentId, 'down')],
+          ['DO-74 fallback (the fact not stated; an observation listed under the attempt)', () => pay08.answers.set(p.paymentId, { attempts: [], refusals: [], authorizations: [], unallocatedFacts: [],
+            observationConflicts: [{ refundAttemptId: r.attemptId, conflictIds: [current], observations: 1 }] } as PaymentRefunds)],
+        ];
+        let current = '';
+        for (const [why, setup] of variants) {
+          current = randomUUID();
+          setup();
+          ownerItem(p.paymentId, current, r.attemptId, p.amount);
+          await reconciliation().drainOnce();
+          expect(await contestCases(current), why).toBe(0);
+          expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_observation_conflict' AND "evidenceKey" = $1`, [r.attemptId]), why).toBe(0);
+        }
+        // item-side defects: unusable figures, an id that is not the fact, an unreadable attempt, and no relay of Billing's own for the attempt
+        const itemDefects: [string, () => string][] = [
+          ['figures unusable', () => { const f = randomUUID(); pay08States(p.paymentId, r.attemptId, f, p.amount); ownerItem(p.paymentId, f, r.attemptId, null); return f; }],
+          ['id is not the fact', () => { const f = randomUUID(); pay08States(p.paymentId, r.attemptId, f, p.amount); ownerItem(p.paymentId, f, r.attemptId, p.amount, { id: randomUUID() }); return f; }],
+          ['attempt unreadable', () => { const f = randomUUID(); pay08States(p.paymentId, r.attemptId, f, p.amount); ownerItem(p.paymentId, f, 'not-a-uuid', p.amount); return f; }],
+          ['no own relay', () => { const f = randomUUID(); const ghost = randomUUID(); pay08States(p.paymentId, ghost, f, p.amount); ownerItem(p.paymentId, f, ghost, p.amount); return f; }],
+        ];
+        for (const [why, make] of itemDefects) {
+          const f = make();
+          await reconciliation().drainOnce();
+          expect(await contestCases(f), why).toBe(0);
+        }
+        // the reads then agree: the case opens (recovery, no stale state)
+        const ok = randomUUID();
+        pay08States(p.paymentId, r.attemptId, ok, p.amount);
+        ownerItem(p.paymentId, ok, r.attemptId, p.amount);
+        await reconciliation().drainOnce();
+        expect(await contestCases(ok)).toBe(1);
+      });
+
+      it('O2-I3 (isolation, older Payment): the kind unknown at Payment skips ONLY this kind; every other kind of the same pass still opens its case; later the case opens', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const factId = randomUUID();
+        pay08States(p.paymentId, r.attemptId, factId, p.amount);
+        ownerItem(p.paymentId, factId, r.attemptId, p.amount);
+        const other = randomUUID();
+        discrepancy(p.paymentId, other);
+        paymentItems.unsupported.add('refund_fact_contested');
+        try {
+          expect((await reconciliation().drainOnce()).read, 'the pass still read Payment: only this kind was skipped').toBe(true);
+          expect(paymentItems.asked.has('refund_fact_contested')).toBe(true);
+          expect(await contestCases(factId)).toBe(0);
+          expect(await caseOf('refund_discrepancy', other)).toBeTruthy(); // the other kinds were read
+        } finally {
+          paymentItems.unsupported.delete('refund_fact_contested');
+        }
+        await reconciliation().drainOnce();
+        expect(await contestCases(factId)).toBe(1);
+      });
+
+      it('O2-I4 (DO-74 preserved): the fact owner\'s case opened FIRST does not stop the observer\'s later item from opening its own DO-74 case', async () => {
+        const p1 = await directPurchase();
+        const r1 = await relayed(p1.paymentId);
+        const factId = randomUUID();
+        pay08States(p1.paymentId, r1.attemptId, factId, p1.amount);
+        ownerItem(p1.paymentId, factId, r1.attemptId, p1.amount);
+        await reconciliation().drainOnce();
+        expect(await contestCases(factId)).toBe(1);
+        // the observer: another payment's attempt reported the same fact; PAY-08 of the observer lists its own observation
+        const p2 = await directPurchase();
+        const r2 = await relayed(p2.paymentId);
+        const obsId = randomUUID();
+        push('fact_conflict', { kind: 'fact_conflict', id: obsId, paymentId: p2.paymentId, factId, amount: 9000, currency: 'TND', detail: { attemptId: randomUUID(), refundAttemptId: r2.attemptId, source: 'webhook' }, at: now() } as PaymentItem);
+        pay08.answers.set(p2.paymentId, { attempts: [{ refundAttemptId: r2.attemptId, status: 'discrepancy', approvedBy: { userId: U.owner } }], refusals: [], authorizations: [], unallocatedFacts: [],
+          observationConflicts: [{ refundAttemptId: r2.attemptId, conflictIds: [obsId], observations: 1 }] } as PaymentRefunds);
+        await reconciliation().drainOnce();
+        const obs = await caseOf('refund_observation_conflict', r2.attemptId);
+        expect(obs).toMatchObject({ paymentId: p2.paymentId, amount: null, currency: null, detail: null });
+        expect(await contestCases(factId)).toBe(1); // still the owner's one case; nothing of P1 under P2
+        expect((await caseOf('refund_fact_contested', factId))!.paymentId).toBe(p1.paymentId);
+      });
+
+      it('O2-I5 (acknowledgement, P1 only): S0-C15B\'s refusal applies on the fact owner\'s movement and nowhere else; no closure authority', async () => {
+        const p1 = await directPurchase();
+        const r1 = await relayed(p1.paymentId);
+        const mine = randomUUID();
+        discrepancy(p1.paymentId, mine);
+        const p2 = await directPurchase();
+        const elsewhere = randomUUID();
+        discrepancy(p2.paymentId, elsewhere);
+        await reconciliation().drainOnce();
+        const factId = randomUUID();
+        pay08States(p1.paymentId, r1.attemptId, factId, p1.amount);
+        ownerItem(p1.paymentId, factId, r1.attemptId, p1.amount);
+        await reconciliation().drainOnce();
+        const c = (await caseOf('refund_fact_contested', factId))!;
+        const m = (await caseOf('refund_discrepancy', mine))!;
+        const e = (await caseOf('refund_discrepancy', elsewhere))!;
+        const n1 = await acknowledge(m.id, 'reviewed_no_financial_effect');
+        expect([n1.status, n1.body.code]).toEqual([409, 'reconciliation_case_contested']); // P1's contested movement
+        const n2 = await acknowledge(e.id, 'reviewed_no_financial_effect');
+        expect(n2.status, 'another payment is not restricted by P1\'s contest').toBe(200);
+        for (const reason of ['reviewed_no_financial_effect', 'duplicate_evidence_reviewed', 'provider_statement_reviewed']) {
+          const a = await acknowledge(c.id, reason);
+          expect([a.status, a.body.code], reason).toEqual([409, 'reconciliation_case_not_acknowledgeable']); // the case itself: never closed here
+        }
+        expect(await one(`SELECT kind FROM reconciliation_case_resolution WHERE "caseId" = $1`, [c.id])).toBeUndefined();
+      });
+
+      it('O2-I7 (tenant isolation, Billing\'s own layer): with the upstream Platform check ALLOWING a foreign Owner (LABELLED TEST-ONLY MECHANISM, as R3-F1), the fact owner\'s case is neither read nor listed', async () => {
+        const p1 = await directPurchase();
+        const r1 = await relayed(p1.paymentId);
+        const factId = randomUUID();
+        pay08States(p1.paymentId, r1.attemptId, factId, p1.amount);
+        ownerItem(p1.paymentId, factId, r1.attemptId, p1.amount);
+        await reconciliation().drainOnce();
+        const c = (await caseOf('refund_fact_contested', factId))!;
+        expect(c.platformId).toBe(PLATFORM);
+        const read = (bearer: string) => send(request(server()).get(`/billing/admin/reconciliation-cases/${c.id}`), bearer, null);
+        const list = async (bearer: string) => ((await send(request(server()).get('/billing/admin/reconciliation-cases?type=refund_fact_contested&limit=200'), bearer, null).expect(200)).body.items as { id: string }[]).map((i) => i.id);
+        expect((await read('owner-tok')).status).toBe(200);
+        auth.platforms.set(PLATFORM, OTHER_COMPANY);
+        try {
+          expect((await fetch(`${auth.url}/auth/platform-access/${PLATFORM}`, { headers: { authorization: 'Bearer foreign-owner-tok' } })).status, 'the mechanism is effective').toBe(200);
+          expect((await read('foreign-owner-tok')).status, 'Billing\'s ownership check alone refuses').toBe(404);
+          expect(await list('foreign-owner-tok'), 'Billing\'s Company filter alone excludes it').not.toContain(c.id);
+        } finally {
+          auth.platforms.set(PLATFORM, COMPANY);
+        }
+      });
+
+      it('O2-I6 (database, direct SQL): the case never commits without its evidence; evidence of another payment\'s relay, and changing or removing evidence, are refused', async () => {
+        const p1 = await directPurchase();
+        const r1 = await relayed(p1.paymentId);
+        const factId = randomUUID();
+        pay08States(p1.paymentId, r1.attemptId, factId, p1.amount);
+        ownerItem(p1.paymentId, factId, r1.attemptId, p1.amount);
+        await reconciliation().drainOnce();
+        const c = (await caseOf('refund_fact_contested', factId))!;
+        const sqlCase = async () => {
+          const cl = await admin.connect();
+          try {
+            await cl.query('BEGIN');
+            await cl.query(`INSERT INTO reconciliation_case ("caseType", "evidenceKey", "companyId", "platformId", "paymentId", amount, currency, detail)
+              VALUES ('refund_fact_contested', $1, $2, $3, $4, 100, 'TND', 'contested_unallocated')`, [randomUUID(), c.companyId, c.platformId, p1.paymentId]);
+            await cl.query('COMMIT');
+          } catch (err) {
+            await cl.query('ROLLBACK').catch(() => undefined);
+            throw err;
+          } finally {
+            cl.release();
+          }
+        };
+        await expect(sqlCase()).rejects.toMatchObject({ constraint: 'reconciliation_case_contest_evidence_missing' });
+        const p2 = await directPurchase();
+        const r2 = await relayed(p2.paymentId);
+        await expect(admin.query(`INSERT INTO reconciliation_contest_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId") VALUES ($1, $2, $3, $4)`,
+          [c.id, p1.paymentId, randomUUID(), r2.attemptId])).rejects.toThrow();
+        await expect(admin.query(`UPDATE reconciliation_contest_evidence SET "refundAttemptId" = NULL WHERE "caseId" = $1`, [c.id])).rejects.toThrow();
+        await expect(admin.query(`DELETE FROM reconciliation_contest_evidence WHERE "caseId" = $1`, [c.id])).rejects.toThrow();
+        expect(await evidenceOf(c.id)).toMatchObject({ paymentId: p1.paymentId, refundFactId: factId, refundAttemptId: r1.attemptId });
+      });
     });
 
     describe('Core V2 DO-73: verified refund facts Payment cannot allocate stay Owner-visible (BIL-33 P; U-1 to U-7)', () => {
@@ -3531,8 +3740,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         expect(await exposureCase(disputeId)).toBeUndefined();
         // the provider's refund surfaces after the write-off committed: the relay reconciler records the marker; the exposure case opens; nothing is rewritten
         evidenceAt(d.paymentId, r.attemptId, 'unmatched_fact');
-        await admin.query(`UPDATE refund_authorization_relay SET "checkAfter" = NULL WHERE id = $1`, [r.attemptId]); // LABELLED TEST AID: the reconciler's lease
-        await relayReconciler().reconcileOnce();
+        await reconcileRelay(r.attemptId); // LABELLED TEST AID: the reconciler reads this relay now
         expect(await markerOf(r.attemptId)).toMatchObject({ firstState: 'unmatched_fact' });
         await reconciliation().drainOnce();
         expect(await exposureCase(disputeId)).toBeTruthy();

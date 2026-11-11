@@ -6,7 +6,8 @@ export const PAYMENT_RECONCILIATION_CLIENT = Symbol('BILLING_PAYMENT_RECONCILIAT
 export const PAYMENT_ITEM_KINDS = ['late_success', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback', 'capture_refund_unavailable',
   'fact_conflict', // Core V2 S0-C11 item 8 (BIL-33 I)
   'dispute_conflict_presence', // Core V2 S0-C15B (B-D1): Payment's redacted, producer-only existence of a preserved dispute conflict
-  'allocation_blocked'] as const; // Core V2 DO-73 (BIL-33 P): a verified refund fact Payment permanently blocked from allocation, with its reason
+  'allocation_blocked', // Core V2 DO-73 (BIL-33 P): a verified refund fact Payment permanently blocked from allocation, with its reason
+  'refund_fact_contested'] as const; // Core V2 O-2 (BIL-33 T, PAY-12 M): the fact OWNER's own verified refund fact, contested by some observation
 export type PaymentItemKind = (typeof PAYMENT_ITEM_KINDS)[number];
 
 /** One item of Payment's evidence, as Payment states it (never derived): its id is the evidence's own identity. */
@@ -50,6 +51,9 @@ function item(kind: PaymentItemKind, v: unknown): PaymentItem | null {
   // Core V2 DO-73 (U-4): a blocked fact's currency is the provider's own text; an unusable one is kept with no figures (Payment stays authoritative)
   // rather than refusing the page, which would hide every other blocked fact of the pass
   if (kind === 'allocation_blocked' && (amount === null) !== (currency === null)) return item('allocation_blocked', { ...r, kind, amount: null, currency: null });
+  // Core V2 O-2: the same for a contested fact's own figures: kept with no figures (the reader then opens nothing: no agreement is possible), never a
+  // refused page that would hide every other contested fact of the pass
+  if (kind === 'refund_fact_contested' && (amount === null) !== (currency === null)) return item('refund_fact_contested', { ...r, kind, amount: null, currency: null });
   if ((amount === null) !== (currency === null)) return null;
   const factId = typeof r.factId === 'string' && UUID.test(r.factId) ? r.factId : null;
   const detail = r.detail && typeof r.detail === 'object' && !Array.isArray(r.detail) ? (r.detail as Record<string, unknown>) : {};

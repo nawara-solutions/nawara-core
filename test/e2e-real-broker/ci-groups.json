@@ -24,7 +24,8 @@
       "measuredSeconds": 1352.5,
       "suites": [
         "s0c15b-contest-certification.e2e-spec.ts",
-        "s0c14-overlap-certification.e2e-spec.ts"
+        "s0c14-overlap-certification.e2e-spec.ts",
+        "o2-fact-owner-certification.e2e-spec.ts"
       ]
     },
     {

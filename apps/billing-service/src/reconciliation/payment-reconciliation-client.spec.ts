@@ -61,4 +61,12 @@ describe('HttpPaymentReconciliationClient (Core V2 S0-C12 item 9)', () => {
     body = { items: [{ ...late, currency: 'EURO' }] };
     await expect(new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('late_success', undefined, 100)).rejects.toThrow(/malformed item/);
   });
+  it('Core V2 O-2: a contested fact item keeps the owner\'s own fact, figures and attempt; an unusable currency is kept without figures (the reader opens nothing); a bad id fails the page', async () => {
+    body = { items: ['TND', 'tnd'].map((currency, i) => ({ kind: 'refund_fact_contested', id: id(30 + i), paymentId: PAYMENT, factId: id(30 + i), amount: 900, currency,
+      detail: { refundAttemptId: id(40) }, at: '2026-11-11T10:00:00.000Z' })) };
+    const page = await new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('refund_fact_contested', undefined, 100);
+    expect(page.map((i) => [i.id, i.factId, i.amount, i.currency, i.detail])).toEqual([[id(30), id(30), 900, 'TND', { refundAttemptId: id(40) }], [id(31), id(31), null, null, { refundAttemptId: id(40) }]]);
+    body = { items: [{ kind: 'refund_fact_contested', id: 'not-a-uuid', paymentId: PAYMENT, factId: id(30), amount: 900, currency: 'TND', detail: {}, at: null }] };
+    await expect(new HttpPaymentReconciliationClient({ baseUrl: url, serviceToken: 'billing-token', timeoutMs: 500 }).items('refund_fact_contested', undefined, 100)).rejects.toThrow(/malformed item/);
+  });
 });
