@@ -99,11 +99,13 @@ export const GROUP_JOB = 'e2e-real-broker';
 export const VERIFY_JOB = 'e2e-real-broker-verify';
 const asList = (v) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
 const expr = (v) => String(v ?? '').replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim();
+/** Core V2 Smart CI Stage 1: the only condition the group and verify jobs may carry (check:repo's checkCiClassify owns the lane rules). */
+const LANE_ONLY = "needs.classify.outputs.lane != 'docs'";
 
 /**
  * The Core CI jobs around the split (`doc`: the parsed core-ci.yml): the matrix comes only from the plan job's validated output; each
  * group job runs its suites only through this guard, on its own PostgreSQL and RabbitMQ, and always uploads its report; the verify job
- * always runs and checks every report. Nothing in them may turn a failure into a success.
+ * always runs and checks every report. (Core V2 Smart CI Stage 1: both are skipped only in the docs lane, by exactly the lane condition.) Nothing in them may turn a failure into a success.
  */
 export function checkRealBrokerJobs(doc) {
   const problems = [];
@@ -127,7 +129,7 @@ export function checkRealBrokerJobs(doc) {
     if (!asList(group.needs).includes(PLAN_JOB)) problems.push(`${where(GROUP_JOB)}: must need ${PLAN_JOB}`);
     if (expr(group.strategy?.matrix) !== `fromJSON(needs.${PLAN_JOB}.outputs.matrix)`) problems.push(`${where(GROUP_JOB)}: the matrix must be exactly the plan job's output (never a hand-written group list)`);
     if (group.strategy?.['fail-fast'] !== false) problems.push(`${where(GROUP_JOB)}: fail-fast must be false (every group reports)`);
-    if (group.if !== undefined) problems.push(`${where(GROUP_JOB)}: must not be conditional`);
+    if (group.if !== undefined && expr(group.if) !== LANE_ONLY) problems.push(`${where(GROUP_JOB)}: must not be conditional (except exactly "${LANE_ONLY}": skipped only in the Smart CI docs lane)`);
     for (const svc of ['postgres', 'rabbitmq']) if (!group.services?.[svc]) problems.push(`${where(GROUP_JOB)}: needs its own ${svc} service container`);
     const run = runs(group, /^node scripts\/real-broker-groups\.mjs run "\$GROUP" "\$RUNNER_TEMP\/real-broker-report"$/);
     if (run.length !== 1 || expr(run[0].env?.GROUP) !== 'matrix.group' || run[0].if !== undefined) problems.push(`${where(GROUP_JOB)}: exactly one unconditional step must run the group through the guard (node scripts/real-broker-groups.mjs run "$GROUP" ..., GROUP = matrix.group)`);
@@ -137,7 +139,7 @@ export function checkRealBrokerJobs(doc) {
   }
   const verify = jobs[VERIFY_JOB];
   if (verify) {
-    if (expr(verify.if) !== 'always()') problems.push(`${where(VERIFY_JOB)}: must have "if: always()" (it reports a failed or missing group)`);
+    if (expr(verify.if) !== `always() && ${LANE_ONLY}`) problems.push(`${where(VERIFY_JOB)}: must have "if: always() && ${LANE_ONLY}" (it reports a failed or missing group in every full-lane run)`);
     for (const n of [PLAN_JOB, GROUP_JOB]) if (!asList(verify.needs).includes(n)) problems.push(`${where(VERIFY_JOB)}: must need ${n}`);
     const dl = asList(verify.steps).filter((s) => String(s?.uses ?? '').startsWith('actions/download-artifact@'));
     if (dl.length !== 1 || dl[0].with?.pattern !== 'real-broker-report-*') problems.push(`${where(VERIFY_JOB)}: must download every real-broker-report-* artifact`);

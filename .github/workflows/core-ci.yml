@@ -24,12 +24,13 @@ env:
   NODE_VERSION: '22'
 
 jobs:
-  # Core V2 Smart CI, STAGE 0 (SHADOW): reports the lane this change COULD use (docs or full) and why. Nothing reads its outputs: every job
-  # below still runs and core-ci-passed still requires every job to succeed. The classifier is taken from the pull request's BASE commit,
-  # never from the pull request itself, so a change cannot select its own classification; without one there (or on any error) the lane is
-  # full. No credentials are persisted and no secret is used. CI_FORCE_FULL (repository variable) = 1 forces full.
+  # Core V2 Smart CI, STAGE 1: decides the lane, `docs` or `full`. The classifier is taken from the pull request's BASE commit, never from the
+  # pull request itself, so a change cannot select its own lane (a change to the classifier or to this workflow is `full` by that base
+  # classifier). Only a pull request whose every change is allowlisted, non-executable Markdown is `docs`; a push, CI_FORCE_FULL=1
+  # (repository variable), a missing or failing classifier and any unexpected output are `full`. `docs` runs only this job and
+  # repo-checks; `full` runs every job. No credentials are persisted and no secret is used. core-ci-passed re-checks the lane.
   classify:
-    name: change classification (Smart CI Stage 0, shadow)
+    name: change classification (Smart CI)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,7 +40,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: classify with the base commit's classifier (reported only; nothing is skipped)
+      - name: classify with the base commit's classifier (docs or full)
         id: lane
         env:
           EVENT: ${{ github.event_name }}
@@ -49,22 +50,27 @@ jobs:
         run: |
           set -euo pipefail
           trusted="$RUNNER_TEMP/classify-base.mjs"
-          if [ "$EVENT" = pull_request ] && git cat-file -e "$BASE_SHA:scripts/ci-lanes/classify.mjs" 2>/dev/null; then
+          if [ "${CI_FORCE_FULL:-}" = 1 ]; then
+            result='{"lane":"full","reasons":["CI_FORCE_FULL=1 (emergency override)"]}'
+          elif [ "$EVENT" = pull_request ] && git cat-file -e "$BASE_SHA:scripts/ci-lanes/classify.mjs" 2>/dev/null; then
             git show "$BASE_SHA:scripts/ci-lanes/classify.mjs" > "$trusted"
             result="$(node "$trusted" "$EVENT" "$BASE_SHA" "$HEAD_SHA")" || result='{"lane":"full","reasons":["the base classifier failed: fail closed"]}'
           else
-            result="$(jq -cn --arg e "$EVENT" '{lane:"full",reasons:["no base classifier for this event ("+$e+"): full"]}')"
+            result="$(jq -cn --arg e "$EVENT" '{lane:"full",reasons:["event "+$e+" without a base classifier: full"]}')"
           fi
-          lane="$(jq -r '.lane' <<<"$result")"
+          lane="$(jq -r '.lane' <<<"$result" 2>/dev/null)" || lane=full
           case "$lane" in docs|full) ;; *) lane=full ;; esac
           echo "lane=$lane" >> "$GITHUB_OUTPUT"
           {
-            echo "### Smart CI Stage 0 (shadow)"
-            echo "- Proposed lane: \`$lane\`"
-            jq -r '.reasons[] | "- Reason: \(.)"' <<<"$result"
-            echo "- Enforced in Stage 0: \`full\` (every Core CI job runs; core-ci-passed requires every job)"
+            echo "### Smart CI lane: \`$lane\`"
+            jq -r '.reasons[] | "- Reason: \(.)"' <<<"$result" 2>/dev/null || echo "- Reason: unreadable classifier output: full"
+            if [ "$lane" = docs ]; then
+              echo "- Runs: classify, repo-checks (every other Core CI job is skipped; core-ci-passed requires exactly that)"
+            else
+              echo "- Runs: every Core CI job (core-ci-passed requires every job to succeed)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "smart-ci stage0 proposed lane=$lane result=$result"
+          echo "smart-ci lane=$lane result=$result"
     outputs:
       lane: ${{ steps.lane.outputs.lane }}
 
@@ -93,6 +99,8 @@ jobs:
 
   node:
     name: ${{ matrix.name }}
+    needs: classify
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -203,6 +211,8 @@ jobs:
   # publishing and deploying stay in auth-service-docker-build.yml. notification-service is covered since its Stage 16.3 foundation, file-service since its Stage 17.2 foundation, audit-service since its Stage 18.2 foundation and release-service since its Stage 20.2 foundation.
   images:
     name: core image (${{ matrix.service }})
+    needs: classify
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -226,6 +236,8 @@ jobs:
 
   infra:
     name: local infrastructure (least-privilege roles)
+    needs: classify
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -249,6 +261,8 @@ jobs:
   # and derives the matrix from the manifest, so a group can never be left out of the matrix.
   e2e-real-broker-plan:
     name: real-broker suite manifest
+    needs: classify
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -263,7 +277,8 @@ jobs:
 
   e2e-real-broker:
     name: Real RabbitMQ loops (group ${{ matrix.group }})
-    needs: e2e-real-broker-plan
+    needs: [classify, e2e-real-broker-plan]
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     strategy:
       # Every group runs to its end, so a failure in one never hides the result of another.
@@ -326,8 +341,8 @@ jobs:
   # and every test passed with none failed, errored or skipped. core-ci-passed needs it, the plan and the group jobs.
   e2e-real-broker-verify:
     name: real-broker reports complete
-    if: always()
-    needs: [e2e-real-broker-plan, e2e-real-broker]
+    if: always() && needs.classify.outputs.lane != 'docs'
+    needs: [classify, e2e-real-broker-plan, e2e-real-broker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -343,6 +358,8 @@ jobs:
 
   e2e-auth-organization:
     name: Stage 10.1 Auth/Organization human-admin wire contract over real HTTP
+    needs: classify
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -377,6 +394,8 @@ jobs:
   # isolation). It builds from a clean `npm ci`, contract first (`test:e2e:audit-producers`): never from a stale local `dist`.
   e2e-shared-platform:
     name: Core shared platform integration (all producers, real RabbitMQ)
+    needs: classify
+    if: needs.classify.outputs.lane != 'docs'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -409,19 +428,27 @@ jobs:
   # V2-A.3 (A3.2): the ONE stable check a `main` ruleset can require. Matrix check names change when the matrix changes; this name
   # does not. It needs EVERY other job of this workflow (`npm run check:repo` refuses a job missing here) and always runs, because a
   # required check that is SKIPPED counts as passed: without `if: always()` a failed dependency would skip this job and unblock the
-  # merge. It succeeds only when every needed job succeeded; failed, cancelled and skipped are all refused. This workflow has no
-  # path filter, so the check also reports on documentation-only pull requests.
+  # merge. Core V2 Smart CI Stage 1: its verdict is lane-aware (scripts/ci-lanes/gate.mjs, from this same revision, so it knows this
+  # workflow's jobs): the classification succeeded, the lane is docs or full (full for every push and under CI_FORCE_FULL=1), every job
+  # the lane requires succeeded and every other job was SKIPPED; a failed, cancelled, missing or unknown job, or a job that ran outside
+  # its lane, is refused. This workflow has no path filter, so the check also reports on documentation-only pull requests.
   core-ci-passed:
     name: core-ci-passed
     if: always()
     needs: [classify, repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]
     runs-on: ubuntu-latest
     steps:
-      - name: every Core CI job succeeded
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: every job the lane requires succeeded; every other job was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
         run: |
           set -euo pipefail
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
-          jq -e 'length > 0 and all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null \
-            || { echo "core-ci-passed: at least one Core CI job did not succeed" >&2; exit 1; }
+          node scripts/ci-lanes/gate.mjs

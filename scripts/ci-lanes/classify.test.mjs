@@ -1,4 +1,4 @@
-// Core V2 Smart CI (Stage 0) classifier and future gate tests. Deterministic: synthetic diffs and temporary git repositories, never the
+// Core V2 Smart CI (Stage 1) classifier and lane-aware gate tests. Deterministic: synthetic diffs and temporary git repositories, never the
 // checkout's own history (CI checks out shallow). CLASSIFY_MODULE overrides the module under test (negative controls).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +12,7 @@ const MOD = process.env.CLASSIFY_MODULE ?? fileURLToPath(new URL('./classify.mjs
 const { classify, gate, parseRawZ, requiredJobs, ALL_JOBS, main } = await import(pathToFileURL(MOD).href);
 const e = (path, status = 'M', o = {}) => ({ status, path, oldPath: null, oldMode: status === 'A' ? '000000' : '100644', newMode: status === 'D' ? '000000' : '100644', ...o });
 const lane = (entries, event = 'pull_request') => classify({ event, entries }).lane;
+const pr = (args) => gate({ event: 'pull_request', ...args });
 const needsFor = (laneName, override = {}) => {
   const req = new Set(requiredJobs(laneName));
   return Object.fromEntries(ALL_JOBS.map((j) => [j, { result: override[j] ?? (req.has(j) ? 'success' : 'skipped') }]));
@@ -66,7 +67,10 @@ test('a workflow, this classifier, scripts and test infrastructure → full', ()
   assert.equal(lane([e('test/e2e-real-broker/ci-groups.json')]), 'full');
   assert.equal(lane([e('package-lock.json')]), 'full');
 });
-test('an unknown file → full', () => {
+test('an unknown file → full (only allowlisted Markdown reaches docs)', () => {
+  for (const p of ['Dockerfile', '.gitattributes', '.npmrc', '.nvmrc', 'docs/a.markdown', 'docs/a.MD', 'docs/a.md.sh', 'docs/a.mdx', 'docs/.md/x.ts', 'apps/notification-service/docs/x.md', 'apps/notification-service/src/README.md', 'libs/x/README.md', 'docker-compose.yml', 'LICENSE']) {
+    assert.equal(lane([e(p, 'A')]), 'full', p);
+  }
   assert.equal(lane([e('tools/new-thing.sh', 'A')]), 'full');
   assert.equal(lane([e('docs/diagram.png', 'A')]), 'full');
   assert.equal(lane([e('.claude/agents/x.md')]), 'full');
@@ -89,6 +93,9 @@ test('a documentation name cannot hide executable behavior: symlink, submodule, 
   assert.equal(lane([e('docs/a.md', 'M', { oldMode: '100644', newMode: '100755' })]), 'full');
   assert.equal(lane([e('docs/run.md', 'A', { newMode: '100755' })]), 'full');
   assert.equal(lane([e('CONTRIBUTING.md', 'M', { oldMode: '120000', newMode: '120000' })]), 'full');
+  // A renamed document that becomes executable (or a symlink) in the same change.
+  assert.equal(lane([{ status: 'R', oldPath: 'docs/a.md', path: 'docs/b.md', oldMode: '100644', newMode: '100755' }]), 'full');
+  assert.equal(lane([{ status: 'R', oldPath: 'docs/a.md', path: 'docs/b.md', oldMode: '100644', newMode: '120000' }]), 'full');
 });
 test('change detection failure → full (no entries, unknown status, unparseable diff, bad reference)', () => {
   assert.equal(lane([]), 'full');
@@ -121,29 +128,54 @@ test('git: the change is measured from the MERGE BASE (main moving on adds nothi
     ['a docs symlink', ({ dir }) => symlinkSync('../scripts/s.mjs', join(dir, 'docs/link.md')), 'full'],
     ['an executable docs file', ({ put, dir }) => { put('docs/run.md'); chmodSync(join(dir, 'docs/run.md'), 0o755); }, 'full'],
     ['a classifier change', ({ put }) => put('scripts/ci-lanes/classify.mjs', '// x\n'), 'full'],
+    ['a classifier change hidden among documentation', ({ put }) => { put('docs/a.md', 'changed\n'); put('scripts/ci-lanes/classify.mjs', '// x\n'); }, 'full'],
+    ['a documentation rename that becomes executable', ({ git, dir }) => { git('mv', 'docs/a.md', 'docs/c.md'); chmodSync(join(dir, 'docs/c.md'), 0o755); }, 'full'],
+    ['a workflow change', ({ put }) => put('.github/workflows/core-ci.yml', 'x: 1\n'), 'full'],
   ];
   for (const [name, change, want] of cases) {
     const r = repo(change);
     try { assert.equal(cli(r).lane, want, name); } finally { r.cleanup(); }
   }
 });
-test('future gate: docs passes only with the required jobs succeeded and every other job SKIPPED', () => {
-  assert.equal(gate({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs') }).ok, true);
-  assert.equal(gate({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { 'repo-checks': 'skipped' }) }).ok, false);
-  assert.equal(gate({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { 'repo-checks': 'failure' }) }).ok, false);
-  assert.equal(gate({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { node: 'failure' }) }).ok, false);
-  assert.equal(gate({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { node: 'cancelled' }) }).ok, false);
+test('gate: docs passes only with the required jobs succeeded and every other job SKIPPED', () => {
+  assert.equal(pr({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs') }).ok, true);
+  assert.equal(pr({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { 'repo-checks': 'skipped' }) }).ok, false);
+  assert.equal(pr({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { 'repo-checks': 'failure' }) }).ok, false);
+  assert.equal(pr({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { 'repo-checks': 'cancelled' }) }).ok, false);
+  // A job outside the docs lane that ran, whatever its result, is not silently ignored.
+  for (const result of ['failure', 'cancelled', 'success']) assert.equal(pr({ lane: 'docs', classifyResult: 'success', needs: needsFor('docs', { node: result }) }).ok, false, result);
 });
-test('future gate: full requires every job succeeded; a classification failure, unknown lane, missing or unknown job fails', () => {
-  assert.equal(gate({ lane: 'full', classifyResult: 'success', needs: needsFor('full') }).ok, true);
-  assert.equal(gate({ lane: 'full', classifyResult: 'success', needs: needsFor('full', { 'e2e-real-broker': 'skipped' }) }).ok, false);
-  assert.equal(gate({ lane: 'full', classifyResult: 'success', needs: needsFor('full', { 'e2e-real-broker': 'cancelled' }) }).ok, false);
-  assert.equal(gate({ lane: 'docs', classifyResult: 'failure', needs: needsFor('docs') }).ok, false);
-  assert.equal(gate({ lane: 'targeted', classifyResult: 'success', needs: needsFor('docs') }).ok, false);
+test('gate: full requires every job succeeded; a classification failure, unknown lane, missing or unknown job fails', () => {
+  assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: needsFor('full') }).ok, true);
+  for (const job of ALL_JOBS) {
+    for (const result of ['skipped', 'cancelled', 'failure', undefined]) {
+      assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: needsFor('full', { [job]: result ?? 'missing' }) }).ok, false, `${job} ${result}`);
+    }
+  }
+  assert.equal(pr({ lane: 'docs', classifyResult: 'failure', needs: needsFor('docs') }).ok, false);
+  assert.equal(pr({ lane: 'docs', classifyResult: undefined, needs: needsFor('docs') }).ok, false);
   const missing = needsFor('full'); delete missing.images;
-  assert.equal(gate({ lane: 'full', classifyResult: 'success', needs: missing }).ok, false);
-  assert.equal(gate({ lane: 'full', classifyResult: 'success', needs: { ...needsFor('full'), surprise: { result: 'success' } } }).ok, false);
+  assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: missing }).ok, false);
+  const noClassify = needsFor('docs'); delete noClassify.classify;
+  assert.equal(pr({ lane: 'docs', classifyResult: 'success', needs: noClassify }).ok, false);
+  assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: { ...needsFor('full'), surprise: { result: 'success' } } }).ok, false);
+  assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: null }).ok, false);
+  assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: [] }).ok, false);
 });
-test('future gate: a reduced job set cannot pass as full', () => {
-  assert.equal(gate({ lane: 'full', classifyResult: 'success', needs: needsFor('docs') }).ok, false);
+test('gate: a forged or malformed lane cannot pass', () => {
+  for (const forged of ['targeted', 'DOCS', 'docs ', 'Full', '', null, undefined, 1, ['docs'], { lane: 'docs' }]) {
+    assert.equal(pr({ lane: forged, classifyResult: 'success', needs: needsFor('docs') }).ok, false, JSON.stringify(forged));
+  }
+});
+test('gate: a reduced job set cannot pass as full', () => {
+  assert.equal(pr({ lane: 'full', classifyResult: 'success', needs: needsFor('docs') }).ok, false);
+});
+test('gate: a push (or any non-pull-request event) and CI_FORCE_FULL=1 can only be full', () => {
+  for (const event of ['push', 'merge_group', 'workflow_dispatch', 'schedule', '', undefined]) {
+    assert.equal(gate({ event, lane: 'docs', classifyResult: 'success', needs: needsFor('docs') }).ok, false, String(event));
+  }
+  assert.equal(gate({ event: 'push', lane: 'full', classifyResult: 'success', needs: needsFor('full') }).ok, true);
+  assert.equal(gate({ event: undefined, lane: 'full', classifyResult: 'success', needs: needsFor('full') }).ok, false);
+  assert.equal(pr({ lane: 'docs', forceFull: '1', classifyResult: 'success', needs: needsFor('docs') }).ok, false);
+  assert.equal(pr({ lane: 'full', forceFull: '1', classifyResult: 'success', needs: needsFor('full') }).ok, true);
 });

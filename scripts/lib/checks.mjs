@@ -1632,20 +1632,26 @@ function checkDashboardSemantics(file, d, text) {
 }
 
 export const CI_AGGREGATE = 'core-ci-passed';
-const AGGREGATE_RESULT_RULE = 'all(.[]; .result == "success")';
+/** Core V2 Smart CI (Stage 1): the aggregate's verdict is the lane-aware gate, run from the same revision as this workflow. */
+const AGGREGATE_GATE = 'node scripts/ci-lanes/gate.mjs';
 
-/** Core V2 Smart CI (Stage 0): the change-classification job's stable id and the classifier path Core CI must take from the BASE commit. */
+/** Core V2 Smart CI: the change-classification job's stable id and the classifier path Core CI must take from the BASE commit. */
 export const CI_CLASSIFY = 'classify';
 const CLASSIFIER_PATH = 'scripts/ci-lanes/classify.mjs';
+/** Stage 1: the ONLY condition a lane-gated job may have (the `always() &&` form keeps a job that already ran after failures). */
+const LANE_CONDITION = "needs.classify.outputs.lane != 'docs'";
+const LANE_CONDITIONS = [LANE_CONDITION, `always() && ${LANE_CONDITION}`];
+const normalizedIf = (job) => String(job?.if ?? '').replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim();
 
 /**
- * Core V2 Smart CI, STAGE 0 (SHADOW). The `classify` job only REPORTS a lane: it must be unconditional and single (no if, needs, matrix or
- * continue-on-error), persist no credentials, use no secret, and run the classifier taken from the pull request's BASE commit
- * (`git show "$BASE_SHA:scripts/ci-lanes/classify.mjs"`, BASE_SHA = the event's base sha), never the checked-out one, with the CI_FORCE_FULL
- * override passed through. In Stage 0 no job may depend on the classification: only the aggregate needs `classify`, and no `if:` reads it, so
- * every job runs. The workflow never uses `pull_request_target`. `allJobs` (the classifier's own job list) must equal the workflow's jobs.
+ * Core V2 Smart CI, STAGE 1. The `classify` job decides the lane: it must be unconditional and single (no if, needs, matrix or
+ * continue-on-error), persist no credentials, use no secret, honour CI_FORCE_FULL itself, run the classifier taken from the pull request's
+ * BASE commit (`git show "$BASE_SHA:scripts/ci-lanes/classify.mjs"`, BASE_SHA = the event's base sha), never the checked-out one, and
+ * normalize any lane other than docs|full to full. The jobs the `docs` lane runs (`docsJobs`, from the classifier) have no condition; every
+ * other job needs `classify` and has exactly the lane condition, nothing more, and nothing else in the workflow reads the classification
+ * (no step-level skip). The workflow never uses `pull_request_target`. `allJobs` (the classifier's job list) must equal the workflow's jobs.
  */
-export function checkCiClassify(fileName, text, allJobs) {
+export function checkCiClassify(fileName, text, allJobs, docsJobs) {
   const problems = [];
   const doc = parse(text);
   const on = doc?.on ?? doc?.true;
@@ -1663,18 +1669,38 @@ export function checkCiClassify(fileName, text, allJobs) {
   if (!checkout || checkout.with?.['persist-credentials'] !== false || Number(checkout.with?.['fetch-depth']) !== 0) {
     problems.push(`${where}: its checkout must set fetch-depth: 0 (the merge base) and persist-credentials: false`);
   }
+  if (steps.some((s) => 'continue-on-error' in s || 'if' in s)) problems.push(`${where}: its steps must not be conditional or continue on error`);
   const run = steps.map((s) => String(s.run ?? '')).join('\n');
   if (/\$\{\{\s*secrets\./.test(JSON.stringify(job))) problems.push(`${where}: must use no secret`);
   if (!run.includes(`git show "$BASE_SHA:${CLASSIFIER_PATH}"`)) problems.push(`${where}: must run the classifier from the BASE commit (git show "$BASE_SHA:${CLASSIFIER_PATH}")`);
   if (new RegExp(`node\\s+["']?(\\./)?${CLASSIFIER_PATH.replace(/[./]/g, (c) => `\\${c}`)}`).test(run)) problems.push(`${where}: must never run the checked-out classifier (the pull request would select its own lane)`);
+  if (!run.includes('if [ "${CI_FORCE_FULL:-}" = 1 ]; then')) problems.push(`${where}: must itself force full when CI_FORCE_FULL=1 (the override must not depend on the classifier)`);
+  if (!run.includes('case "$lane" in docs|full) ;; *) lane=full ;; esac')) problems.push(`${where}: must turn any lane other than docs or full into full`);
+  if (!run.includes(`"$(node "$trusted" "$EVENT" "$BASE_SHA" "$HEAD_SHA")" || result='{"lane":"full","reasons":["the base classifier failed: fail closed"]}'`)) problems.push(`${where}: a failing base classifier must give the full lane`);
+  if (!run.includes(`lane="$(jq -r '.lane' <<<"$result" 2>/dev/null)" || lane=full`)) problems.push(`${where}: unreadable classifier output must give the full lane`);
   const env = Object.assign({}, ...steps.map((s) => s.env ?? {}));
   if (String(env.BASE_SHA ?? '').replace(/\s+/g, '') !== '${{github.event.pull_request.base.sha}}') problems.push(`${where}: BASE_SHA must be \${{ github.event.pull_request.base.sha }}`);
   if (String(env.CI_FORCE_FULL ?? '').replace(/\s+/g, '') !== '${{vars.CI_FORCE_FULL}}') problems.push(`${where}: must pass the CI_FORCE_FULL emergency override (\${{ vars.CI_FORCE_FULL }})`);
+  if (String(job.outputs?.lane ?? '').replace(/\s+/g, '') !== '${{steps.lane.outputs.lane}}') problems.push(`${where}: its output "lane" must be \${{ steps.lane.outputs.lane }}`);
+
+  const docs = new Set(asArray(docsJobs).map(String));
+  if (!docs.has(CI_CLASSIFY)) problems.push(`${fileName}: the docs lane must include "${CI_CLASSIFY}"`);
+  let gated = 0;
   for (const [id, other] of Object.entries(jobs)) {
-    if (id === CI_CLASSIFY) continue;
-    if (id !== CI_AGGREGATE && asArray(other?.needs).map(String).includes(CI_CLASSIFY)) problems.push(`${fileName} job "${id}": must not need "${CI_CLASSIFY}" in Stage 0 (shadow: every job runs)`);
-    if (/needs\.classify/.test(String(other?.if ?? ''))) problems.push(`${fileName} job "${id}": its condition must not read the classification in Stage 0 (shadow: every job runs)`);
+    if (id === CI_CLASSIFY || id === CI_AGGREGATE) continue;
+    const at = `${fileName} job "${id}"`;
+    if (docs.has(id)) {
+      if ('if' in (other ?? {})) problems.push(`${at}: runs in every lane (the docs lane requires it), so it must have no condition`);
+      continue;
+    }
+    gated += 1;
+    if (!asArray(other?.needs).map(String).includes(CI_CLASSIFY)) problems.push(`${at}: must need "${CI_CLASSIFY}" (its condition reads the lane)`);
+    if (!LANE_CONDITIONS.includes(normalizedIf(other))) problems.push(`${at}: its condition must be exactly "${LANE_CONDITION}" (or "always() && ${LANE_CONDITION}"): it is skipped only in the docs lane`);
   }
+  const reads = (text.match(/needs\.classify\b/g) ?? []).length;
+  if (reads !== gated) problems.push(`${fileName}: the classification may be read only by the lane condition of each gated job (${reads} reads for ${gated} gated jobs)`);
+  if (/\bsteps\.lane\b/.test(text.replace('${{ steps.lane.outputs.lane }}', ''))) problems.push(`${fileName}: the lane step's output may be read only by the classify job's output`);
+  for (const id of docs) if (!(id in jobs)) problems.push(`${fileName}: the docs lane's job "${id}" does not exist`);
   const ids = Object.keys(jobs).filter((id) => id !== CI_AGGREGATE).sort();
   const listed = [...asArray(allJobs)].map(String).sort();
   if (JSON.stringify(ids) !== JSON.stringify(listed)) problems.push(`${fileName}: the classifier's job list (${listed.join(', ')}) must equal the workflow's jobs (${ids.join(', ')})`);
@@ -1683,7 +1709,8 @@ export function checkCiClassify(fileName, text, allJobs) {
 
 /**
  * The aggregate must exist under its stable id and name, need EVERY other job of the workflow, always run (a skipped required check
- * counts as passed), and succeed only when every needed job succeeded. The workflow must report on every pull request to main: no
+ * counts as passed), and decide with the lane-aware gate (scripts/ci-lanes/gate.mjs: in the full lane every job succeeded; in the docs
+ * lane the docs jobs succeeded and every other job was skipped). The workflow must report on every pull request to main: no
  * path filter. Nothing may turn a failure into a success (continue-on-error).
  */
 export function checkCiAggregate(fileName, text) {
@@ -1719,13 +1746,20 @@ export function checkCiAggregate(fileName, text) {
   if (unknown.length > 0) problems.push(`${where}: needs unknown jobs (${unknown.join(', ')})`);
 
   const steps = asArray(job.steps);
-  const verdict = steps.filter((s) => String(s.run ?? '').includes(AGGREGATE_RESULT_RULE));
-  const fromNeeds = (s) => Object.values(s.env ?? {}).some((v) => /^\$\{\{\s*toJSON\(needs\)\s*\}\}$/.test(String(v).trim()));
-  if (verdict.length !== 1 || !fromNeeds(verdict[0])) {
-    problems.push(`${where}: exactly one step must decide from toJSON(needs) with jq '${AGGREGATE_RESULT_RULE}'`);
-  } else if (firstCommandLine(verdict[0].run) !== 'set -euo pipefail') {
-    problems.push(`${where}: the deciding step must start with "set -euo pipefail"`);
+  const verdict = steps.filter((s) => String(s.run ?? '').includes('scripts/ci-lanes/gate.mjs'));
+  const envIs = (s, key, value) => String(s.env?.[key] ?? '').replace(/\s+/g, '') === value;
+  if (verdict.length !== 1) {
+    problems.push(`${where}: exactly one step must decide with the lane-aware gate (${AGGREGATE_GATE})`);
+  } else {
+    const lines = String(verdict[0].run).split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines[0] !== 'set -euo pipefail') problems.push(`${where}: the deciding step must start with "set -euo pipefail"`);
+    if (lines.length !== 2 || lines[1] !== AGGREGATE_GATE) problems.push(`${where}: the deciding step must run exactly "${AGGREGATE_GATE}"`);
+    if (!envIs(verdict[0], 'NEEDS', '${{toJSON(needs)}}')) problems.push(`${where}: the gate must decide from NEEDS: \${{ toJSON(needs) }}`);
+    if (!envIs(verdict[0], 'EVENT', '${{github.event_name}}')) problems.push(`${where}: the gate must receive EVENT: \${{ github.event_name }} (only a pull request may be docs)`);
+    if (!envIs(verdict[0], 'CI_FORCE_FULL', '${{vars.CI_FORCE_FULL}}')) problems.push(`${where}: the gate must receive CI_FORCE_FULL: \${{ vars.CI_FORCE_FULL }}`);
   }
+  const checkout = steps.find((s) => String(s.uses ?? '').startsWith('actions/checkout@'));
+  if (!checkout || checkout.with?.['persist-credentials'] !== false) problems.push(`${where}: its checkout must set persist-credentials: false`);
   if (steps.some((s) => 'continue-on-error' in s || 'if' in s)) problems.push(`${where}: its steps must not be conditional or continue on error`);
   if (steps.some((s) => /\|\|\s*(true|:)\s*$/m.test(String(s.run ?? '')))) problems.push(`${where}: a step swallows its failure ("|| true")`);
 
