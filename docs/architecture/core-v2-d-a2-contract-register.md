@@ -1159,6 +1159,118 @@ lifecycle authority and the V-4 / L2 / L3 contracts (V5-8); (5) the shared autho
 Payment lifecycle-aware S5e integration (D6 for BIL-13, V5-5, the `inactive` kind of BIL-26, Payment's A-6 extension point); (7) the S0
 §8 inactive-Organization discharge certification.
 
+### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO decision approved)
+
+**Status of this section.** The Owner approved, on 2026-11-11, this register's structure (v0), the identifiers FDR-01 to FDR-11 with their
+provisional titles and coverage, and the legacy-reference crosswalk below **as a provenance record only**. **No financial policy, definition,
+resolution kind, closure authority or implementation is approved by this section.** An entry is approved only by a later, dated Owner approval
+recorded in the entry itself (field *Approval*). Appearing here approves nothing.
+
+**Why it exists.** The original definitions of the legacy identifiers FD-1 to FD-8 were not recovered (provenance gate, 2026-11-11): the
+repository introduces them only as bare collective references (FD-1 to FD-5 in S0-C15A, `93ae45d`; FD-1 to FD-8 in S0-C15B, `c24c0f4`), and the
+individual glosses later written into the R3 entries (`837f7b0`, `f13a0bb`) restate unverified session labels. FD-1 to FD-8 therefore stay
+**unresolved legacy identifiers**; they are not redefined, renumbered or reinterpreted here. Future financial decisions use **FDR-NN** (S0 §1.5,
+FDR entry). An FDR entry never retroactively approves, defines or satisfies an FD identifier.
+
+**Distinct items kept outside the FDR.** F-29 (association authority for unmatched facts): **LOCKED** (PAY-12 G). R3-F2 (S0 §1.5 R3 point 13):
+**OPEN**. P-2 (dispute-conflict resolution): a separate decision. Financial D9 ("partial refund beside a loss") and financial D15 ("final
+liability for the overlap shortfall"), both S0-C14 item 15 (`43bd372`), keep their identifiers; "financial D15" is unrelated to the notification
+decision D15 of stage 16.1 (`a8b580b`, 2026-09-24). FDR entries may *address* these items; they never replace them.
+
+**Analytical vocabulary (Owner-accepted 2026-11-11, vocabulary only; no status changes).** Four meanings are kept apart in every FDR entry:
+(1) a refund operation completed (`refund_case` `completed`, FC-3); (2) a reconciliation case resolved (a `reconciliation_case_resolution` row;
+the Owner read's `status: resolved`); (3) the underlying financial evidence reconciled (no status represents it today); (4) final financial
+liability assigned (nothing represents it today).
+
+#### 7.2.1 Entry schema
+
+| Field | Content |
+|---|---|
+| ID | `FDR-NN`, zero-padded, never reused or renumbered |
+| Version | `v0` = proposed draft; a new version for each approved change, earlier versions kept |
+| Title | Provisional title |
+| Status | `PROPOSED — NOT APPROVED` → `under review` → `approved vN` / `rejected` / `superseded by FDR-NN`; only a dated Owner approval sets `approved` |
+| Provenance | Sources (file, section, commit) for the items it covers |
+| Legacy relation | Legacy gates it **may** help satisfy (§7.2.3); never "FD-n = FDR-NN" |
+| Proposed definition | Placeholder until a definition is proposed and approved |
+| Owner and authority | Decision owner; business, legal or contractual authority required |
+| Current behavior | The enforced behavior today, with sources |
+| Alternatives | Options only, once proposed; none binding |
+| Consequences | Financial and accounting consequences per alternative |
+| Evidence prerequisites | Including provider evidence and real-money data |
+| Dependencies | Other FDR entries and distinct items (F-29, P-2, D9, D15, O-1, DO-37) |
+| Certification | Required after approval, before any implementation counts |
+| Approval | Date, version and reference; **empty until an actual Owner approval** |
+
+#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`)
+
+Common to every entry below: *Proposed definition*, *Alternatives*, *Consequences* and *Certification*: **not yet proposed** (placeholders);
+*Approval*: **none**. *Owner*: the Owner. No entry implies a financial policy.
+
+| ID | Version | Status | Provisional title | Coverage | Provenance | Authority required | Current behavior (unchanged) | Evidence prerequisites | Dependencies |
+|---|---|---|---|---|---|---|---|---|---|
+| FDR-01 | v0 | PROPOSED — NOT APPROVED | Final financial liability for a shortfall | Who bears money not retained when one captured movement both returns by refund and leaves by a lost chargeback, or otherwise leaves retention | Financial D15 (S0-C14 item 15); S0-C15A item 10; DO-73 U-7 | Business and contractual | No liability is assigned anywhere (S0-C14 item 15; S0-C15A item 3) | Commercial and contractual terms; fee data (FDR-09) | FDR-09, FDR-10 |
+| FDR-02 | v0 | PROPOSED — NOT APPROVED | Assisted-purchase outcome in overlap or exposure | The recovery obligation and T3 when the movement is in overlap or exposure | S0-C14 items 4, 7, 10, 11 | Business | Obligation stands; new collection channel refused during an overlap (S0-C14 item 7) | The FDR-01 rule; the obligation's recorded facts | FDR-01 |
+| FDR-03 | v0 | PROPOSED — NOT APPROVED | Direct-purchase outcome in overlap or exposure | The direct write-off when the movement is in overlap or exposure | S0-C14 items 5, 6; FC-6 | Business | Write-off waits while a refund may exist; a loss only from recorded facts | The FDR-01 rule | FDR-01 |
+| FDR-04 | v0 | PROPOSED — NOT APPROVED | Collection-freeze exit | The condition that ends S0-C14 item 7's freeze | S0-C14 items 7, 17; S0-C15A item 10 ("the collection-freeze exit") | Business | No exit exists; item 17 is an explicit real-money blocker | An FDR-08 closure rule | FDR-02, FDR-08 |
+| FDR-05 | v0 | PROPOSED — NOT APPROVED | Terminal partial refund beside a loss | Financial D9; DO-53 | S0-C14 item 15; S0-C15A item 5 | Business, plus provider evidence | Exposure resolves only as `refund_completed` once an overlap case exists | Real-provider partial-refund semantics (FDR-10) | FDR-01, FDR-10 |
+| FDR-06 | v0 | PROPOSED — NOT APPROVED | Correction of a write-off overlapped by a refund | Whether and how an append-only adjustment (FC-6) applies when a completed refund follows a recorded write-off | S0-C14 items 3, 8; FC-6 | Business and accounting | The write-off stands; the overlap case opens; nothing is rewritten | The FDR-01 and FDR-03 rules | FDR-01, FDR-03 |
+| FDR-07 | v0 | PROPOSED — NOT APPROVED | Acknowledgement restriction scope | Which acknowledgement reasons are refused on which movements while financial evidence is unresolved | S0-C14 item 9; S0-C15A item 6; S0-C15B; DO-73; DO-74; O-2 | Owner (governance) | As enforced by `billing_acknowledgement_refused_by_*` today | The FDR-08 closure rules | FDR-08 |
+| FDR-08 | v0 | PROPOSED — NOT APPROVED | Reconciliation closure evidence | Per restricted case type (§7.2.4): the closed list of resolution kinds and the recorded evidence each requires | S0-C14 item 8; S0-C10 item 7; S0-C15B item 5; DO-73 item 4; DO-74 item 4; R3 point 6 | Owner, plus design | Seven types have no resolution kind; two resolve only by their evidence (§7.2.4) | Per kind; provider-statement kinds need DO-37 (FDR-10) | FDR-01 (liability-closing kinds), FDR-10, P-2, F-29 |
+| FDR-09 | v0 | PROPOSED — NOT APPROVED | Fee accounting | DO-35 (absorbed provider and chargeback fees recorded nowhere); DO-36 (the Organization's kept fee not recorded) | Diagram workshop register DO-35, DO-36 | Business and accounting | No fee record exists | A fee data model | Feeds FDR-01 |
+| FDR-10 | v0 | PROPOSED — NOT APPROVED | Provider evidence basis | Which provider evidence may support a financial decision: statements (DO-37), reference scope (O-1), partial-refund semantics | DO-37; O-1; real-provider gates B2 to B8 | Owner, plus real-provider evidence | Only simulation and test providers exist; no statement input | Real-provider documentation and data | Real-provider gates |
+| FDR-11 | v0 | PROPOSED — NOT APPROVED | Exchange-rate policy | Exchange-rate treatment named in DO-73 U-7; currency-mismatched refund facts | DO-73 U-7 (S0 §1.5 DO-73 point 10) | Business and accounting | No rate is ever applied or assumed (S0-C12 item 8); mismatched facts are blocked (DO-73) | Provider and accounting evidence | FDR-01, FDR-10 |
+
+#### 7.2.3 Legacy FD reference crosswalk (provenance record; every gate UNSATISFIED)
+
+**The crosswalk maps potential decision coverage, not historical equivalence.** It does not state what any FD identifier originally meant. **No
+legacy gate is satisfied by this register.** A gate is satisfied only by a separate, dated Owner adoption record naming the approved FDR versions
+that together meet it and the certification evidence that proves the resulting behavior. Locations are at `5950443`.
+
+| # | Location | Source wording (abridged) | Behavior it currently blocks | Possibly relevant FDR (coverage only) | Original intent | Future approvals required | Gate |
+|---|---|---|---|---|---|---|---|
+| 1 | Freeze S0 §1.5 S0-C15A item 10 | "D9, D15, FD-1 to FD-5 and the collection-freeze exit stay unresolved" | Exposure exit beyond `refund_completed`; liability | FDR-01, 02, 03, 04, 05 | Unknown | Several | UNSATISFIED |
+| 2 | Freeze S0-C15B item 5 | "until P-2 … and the FD resolution decisions (FD-1 to FD-8) define the evidence that may close them" | Closure of `refund_fact_contested`, `dispute_conflict_observed` | FDR-08, FDR-10 (and P-2) | Unknown | P-2 and FDR-08, at least | UNSATISFIED |
+| 3 | Freeze S0-C15B item 11 (limits) | "Financial D9, D15, FD-1 to FD-8, P-2 and the collection-freeze exit stay unresolved" | None of its own (limits statement) | FDR-01, 04, 05 | Unknown | — | UNSATISFIED |
+| 4 | Freeze DO-73 item 4 | "until FD-1 to FD-8 define the evidence that may close it" | Closure of `refund_fact_unallocated` | FDR-08, FDR-11, FDR-01 | Unknown | Several | UNSATISFIED |
+| 5 | Freeze DO-73 item 10 (U-7) | "Who bears the money, exchange-rate policy, purchase or entitlement treatment, and closure stay with D9, D15, FD-1 to FD-8 and P-2" | Liability, exchange rates, entitlement treatment, closure | FDR-01, 11, 02, 03, 08 | Unknown | Several | UNSATISFIED |
+| 6 | Freeze DO-74 item 4 | "until the FD decisions define the evidence that may close it" | Closure of `refund_observation_conflict` | FDR-08 (and F-29 for associated facts) | Unknown | Several | UNSATISFIED |
+| 7 | Freeze R3 point 6 | "non-resolvable until FD-1, FD-2/FD-3 and FD-8 (and the F-29 association authority for a completed refund)" | An R3-held waiting case's closure beyond `refund_completed` | FDR-01, 02, 03, 08 (and F-29) | Gloss written 2026-11-10 from unverified labels | Several | UNSATISFIED |
+| 8 | Freeze R3 point 12a (R3-F1) | "R3-F1 stays OPEN for reconciliation (F-29, FD-6, FD-8)" | Reconciling R3 evidence | FDR-06, FDR-08 (and F-29) | Gloss from unverified labels | Several | UNSATISFIED |
+| 9 | Freeze R3 point 13 (R3-F2) | "Deciding it needs F-29 … and FD-6 and FD-8 (write-off during an overlap; closed resolution kinds)" | The R3-F2 decision | FDR-06, 08, 01, 10 (and F-29) | Gloss from unverified labels | Several | UNSATISFIED |
+| 10 | Freeze O-2 point 4 | "Open, unchanged: … R3-F2, FD-1 to FD-8 …" | None of its own | — | Unknown | — | UNSATISFIED |
+| 11 | This register, BIL-33 P (DO-73) | "interim fail-closed (never acknowledged or resolved until FD-1 to FD-8)" | As #4 | FDR-08 | Unknown | Several | UNSATISFIED |
+| 12 | This register, BIL-33 R (R3) | "the hold has no exit until FD-1, FD-2/FD-3, FD-8 (and F-29)" | As #7 | FDR-01, 02, 03, 08 (and F-29) | Gloss from unverified labels | Several | UNSATISFIED |
+| 13 | Billing migration `0053` comment, line 12 (applied; immutable) | "until FD-1 to FD-8 define the evidence that may close it" | As #4 (comment beside the database guards) | FDR-08 | Unknown | Several | UNSATISFIED |
+| 14 | Billing migrations `0053` line 23 and `0054` line 20 (applied) | "… or resolves … FD-1 to FD-8, P-2 or the collection freeze" (non-scope statements) | None | — | Unknown | — | UNSATISFIED |
+| 15 | Billing migration `0055` line 22 (applied) | "… or resolves FD-1 to FD-8, D9, D15" (non-scope statement) | None | — | Unknown | — | UNSATISFIED |
+
+#### 7.2.4 Restricted reconciliation case types (current behavior, unchanged)
+
+Resolution kinds that exist (Billing `0045`, `reconciliation_case_resolution_kind`): `refund_completed`, `late_settlement_applied`, `surplus_refunded`,
+`surplus_repaid`, `recovery_counted`, `loss_recognized`, `effect_applied`, `authorization_resolved`, `acknowledged`, `chargeback_returned`. Which kind
+a type may receive is decided by the resolution guard (Billing `0053`, unchanged since). `acknowledged` is permitted only for the review-only
+types `refund_discrepancy`, `partial_chargeback` and `second_reversal_cause` (R6H-2), subject to the existing overlap, exposure, contest and
+unallocated refusals.
+
+| Case type | Opened by | Permitted resolution today | Acknowledgement | Possible future dependencies (FDR) |
+|---|---|---|---|---|
+| `chargeback_refund_overlap` | S0-C14 item 8 | **None** (no resolution kind) | Never | FDR-01, 02, 03, 06, 08 |
+| `capture_contradiction` | S0-C11 item 8 | **None** (visibility only) | Never | FDR-08, FDR-10 |
+| `chargeback_loss_review` | S0-C10 item 7 | **None** (no resolution kind) | Never | FDR-01, FDR-08 |
+| `refund_fact_contested` | S0-C15B (DO-57); O-2 (fact owner) | **None** (interim fail-closed, B-D3) | Never | FDR-08, FDR-10, P-2 |
+| `dispute_conflict_observed` | S0-C15B (DO-56) | **None** (interim fail-closed, B-D3) | Never | P-2, FDR-08, FDR-10 |
+| `refund_fact_unallocated` | DO-73 | **None** (interim fail-closed) | Never | FDR-08, FDR-11, FDR-01 |
+| `refund_observation_conflict` | DO-74 | **None** (interim fail-closed) | Never | FDR-08 (and F-29) |
+| `chargeback_effect_waiting` | S0-C14 item 12; R3 point 6 | `effect_applied` only when the loss's effect exists (the effect itself is refused while an R3 marker exists); otherwise `refund_completed` | Never | FDR-08 (R3-F2), F-29 |
+| `chargeback_refund_exposure` | S0-C15A item 4; R3 marker | `refund_completed` only, once the movement's overlap case exists | Never | FDR-05, FDR-08, F-29 |
+
+**R3-F2 caution (recorded, unchanged).** A `refund_completed` resolution records meaning (2), a case resolved after a refund operation
+completed (meaning 1). It is **not** evidence that the financial evidence is reconciled (meaning 3) or that liability is assigned (meaning 4).
+In particular, beside an R3 marker it can close `chargeback_effect_waiting` and `chargeback_refund_exposure` while the failed attempt's unmatched
+fact stays unassociated and the provider may have returned the money twice (S0 §1.5 R3 point 13). The R3-F1 field
+`unreconciledFailedAttemptEvidence` stays `true` on those cases.
+
 ## 8. Gates and dependencies
 
 The gates are those of the [roadmap](./core-v2-s-execution-roadmap.md) §7; this register adds only the open decisions of §7 above.
