@@ -7,7 +7,7 @@ import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow, checkPreLifecycleInvariant,
 import { ACTIVATION_FILE, AUDIT_BINDINGS_FILE, PROVISION_FILE, checkProvisionTopicGrants, checkTopicPermissionSources } from './lib/topic-permissions.mjs';
 import { parse as parseYaml } from 'yaml';
 import { checkRealBrokerGroups, checkRealBrokerJobs } from './real-broker-groups.mjs';
-import { ALL_JOBS as CLASSIFY_JOBS } from './ci-lanes/classify.mjs';
+import { ALL_JOBS as CLASSIFY_JOBS, requiredJobs as classifyRequiredJobs } from './ci-lanes/classify.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -46,7 +46,7 @@ const CONFIRMED_OPERATIONS = {
 for (const f of readdirSync(wfDir).filter((n) => n.endsWith('.yml'))) {
   const text = readFileSync(join(wfDir, f), 'utf8');
   problems.push(...checkWorkflowSafety(f, text));
-  if (f === 'core-ci.yml') problems.push(...checkCiCoverage(f, text), ...checkCiAggregate(f, text), ...checkCiClassify(f, text, CLASSIFY_JOBS));
+  if (f === 'core-ci.yml') problems.push(...checkCiCoverage(f, text), ...checkCiAggregate(f, text), ...checkCiClassify(f, text, CLASSIFY_JOBS, classifyRequiredJobs('docs')));
   // Core V2 A1: the real-broker split (every suite in exactly one group; the plan, group and verify jobs keep their guard).
   if (f === 'core-ci.yml') problems.push(...checkRealBrokerJobs(parseYaml(text)), ...checkRealBrokerGroups(root));
   problems.push(...checkActionPins(f, text));

@@ -1,6 +1,7 @@
-// Core V2 Smart CI (Stage 0, SHADOW). Classifies a pull request's changes into the lane Core CI COULD use: `docs` or `full`. In Stage 0 the
-// lane is only reported: every Core CI job still runs and `core-ci-passed` still requires every job to succeed. Fail-closed: anything not
-// proven documentation is `full`; any error is `full`.
+// Core V2 Smart CI (Stage 1). Classifies a pull request's changes into the lane Core CI runs: `docs` or `full`. `docs` runs only the
+// classification and the repository checks; `full` runs every Core CI job. `core-ci-passed` applies the lane-aware verdict `gate()` below
+// (scripts/ci-lanes/gate.mjs). Fail-closed: anything not proven documentation is `full`; any error is `full`; only a pull request can be
+// `docs`; TARGETED does not exist.
 //
 // SELF-CONTAINED ON PURPOSE: Core CI runs this file from the pull request's BASE commit (`git show <base>:scripts/ci-lanes/classify.mjs`), so a
 // pull request can never select its own classifier. It therefore imports Node built-ins only.
@@ -28,7 +29,8 @@ const ALWAYS_FULL = [
 export const ALL_JOBS = ['classify', 'repo-checks', 'node', 'images', 'infra', 'e2e-real-broker-plan', 'e2e-real-broker', 'e2e-real-broker-verify',
   'e2e-auth-organization', 'e2e-shared-platform'];
 
-/** The jobs a lane requires. `full` is every job. Stage 0 enforces `full` always; `docs` is defined and tested for a later stage only. */
+/** The jobs a lane requires (and runs). `full` is every job; `docs` is the classification and the repository checks (which include the
+ * documentation consumers: service READMEs in check:repo, runbooks in test:deploy). check:repo verifies the workflow runs exactly these. */
 export function requiredJobs(lane) {
   if (lane === 'docs') return ['classify', 'repo-checks'];
   if (lane === 'full') return [...ALL_JOBS];
@@ -74,21 +76,28 @@ export function classify({ event, entries }) {
   return { lane: 'docs', reasons: [`${unique.length} documentation file(s) only`], required: requiredJobs('docs') };
 }
 
-/** The lane-aware verdict a later stage's `core-ci-passed` would apply (NOT used by CI in Stage 0): the classification succeeded, the lane is
- * known, every job the lane requires succeeded, and every other job was skipped. A failed, cancelled, missing or unknown job fails. */
-export function gate({ lane, classifyResult, needs }) {
+/** The lane-aware verdict of `core-ci-passed` (scripts/ci-lanes/gate.mjs): the classification succeeded; the lane is `docs` or `full`; only a
+ * pull request may be `docs`, and never under CI_FORCE_FULL=1; every job the lane requires succeeded and every other job was SKIPPED (a job
+ * that ran in the `docs` lane, whatever its result, fails); no job is missing or unknown; and in `full` every job succeeded. */
+export function gate({ lane, classifyResult, needs, event, forceFull }) {
+  if (classifyResult !== 'success') return { ok: false, lines: [`classify: ${classifyResult ?? 'missing'} (it must succeed)`] };
+  if (!LANES.includes(lane)) return { ok: false, lines: [`unknown lane ${JSON.stringify(lane)}`] };
+  if (typeof event !== 'string' || event === '') return { ok: false, lines: ['unknown event'] };
+  if (lane !== 'full' && event !== 'pull_request') return { ok: false, lines: [`event ${event} must use the full lane, not ${lane}`] };
+  if (lane !== 'full' && forceFull === '1') return { ok: false, lines: [`CI_FORCE_FULL=1 requires the full lane, not ${lane}`] };
+  if (!needs || typeof needs !== 'object' || Array.isArray(needs)) return { ok: false, lines: ['no job results'] };
   const lines = [];
-  if (classifyResult !== 'success') return { ok: false, lines: [`classify: ${classifyResult}`] };
-  if (!LANES.includes(lane)) return { ok: false, lines: [`unknown lane ${lane}`] };
   const required = new Set(requiredJobs(lane));
   let ok = true;
   for (const job of ALL_JOBS) {
-    const result = needs?.[job]?.result;
+    const result = needs[job]?.result;
     const want = required.has(job) ? 'success' : 'skipped';
     lines.push(`${job}: ${result ?? 'missing'} (lane ${lane} requires ${want})`);
     if (result !== want) ok = false;
   }
-  for (const job of Object.keys(needs ?? {})) if (!ALL_JOBS.includes(job)) { ok = false; lines.push(`${job}: not a known job`); }
+  for (const job of Object.keys(needs)) if (!ALL_JOBS.includes(job)) { ok = false; lines.push(`${job}: not a known job`); }
+  // Independent of the job lists: the full lane passes only when every needed job succeeded.
+  if (lane === 'full' && !Object.values(needs).every((n) => n?.result === 'success')) ok = false;
   return { ok, lines };
 }
 

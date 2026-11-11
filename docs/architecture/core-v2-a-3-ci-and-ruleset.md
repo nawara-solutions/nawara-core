@@ -59,6 +59,8 @@ matrix entry is renamed. One stable check is required instead.
   aggregate and unblock the merge;
 - succeeds only when every needed job's result is `success` (`all(.[]; .result == "success")`); `failure`, `cancelled` and `skipped`
   are refused, and each job's result is printed;
+  *(since Smart CI Stage 1, §13, the verdict is lane-aware: in the `full` lane this rule still holds; in the `docs` lane the docs jobs
+  must succeed and every other job must be skipped)*;
 - Core CI has **no path filter**, so the check reports on every pull request to `main`, including documentation-only ones. The
   path-filtered Auth image workflow is deliberately **not** a required check (it would never report outside its paths).
 
@@ -468,3 +470,33 @@ lane are **not** enabled; each needs a separate Owner decision.
   `pull_request_target`; and a classifier job list that differs from the workflow's jobs. The classifier's own tests run in `test:repo`.
 - **Stage 1 prerequisites (for the Owner).** Shadow results reviewed against real pull requests; a Stage 1 change to the aggregate rule
   (`checkCiAggregate`) and its tests; the gated jobs' conditions; and an explicit Owner decision.
+
+## 13. Smart CI Stage 1: the `docs` and `full` lanes (2026-11-11)
+
+**Status: Stage 1, implemented for Owner merge review.** Two lanes are active: `docs` and `full`. `targeted` does not exist. The ruleset is
+unchanged: `core-ci-passed` stays the single required check, strict (up to date with `main`). No path filter, no `[skip ci]` handling.
+
+- **Lanes.** `docs` runs **only** `classify` and `repo-checks` (the repository checks and their tests, promtool, and the deployment script
+  tests: the documentation consumers, service READMEs in `check:repo` and runbooks in `test:deploy`, run here). `full` runs every Core CI
+  job: the node matrix, the images, infra, the real-broker plan, the four real-broker groups and their verification, the Auth/Organization
+  wire contract and the shared-platform suites.
+- **Who decides.** The `classify` job, with the classifier from the pull request's **base** commit (§12), unchanged. A change to the
+  classifier, the gate or this workflow is `full` by that base classifier. Only a pull request can be `docs`; every push to `main` is
+  `full`. `CI_FORCE_FULL=1` is honoured by the job itself before any classifier runs. A missing or failing classifier and any output other
+  than exactly `docs` or `full` are `full`.
+- **How jobs are skipped.** Every job outside the `docs` lane `needs: classify` and has exactly `if: needs.classify.outputs.lane != 'docs'`
+  (the real-broker verification: `always() && ...`, so it still reports a failed group in every `full` run). Only the exact value `docs`
+  skips anything; an empty or unexpected lane runs everything. No step reads the lane.
+- **The verdict** (`core-ci-passed`, `scripts/ci-lanes/gate.mjs`, from the same revision as the workflow, so it knows this workflow's jobs):
+  the classification succeeded; the lane is exactly `docs` or `full`; a non-pull-request event or `CI_FORCE_FULL=1` is `full`; every job
+  the lane requires succeeded; every other job was **skipped** (a job that ran in the `docs` lane, whatever its result, fails); no job is
+  missing or unknown; and in `full` every job succeeded. Anything unreadable fails.
+- **Self-checks.** `check:repo` (`checkCiClassify`, `checkCiAggregate`, the real-broker job checks) refuses: a conditional or tolerant
+  `classify` job; the checked-out classifier; a missing override; a lane-normalization removed; a `docs`-lane job with a condition; a gated job
+  without exactly the lane condition (or without `needs: classify`); any other read of the classification; an aggregate not running exactly
+  the gate with `NEEDS`, `EVENT` and `CI_FORCE_FULL`; and job lists that differ from the classifier's. `test:repo` simulates the real job
+  graph in both lanes and runs the real gate step against it, including failed, cancelled, skipped, missing, forged and out-of-lane cases.
+- **Known limit.** A pull request's workflow and gate come from the pull request itself (GitHub `pull_request`), so a change that edits them
+  is reviewed as a `full`-lane change; the classifier is the only part taken from the base.
+- **Rollback.** Set the repository variable `CI_FORCE_FULL=1`: every run is `full` at once, with no commit. To remove Stage 1, revert its
+  pull request (a `full`-lane change).

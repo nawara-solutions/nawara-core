@@ -15,7 +15,7 @@ import { checkAllReports as checkAllRbReports, checkManifest as checkRbManifest,
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
 import { BACKUP_DESTINATION_ENV, BACKUP_JOB, BACKUP_JOB_SECRETS, BACKUP_PACKAGE_RUN, BACKUP_PERMISSIONS, BACKUP_REMOTE_SCRIPT, BACKUP_SSH_ACTION, BACKUP_SSH_WITH, BACKUP_TAG, BACKUP_TAILSCALE_WITH, BACKUP_WORKFLOW, SSH_ACTION_INPUTS, checkDroneSshFiles } from './lib/checks.mjs';
 import { PROBE_ENV, PROBE_GUARD, PROBE_JOB, PROBE_SECRETS, PROBE_TAG, PROBE_TAILSCALE_WITH, PROBE_WORKFLOW, TAILSCALE_ACTION, TAILSCALE_ACTION_RELEASE, TAILSCALE_CLIENT_SHA256, TAILSCALE_CLIENT_VERSION } from './lib/checks.mjs';
-import { ALL_JOBS as CLASSIFY_JOBS } from './ci-lanes/classify.mjs';
+import { ALL_JOBS as CLASSIFY_JOBS, requiredJobs as classifyRequiredJobs } from './ci-lanes/classify.mjs';
 
 // V2-A.3 A3.6: the host-key guard step, exactly as every real production SSH job carries it.
 const HOST_KEY_GUARD_STEP = `      - name: Require the pinned production host key
@@ -428,45 +428,147 @@ test('core-ci-passed: dropping any needed job, or adding a job it does not need,
   assert.match(checkCiAggregate('core-ci.yml', added).join(), /missing: new-suite/);
 });
 
-// ------------------------------------------------------------------------------ Core V2 Smart CI, Stage 0 (shadow): change classification
-test('Smart CI Stage 0: the real Core CI has a shadow classify job using the BASE commit\'s classifier', () => {
-  assert.deepEqual(checkCiClassify('core-ci.yml', CORE_CI, CLASSIFY_JOBS), []);
+// ------------------------------------------------------------------------------ Core V2 Smart CI, Stage 1: the docs and full lanes
+const DOCS_JOBS = classifyRequiredJobs('docs');
+const LANE_IF = "needs.classify.outputs.lane != 'docs'";
+const CLASSIFY_NAME = '    name: change classification (Smart CI)\n';
+const classifyProblems = (text, all = CLASSIFY_JOBS, docs = DOCS_JOBS) => checkCiClassify('core-ci.yml', text, all, docs).join('\n');
+
+test('Smart CI Stage 1: the real Core CI classifies with the BASE commit\'s classifier and gates every non-docs job by the lane', () => {
+  assert.deepEqual(checkCiClassify('core-ci.yml', CORE_CI, CLASSIFY_JOBS, DOCS_JOBS), []);
+  assert.deepEqual(DOCS_JOBS, ['classify', 'repo-checks']);
+  const jobs = parse(CORE_CI).jobs;
+  for (const [id, job] of Object.entries(jobs)) {
+    if (id === CI_AGGREGATE || DOCS_JOBS.includes(id)) { assert.equal(job.if, id === CI_AGGREGATE ? 'always()' : undefined, id); continue; }
+    assert.ok([LANE_IF, `always() && ${LANE_IF}`].includes(job.if), `${id}: ${job.if}`);
+    assert.ok([job.needs].flat().includes('classify'), id);
+  }
 });
 
-test('Smart CI Stage 0: the classifier from the pull request itself, or no base classifier, is refused', () => {
+test('Smart CI Stage 1: the classifier from the pull request itself, or no base classifier, is refused', () => {
   const selfSelected = swap(CORE_CI, 'git show "$BASE_SHA:scripts/ci-lanes/classify.mjs" > "$trusted"', 'cp scripts/ci-lanes/classify.mjs "$trusted"; node scripts/ci-lanes/classify.mjs "$EVENT" "$BASE_SHA" "$HEAD_SHA"');
-  const problems = checkCiClassify('core-ci.yml', selfSelected, CLASSIFY_JOBS).join();
+  const problems = classifyProblems(selfSelected);
   assert.match(problems, /must run the classifier from the BASE commit/);
   assert.match(problems, /must never run the checked-out classifier/);
-  assert.match(checkCiClassify('core-ci.yml', swap(CORE_CI, 'BASE_SHA: ${{ github.event.pull_request.base.sha }}', 'BASE_SHA: ${{ github.event.pull_request.head.sha }}'), CLASSIFY_JOBS).join(), /BASE_SHA must be/);
+  assert.match(classifyProblems(swap(CORE_CI, 'BASE_SHA: ${{ github.event.pull_request.base.sha }}', 'BASE_SHA: ${{ github.event.pull_request.head.sha }}')), /BASE_SHA must be/);
 });
 
-test('Smart CI Stage 0: in shadow mode no job may depend on the classification (every job runs)', () => {
-  const gated = swap(CORE_CI, '  repo-checks:\n    name: repository checks\n', "  repo-checks:\n    name: repository checks\n    needs: classify\n    if: needs.classify.outputs.lane == 'full'\n");
-  const problems = checkCiClassify('core-ci.yml', gated, CLASSIFY_JOBS).join();
-  assert.match(problems, /job "repo-checks": must not need "classify" in Stage 0/);
-  assert.match(problems, /job "repo-checks": its condition must not read the classification in Stage 0/);
+test('Smart CI Stage 1: a docs-lane job may not be skipped; every other job is skipped ONLY by the exact lane condition', () => {
+  const gatedRepo = swap(CORE_CI, '  repo-checks:\n    name: repository checks\n', `  repo-checks:\n    name: repository checks\n    needs: classify\n    if: ${LANE_IF}\n`);
+  assert.match(classifyProblems(gatedRepo), /job "repo-checks": runs in every lane .* must have no condition/);
+  const NODE = '    name: ${{ matrix.name }}\n    needs: classify\n';
+  const ungated = swap(CORE_CI, `${NODE}    if: ${LANE_IF}\n`, NODE);
+  assert.match(classifyProblems(ungated), /job "node": its condition must be exactly/);
+  for (const weaker of ["needs.classify.outputs.lane == 'full'", `${LANE_IF} && github.event_name == 'push'`, `${LANE_IF} || false`, "needs.classify.outputs.lane != 'docs' && !contains(github.event.pull_request.title, 'wip')"]) {
+    assert.match(classifyProblems(swap(CORE_CI, `${NODE}    if: ${LANE_IF}\n`, `${NODE}    if: ${weaker}\n`)), /job "node": its condition must be exactly/, weaker);
+  }
+  const noNeed = swap(CORE_CI, '    name: local infrastructure (least-privilege roles)\n    needs: classify\n', '    name: local infrastructure (least-privilege roles)\n');
+  assert.match(classifyProblems(noNeed), /job "infra": must need "classify"/);
+  // A step inside a full-lane job may not read the lane (a job would "succeed" while skipping its tests).
+  const stepSkip = swap(CORE_CI, '      - name: deployment script tests\n', "      - name: deployment script tests\n        if: needs.classify.outputs.lane == 'full'\n");
+  assert.match(classifyProblems(stepSkip), /may be read only by the lane condition/);
+  const outputRead = swap(CORE_CI, '      - name: deployment script tests\n', "      - name: deployment script tests\n        if: steps.lane.outputs.lane == 'full'\n");
+  assert.match(classifyProblems(outputRead), /lane step's output may be read only/);
 });
 
-test('Smart CI Stage 0: the classify job must always run, alone, with no credentials, secret or bypass', () => {
-  const conditional = swap(CORE_CI, '    name: change classification (Smart CI Stage 0, shadow)\n', "    name: change classification (Smart CI Stage 0, shadow)\n    if: github.event_name == 'push'\n");
-  assert.match(checkCiClassify('core-ci.yml', conditional, CLASSIFY_JOBS).join(), /must not set "if"/);
-  const tolerant = swap(CORE_CI, '    name: change classification (Smart CI Stage 0, shadow)\n', '    name: change classification (Smart CI Stage 0, shadow)\n    continue-on-error: true\n');
-  assert.match(checkCiClassify('core-ci.yml', tolerant, CLASSIFY_JOBS).join(), /must not set "continue-on-error"/);
-  const credentials = swap(CORE_CI, '          fetch-depth: 0\n          persist-credentials: false\n', '          fetch-depth: 0\n');
-  assert.match(checkCiClassify('core-ci.yml', credentials, CLASSIFY_JOBS).join(), /persist-credentials: false/);
-  const noOverride = swap(CORE_CI, '          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}\n', '');
-  assert.match(checkCiClassify('core-ci.yml', noOverride, CLASSIFY_JOBS).join(), /CI_FORCE_FULL emergency override/);
-  const target = swap(CORE_CI, 'on:\n  pull_request:\n', 'on:\n  pull_request_target:\n    branches: [main]\n  pull_request:\n');
-  assert.match(checkCiClassify('core-ci.yml', target, CLASSIFY_JOBS).join(), /must not run on pull_request_target/);
-  const without = swap(CORE_CI, '  classify:\n', '  classify-renamed:\n');
-  assert.match(checkCiClassify('core-ci.yml', without, CLASSIFY_JOBS).join(), /job "classify" is missing/);
+test('Smart CI Stage 1: the classify job must always run, alone, with no credentials, secret or bypass, and normalize its lane', () => {
+  assert.match(classifyProblems(swap(CORE_CI, CLASSIFY_NAME, `${CLASSIFY_NAME}    if: github.event_name == 'push'\n`)), /must not set "if"/);
+  assert.match(classifyProblems(swap(CORE_CI, CLASSIFY_NAME, `${CLASSIFY_NAME}    continue-on-error: true\n`)), /must not set "continue-on-error"/);
+  assert.match(classifyProblems(swap(CORE_CI, CLASSIFY_NAME, `${CLASSIFY_NAME}    needs: repo-checks\n`)), /must not set "needs"/);
+  assert.match(classifyProblems(swap(CORE_CI, '          fetch-depth: 0\n          persist-credentials: false\n', '          fetch-depth: 0\n')), /persist-credentials: false/);
+  assert.match(classifyProblems(swap(CORE_CI, '          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}\n        run: |\n          set -euo pipefail\n          trusted=', '        run: |\n          set -euo pipefail\n          trusted=')), /CI_FORCE_FULL emergency override/);
+  assert.match(classifyProblems(swap(CORE_CI, 'if [ "${CI_FORCE_FULL:-}" = 1 ]; then', 'if false; then')), /must itself force full when CI_FORCE_FULL=1/);
+  assert.match(classifyProblems(swap(CORE_CI, 'case "$lane" in docs|full) ;; *) lane=full ;; esac', 'true')), /must turn any lane other than docs or full into full/);
+  assert.match(classifyProblems(swap(CORE_CI, `|| result='{"lane":"full","reasons":["the base classifier failed: fail closed"]}'`, `|| result='{"lane":"docs","reasons":["x"]}'`)), /a failing base classifier must give the full lane/);
+  assert.match(classifyProblems(swap(CORE_CI, `2>/dev/null)" || lane=full`, `2>/dev/null)" || lane=docs`)), /unreadable classifier output must give the full lane/);
+  assert.match(classifyProblems(swap(CORE_CI, '      lane: ${{ steps.lane.outputs.lane }}\n', "      lane: docs\n")), /its output "lane" must be/);
+  assert.match(classifyProblems(swap(CORE_CI, 'on:\n  pull_request:\n', 'on:\n  pull_request_target:\n    branches: [main]\n  pull_request:\n')), /must not run on pull_request_target/);
+  assert.match(classifyProblems(swap(CORE_CI, '  classify:\n', '  classify-renamed:\n')), /job "classify" is missing/);
 });
 
-test('Smart CI Stage 0: the classifier\'s job list must equal the workflow\'s jobs', () => {
-  assert.match(checkCiClassify('core-ci.yml', CORE_CI, CLASSIFY_JOBS.filter((j) => j !== 'infra')).join(), /must equal the workflow's jobs/);
-  const added = swap(CORE_CI, '  core-ci-passed:\n', '  new-suite:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n');
-  assert.match(checkCiClassify('core-ci.yml', added, CLASSIFY_JOBS).join(), /must equal the workflow's jobs/);
+test('Smart CI Stage 1: the classifier\'s job lists must equal the workflow\'s jobs and its docs lane', () => {
+  assert.match(classifyProblems(CORE_CI, CLASSIFY_JOBS.filter((j) => j !== 'infra')), /must equal the workflow's jobs/);
+  const added = swap(CORE_CI, '  core-ci-passed:\n', `  new-suite:\n    needs: classify\n    if: ${LANE_IF}\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n`);
+  assert.match(classifyProblems(added), /must equal the workflow's jobs/);
+  assert.match(classifyProblems(CORE_CI, CLASSIFY_JOBS, ['classify', 'repo-checks', 'node']), /job "node": runs in every lane/);
+  assert.match(classifyProblems(CORE_CI, CLASSIFY_JOBS, ['repo-checks']), /the docs lane must include "classify"/);
+});
+
+/**
+ * The job graph of the REAL Core CI for one run, evaluated statically: a job with no condition runs when every need succeeded; the lane
+ * condition adds "the lane is not docs"; `always() && <lane condition>` runs whatever its needs did. Returns the `needs` context
+ * core-ci-passed receives.
+ */
+function simulateCoreCi({ lane, classifyResult = 'success', fail = [] }) {
+  const jobs = parse(CORE_CI).jobs;
+  const out = {};
+  const pending = Object.keys(jobs).filter((id) => id !== CI_AGGREGATE);
+  while (pending.length > 0) {
+    const i = pending.findIndex((id) => [jobs[id].needs ?? []].flat().every((n) => n in out));
+    assert.ok(i >= 0, 'the job graph has a cycle');
+    const [id] = pending.splice(i, 1);
+    if (id === 'classify') { out[id] = { result: classifyResult, outputs: classifyResult === 'success' ? { lane } : {} }; continue; }
+    const needsOk = [jobs[id].needs ?? []].flat().every((n) => out[n].result === 'success');
+    const notDocs = out.classify.outputs.lane !== 'docs';
+    const cond = String(jobs[id].if ?? '');
+    const runs = cond === '' ? needsOk : cond === LANE_IF ? needsOk && notDocs : cond === `always() && ${LANE_IF}` ? notDocs : assert.fail(`${id}: unexpected condition ${cond}`);
+    out[id] = { result: runs ? (fail.includes(id) ? 'failure' : 'success') : 'skipped', outputs: {} };
+  }
+  return out;
+}
+const AGG_STEP = () => parse(CORE_CI).jobs[CI_AGGREGATE].steps.find((s) => String(s.run ?? '').includes('gate.mjs'));
+const REPO_ROOT = decodeURIComponent(new URL('..', import.meta.url).pathname);
+const realGate = (needs, event = 'pull_request', extra = {}) => spawnSync('bash', ['-c', AGG_STEP().run], { cwd: REPO_ROOT, env: { PATH: process.env.PATH, NEEDS: typeof needs === 'string' ? needs : JSON.stringify(needs), EVENT: event, ...extra }, encoding: 'utf8' });
+const ran = (needs) => Object.keys(needs).filter((id) => needs[id].result !== 'skipped').sort();
+
+test('Smart CI Stage 1: the REAL job graph runs exactly classify + repo-checks for docs and every job for full, and the REAL gate passes both', () => {
+  const docs = simulateCoreCi({ lane: 'docs' });
+  assert.deepEqual(ran(docs), ['classify', 'repo-checks']);
+  const docsGate = realGate(docs);
+  assert.equal(docsGate.status, 0, docsGate.stdout + docsGate.stderr);
+  const full = simulateCoreCi({ lane: 'full' });
+  assert.deepEqual(ran(full), [...CLASSIFY_JOBS].sort());
+  assert.ok(Object.values(full).every((n) => n.result === 'success'));
+  for (const event of ['pull_request', 'push']) assert.equal(realGate(full, event).status, 0, event);
+});
+
+test('Smart CI Stage 1: the REAL gate refuses any failure, a skipped full-lane job, a job outside its lane, a forged lane or a docs push', () => {
+  for (const id of CLASSIFY_JOBS.filter((j) => j !== 'classify')) {
+    assert.notEqual(realGate(simulateCoreCi({ lane: 'full', fail: [id] })).status, 0, `full: ${id} failed`);
+    const skipped = simulateCoreCi({ lane: 'full' }); skipped[id].result = 'skipped';
+    assert.notEqual(realGate(skipped).status, 0, `full: ${id} skipped`);
+    const cancelled = simulateCoreCi({ lane: 'full' }); cancelled[id].result = 'cancelled';
+    assert.notEqual(realGate(cancelled).status, 0, `full: ${id} cancelled`);
+    const missing = simulateCoreCi({ lane: 'full' }); delete missing[id];
+    assert.notEqual(realGate(missing).status, 0, `full: ${id} missing`);
+  }
+  assert.notEqual(realGate(simulateCoreCi({ lane: 'docs', fail: ['repo-checks'] })).status, 0, 'docs: repo-checks failed');
+  for (const id of CLASSIFY_JOBS.filter((j) => !DOCS_JOBS.includes(j))) {
+    for (const result of ['success', 'failure', 'cancelled']) {
+      const outside = simulateCoreCi({ lane: 'docs' }); outside[id].result = result;
+      assert.notEqual(realGate(outside).status, 0, `docs: ${id} ${result}`);
+    }
+  }
+  // Forged or malformed lanes, a failed classification, a docs push, the override and unreadable input.
+  const docs = simulateCoreCi({ lane: 'docs' });
+  for (const forged of ['DOCS', 'docs ', '', 'targeted', 'fast', null]) {
+    const n = structuredClone(docs); n.classify.outputs.lane = forged;
+    assert.notEqual(realGate(n).status, 0, `lane ${JSON.stringify(forged)}`);
+  }
+  const noOutput = structuredClone(docs); delete noOutput.classify.outputs;
+  assert.notEqual(realGate(noOutput).status, 0, 'no lane output');
+  const failedClassify = simulateCoreCi({ lane: 'docs', classifyResult: 'failure' });
+  assert.notEqual(realGate(failedClassify).status, 0, 'classification failed');
+  const forgedSuccess = structuredClone(failedClassify); forgedSuccess.classify.outputs = { lane: 'docs' };
+  assert.notEqual(realGate(forgedSuccess).status, 0, 'a docs lane from a failed classification');
+  const noClassify = structuredClone(docs); delete noClassify.classify;
+  assert.notEqual(realGate(noClassify).status, 0, 'classify missing');
+  assert.notEqual(realGate(docs, 'push').status, 0, 'a docs push');
+  assert.notEqual(realGate(docs, '').status, 0, 'no event');
+  assert.notEqual(realGate(docs, 'pull_request', { CI_FORCE_FULL: '1' }).status, 0, 'docs under CI_FORCE_FULL=1');
+  assert.equal(realGate(simulateCoreCi({ lane: 'full' }), 'pull_request', { CI_FORCE_FULL: '1' }).status, 0, 'full under CI_FORCE_FULL=1');
+  assert.notEqual(realGate({ ...docs, surprise: { result: 'success' } }).status, 0, 'an unknown job');
+  for (const bad of ['not json', '[]', 'null', '{}', '']) assert.notEqual(realGate(bad).status, 0, `NEEDS ${JSON.stringify(bad)}`);
 });
 
 test('core-ci-passed: it must always run (a skipped required check counts as passed)', () => {
@@ -480,18 +582,21 @@ test('core-ci-passed: it must always run (a skipped required check counts as pas
 });
 
 test('core-ci-passed: weakening the verdict is refused', () => {
-  const RULE = `all(.[]; .result == "success")`;
-  for (const weaker of ['any(.[]; .result == "success")', 'all(.[]; .result != "failure")', 'all(.[]; .result == "success" or .result == "skipped")']) {
-    assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, RULE, weaker)).join(), /exactly one step must decide/, weaker);
+  const RUN = '          node scripts/ci-lanes/gate.mjs\n';
+  for (const weaker of ['          node scripts/ci-lanes/gate.mjs || true\n', '          node scripts/ci-lanes/gate.mjs; exit 0\n', '          echo ok\n']) {
+    assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, RUN, weaker)).join(), /swallows its failure|must run exactly|exactly one step must decide/, weaker);
   }
-  const swallowed = swap(CORE_CI, `|| { echo "core-ci-passed: at least one Core CI job did not succeed" >&2; exit 1; }`, '|| true');
-  assert.match(checkCiAggregate('core-ci.yml', swallowed).join(), /swallows its failure/);
-  const soft = swap(CORE_CI, '      - name: every Core CI job succeeded\n', '      - name: every Core CI job succeeded\n        continue-on-error: true\n');
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, RUN, `${RUN}          exit 0\n`)).join(), /must run exactly/);
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, `          set -euo pipefail\n${RUN}`, RUN)).join(), /must start with "set -euo pipefail"/);
+  const soft = swap(CORE_CI, '      - name: every job the lane requires succeeded; every other job was skipped\n', '      - name: every job the lane requires succeeded; every other job was skipped\n        continue-on-error: true\n');
   assert.match(checkCiAggregate('core-ci.yml', soft).join(), /must not be conditional or continue on error/);
   const softJob = swap(CORE_CI, '  infra:\n', '  infra:\n    continue-on-error: true\n');
   assert.match(checkCiAggregate('core-ci.yml', softJob).join(), /job "infra": must not set continue-on-error/);
-  const otherSource = swap(CORE_CI, 'NEEDS: ${{ toJSON(needs) }}', 'NEEDS: ${{ toJSON(needs.node) }}');
-  assert.match(checkCiAggregate('core-ci.yml', otherSource).join(), /exactly one step must decide/);
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, 'NEEDS: ${{ toJSON(needs) }}', 'NEEDS: ${{ toJSON(needs.node) }}')).join(), /must decide from NEEDS/);
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '          EVENT: ${{ github.event_name }}\n          CI_FORCE_FULL', '          CI_FORCE_FULL')).join(), /must receive EVENT/);
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, "          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}\n        run: |\n          set -euo pipefail\n          node scripts/ci-lanes/gate.mjs\n", "        run: |\n          set -euo pipefail\n          node scripts/ci-lanes/gate.mjs\n")).join(), /must receive CI_FORCE_FULL/);
+  const AGG_CHECKOUT = '    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n        with:\n          node-version: ${{ env.NODE_VERSION }}\n      - name: every job the lane';
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, AGG_CHECKOUT, AGG_CHECKOUT.replace('        with:\n          persist-credentials: false\n', ''))).join(), /persist-credentials: false/);
 });
 
 test('core-ci-passed: Core CI must report on every pull request to main (no path filter)', () => {
@@ -500,21 +605,6 @@ test('core-ci-passed: Core CI must report on every pull request to main (no path
     assert.match(checkCiAggregate('core-ci.yml', filtered).join(), /must have no paths(-ignore)? filter/);
   }
   assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '  pull_request:\n    branches: [main]\n', '')).join(), /must run on pull_request/);
-});
-
-test('core-ci-passed: the REAL deciding step passes only when every needed job succeeded', () => {
-  const step = parse(CORE_CI).jobs[CI_AGGREGATE].steps.find((s) => s.name === 'every Core CI job succeeded');
-  const ids = parse(CORE_CI).jobs[CI_AGGREGATE].needs;
-  const decide = (results) => spawnSync('bash', ['-c', step.run], { env: { PATH: process.env.PATH, NEEDS: JSON.stringify(results) }, encoding: 'utf8' });
-  const all = (result, over = {}) => Object.fromEntries(ids.map((id) => [id, { result: over[id] ?? result, outputs: {} }]));
-  const green = decide(all('success'));
-  assert.equal(green.status, 0, green.stderr);
-  for (const id of ids) assert.match(green.stdout, new RegExp(`^${id}: success$`, 'm'));
-  for (const bad of ['failure', 'cancelled', 'skipped']) {
-    for (const id of ids) assert.notEqual(decide(all('success', { [id]: bad })).status, 0, `${id}=${bad} was accepted`);
-  }
-  assert.notEqual(decide({}).status, 0, 'an empty needs context was accepted');
-  assert.notEqual(spawnSync('bash', ['-c', step.run], { env: { PATH: process.env.PATH, NEEDS: 'not json' }, encoding: 'utf8' }).status, 0);
 });
 
 // --------------------------------------------------------------------------------- V2 A0: immutable builds, digest deployments
@@ -4268,15 +4358,19 @@ test('A1: the plan, group and verify jobs of the real Core CI keep the guard; we
   const refused = (from, to, re, what) => assert.match(checkRealBrokerJobs(parse(swap(CORE_CI, from, to))).join(), re, what);
   refused('      matrix: ${{ fromJSON(needs.e2e-real-broker-plan.outputs.matrix) }}\n', '      matrix:\n        group: [g1, g2, g3]\n', /matrix must be exactly the plan job's output/, 'a hand-written matrix');
   refused('      fail-fast: false\n      matrix: ${{ fromJSON', '      fail-fast: true\n      matrix: ${{ fromJSON', /fail-fast must be false/, 'fail-fast');
-  refused('    name: real-broker reports complete\n    if: always()\n', '    name: real-broker reports complete\n', /must have "if: always\(\)"/, 'verify skipped after a failure');
-  refused('    needs: [e2e-real-broker-plan, e2e-real-broker]\n', '    needs: [e2e-real-broker-plan]\n', /must need e2e-real-broker$/m, 'verify before the groups');
+  const VERIFY_IF = "    name: real-broker reports complete\n    if: always() && needs.classify.outputs.lane != 'docs'\n";
+  refused(VERIFY_IF, '    name: real-broker reports complete\n', /must have "if: always\(\) && needs\.classify/, 'verify skipped after a failure');
+  refused(VERIFY_IF, "    name: real-broker reports complete\n    if: needs.classify.outputs.lane != 'docs'\n", /must have "if: always\(\) && needs\.classify/, 'verify skipped after a failure (lane only)');
+  refused('    needs: [classify, e2e-real-broker-plan, e2e-real-broker]\n', '    needs: [classify, e2e-real-broker-plan]\n', /must need e2e-real-broker$/m, 'verify before the groups');
   refused('        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"\n', '        run: npm run test:e2e -w @nawara/e2e-real-broker\n', /exactly one unconditional step must run the group through the guard/, 'bypassing the guard');
   refused('        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"\n', '        run: node scripts/real-broker-groups.mjs run "$GROUP" "$RUNNER_TEMP/real-broker-report"\n        continue-on-error: true\n', /must not continue on error/, 'continue-on-error');
   refused('      - name: upload the group\'s JUnit report and timing\n        if: always()\n', '      - name: upload the group\'s JUnit report and timing\n', /must always upload its report/, 'upload only on success');
   refused('        run: node scripts/real-broker-groups.mjs verify "$RUNNER_TEMP/real-broker-reports"\n', '        run: node scripts/real-broker-groups.mjs verify "$RUNNER_TEMP/real-broker-reports" || true\n', /swallows its failure|exactly one step must run/, 'a swallowed verdict');
   refused('          pattern: real-broker-report-*\n', '          pattern: real-broker-report-g1\n', /must download every real-broker-report-\* artifact/, 'one report only');
   refused('        run: node scripts/real-broker-groups.mjs plan >> "$GITHUB_OUTPUT"\n', '        run: echo \'matrix={"group":["g1"]}\' >> "$GITHUB_OUTPUT"\n', /exactly one step \(id "plan"\) must run/, 'an unchecked plan');
-  refused('    name: Real RabbitMQ loops (group ${{ matrix.group }})\n', '    name: Real RabbitMQ loops (group ${{ matrix.group }})\n    if: github.event_name == \'push\'\n', /must not be conditional/, 'a conditional group job');
+  const GROUP_IF = "    needs: [classify, e2e-real-broker-plan]\n    if: needs.classify.outputs.lane != 'docs'\n";
+  refused(GROUP_IF, "    needs: [classify, e2e-real-broker-plan]\n    if: github.event_name == 'push'\n", /must not be conditional/, 'a conditional group job');
+  refused(GROUP_IF, "    needs: [classify, e2e-real-broker-plan]\n    if: needs.classify.outputs.lane != 'docs' && github.event_name == 'push'\n", /must not be conditional/, 'a lane condition with more');
   const noVerify = CORE_CI.slice(0, CORE_CI.indexOf('  # Core V2 A1: the groups together.')) + CORE_CI.slice(CORE_CI.indexOf('  e2e-auth-organization:\n'));
   assert.match(checkRealBrokerJobs(parse(noVerify)).join(), /job "e2e-real-broker-verify" is missing/);
 });
