@@ -745,6 +745,89 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       expect(v.map((e) => e.refundAttemptId as string).sort((x, y) => x.localeCompare(y))).toEqual([r1.attemptId, a2].sort((x, y) => x.localeCompare(y)));
       for (const e of v) expect(e.conflictIds).toHaveLength(1);
     });
+
+    // ═════════════════════════════════════════════════════════════ Core V2 O-2 (PAY-12 M): the FACT OWNER's contested refund fact
+    const ITEM_KEYS = ['amount', 'at', 'currency', 'detail', 'factId', 'id', 'kind', 'organizationId', 'paymentId', 'paymentRequestId', 'producer', 'purpose'];
+    const contested = async (token = billing.token) => (await serviceItems('refund_fact_contested', token).expect(200)).body.items as Row[];
+    const ownerContested = async (bearer = 'owner-jwt') => itemsOf('refund_fact_contested', bearer);
+    /** P1: a refund the attempt reports itself: P1's matched, allocated fact */
+    const ownFact = async () => {
+      const p1 = await refundOf();
+      const txn = await ownRef(p1.attemptId);
+      expect(await observe(p1.attemptId, txn)).toBe(200);
+      const fact = await one(`SELECT id, "observedAt" FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'refund'`, [txn]);
+      expect(await count(`SELECT count(*) AS n FROM refund_allocation WHERE "factId" = $1`, [fact.id])).toBe(1);
+      return { p1, txn, factId: fact.id as string, observedAt: new Date(fact.observedAt).toISOString() };
+    };
+
+    it('O2-P1: one owner item per contested fact (three observations, two observers, two Companies); only the owner\'s own fact, figures and attempt; never an observer, a count or the reference', async () => {
+      const f = await ownFact();
+      expect((await contested()).some((i) => i.id === f.factId), 'not contested yet: no item').toBe(false);
+      const p2 = await refundOf(); // same Company
+      expect(await observe(p2.attemptId, f.txn)).toBe(200);
+      expect(await observe(p2.attemptId, f.txn)).toBe(200); // repeated (a new notification id)
+      const p3 = await refundOf({ company: COMPANY2, ownerId: OWNER2 }); // another Company
+      expect(await observe(p3.attemptId, f.txn)).toBe(200);
+      const observations = await count(`SELECT count(*) AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [f.factId]);
+      expect(observations).toBeGreaterThanOrEqual(2);
+      const mine = (await contested()).filter((i) => i.id === f.factId);
+      expect(mine, 'exactly one row: EXISTS, never one per observer').toHaveLength(1);
+      expect(mine[0]).toEqual({ kind: 'refund_fact_contested', id: f.factId, paymentId: f.p1.payment.id, paymentRequestId: f.p1.payment.paymentRequestId, producer: 'billing-service',
+        organizationId: (await one(`SELECT "organizationId" FROM payment WHERE id = $1`, [f.p1.payment.id])).organizationId, purpose: expect.any(String), factId: f.factId, amount: 9000, currency: 'TND', detail: { refundAttemptId: f.p1.attemptId }, at: f.observedAt });
+      expect(Object.keys(mine[0]!).sort()).toEqual(ITEM_KEYS);
+      const observerIds = [p2.payment.id, p2.attemptId, p3.payment.id, p3.attemptId, COMPANY2, f.txn, ...(await admin.query(`SELECT id FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [f.factId])).rows.map((r) => r.id as string)];
+      for (const x of observerIds) expect(JSON.stringify(mine[0]), `no observer evidence (${x})`).not.toContain(x);
+      expect(JSON.stringify(mine[0])).not.toMatch(/observation|count/i);
+      // the observers' payments never carry the owner's item
+      expect((await contested()).filter((i) => i.factId === f.factId).map((i) => i.paymentId)).toEqual([f.p1.payment.id]);
+      // Owner scope: the owner's Company sees it; the other Company does not
+      expect((await ownerContested('owner-jwt')).filter((i) => i.id === f.factId)).toHaveLength(1);
+      expect((await ownerContested('owner2-jwt')).some((i) => i.id === f.factId)).toBe(false);
+      expect((await ownerContested('owner2-jwt')).some((i) => i.paymentId === f.p1.payment.id)).toBe(false);
+    });
+
+    it('O2-P2: ownership is only the fact\'s own payment: an unmatched and an ASSOCIATED contested fact have no owner item; an uncontested fact has none either', async () => {
+      // unmatched, contested (DO-74 R1 shape): no item for anyone
+      const r = await refundOf();
+      const txn = await ownRef(r.attemptId);
+      const { fact: unmatchedFact } = await unmatched({ type: 'refund.succeeded', amount: 9000, txn });
+      expect(await observe(r.attemptId, txn)).toBe(200);
+      expect(await count(`SELECT count(*) AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [unmatchedFact.id])).toBeGreaterThan(0);
+      // associated (F-29 path in this suite), then contested by an attempt naming its reference
+      const z = await authorizedRefund();
+      const { fact: assoc } = await unmatched({ type: 'refund.succeeded', amount: 9000 });
+      await associate(assoc.id, { targetType: 'refund_authorization', targetId: z.authorization.id,
+        receiptSecret: auth.issue(assocBinding(assoc, 'refund_authorization', z.authorization.id), OWNER).secret }).expect(201);
+      const x = await refundOf();
+      expect(await observe(x.attemptId, assoc.providerTxnId)).toBe(200);
+      expect(await count(`SELECT count(*) AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [assoc.id])).toBeGreaterThan(0);
+      // an uncontested own fact
+      const plain = await ownFact();
+      for (const items of [await contested(), await ownerContested('owner-jwt'), await ownerContested('owner2-jwt')]) {
+        for (const id of [unmatchedFact.id, assoc.id, plain.factId]) expect(items.some((i) => i.id === id || i.factId === id), id).toBe(false);
+      }
+    });
+
+    it('O2-P3: per-kind keyset paging returns every item exactly once (no skip, no duplicate), and the kind is the producer\'s and the Owner\'s', async () => {
+      for (let k = 0; k < 2; k++) {
+        const f = await ownFact();
+        const o = await refundOf();
+        expect(await observe(o.attemptId, f.txn)).toBe(200);
+      }
+      const all = (await contested()).map((i) => i.id as string);
+      expect(new Set(all).size).toBe(all.length);
+      const paged: string[] = [];
+      let after: string | undefined;
+      for (;;) {
+        const page = (await request(server()).get(`/payment/reconciliation/items?kind=refund_fact_contested&limit=1${after ? `&after=${after}` : ''}`)
+          .set('authorization', `Bearer ${billing.token}`).expect(200)).body.items as Row[];
+        if (page.length === 0) break;
+        paged.push(page[0]!.id as string);
+        after = page[0]!.id as string;
+      }
+      expect(paged).toEqual([...all].sort());
+      expect((await ownerGet('/reconciliation-items?kind=refund_fact_contested&limit=200')).status).toBe(200);
+    });
   });
 
   describe('Core V2 R3 (PAY-08 I): failedAttemptEvidence, the refund evidence left after a FAILED attempt\'s own provider refund reference', () => {

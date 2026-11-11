@@ -26,6 +26,7 @@ export const ITEM_KINDS = [
   'fact_conflict', 'late_success', 'allocation_blocked', 'over_return', 'refund_discrepancy', 'authorization_pending', 'chargeback',
   'association', 'capture_refund_unavailable', 'capture_mismatch', 'multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict',
   'dispute_conflict_presence',
+  'refund_fact_contested', // Core V2 O-2 (PAY-12 M): the fact OWNER's view of its own contested refund fact (Owner and producer)
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 /** Core V2 S0-C12 items 14(f), 15 and S0-C13 Part A: `multiple_captures`, `capture_recovery_exhausted` and `dispute_conflict` are the Owner's alone; a service read never reaches them. */
@@ -149,6 +150,17 @@ const ITEM_SQL: Record<ItemKind, string> = {
         'chargeback', CASE WHEN o."chargebackTxnId" IS NULL THEN NULL ELSE jsonb_build_object('reference', o."chargebackTxnId", 'amount', o."chargebackAmount", 'currency', trim(o."chargebackCurrency")) END,
         'providerOccurredAt', o."providerOccurredAt") AS detail
     FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,
+  // Core V2 O-2 (PAY-12 M; the Owner's O2-a, 2026-11-11): the FACT OWNER's view of its own verified refund fact that at least one provider observation
+  // contradicts (any observer: this payment's own attempt, another payment's, possibly another Company's). One row per fact (EXISTS, never a join), keyed by
+  // the fact: monotonic (facts and observations are append-only) and derived at read, so a contest of an old fact appears with no backfill. Ownership is
+  // ONLY the fact's own `paymentId` and its own refund attempt: never a provider reference, never an association (an unmatched or associated fact has no
+  // owner here while F-29 is locked). It carries ONLY the owner's own fact, figures, attempt and observedAt: no observation, observer, count, observation
+  // time or provider reference. The one bit it discloses is that the owner's own fact is contested. Read-only: it allocates, associates or resolves nothing.
+  refund_fact_contested: `SELECT f.id, f."paymentId", f.id AS "factId", f.amount, f.currency, f."observedAt" AS at,
+      jsonb_build_object('refundAttemptId', f."refundAttemptId") AS detail
+    FROM provider_transaction_fact f JOIN payment p ON p.id = f."paymentId"
+   WHERE f.kind = 'refund' AND f."paymentId" IS NOT NULL AND f."refundAttemptId" IS NOT NULL
+     AND EXISTS (SELECT 1 FROM provider_transaction_fact_conflict c WHERE c."factId" = f.id)`,
   // Core V2 S0-C15B (B-D1): the same rows as `dispute_conflict`, REDACTED for the producer: identity, payment and time only; no figure, no detail
   dispute_conflict_presence: `SELECT o.id, o."paymentId", NULL::uuid AS "factId", NULL::bigint AS amount, NULL::text AS currency, o."observedAt" AS at, '{}'::jsonb AS detail
     FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,

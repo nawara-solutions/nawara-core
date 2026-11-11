@@ -920,7 +920,7 @@ describeWithEnv(
       expect(s.billing.openCases).toContain('chargeback_effect_waiting');
     }, T);
 
-    it('D6 (cross-payment, same Company): B\'s attempt reports A\'s matched refund: B gets one case naming nothing of A; A\'s Billing view, cases and money are unchanged (O-2 stays open)', async () => {
+    it('D6 (cross-payment, same Company): B\'s attempt reports A\'s matched refund: B gets one case naming nothing of A; A\'s money is unchanged and, NOW BY CORE V2 O-2, A gets exactly its own S0-C15B contest case (naming nothing of B)', async () => {
       const { p: pa } = await buy('direct');
       const a = await relayed(pa.paymentId, pa.amount);
       const txnA = await providerRef(a.attemptId);
@@ -944,7 +944,16 @@ describeWithEnv(
       expect(c).toMatchObject({ paymentId: pb.paymentId, amount: null, currency: null, detail: null, kind: null });
       const surface = await caseSurface(c.id);
       for (const foreign of [aFactId, txnA, pa.paymentId, pa.paymentRequestId, a.attemptId, a.caseId]) expect(surface, `B's case names nothing of A (${foreign})`).not.toContain(foreign);
-      expect(await billingCases(pa), 'A\'s Billing cases are unchanged').toEqual(aCases);
+      // Core V2 O-2 (was: "A's Billing cases are unchanged, O-2 stays open"): A's earlier cases stand, and the fact owner A gets exactly ONE contest case of its
+      // own fact, with its own verified figures, naming nothing of B
+      const aNow = await billingCases(pa);
+      const added = aNow.filter((x) => !aCases.some((y) => JSON.stringify(y) === JSON.stringify(x)));
+      expect(aNow.filter((x) => aCases.some((y) => JSON.stringify(y) === JSON.stringify(x))), 'A\'s earlier cases stand').toEqual(aCases);
+      expect(added, 'A\'s one O-2 case').toEqual([{ caseType: 'refund_fact_contested', detail: 'contested_after_allocation', amount: String(pa.amount), kind: null, reason: null }]);
+      const aCase = (await billingAdmin.query(`SELECT id FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [aFactId])).rows[0]!;
+      const aSurface = JSON.stringify({ row: (await billingAdmin.query(`SELECT * FROM reconciliation_case WHERE id = $1`, [aCase.id])).rows,
+        read: (await call(B1, 'GET', owners.a.token, `/billing/admin/reconciliation-cases/${aCase.id}`)).json });
+      for (const foreign of [pb.paymentId, pb.paymentRequestId, b.attemptId, c.id]) expect(aSurface, `A's case names nothing of B (${foreign})`).not.toContain(foreign);
       expect(billingOnly(await financial(pa)), 'A\'s money is unchanged').toEqual(aMoney);
       expect(await financial(pb), 'B\'s money is unchanged').toEqual(bBefore);
       const d = (await discrepancyCase(b.attemptId))!;

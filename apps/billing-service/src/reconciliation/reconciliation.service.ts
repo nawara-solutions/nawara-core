@@ -250,6 +250,7 @@ export class ReconciliationService {
     });
     await this.readDisputeConflicts(tally);
     await this.readUnallocated(tally);
+    await this.readFactOwnerContests(tally);
   }
 
   /**
@@ -265,7 +266,10 @@ export class ReconciliationService {
     const attemptId = typeof i.detail.refundAttemptId === 'string' && UUID.test(i.detail.refundAttemptId) ? i.detail.refundAttemptId : null;
     const inconsistent = (why: string) => this.log.warn(`payment_evidence_inconsistent kind=fact_conflict item=${i.id} reason=${why} — nothing opened; the next pass reads again`);
     if (!attemptId) return inconsistent('refund_attempt_unreadable');
-    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [factId])).rows.length > 0) return;
+    // Core V2 O-2: only THIS payment's own contest case ends the item here. The fact owner's case (O-2, under the owner's payment) must not stop an
+    // observing payment's item from reaching DO-74's observer case below
+    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1 AND "paymentId" = $2`,
+      [factId, i.paymentId])).rows.length > 0) return;
     let read: Awaited<ReturnType<PaymentRefundClient['refunds']>>;
     try {
       read = await this.captures.refunds(i.paymentId);
@@ -346,6 +350,65 @@ export class ReconciliationService {
     } catch (e) {
       this.log.warn(`payment_allocation_blocked_read_unavailable ${describeFailure(e)} — nothing inferred; the other kinds were read; the next pass reads again`);
     }
+  }
+
+  /**
+   * Core V2 O-2 (BIL-33 T; the Owner's O2-a to O2-d, 2026-11-11): Payment's fact-OWNER item `refund_fact_contested` (PAY-12 M), read on its own after every
+   * other kind: an older Payment (the kind unknown there), an unavailable Payment or a malformed page skips only this kind; the next pass reads again.
+   */
+  private async readFactOwnerContests(tally: { opened: number }): Promise<void> {
+    try {
+      await this.page('refund_fact_contested', async (i) => this.factOwnerContest(i, tally));
+    } catch (e) {
+      this.log.warn(`payment_refund_fact_contested_read_unavailable ${describeFailure(e)} — nothing inferred; the other kinds were read; the next pass reads again`);
+    }
+  }
+
+  /**
+   * Core V2 O-2: the FACT OWNER's contested refund fact opens S0-C15B's existing `refund_fact_contested` case (and its `reconciliation_contest_evidence`,
+   * one transaction), whoever observed the contradiction: this payment's own attempt or another payment's, possibly another Company's. Payment's item states
+   * only the owner's OWN fact, figures and attempt; nothing of any observer crosses, so the case cannot name one. Stricter than the observer-side path, and
+   * fail-closed on everything (nothing opened, one warning, the next pass reads again):
+   *   * identity: the item is the fact (`id` = `factId`), under the item's payment, with its own refund attempt;
+   *   * PAY-08 (B-D6): the SAME fact under the SAME attempt of the SAME payment, allocated or not yet, with EXACTLY the item's amount and currency;
+   *   * Billing's OWN relay of that attempt for that payment (never a case without it);
+   *   * no DO-74 observer fallback: a fact PAY-08 does not state as this payment's opens nothing here.
+   * Once per fact (the case's identity), whichever path opens it first; acknowledgement follows S0-C15B's existing rule; it closes nothing and moves no money.
+   */
+  private async factOwnerContest(i: PaymentItem, tally: { opened: number }): Promise<void> {
+    const inconsistent = (why: string) => this.log.warn(`payment_evidence_inconsistent kind=refund_fact_contested item=${i.id} reason=${why} — nothing opened; the next pass reads again`);
+    const attemptId = typeof i.detail.refundAttemptId === 'string' && UUID.test(i.detail.refundAttemptId) ? i.detail.refundAttemptId : null;
+    if (!i.factId || i.factId !== i.id) return inconsistent('fact_unreadable');
+    if (!attemptId) return inconsistent('refund_attempt_unreadable');
+    if (i.amount === null || i.currency === null) return inconsistent('fact_figures_unusable');
+    const factId = i.factId;
+    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [factId])).rows.length > 0) return;
+    let read: Awaited<ReturnType<PaymentRefundClient['refunds']>>;
+    try {
+      read = await this.captures.refunds(i.paymentId);
+    } catch {
+      return inconsistent('payment_unavailable');
+    }
+    if (read === null) return inconsistent('payment_not_found');
+    const allocated = read.authorizations.filter((z) => z.refundAttemptId === attemptId).flatMap((z) => z.allocations).find((a) => a.factId === factId);
+    if (!allocated && read.unallocatedFacts === null) return inconsistent('unallocated_facts_unknown');
+    const pending = allocated ? undefined : (read.unallocatedFacts ?? []).find((f) => f.factId === factId && f.refundAttemptId === attemptId);
+    const fact = allocated ?? pending;
+    if (!fact) return inconsistent('fact_not_stated');
+    if (!Number.isSafeInteger(fact.amount) || fact.amount < 1 || !/^[A-Z]{3}$/.test(fact.currency)) return inconsistent('fact_figures_unusable');
+    if (fact.amount !== i.amount || fact.currency !== i.currency) return inconsistent('fact_figures_disagree');
+    // a refusal by this database (a constraint) or a failure opens nothing and changes nothing: logged, retried on the next pass, never skipped silently
+    await this.db.tx(async (q) => {
+      const relay = (await q.query<{ captureFactId: string | null }>(
+        `SELECT r."captureFactId" FROM refund_authorization_relay x JOIN refund_case r ON r.id = x."refundCaseId" WHERE x.id = $1 AND x."paymentId" = $2`, [attemptId, i.paymentId])).rows[0];
+      if (!relay) return inconsistent('own_relay_missing');
+      const caseId = await this.cases.openForPayment(q, { caseType: 'refund_fact_contested', evidenceKey: factId, paymentId: i.paymentId, captureFactId: relay.captureFactId,
+        amount: fact.amount, currency: fact.currency, detail: allocated ? 'contested_after_allocation' : 'contested_unallocated' });
+      if (!caseId) return; // opened by another pass or path, or no Company Owner exists to see it
+      await q.query(`INSERT INTO reconciliation_contest_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId") VALUES ($1, $2, $3, $4)`,
+        [caseId, i.paymentId, factId, attemptId]);
+      tally.opened++;
+    }).catch((e: unknown) => this.log.warn(`refund_fact_owner_contest_open_failure item=${i.id} ${describeFailure(e)} — nothing opened; the next pass reads again`));
   }
 
   /**
