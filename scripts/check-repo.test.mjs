@@ -9,12 +9,13 @@ import { parse, parseDocument } from 'yaml';
 import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
 import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow } from './lib/checks.mjs';
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, checkCiClassify, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 import { checkAllReports as checkAllRbReports, checkManifest as checkRbManifest, checkRealBrokerGroups, checkRealBrokerJobs, checkVitestConfig as checkRbVitestConfig, discoverSuites as rbDiscoverSuites, loadManifest as rbLoadManifest, matrixOf as rbMatrixOf } from './real-broker-groups.mjs';
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
 import { BACKUP_DESTINATION_ENV, BACKUP_JOB, BACKUP_JOB_SECRETS, BACKUP_PACKAGE_RUN, BACKUP_PERMISSIONS, BACKUP_REMOTE_SCRIPT, BACKUP_SSH_ACTION, BACKUP_SSH_WITH, BACKUP_TAG, BACKUP_TAILSCALE_WITH, BACKUP_WORKFLOW, SSH_ACTION_INPUTS, checkDroneSshFiles } from './lib/checks.mjs';
 import { PROBE_ENV, PROBE_GUARD, PROBE_JOB, PROBE_SECRETS, PROBE_TAG, PROBE_TAILSCALE_WITH, PROBE_WORKFLOW, TAILSCALE_ACTION, TAILSCALE_ACTION_RELEASE, TAILSCALE_CLIENT_SHA256, TAILSCALE_CLIENT_VERSION } from './lib/checks.mjs';
+import { ALL_JOBS as CLASSIFY_JOBS } from './ci-lanes/classify.mjs';
 
 // V2-A.3 A3.6: the host-key guard step, exactly as every real production SSH job carries it.
 const HOST_KEY_GUARD_STEP = `      - name: Require the pinned production host key
@@ -399,7 +400,7 @@ test('I: the digest deployment keeps set -euo pipefail and no secret in the remo
 
 // ------------------------------------------------------------------------------ V2-A.3 (A3.2): the stable aggregate check
 const CORE_CI = workflow('core-ci.yml');
-const NEEDS_LINE = '    needs: [repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]\n';
+const NEEDS_LINE = '    needs: [classify, repo-checks, node, images, infra, e2e-real-broker-plan, e2e-real-broker, e2e-real-broker-verify, e2e-auth-organization, e2e-shared-platform]\n';
 
 test('core-ci-passed: the real Core CI workflow has the aggregate, needing every other job', () => {
   assert.deepEqual(checkCiAggregate('core-ci.yml', CORE_CI), []);
@@ -417,14 +418,55 @@ test('core-ci-passed: removing the aggregate, renaming it or making it a matrix 
 });
 
 test('core-ci-passed: dropping any needed job, or adding a job it does not need, is refused', () => {
-  for (const id of ['repo-checks', 'node', 'images', 'infra', 'e2e-real-broker-plan', 'e2e-real-broker', 'e2e-real-broker-verify', 'e2e-auth-organization', 'e2e-shared-platform']) {
+  for (const id of ['classify', 'repo-checks', 'node', 'images', 'infra', 'e2e-real-broker-plan', 'e2e-real-broker', 'e2e-real-broker-verify', 'e2e-auth-organization', 'e2e-shared-platform']) {
     // Whole ids only (Core V2 A1: e2e-real-broker is a prefix of e2e-real-broker-plan and e2e-real-broker-verify).
     const dropped = swap(CORE_CI, NEEDS_LINE, NEEDS_LINE.replace(new RegExp(`(?<=[[ ])${id}(, |(?=]))`), '').replace(', ]', ']'));
-    assert.equal(parse(dropped).jobs[CI_AGGREGATE].needs.length, 8, `${id}: exactly one need removed`);
+    assert.equal(parse(dropped).jobs[CI_AGGREGATE].needs.length, 9, `${id}: exactly one need removed`);
     assert.match(checkCiAggregate('core-ci.yml', dropped).join(), new RegExp(`\\(missing: ${id}\\)`), id);
   }
   const added = swap(CORE_CI, '  core-ci-passed:\n', '  new-suite:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n');
   assert.match(checkCiAggregate('core-ci.yml', added).join(), /missing: new-suite/);
+});
+
+// ------------------------------------------------------------------------------ Core V2 Smart CI, Stage 0 (shadow): change classification
+test('Smart CI Stage 0: the real Core CI has a shadow classify job using the BASE commit\'s classifier', () => {
+  assert.deepEqual(checkCiClassify('core-ci.yml', CORE_CI, CLASSIFY_JOBS), []);
+});
+
+test('Smart CI Stage 0: the classifier from the pull request itself, or no base classifier, is refused', () => {
+  const selfSelected = swap(CORE_CI, 'git show "$BASE_SHA:scripts/ci-lanes/classify.mjs" > "$trusted"', 'cp scripts/ci-lanes/classify.mjs "$trusted"; node scripts/ci-lanes/classify.mjs "$EVENT" "$BASE_SHA" "$HEAD_SHA"');
+  const problems = checkCiClassify('core-ci.yml', selfSelected, CLASSIFY_JOBS).join();
+  assert.match(problems, /must run the classifier from the BASE commit/);
+  assert.match(problems, /must never run the checked-out classifier/);
+  assert.match(checkCiClassify('core-ci.yml', swap(CORE_CI, 'BASE_SHA: ${{ github.event.pull_request.base.sha }}', 'BASE_SHA: ${{ github.event.pull_request.head.sha }}'), CLASSIFY_JOBS).join(), /BASE_SHA must be/);
+});
+
+test('Smart CI Stage 0: in shadow mode no job may depend on the classification (every job runs)', () => {
+  const gated = swap(CORE_CI, '  repo-checks:\n    name: repository checks\n', "  repo-checks:\n    name: repository checks\n    needs: classify\n    if: needs.classify.outputs.lane == 'full'\n");
+  const problems = checkCiClassify('core-ci.yml', gated, CLASSIFY_JOBS).join();
+  assert.match(problems, /job "repo-checks": must not need "classify" in Stage 0/);
+  assert.match(problems, /job "repo-checks": its condition must not read the classification in Stage 0/);
+});
+
+test('Smart CI Stage 0: the classify job must always run, alone, with no credentials, secret or bypass', () => {
+  const conditional = swap(CORE_CI, '    name: change classification (Smart CI Stage 0, shadow)\n', "    name: change classification (Smart CI Stage 0, shadow)\n    if: github.event_name == 'push'\n");
+  assert.match(checkCiClassify('core-ci.yml', conditional, CLASSIFY_JOBS).join(), /must not set "if"/);
+  const tolerant = swap(CORE_CI, '    name: change classification (Smart CI Stage 0, shadow)\n', '    name: change classification (Smart CI Stage 0, shadow)\n    continue-on-error: true\n');
+  assert.match(checkCiClassify('core-ci.yml', tolerant, CLASSIFY_JOBS).join(), /must not set "continue-on-error"/);
+  const credentials = swap(CORE_CI, '          fetch-depth: 0\n          persist-credentials: false\n', '          fetch-depth: 0\n');
+  assert.match(checkCiClassify('core-ci.yml', credentials, CLASSIFY_JOBS).join(), /persist-credentials: false/);
+  const noOverride = swap(CORE_CI, '          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}\n', '');
+  assert.match(checkCiClassify('core-ci.yml', noOverride, CLASSIFY_JOBS).join(), /CI_FORCE_FULL emergency override/);
+  const target = swap(CORE_CI, 'on:\n  pull_request:\n', 'on:\n  pull_request_target:\n    branches: [main]\n  pull_request:\n');
+  assert.match(checkCiClassify('core-ci.yml', target, CLASSIFY_JOBS).join(), /must not run on pull_request_target/);
+  const without = swap(CORE_CI, '  classify:\n', '  classify-renamed:\n');
+  assert.match(checkCiClassify('core-ci.yml', without, CLASSIFY_JOBS).join(), /job "classify" is missing/);
+});
+
+test('Smart CI Stage 0: the classifier\'s job list must equal the workflow\'s jobs', () => {
+  assert.match(checkCiClassify('core-ci.yml', CORE_CI, CLASSIFY_JOBS.filter((j) => j !== 'infra')).join(), /must equal the workflow's jobs/);
+  const added = swap(CORE_CI, '  core-ci-passed:\n', '  new-suite:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n');
+  assert.match(checkCiClassify('core-ci.yml', added, CLASSIFY_JOBS).join(), /must equal the workflow's jobs/);
 });
 
 test('core-ci-passed: it must always run (a skipped required check counts as passed)', () => {

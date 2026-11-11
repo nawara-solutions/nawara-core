@@ -442,3 +442,29 @@ unchanged. The runbook is [core-backup-restore.md §3](../runbooks/core-backup-r
 3. Dispatch once and approve it. There is no automatic retry.
 
 G7, F6 and F7 stay locked.
+
+## 12. Smart CI Stage 0: change classification in shadow mode (2026-11-11)
+
+**Status: Stage 0 (shadow), approved by the Owner on 2026-11-11. Nothing is skipped.** Every Core CI job still runs on every pull request and
+every push to `main`; `core-ci-passed` still requires every job to succeed (`all(.[]; .result == "success")`), and the ruleset still requires
+only `core-ci-passed`. No path filter, no `[skip ci]` handling, no branch-protection change. Stage 1 (a reduced `docs` lane) and a `targeted`
+lane are **not** enabled; each needs a separate Owner decision.
+
+- **What it does.** A new job `classify` ("change classification (Smart CI Stage 0, shadow)") reports, in the run summary and its log, the lane
+  the change *could* use (`docs` or `full`) and why. Nothing reads its output in Stage 0.
+- **Trust.** The job runs the classifier from the pull request's **base** commit (`git show "$BASE_SHA:scripts/ci-lanes/classify.mjs"`),
+  never the checked-out one, so a pull request cannot select its own lane. Without a classifier at the base (this change's own pull request,
+  a push, any other event) or on any error, the lane is `full`. The checkout persists no credentials; no secret is used; the workflow never runs
+  on `pull_request_target`. The repository variable `CI_FORCE_FULL=1` forces `full` (emergency override).
+- **Classification (`scripts/ci-lanes/classify.mjs`).** Only a pull request can be `docs`. `docs` means every changed path, both sides of a
+  rename and every deletion included, is `docs/**/*.md`, a root `*.md`, or an `apps/*/README.md` / `libs/*/README.md`, with no symlink,
+  submodule, executable bit or mode change. `docs/architecture/audit-event-catalog.md` is `full` (a test reads it). Workflows, scripts (this
+  classifier included), tests, infrastructure, shared libraries, dependency manifests, migrations and the payment, billing, auth, audit and
+  organization services are always `full`; so is anything unknown or mixed. The change is measured from the merge base.
+- **The future gate.** `gate()` in the same file is the lane-aware verdict a later stage would use (required jobs succeeded, every other job
+  skipped; a failed, cancelled, missing or unknown job fails). It is tested but not used by Core CI in Stage 0.
+- **Self-checks.** `check:repo` (`checkCiClassify`) refuses a classify job that is conditional, a matrix, tolerant of failure, holding
+  credentials or secrets, running the checked-out classifier, or missing the override; any job that depends on the classification in Stage 0;
+  `pull_request_target`; and a classifier job list that differs from the workflow's jobs. The classifier's own tests run in `test:repo`.
+- **Stage 1 prerequisites (for the Owner).** Shadow results reviewed against real pull requests; a Stage 1 change to the aggregate rule
+  (`checkCiAggregate`) and its tests; the gated jobs' conditions; and an explicit Owner decision.
