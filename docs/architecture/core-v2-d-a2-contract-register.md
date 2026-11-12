@@ -1159,7 +1159,7 @@ lifecycle authority and the V-4 / L2 / L3 contracts (V5-8); (5) the shared autho
 Payment lifecycle-aware S5e integration (D6 for BIL-13, V5-5, the `inactive` kind of BIL-26, Payment's A-6 extension point); (7) the S0
 §8 inactive-Organization discharge certification.
 
-### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO financial decision approved; FDR-08 v1 approved as a closure-evidence framework only, 2026-11-12, §7.2.5; FDR-01 v1 and FDR-09 v1 approved as definitions only, 2026-11-12, §7.2.7 and §7.2.8)
+### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO financial decision approved; FDR-08 v1 approved as a closure-evidence framework only, 2026-11-12, §7.2.5; FDR-01 v1 and FDR-09 v1 approved as definitions only, 2026-11-12, §7.2.7 and §7.2.8; FDR-10 v1 and FDR-11 v1 approved as definitions only, 2026-11-12, §7.2.9 and §7.2.10)
 
 **Status of this section.** The Owner approved, on 2026-11-11, this register's structure (v0), the identifiers FDR-01 to FDR-11 with their
 provisional titles and coverage, and the legacy-reference crosswalk below **as a provenance record only**. **No financial policy, definition,
@@ -1167,7 +1167,9 @@ resolution kind, closure authority or implementation is approved by this section
 recorded in the entry itself (field *Approval*). Appearing here approves nothing. The approvals recorded so far are FDR-08 v1 (§7.2.5,
 2026-11-12): a reconciliation closure-evidence **framework**, which approves no resolution kind, financial reconciliation, liability or authority;
 and FDR-01 v1 and FDR-09 v1 (§7.2.7, §7.2.8, 2026-11-12): **definitions only**, which approve no liability bearer, amount, recovery route,
-correction, settlement behavior, fee-accounting model, schema, journal or uniqueness key.
+correction, settlement behavior, fee-accounting model, schema, journal or uniqueness key; and FDR-10 v1 and FDR-11 v1 (§7.2.9, §7.2.10,
+2026-11-12): **definitions only**, which approve no adapter, provider activation, association, reversal, conversion, rate, settlement or
+financial effect.
 
 **Why it exists.** The original definitions of the legacy identifiers FD-1 to FD-8 were not recovered (provenance gate, 2026-11-11): the
 repository introduces them only as bare collective references (FD-1 to FD-5 in S0-C15A, `93ae45d`; FD-1 to FD-8 in S0-C15B, `c24c0f4`), and the
@@ -1205,13 +1207,14 @@ liability assigned (nothing represents it today).
 | Certification | Required after approval, before any implementation counts |
 | Approval | Date, version and reference; **empty until an actual Owner approval** |
 
-#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`; FDR-08 also has a v1 framework approval, §7.2.5; FDR-01 and FDR-09 also have v1 definition approvals, §7.2.7, §7.2.8)
+#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`; FDR-08 also has a v1 framework approval, §7.2.5; FDR-01, FDR-09, FDR-10 and FDR-11 also have v1 definition approvals, §7.2.7 to §7.2.10)
 
 Common to every entry below: *Proposed definition*, *Alternatives*, *Consequences* and *Certification*: **not yet proposed** (placeholders);
 *Approval*: **none**. *Owner*: the Owner. No entry implies a financial policy. The FDR-08 `v0` row is kept unchanged as its earlier version;
 FDR-08 `v1` (framework only) is recorded in §7.2.5. The FDR-01 and FDR-09 `v0` rows are likewise kept unchanged as their earlier versions;
-FDR-01 `v1` and FDR-09 `v1` (definitions only) are recorded in §7.2.7 and §7.2.8. These three `v1` rows are the only row-level exceptions to
-these common statements.
+FDR-01 `v1` and FDR-09 `v1` (definitions only) are recorded in §7.2.7 and §7.2.8. The FDR-10 and FDR-11 `v0` rows are likewise kept
+unchanged; FDR-10 `v1` and FDR-11 `v1` (definitions only) are recorded in §7.2.9 and §7.2.10. These five `v1` rows are the only row-level
+exceptions to these common statements.
 
 | ID | Version | Status | Provisional title | Coverage | Provenance | Authority required | Current behavior (unchanged) | Evidence prerequisites | Dependencies |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1228,7 +1231,9 @@ these common statements.
 | FDR-09 | v0 | PROPOSED — NOT APPROVED | Fee accounting | DO-35 (absorbed provider and chargeback fees recorded nowhere); DO-36 (the Organization's kept fee not recorded) | Diagram workshop register DO-35, DO-36 | Business and accounting | No fee record exists | A fee data model | Feeds FDR-01 |
 | FDR-09 | v1 | **approved v1 — DEFINITION ONLY** (Owner, 2026-11-12; §7.2.8) | Fee accounting: definition framework | Fee categories, principles 1 to 6, options A to C as alternatives, option D as the current interim limitation only (§7.2.8) | As v0; S0 §1.5 FDR-01 v1 and FDR-09 v1 pointer | Owner (definition); business, accounting and provider evidence for any later model | **Unchanged**: no fee record exists; principal-only movement accounting | §7.2.8 | As v0; FDR-10, FDR-11, F-26 |
 | FDR-10 | v0 | PROPOSED — NOT APPROVED | Provider evidence basis | Which provider evidence may support a financial decision: statements (DO-37), reference scope (O-1), partial-refund semantics | DO-37; O-1; real-provider gates B2 to B8 | Owner, plus real-provider evidence | Only simulation and test providers exist; no statement input | Real-provider documentation and data | Real-provider gates |
+| FDR-10 | v1 | **approved v1 — DEFINITION ONLY** (Owner, 2026-11-12; §7.2.9) | Provider evidence: definition framework | Evidence concepts FDR-10 E1 to E5 and safety rules FDR-10 V1 to V7 (§7.2.9) | As v0; S0 §1.5 FDR-10 v1 and FDR-11 v1 pointer | Owner (definition); real-provider contracts and certification for any later use | **Unchanged**: simulation and test providers only (`liveMode = false`); no real-provider activation | §7.2.9 | As v0; F-26, DO-37, DO-76, R3 O-1, B1 to B8; F-29 LOCKED |
 | FDR-11 | v0 | PROPOSED — NOT APPROVED | Exchange-rate policy | Exchange-rate treatment named in DO-73 U-7; currency-mismatched refund facts | DO-73 U-7 (S0 §1.5 DO-73 point 10) | Business and accounting | No rate is ever applied or assumed (S0-C12 item 8); mismatched facts are blocked (DO-73) | Provider and accounting evidence | FDR-01, FDR-10 |
+| FDR-11 | v1 | **approved v1 — DEFINITION ONLY** (Owner, 2026-11-12; §7.2.10) | Currency evidence: definition framework | Currency-evidence topics and safety principles FDR-11 C1 to C6 (§7.2.10) | As v0; S0 §1.5 FDR-10 v1 and FDR-11 v1 pointer | Owner (definition); business, provider and accounting authority for any later rate or conversion | **Unchanged**: no conversion, no rate; one currency per Platform (current behavior); mismatched refund facts blocked | §7.2.10 | As v0; FDR-09, FDR-10, DO-73, B6 |
 
 #### 7.2.3 Legacy FD reference crosswalk (provenance record; every gate UNSATISFIED)
 
@@ -1508,6 +1513,112 @@ records today's state; it is not an approved permanent policy.
 
 **Dependencies.** FDR-10 (provider fee and gross-or-net reporting, statements), FDR-11 (currency), F-26 (reversals of fees with their
 movement), the business inputs of §7.2.7, and the future accounting service (`financial-architecture` §9, Stage 5).
+
+#### 7.2.9 FDR-10 v1: provider-evidence definition framework (approved as a DEFINITION ONLY, 2026-11-12)
+
+**Approval.** FDR-10 `v1`, approved by the Owner on 2026-11-12 ("OWNER GO: FDR-10 v1 AND FDR-11 v1 DEFINITION ADOPTION", on `main` at
+`2ce23ea`), **as a definition-only provider-evidence framework**. The `v0` row in §7.2.2 is kept as the earlier version.
+
+**Explicitly NOT approved.** No real-provider financial policy, adapter, provider activation, matching or association authority (F-29 stays
+**LOCKED**), reversal fact or loss correction (F-26 stays **OPEN**), statement ingestion, settlement or financial effect. No real-provider
+activation follows from this approval.
+
+**Evidence concepts.** FDR-10 E1 to E4 are evidence or verification concepts; FDR-10 E5 is a financial-processing **consequence**, not a
+higher level of evidence quality. E3, E4 and E5 do not form an automatic progression.
+
+| Concept | Meaning | Core today (development and simulation; `liveMode = false`) |
+|---|---|---|
+| FDR-10 E1 Provider assertion | Anything a provider states | Webhook bodies; one whose signature fails is refused (401) and nothing is stored |
+| FDR-10 E2 Authenticated provider event or status observation | An assertion authenticated by signature or by an authenticated status read | Payment's provider facts (`capture`, `refund`, `chargeback`; FC-1, recorded before processing, V-2), dispute observations, preserved conflicts, quarantined evidence (S0-C12 item 16) |
+| FDR-10 E3 Evidence supporting an actual money movement | Evidence that the money really moved | None beyond E2: no real provider; no statement |
+| FDR-10 E4 Reconciliation against provider statements | Agreement with the provider's statements | None (DO-37) |
+| FDR-10 E5 Core financial effect derived from approved evidence | Balances, allocations, losses, obligations, reversals derived from evidence under approved rules | FC-5 balances and the S6 effects, from E2 facts of the simulation and test providers under the currently authorized rules |
+
+**Safety rules FDR-10 V1 to V7 (definition only).**
+
+- **V1** No evidence concept automatically proves another; a provider assertion is not necessarily movement evidence.
+- **V2** Authenticated events may support the existing simulation and test effects under the currently authorized rules; real-provider
+  effects require separate adapter certification and the authorization of blockers B1 to B8 (S0 §1.5 S0-C12 item 19).
+- **V3** Provider capabilities (for example `partialRefunds`, `notFoundIsAuthoritative`, `refundReferenceScope`) must be declared and
+  certified; none is implied.
+- **V4** A dispute outcome never independently proves a returned-money movement. **A won dispute does not by itself prove that funds were
+  restored** (S0-C10 item 9). No reversal or loss correction is authorized.
+- **V5** Unmatched and quarantined evidence remains financially inert.
+- **V6** Contradictions are preserved, never overwritten (a terminal dispute outcome is never replaced; conflicts are kept).
+- **V7** No real-provider activation follows from FDR-10 approval.
+
+**Existing enforced rules (unchanged).** A fact is unique per provider and provider transaction id, immutable, and recorded on its own before
+any processing (FC-1, V-2); each capture is its own fact (S0-C12 item 14). A matched refund fact names its attempt exactly when it names its
+payment (Payment `0021`); an unmatched fact has no financial effect and is associated only by an append-only association (F-29 LOCKED). Only
+`succeeded` and a provider-confirmed `failed` are definitive; `notFound` never proves a failure unless the adapter declares
+`notFoundIsAuthoritative`. A `lost` dispute moves no money; only a verified `chargeback` fact does. Invalid currency or amount shapes are
+quarantined and their acknowledgement means "held", never "processed" (S0-C12 item 16); a missing amount or an unparseable authenticated body
+is an unresolved risk (S0-C12 item 18).
+
+**Dependencies (all OPEN).**
+
+- *Provider-reference scope (R3 O-1).* Only an adapter that explicitly declares `refundReferenceScope: 'provider'` (today the simulation
+  adapter) is compared; any other reads `unknown` (S0 §1.5 R3 point 2). A real adapter's contract is undecided.
+- *Gross and net amounts.* Facts carry the amount the provider states; whether a real provider reports net of fees is unknown (FDR-09).
+- *Partial refunds.* `partialRefunds` is a capability flag only; real partial-refund and partial-capture semantics are undecided (FDR-05, B2).
+- *Statements (DO-37).* No statement input exists; E4 is not available.
+- *Authorization anomalies (DO-76).* A refund fact of a known attempt without a refund authorization stays blocked and Owner-visible.
+- *Reversals (F-26).* No fact kind exists for a returned movement.
+- *Certification (B1 to B8).* S0-C12 item 19; with Payment SDD O-1 (provider contracts) and O-3 (settlement).
+
+**Certification prerequisites (before any real-provider evidence counts; separately authorized).** Per provider: contract documentation;
+sandbox evidence for each fact kind, partial refunds, reversals and statements; negative controls (forged signature, reused reference, wrong
+currency, unmatched fact); and B1 to B8 each authorized and certified.
+
+#### 7.2.10 FDR-11 v1: currency-evidence definition framework (approved as a DEFINITION ONLY, 2026-11-12)
+
+**Approval.** FDR-11 `v1`, approved by the Owner on 2026-11-12 (same GO as §7.2.9), **as a definition-only currency-evidence framework**.
+The `v0` row in §7.2.2 is kept as the earlier version.
+
+**Explicitly NOT approved.** No new currency, conversion, exchange rate, rate source, rounding rule, FX accounting, aggregation or financial
+effect.
+
+**Topics covered (definitions only).** Currency identity; the minor-unit exponent and its provenance; provider amount encoding and scale;
+currency-mismatch handling; provider settlement currency; rate evidence and its timestamp; rounding provenance; FX differences; fee currencies
+(FDR-09); cross-currency aggregation restrictions.
+
+**Safety principles FDR-11 C1 to C6 (definition only).**
+
+- **C1** An amount is meaningful only with its currency and the provenance of its exponent.
+- **C2** Amounts in different currencies are never summed or netted.
+- **C3** No conversion without an approved rate source, rate timestamp and rounding rule, each recorded with any result.
+- **C4** A mismatch is never resolved silently; the provider-stated original figures stay preserved.
+- **C5** Unmatched and quarantined currency evidence has no financial effect.
+- **C6** A fee's currency is its own evidence, never assumed to be the principal's.
+
+**Current behavior (preserved, unchanged).** Billing's `currency` table (Billing `0001`) is the only place an exponent lives (TND, exponent 3)
+and an exponent never changes (BI-21). Amounts and currencies are recorded exactly; never converted, rounded or normalized; no exchange rate
+is ever applied, inferred or assumed (S0-C12 item 8). One currency per Platform (`billing_platform`) is **current behavior, not a permanent
+policy**. A currency-mismatched refund fact stays blocked, its figures never truncated or converted (DO-73, U-4); a refund of an ineligible
+currency is refused (S0-C12 item 17); invalid currency shapes are quarantined (S0-C12 item 16); an automatic loss effect needs the loss in
+its capture's currency (S0-C10 item 3); refunds in another currency need adapter support or fail closed (B6).
+
+**Dependencies (all OPEN).** Supported currencies beyond TND (Billing SDD B-005; Payment SDD O-10); provider settlement currencies (Payment
+SDD O-3); rate source and authority; FX accounting (a future accounting service); fee currencies (FDR-09); provider currency evidence
+(FDR-10).
+
+**Certification prerequisites (before any conversion or multi-currency behavior counts; separately authorized).** Mismatch negative controls,
+aggregation-refusal tests, and recorded rate provenance.
+
+#### 7.2.11 Identifier namespace note (2026-11-12; non-retroactive; no historical decision renamed or rewritten)
+
+Several short identifiers recur with different meanings. FDR entries cite them qualified:
+
+| Qualified citation | Meaning | Source |
+|---|---|---|
+| R3 O-1 | Real-provider refund-reference scope (open decision) | S0 §1.5 R3 point 2 |
+| S0-C12 O-1, O-2 | The Owner's S0-C12 decisions (O-2: quarantined evidence, a documented limitation and blocker B4) | S0 §1.5 S0-C12 |
+| S0-C10 O-1 to O-5 | The Owner's S0-C10 implementation decisions | S0 §1.5 S0-C10 item 16 |
+| Freeze O-2 fact-owner finding | The fact owner of a contested verified refund fact (implemented as O-2) | S0 §1.5 DO-74 point 10; O-2 entry |
+| Payment SDD O-1, O-2, O-3 | Provider contracts; merchant of record; settlement, custody, timing, currencies | `docs/sdd/payment-service.md` open decisions |
+| FDR-01 L1 to L6 | FDR-01 analytical stages (unrelated to the late-settlement rules L-1 to L-6 and to ADR-0060 / S0-C11 L2, L3) | §7.2.7 |
+| FDR-10 E1 to E5; FDR-10 V1 to V7 | FDR-10 evidence concepts and safety rules (unrelated to the V-n rules and to DO-75 V1 to V3) | §7.2.9 |
+| FDR-11 C1 to C6 | FDR-11 safety principles (unrelated to S0-C14's C1 to C15 and to ADR-0035's C1 to C4) | §7.2.10 |
 
 ## 8. Gates and dependencies
 
