@@ -1159,13 +1159,15 @@ lifecycle authority and the V-4 / L2 / L3 contracts (V5-8); (5) the shared autho
 Payment lifecycle-aware S5e integration (D6 for BIL-13, V5-5, the `inactive` kind of BIL-26, Payment's A-6 extension point); (7) the S0
 §8 inactive-Organization discharge certification.
 
-### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO financial decision approved; FDR-08 v1 approved as a closure-evidence framework only, 2026-11-12, §7.2.5)
+### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO financial decision approved; FDR-08 v1 approved as a closure-evidence framework only, 2026-11-12, §7.2.5; FDR-01 v1 and FDR-09 v1 approved as definitions only, 2026-11-12, §7.2.7 and §7.2.8)
 
 **Status of this section.** The Owner approved, on 2026-11-11, this register's structure (v0), the identifiers FDR-01 to FDR-11 with their
 provisional titles and coverage, and the legacy-reference crosswalk below **as a provenance record only**. **No financial policy, definition,
 resolution kind, closure authority or implementation is approved by this section.** An entry is approved only by a later, dated Owner approval
-recorded in the entry itself (field *Approval*). Appearing here approves nothing. The only approval recorded so far is FDR-08 v1 (§7.2.5,
-2026-11-12): a reconciliation closure-evidence **framework**, which approves no resolution kind, financial reconciliation, liability or authority.
+recorded in the entry itself (field *Approval*). Appearing here approves nothing. The approvals recorded so far are FDR-08 v1 (§7.2.5,
+2026-11-12): a reconciliation closure-evidence **framework**, which approves no resolution kind, financial reconciliation, liability or authority;
+and FDR-01 v1 and FDR-09 v1 (§7.2.7, §7.2.8, 2026-11-12): **definitions only**, which approve no liability bearer, amount, recovery route,
+correction, settlement behavior, fee-accounting model, schema, journal or uniqueness key.
 
 **Why it exists.** The original definitions of the legacy identifiers FD-1 to FD-8 were not recovered (provenance gate, 2026-11-11): the
 repository introduces them only as bare collective references (FD-1 to FD-5 in S0-C15A, `93ae45d`; FD-1 to FD-8 in S0-C15B, `c24c0f4`), and the
@@ -1203,15 +1205,18 @@ liability assigned (nothing represents it today).
 | Certification | Required after approval, before any implementation counts |
 | Approval | Date, version and reference; **empty until an actual Owner approval** |
 
-#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`; FDR-08 also has a v1 framework approval, §7.2.5)
+#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`; FDR-08 also has a v1 framework approval, §7.2.5; FDR-01 and FDR-09 also have v1 definition approvals, §7.2.7, §7.2.8)
 
 Common to every entry below: *Proposed definition*, *Alternatives*, *Consequences* and *Certification*: **not yet proposed** (placeholders);
 *Approval*: **none**. *Owner*: the Owner. No entry implies a financial policy. The FDR-08 `v0` row is kept unchanged as its earlier version;
-FDR-08 `v1` (framework only) is recorded in §7.2.5, which is the only row-level exception to these common statements.
+FDR-08 `v1` (framework only) is recorded in §7.2.5. The FDR-01 and FDR-09 `v0` rows are likewise kept unchanged as their earlier versions;
+FDR-01 `v1` and FDR-09 `v1` (definitions only) are recorded in §7.2.7 and §7.2.8. These three `v1` rows are the only row-level exceptions to
+these common statements.
 
 | ID | Version | Status | Provisional title | Coverage | Provenance | Authority required | Current behavior (unchanged) | Evidence prerequisites | Dependencies |
 |---|---|---|---|---|---|---|---|---|---|
 | FDR-01 | v0 | PROPOSED — NOT APPROVED | Final financial liability for a shortfall | Who bears money not retained when one captured movement both returns by refund and leaves by a lost chargeback, or otherwise leaves retention | Financial D15 (S0-C14 item 15); S0-C15A item 10; DO-73 U-7 | Business and contractual | No liability is assigned anywhere (S0-C14 item 15; S0-C15A item 3) | Commercial and contractual terms; fee data (FDR-09) | FDR-09, FDR-10 |
+| FDR-01 | v1 | **approved v1 — DEFINITION ONLY** (Owner, 2026-11-12; §7.2.7) | Financial liability: definition framework | The six analytical stages FDR-01 L1 to L6 and their separation (§7.2.7) | As v0; S0 §1.5 FDR-01 v1 and FDR-09 v1 pointer | Owner (definition); business and contractual authority for any later bearer decision | **Unchanged**: no liability is assigned anywhere; FC-6 write-offs and S6f recovery obligations unchanged and not reclassified | §7.2.7 | As v0; financial D15 stays a distinct unresolved decision; F-26 (§7.2.7) |
 | FDR-02 | v0 | PROPOSED — NOT APPROVED | Assisted-purchase outcome in overlap or exposure | The recovery obligation and T3 when the movement is in overlap or exposure | S0-C14 items 4, 7, 10, 11 | Business | Obligation stands; new collection channel refused during an overlap (S0-C14 item 7) | The FDR-01 rule; the obligation's recorded facts | FDR-01 |
 | FDR-03 | v0 | PROPOSED — NOT APPROVED | Direct-purchase outcome in overlap or exposure | The direct write-off when the movement is in overlap or exposure | S0-C14 items 5, 6; FC-6 | Business | Write-off waits while a refund may exist; a loss only from recorded facts | The FDR-01 rule | FDR-01 |
 | FDR-04 | v0 | PROPOSED — NOT APPROVED | Collection-freeze exit | The condition that ends S0-C14 item 7's freeze | S0-C14 items 7, 17; S0-C15A item 10 ("the collection-freeze exit") | Business | No exit exists; item 17 is an explicit real-money blocker | An FDR-08 closure rule | FDR-02, FDR-08 |
@@ -1221,6 +1226,7 @@ FDR-08 `v1` (framework only) is recorded in §7.2.5, which is the only row-level
 | FDR-08 | v0 | PROPOSED — NOT APPROVED | Reconciliation closure evidence | Per restricted case type (§7.2.4): the closed list of resolution kinds and the recorded evidence each requires | S0-C14 item 8; S0-C10 item 7; S0-C15B item 5; DO-73 item 4; DO-74 item 4; R3 point 6 | Owner, plus design | Seven types have no resolution kind; two resolve only by their evidence (§7.2.4) | Per kind; provider-statement kinds need DO-37 (FDR-10) | FDR-01 (liability-closing kinds), FDR-10, P-2, F-29 |
 | FDR-08 | v1 | **approved v1 — FRAMEWORK ONLY** (Owner, 2026-11-12; §7.2.5) | Reconciliation closure evidence: framework | The A–D closure semantics, the per-kind evidence documentation requirements, safety invariants S1–S9 and the nine-type dependency framework (§7.2.5) | As v0; S0 §1.5 FDR-08 v1 pointer | Owner | **Unchanged**: no resolution kind, guard, worker or acknowledgement changes; every existing kind is an operational resolution (level B) only | §7.2.5 certification prerequisites | As v0; open findings DO-75 to DO-77 (§7.2.6) |
 | FDR-09 | v0 | PROPOSED — NOT APPROVED | Fee accounting | DO-35 (absorbed provider and chargeback fees recorded nowhere); DO-36 (the Organization's kept fee not recorded) | Diagram workshop register DO-35, DO-36 | Business and accounting | No fee record exists | A fee data model | Feeds FDR-01 |
+| FDR-09 | v1 | **approved v1 — DEFINITION ONLY** (Owner, 2026-11-12; §7.2.8) | Fee accounting: definition framework | Fee categories, principles 1 to 6, options A to C as alternatives, option D as the current interim limitation only (§7.2.8) | As v0; S0 §1.5 FDR-01 v1 and FDR-09 v1 pointer | Owner (definition); business, accounting and provider evidence for any later model | **Unchanged**: no fee record exists; principal-only movement accounting | §7.2.8 | As v0; FDR-10, FDR-11, F-26 |
 | FDR-10 | v0 | PROPOSED — NOT APPROVED | Provider evidence basis | Which provider evidence may support a financial decision: statements (DO-37), reference scope (O-1), partial-refund semantics | DO-37; O-1; real-provider gates B2 to B8 | Owner, plus real-provider evidence | Only simulation and test providers exist; no statement input | Real-provider documentation and data | Real-provider gates |
 | FDR-11 | v0 | PROPOSED — NOT APPROVED | Exchange-rate policy | Exchange-rate treatment named in DO-73 U-7; currency-mismatched refund facts | DO-73 U-7 (S0 §1.5 DO-73 point 10) | Business and accounting | No rate is ever applied or assumed (S0-C12 item 8); mismatched facts are blocked (DO-73) | Provider and accounting evidence | FDR-01, FDR-10 |
 
@@ -1402,6 +1408,106 @@ inventory ends at DO-74).
   unmatched-fact association; F-29 governs `refund_observation_conflict`, not this block. `currency_mismatch` stays with FDR-11.
 - **DO-77 Non-Company seller case visibility: intended authority model (OPEN).** Who, if anyone, should see and act on reconciliation
   evidence for a seller that is not a Company. The gap itself is DO-75 V1 (cross-reference; not duplicated here).
+
+**Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
+finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
+
+- DO-75 V1 and DO-77: the same limit is recorded in S0 §1.5 S0-C15A item 10 ("a payment sold by an Organization, as with every Owner case
+  kind") and DO-73 item 10 ("Payments not produced by Billing, or with no Company Owner, open no Billing case"). S0-C15B item 11 (B-D9) records
+  the related but distinct scope "Payments not produced by Billing stay Payment-only". DO-75 V1 tracks the gap; DO-77 only its authority model.
+- DO-75 V2: DO-74 point 6 (`reconciliation_observation_evidence`, bound "once per attempt").
+- DO-75 V3: S0-C15B (`refund_fact_contested` and its contest evidence) and O-2 (the fact owner's case).
+- DO-75 (post-closure evidence): R3 point 12a (R3-F1: `unreconciledFailedAttemptEvidence` stays `true` after resolution) and R3 point 13
+  (R3-F2, OPEN: a `refund_completed` closure beside an unassociated unmatched fact).
+
+#### 7.2.7 FDR-01 v1: financial-liability definition framework (approved as a DEFINITION ONLY, 2026-11-12)
+
+**Approval.** FDR-01 `v1`, approved by the Owner on 2026-11-12 ("OWNER GO: FDR-01 v1 AND FDR-09 v1 DEFINITION ADOPTION", on `main` at
+`1325c44`), **as a definition-only financial-liability framework**. It approves the six analytical stages below and the separations stated
+with them. The `v0` row in §7.2.2 is kept as the earlier version.
+
+**Explicitly NOT approved.** No liability bearer, amount, recovery route, collection action, write-off correction or settlement behavior; no
+financial policy; no new record, authority, case type or resolution kind; no change to any existing effect. Financial D15 (S0-C14 item 15,
+"final liability for the overlap shortfall") stays a **distinct, unresolved decision**; FDR-01 v1 neither decides nor replaces it. No legacy FD
+gate is satisfied (§7.2.3); FD-1 to FD-8 are not reinterpreted.
+
+**Namespace.** The stages are written **FDR-01 L1** to **FDR-01 L6**. They are unrelated to the late-settlement rules L-1 to L-6 (S0 §3.4) and
+to the "L2"/"L3" evidence levels of ADR-0060 and S0-C11.
+
+| Stage | Meaning | Core today (development and simulation; `liveMode = false`) |
+|---|---|---|
+| FDR-01 L1 Provider-movement recognition | A provider movement is recorded | Exists: verified provider facts (FC-1: `capture`, `refund`, `chargeback`) enter the FC-5 balances at once, never clamped (`netRetained` may be negative); Billing keeps each verified loss (`payment_dispute_loss`) |
+| FDR-01 L2 Provider-movement evidence | Verified evidence that the money actually moved | Partial: signature-verified webhook or status-check facts; no provider statements (DO-37); simulation and test providers only |
+| FDR-01 L3 Financial-evidence reconciliation | The financial evidence reconciled within a stated scope | Does not exist |
+| FDR-01 L4 Contractual responsibility | Responsibility determined under contract or law | Does not exist; its inputs are unresolved business decisions (below) |
+| FDR-01 L5 Authorized liability decision | An approved decision naming a bearer | Does not exist |
+| FDR-01 L6 Collection, recovery or settlement | Money actually collected, recovered or settled | Partial: assisted recovery payments, the Organization's cash-return obligation, the Owner's dispute contest or accept decision (R6E-3); no payouts or settlement (Stage 6, deferred) |
+
+**Separations (approved).**
+
+- FDR-01 L1 to L6 are analytical distinctions, **not a mandatory or automated workflow**; nothing enforces an order between them.
+- They do **not** map one-to-one to FDR-08's A to D levels (§7.2.5). FDR-08 classifies what a reconciliation resolution asserts; FDR-01
+  separates the stages of financial liability.
+- One stage never automatically establishes another.
+- Recognition of a provider debit (FDR-01 L1) does not establish financial liability (as S0-C10 item 2: "Recognition is not liability").
+- A reconciliation-case closure (FDR-08 level B) does not establish a contractual bearer.
+- Legal and commercial responsibility requires separate authority (business, legal and contractual), not software behavior.
+- Existing FC-6 losses (including the `direct_chargeback_write_off`) and S6f assisted recovery obligations (with T3) remain **unchanged** and are
+  **not retroactively reclassified** as FDR-01 liability records.
+
+**Business inputs still unresolved (no policy chosen; nothing inferred from code).** Legal issuer (`financial-architecture` §10.1; Billing SDD
+B-001, B-007); merchant of record (§10.4; Payment SDD O-2); custody, settlement and payouts (§10.5; Payment SDD O-3); Nawara's seller
+representation (§10.12; B-001); provider contracts, fees, refund and dispute rules (§10.4; Payment SDD O-1); the Organization's contractual
+obligations and the payer and member protections (B-002, B-003, B-014). "Payment SDD O-1/O-2/O-3" are that document's open decisions and are
+distinct from the open decisions O-1 (real-provider reference scope) and O-2 (fact-owner contest) of S0 §1.5.
+
+**F-26 provider reversal (OPEN architecture dependency; existing identifier: S-INT certification F-26; S0-C10 item 9).** Five things are
+kept distinct: (1) the provider reports a `won` dispute; (2) the provider confirms a reversal; (3) funds are actually returned; (4) Core records
+the returned movement; (5) a separate approved rule corrects a loss or liability. No dispute outcome alone is proof of returned money. Today
+Payment has no fact kind for a returned movement, a `won` after a `lost` stays a `terminal_contradiction` conflict, and nothing reduces a
+cumulative loss, write-off, obligation or `FinancialLoss` (S0-C10 item 9). No reversal fact or correction is authorized.
+
+**Preserved.** S0-C14 item 17 (real-money blocker); F-29 **LOCKED**; R3-F2 **OPEN**; DO-75, DO-76, DO-77 and F-26 **OPEN**; FDR-08 v1
+unchanged; every other FDR entry unchanged.
+
+#### 7.2.8 FDR-09 v1: fee-accounting definition framework (approved as a DEFINITION ONLY, 2026-11-12)
+
+**Approval.** FDR-09 `v1`, approved by the Owner on 2026-11-12 (same GO as §7.2.7), **as a definition-only fee-accounting framework**. The
+`v0` row in §7.2.2 is kept as the earlier version.
+
+**Explicitly NOT approved.** No fee-accounting model, fee-record schema, ownership model, journal, ledger, database uniqueness or idempotency
+key; no fee amount, recognition of income or correction; no currency conversion. Option D below is **not** a permanent accounting policy.
+
+| Fee component | Current state (recorded facts only) |
+|---|---|
+| Provider processing fees | S0 §1.1 states "Nawara absorbs provider fees"; no amount is recorded anywhere (DO-35) |
+| Chargeback fees | No rule and no record (DO-35) |
+| Organization cash fees | Held as assistance terms (`assistance_request`: fee amount, fee proposal, fee-cap versions); collected in cash by the Organization; never part of the electronic settlement (E-11). Whether the Organization holds or earns it is not recorded (DO-36) |
+| Fee refunds | The Organization fee is part of the full-cash `cash_return_obligation` (base and fee) opened by an assisted refund (R6D-2), never netted against the electronic base refund |
+| Reversals and corrections | None exist for fees |
+| Gross versus net provider reporting | Unknown: facts carry the amount the provider states; whether a real provider reports net of fees is unknown until real-provider evidence (FDR-10) |
+| Currency provenance | Amounts in minor units of one currency per Platform; no rate is ever applied (S0-C12 item 8); mismatched refunds are blocked (DO-73) |
+| Double-counting risks (identified, not resolved) | A separate fee beside an amount already net of it; the Organization fee counted both in the cash-return obligation and as income; a chargeback fee inside the chargeback amount and again as a line; netting the base refund against the cash obligation |
+
+**Principles (approved as framework principles).**
+
+1. No fee amount is inferred without an approved evidence or contractual basis.
+2. Fee components stay distinguishable from principal.
+3. Each fee amount has an unambiguous source of truth and provenance.
+4. An assistance fee term is not automatically recognized income.
+5. Future corrections require an approved append-only model.
+6. No currency conversion without an approved FDR-11 policy.
+
+**Fee-model options (alternatives only; none selected).** **A** append-only fee facts owned by Payment, per transaction; **B** fee records
+from provider statements (DO-37); **C** future accounting-ledger entries. They may complement each other: A and B are evidence at two
+granularities (B can verify A, or be the only source for a statement-only provider), and C records consequences derived from evidence (A, B
+or Billing terms) and never replaces it.
+
+**Option D: CURRENT INTERIM LIMITATION ONLY.** Principal-based movement accounting exists (FC-5); comprehensive fee accounting does not. This
+records today's state; it is not an approved permanent policy.
+
+**Dependencies.** FDR-10 (provider fee and gross-or-net reporting, statements), FDR-11 (currency), F-26 (reversals of fees with their
+movement), the business inputs of §7.2.7, and the future accounting service (`financial-architecture` §9, Stage 5).
 
 ## 8. Gates and dependencies
 
