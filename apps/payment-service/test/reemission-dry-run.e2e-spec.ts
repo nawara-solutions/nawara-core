@@ -74,6 +74,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0026_multiple_captures_and_recovery.sql', // Core V2 S0-C12 items 14, 15, FN-2: provider permission, recovery state, insert guards
       '0027_provider_observation_quarantine.sql', // Core V2 S0-C12 item 16: durable quarantine of invalid currency evidence
       '0028_r3_webhook_evidence_index.sql', // Core V2 R3: the write-once refund-evidence index of stored provider notifications
+      '0029_webhook_event_retention_guard.sql', // Core V2 DO-70: a stored provider notification is never deleted or truncated
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

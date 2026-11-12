@@ -335,6 +335,7 @@ timestamps; at most one open refund attempt per refund. Provider refund history 
 | Uniqueness | `UNIQUE (provider, providerEventId)` (the deduplication key) |
 | Not stored | requests that **fail signature verification**: they are rejected and counted, never persisted (an unauthenticated caller cannot write to the database) [T] |
 | Retention | privacy and legal retention of raw bodies **[B, O-17]** |
+| Never deleted | *Core V2 DO-70 (migration `0029`, development and simulation):* `DELETE` and `TRUNCATE` are refused by trigger for every role (`23514`) and by privilege for the runtime role; bookkeeping columns stay updatable. O-17 stays open: a future approved retention policy that prunes or redacts needs its own migration |
 
 ### 4.7 IdempotencyKey
 

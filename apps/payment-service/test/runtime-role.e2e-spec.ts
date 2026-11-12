@@ -161,11 +161,20 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'DELETE FROM payment_dispute_decision',
         'UPDATE simulation_dispute_command SET instruction = instruction',
         'DELETE FROM simulation_dispute_command',
+        // Core V2 DO-70 (migration 0029): a stored provider notification is never deleted or truncated by the runtime role
+        'DELETE FROM webhook_event',
+        'TRUNCATE webhook_event',
+        'ALTER TABLE webhook_event DISABLE TRIGGER webhook_event_10_no_delete',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }
       // ...and the guards that protect the invariants still bind it: a runtime-role UPDATE cannot rewrite the snapshot.
       await expect(app.query(`UPDATE payment SET amount = amount + 1`)).rejects.toMatchObject({ code: '23514' });
+      // DO-70 negative control: the runtime role still records delivery bookkeeping on a stored notification (the Phase 1 flow above stored one),
+      // and still cannot rewrite its received evidence (0005)
+      const stored = (await app.query<{ id: string }>(`SELECT id FROM webhook_event ORDER BY "receivedAt" LIMIT 1`)).rows[0]!;
+      await app.query(`UPDATE webhook_event SET attempts = attempts WHERE id = $1`, [stored.id]);
+      await expect(app.query(`UPDATE webhook_event SET "rawBody" = '\\x00' WHERE id = $1`, [stored.id])).rejects.toMatchObject({ code: '23514' });
     } finally {
       await app.end();
     }
