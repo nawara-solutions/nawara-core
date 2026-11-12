@@ -1159,12 +1159,13 @@ lifecycle authority and the V-4 / L2 / L3 contracts (V5-8); (5) the shared autho
 Payment lifecycle-aware S5e integration (D6 for BIL-13, V5-5, the `inactive` kind of BIL-26, Payment's A-6 extension point); (7) the S0
 §8 inactive-Organization discharge certification.
 
-### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO decision approved)
+### 7.2 Financial Decision Register (FDR) v0 (structure approved by the Owner, 2026-11-11; NO financial decision approved; FDR-08 v1 approved as a closure-evidence framework only, 2026-11-12, §7.2.5)
 
 **Status of this section.** The Owner approved, on 2026-11-11, this register's structure (v0), the identifiers FDR-01 to FDR-11 with their
 provisional titles and coverage, and the legacy-reference crosswalk below **as a provenance record only**. **No financial policy, definition,
 resolution kind, closure authority or implementation is approved by this section.** An entry is approved only by a later, dated Owner approval
-recorded in the entry itself (field *Approval*). Appearing here approves nothing.
+recorded in the entry itself (field *Approval*). Appearing here approves nothing. The only approval recorded so far is FDR-08 v1 (§7.2.5,
+2026-11-12): a reconciliation closure-evidence **framework**, which approves no resolution kind, financial reconciliation, liability or authority.
 
 **Why it exists.** The original definitions of the legacy identifiers FD-1 to FD-8 were not recovered (provenance gate, 2026-11-11): the
 repository introduces them only as bare collective references (FD-1 to FD-5 in S0-C15A, `93ae45d`; FD-1 to FD-8 in S0-C15B, `c24c0f4`), and the
@@ -1202,10 +1203,11 @@ liability assigned (nothing represents it today).
 | Certification | Required after approval, before any implementation counts |
 | Approval | Date, version and reference; **empty until an actual Owner approval** |
 
-#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`)
+#### 7.2.2 Entries (all `v0`, all `PROPOSED — NOT APPROVED`; FDR-08 also has a v1 framework approval, §7.2.5)
 
 Common to every entry below: *Proposed definition*, *Alternatives*, *Consequences* and *Certification*: **not yet proposed** (placeholders);
-*Approval*: **none**. *Owner*: the Owner. No entry implies a financial policy.
+*Approval*: **none**. *Owner*: the Owner. No entry implies a financial policy. The FDR-08 `v0` row is kept unchanged as its earlier version;
+FDR-08 `v1` (framework only) is recorded in §7.2.5, which is the only row-level exception to these common statements.
 
 | ID | Version | Status | Provisional title | Coverage | Provenance | Authority required | Current behavior (unchanged) | Evidence prerequisites | Dependencies |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1217,6 +1219,7 @@ Common to every entry below: *Proposed definition*, *Alternatives*, *Consequence
 | FDR-06 | v0 | PROPOSED — NOT APPROVED | Correction of a write-off overlapped by a refund | Whether and how an append-only adjustment (FC-6) applies when a completed refund follows a recorded write-off | S0-C14 items 3, 8; FC-6 | Business and accounting | The write-off stands; the overlap case opens; nothing is rewritten | The FDR-01 and FDR-03 rules | FDR-01, FDR-03 |
 | FDR-07 | v0 | PROPOSED — NOT APPROVED | Acknowledgement restriction scope | Which acknowledgement reasons are refused on which movements while financial evidence is unresolved | S0-C14 item 9; S0-C15A item 6; S0-C15B; DO-73; DO-74; O-2 | Owner (governance) | As enforced by `billing_acknowledgement_refused_by_*` today | The FDR-08 closure rules | FDR-08 |
 | FDR-08 | v0 | PROPOSED — NOT APPROVED | Reconciliation closure evidence | Per restricted case type (§7.2.4): the closed list of resolution kinds and the recorded evidence each requires | S0-C14 item 8; S0-C10 item 7; S0-C15B item 5; DO-73 item 4; DO-74 item 4; R3 point 6 | Owner, plus design | Seven types have no resolution kind; two resolve only by their evidence (§7.2.4) | Per kind; provider-statement kinds need DO-37 (FDR-10) | FDR-01 (liability-closing kinds), FDR-10, P-2, F-29 |
+| FDR-08 | v1 | **approved v1 — FRAMEWORK ONLY** (Owner, 2026-11-12; §7.2.5) | Reconciliation closure evidence: framework | The A–D closure semantics, the per-kind evidence documentation requirements, safety invariants S1–S9 and the nine-type dependency framework (§7.2.5) | As v0; S0 §1.5 FDR-08 v1 pointer | Owner | **Unchanged**: no resolution kind, guard, worker or acknowledgement changes; every existing kind is an operational resolution (level B) only | §7.2.5 certification prerequisites | As v0; open findings DO-75 to DO-77 (§7.2.6) |
 | FDR-09 | v0 | PROPOSED — NOT APPROVED | Fee accounting | DO-35 (absorbed provider and chargeback fees recorded nowhere); DO-36 (the Organization's kept fee not recorded) | Diagram workshop register DO-35, DO-36 | Business and accounting | No fee record exists | A fee data model | Feeds FDR-01 |
 | FDR-10 | v0 | PROPOSED — NOT APPROVED | Provider evidence basis | Which provider evidence may support a financial decision: statements (DO-37), reference scope (O-1), partial-refund semantics | DO-37; O-1; real-provider gates B2 to B8 | Owner, plus real-provider evidence | Only simulation and test providers exist; no statement input | Real-provider documentation and data | Real-provider gates |
 | FDR-11 | v0 | PROPOSED — NOT APPROVED | Exchange-rate policy | Exchange-rate treatment named in DO-73 U-7; currency-mismatched refund facts | DO-73 U-7 (S0 §1.5 DO-73 point 10) | Business and accounting | No rate is ever applied or assumed (S0-C12 item 8); mismatched facts are blocked (DO-73) | Provider and accounting evidence | FDR-01, FDR-10 |
@@ -1270,6 +1273,135 @@ completed (meaning 1). It is **not** evidence that the financial evidence is rec
 In particular, beside an R3 marker it can close `chargeback_effect_waiting` and `chargeback_refund_exposure` while the failed attempt's unmatched
 fact stays unassociated and the provider may have returned the money twice (S0 §1.5 R3 point 13). The R3-F1 field
 `unreconciledFailedAttemptEvidence` stays `true` on those cases.
+
+#### 7.2.5 FDR-08 v1: reconciliation closure-evidence framework (approved as a FRAMEWORK ONLY, 2026-11-12)
+
+**Approval.** FDR-08 `v1`, approved by the Owner on 2026-11-12 ("OWNER GO: FDR-08 v1 FRAMEWORK ADOPTION", on `main` at `ab058e9`), **as a
+reconciliation closure-evidence framework only**. It approves: the A–D closure semantics; the per-resolution-kind evidence documentation
+requirements; safety invariants S1–S9 as clarified below; the nine restricted case-type dependency framework; and the classification of every
+existing resolution kind as an operational resolution (level B) only. The `v0` row in §7.2.2 is kept as the earlier version.
+
+**Explicitly NOT approved (excluded authorities).** No new case type, resolution kind or acknowledgement reason; no new acknowledgement,
+resolution or closure authority; no financial reconciliation (level C) or liability (level D) decision; no F-29 association authority (F-29 stays
+**LOCKED**); no R3-F2 closure (R3-F2 stays **OPEN**); no release of any legacy FD gate (every gate in §7.2.3 stays **UNSATISFIED**); no change to
+P-2, financial D9 or financial D15, or to any other FDR entry (all stay `v0`, PROPOSED — NOT APPROVED). It changes no code, migration, guard,
+worker, acknowledgement rule or behavior.
+
+**Definition.** FDR-08 states the conditions under which a reconciliation case may receive a resolution and what that resolution may assert.
+For each case type it records the permitted resolution kinds, the evidence each requires, the evidence owner, the authorized writer, the scope,
+the residual evidence that remains and where it is recorded, and the level (below) each kind establishes. FDR-08 itself creates no kind, writer
+or authority, and it does **not** imply that every case can ultimately be closed: a case type may never receive a resolution kind.
+
+**In scope:** the A–D semantics; the documentation requirements; S1–S9; the nine-type matrix; the open findings of §7.2.6. **Out of scope:** new
+kinds or authorities; any guard, worker or acknowledgement change; liability (FDR-01); provider evidence (FDR-10); exchange rates (FDR-11); P-2;
+F-29; R3-F2; acknowledgement scope (FDR-07); any reopening or supersession mechanism; real money and production.
+
+**A–D closure semantics.** These refine the four meanings of §7.2 and are kept apart in every record:
+
+| Level | Meaning | What represents it today |
+|---|---|---|
+| A | A refund operation completed | `refund_case.status = completed` (Payment's FC-3 completion, relayed to Billing) |
+| B | A reconciliation case operationally resolved | One `reconciliation_case_resolution` row (the Owner read's `status: resolved`) |
+| C | The financial evidence reconciled within a stated scope | **Nothing** |
+| D | Final financial liability assigned | **Nothing** (FDR-01) |
+
+A higher level never follows from a lower one: A does not establish B, B does not establish C, and C does not establish D. An operational
+closure (B) never implies financial reconciliation (C) or assigned liability (D) without separately verified evidence. **`acknowledged`** means
+that the Owner recorded a review acknowledgement of a review-only case (`refund_discrepancy`, `partial_chargeback`, `second_reversal_cause`,
+with one of the existing reasons); it is level B and is **not** financial reconciliation.
+
+**Per-kind evidence documentation (mandatory for every FUTURE resolution kind, before it may be proposed for approval):** (1) the case type;
+(2) the resolution assertion, in one sentence; (3) the exact evidence required (rows, tables and conditions the database guard checks); (4) the
+evidence owner (Payment or Billing); (5) the authorized writer (the reconciliation worker or a named human authority); (6) the Company and
+payment scope; (7) the residual evidence left unresolved and where it is recorded; (8) whether the resolution establishes B, C or D;
+(9) whether a later contradiction remains possible, and where it would be recorded.
+
+**Safety invariants S1–S9.**
+
+- **S1** The database resolution guard (`billing_reconciliation_resolution_guard`, last replaced in Billing `0053`) enforces which resolution
+  writes are allowed; application code may only narrow it. The guard checks that a write is supported by recorded evidence; it does not by
+  itself prove reconciliation. A future assertion of level C or D may need additional, separately approved controls.
+- **S2** A resolution asserts level B only, unless its record separately proves C or D with verified evidence.
+- **S3** No resolution creates, moves or assigns money.
+- **S4** A human action alone never closes a restricted case type (§7.2.4).
+- **S5** Every residual left by a closure has a named place where it is recorded. Recording is not visibility: S5 asserts no immediate or
+  guaranteed Owner visibility without verified delivery and reconciliation evidence (see §7.2.6).
+- **S6** An interim fail-closed type stays fail-closed until every prerequisite in its matrix row is approved and certified; this states no
+  permanent business rule.
+- **S7** Resolutions stay append-only and at most one per case, unless a later approved version decides otherwise (DO-75).
+- **S8** No kind relies on provider statements before FDR-10 and DO-37 are approved.
+- **S9** A flag derived from evidence (such as R3-F1's `unreconciledFailedAttemptEvidence`) is never cleared by a resolution.
+
+**Existing resolution kinds: all level B (operational resolution) only.** `refund_completed`, `late_settlement_applied`, `surplus_refunded`,
+`surplus_repaid`, `recovery_counted`, `loss_recognized`, `effect_applied`, `authorization_resolved`, `acknowledged` and `chargeback_returned`.
+None establishes C or D. Their guard conditions and writers are unchanged.
+
+**Restricted case-type matrix (current behavior, verified against the guard and the Billing worker at `ab058e9`; prerequisites are
+dependencies, not approvals).**
+
+*Seven types with no resolution kind.* None appears in any branch of the guard (every kind is refused), none is in the worker's resolution
+pass, and none is review-only (an acknowledgement is refused, 409 `reconciliation_case_not_acknowledgeable`).
+
+| Case type | Evidence key | Current resolution | Prerequisites before any closure could be proposed |
+|---|---|---|---|
+| `chargeback_refund_overlap` | dispute | None | FDR-01, FDR-06, FDR-02/03, DO-75 |
+| `capture_contradiction` | fact and payment | None (visibility only) | FDR-10; FDR-01 where an L-4 purchase rests on the capture |
+| `chargeback_loss_review` | dispute | None | FDR-01, FDR-10 |
+| `refund_fact_contested` | refund fact | None (interim fail-closed) | P-2, FDR-10 (Payment owns the fact, O-2); DO-75 |
+| `dispute_conflict_observed` | Payment item | None (interim fail-closed) | P-2, FDR-10 |
+| `refund_fact_unallocated` (`currency_mismatch`) | refund fact | None (interim fail-closed) | FDR-11, FDR-01 |
+| `refund_fact_unallocated` (`no_authorization`) | refund fact | None (interim fail-closed) | DO-76, FDR-10, FDR-01; **not** F-29 (DO-76) |
+| `refund_observation_conflict` | refund attempt | None (interim fail-closed) | F-29 (LOCKED), DO-75 |
+
+*Two types closable only by their evidence (operational, level B; not permanently fail-closed; written by the worker).*
+
+| Case type | Current resolution (unchanged) | Residual after a `refund_completed` closure | Level C or D would need |
+|---|---|---|---|
+| `chargeback_effect_waiting` | `effect_applied` once `billing_loss_effect_applied(dispute)` holds (the worker prefers it); otherwise `refund_completed` with a completed refund on the loss's captured movement (`billing_refund_case_on_loss_movement`) and the effect **never applied** | The overlap condition (`billing_loss_overlap`) then holds, but the guard does not require an overlap case: a `chargeback_refund_overlap` case is **expected on a later discovery pass**, subject to its opening conditions (DO-75 V1); it is not guaranteed to be open at resolution | R3-F2, F-29, FDR-01 |
+| `chargeback_refund_exposure` | `refund_completed` only: a completed refund on the loss's captured movement **and** an already-open `chargeback_refund_overlap` case with the same dispute key (the guard requires it); never acknowledged | The overlap case is **already open** at resolution (guard-checked) and has no resolution kind | FDR-05, R3-F2, F-29, FDR-01 |
+
+Beside an R3 marker both paths stay available; the read keeps `unreconciledFailedAttemptEvidence: true` after resolution (S9; R3-F2 caution
+above). A refund completing after `effect_applied` likewise makes the overlap condition hold; its overlap case is expected on a later pass.
+
+**Existing versus proposed behavior.** Existing: unchanged in every respect (kinds, guard, worker, acknowledgement, case types, interim
+fail-closed restrictions). Proposed by FDR-08 v1: documentation obligations, classifications and invariants for **future** kinds only. Nothing
+is implemented.
+
+**Certification prerequisites (before any future kind under FDR-08 counts; separately authorized):** a repository check that the guard's
+permitted (kind, case type) pairs equal the FDR-08 matrix; negative controls that each of the seven types refuses every kind, including
+`acknowledged`; that `chargeback_refund_exposure` refuses `refund_completed` without the completed refund or the overlap case, and
+`chargeback_effect_waiting` refuses `effect_applied` without an applied effect and `refund_completed` after one; that the overlap case is
+discovered after a waiting-case `refund_completed` closure where its opening conditions hold; that the R3-F1 flag survives resolution; and
+each kind's level (B, C or D) recorded in this register.
+
+#### 7.2.6 Open findings from FDR-08 v1 (all OPEN; no solution approved)
+
+Identifiers were checked against the repository and the retained evidence on 2026-11-12: DO-75, DO-76 and DO-77 were unused (the adopted
+inventory ends at DO-74).
+
+- **DO-75 Post-closure contradictory evidence and visibility (OPEN).** Contradictory evidence can be recorded after a case is resolved (a
+  provider observation contradicting a refund that closed a case, a second chargeback, a refund completing after `effect_applied`, a further
+  observation on the same attempt). A resolution is final (one append-only row per case), and a case is unique per (type, evidence key)
+  (`reconciliation_case_once`): discovery skips any key that already has a case, open or resolved, so the same type and key never reopen. Later
+  evidence is recorded at Payment and, where it has its own type or key, may open its own case. Whether a new case, an explicit link to the
+  resolved case or an append-only supersession record is needed is a **future design dependency**, required before any kind asserts level C or
+  D. Three visibility gaps are recorded:
+  - **DO-75 V1 Non-Company sellers.** `openForPayment` opens **no case of any type** when the payment request's seller is not a Company; the
+    evidence stays in Billing's and Payment's own records with no Owner case. Its intended authority model is DO-77.
+  - **DO-75 V2 Repeated observation on one attempt.** A further contradicting observation on an attempt that already has a
+    `refund_observation_conflict` case opens nothing; `reconciliation_observation_evidence` holds only the first observation, and later ones are
+    recorded only at Payment.
+  - **DO-75 V3 Repeated contest of one refund fact.** Billing keeps one `refund_fact_contested` case per fact and payment, with the contest
+    evidence of its opening only; later contest details are recorded only at Payment.
+- **DO-76 Provider refund evidence on a known but unauthorized refund attempt (OPEN).** `refund_fact_unallocated` with `no_authorization`
+  is a matched refund fact of a known payment and a known refund attempt for which no `refund_authorization` row exists. Payment records a
+  matched refund fact only from an existing attempt, and a matched refund fact names its attempt exactly when it names its payment (Payment
+  `0021`); an unmatched fact is never blocked (allocation refuses it before any block is written), and an associated one takes its attempt from
+  an existing authorization. The authorization row is created only when Auth's consumption is committed (or by the `0018` backfill), so the
+  attempt was never authorized there; the cause is not recorded. This is an **authorization-integrity anomaly, separate from F-29**
+  unmatched-fact association; F-29 governs `refund_observation_conflict`, not this block. `currency_mismatch` stays with FDR-11.
+- **DO-77 Non-Company seller case visibility: intended authority model (OPEN).** Who, if anyone, should see and act on reconciliation
+  evidence for a seller that is not a Company. The gap itself is DO-75 V1 (cross-reference; not duplicated here).
 
 ## 8. Gates and dependencies
 
