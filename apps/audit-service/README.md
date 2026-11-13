@@ -1,12 +1,12 @@
 # audit-service
 
-> **Status: foundation (18.2), append-only persistence (18.3), the shared contract and catalog (18.4), RabbitMQ ingestion (18.5),
-> query and authorization (18.6).**
+> **Status: Stage 18 complete (18.1 to 18.10, the stage table below), with the Core V2 additions described below (provenance, scoped
+> reads, legal holds, the Owner's organization read).** *(Status corrected 2026-11-13, DO-71: this line stopped at 18.6.)*
 > Cataloged audit events arrive on `audit-service.audit` (bound to `audit.#`), are validated with the shared
-> [`@nawara/audit-contract`](../../libs/audit-contract/README.md) (50 actions; the one audit-service owns is written by itself, never over the bus), admitted only from their catalog producer, and stored
+> [`@nawara/audit-contract`](../../libs/audit-contract/README.md) (the catalog is the single list of actions: 117 on 2026-11-13; the ones audit-service owns are written by itself, never over the bus), admitted only from their catalog producer, and stored
 > once in the append-only `audit_record` (the runtime role can INSERT and SELECT, never UPDATE, DELETE or TRUNCATE; a database superuser
-> remains outside the guarantee). Trusted internal services read it through two bounded routes (below). **Not yet:** producer integration
-> (18.7), retention (18.8).
+> remains outside the guarantee). Trusted internal services read it through two bounded routes (below). Producer integration (18.7) and
+> retention (18.8) are complete. *(Corrected 2026-11-13, DO-71: this said "50 actions" and "Not yet: producer integration (18.7), retention (18.8)".)*
 
 Security and business audit trail for Nawara Core: owning services emit cataloged audit events through their transactional outbox;
 this service validates, stores them append-only and answers tenant-safe queries. Design: [ADR-0049](../../docs/adr/0049-audit-trail-architecture.md),
