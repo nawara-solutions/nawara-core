@@ -1598,6 +1598,11 @@ policy**. A currency-mismatched refund fact stays blocked, its figures never tru
 currency is refused (S0-C12 item 17); invalid currency shapes are quarantined (S0-C12 item 16); an automatic loss effect needs the loss in
 its capture's currency (S0-C10 item 3); refunds in another currency need adapter support or fail closed (B6).
 
+*Correction note (2026-11-13, non-retroactive; the approved FDR-11 v1 text above is kept as approved).* The first sentence above is inaccurate:
+Billing's `currency` table is the only place an exponent lives **within Billing**. Payment has its own reference table with exponents (Payment
+`0001`: TND 3, USD 2, EUR 2; Billing `0001` seeds TND 3), so there are two exponent sources and no shared one (diagram workshop DO-18). FDR-11 C1
+(exponent provenance) applies to each service's own table; this note changes no rule, behavior or approval.
+
 **Dependencies (all OPEN).** Supported currencies beyond TND (Billing SDD B-005; Payment SDD O-10); provider settlement currencies (Payment
 SDD O-3); rate source and authority; FX accounting (a future accounting service); fee currencies (FDR-09); provider currency evidence
 (FDR-10).
