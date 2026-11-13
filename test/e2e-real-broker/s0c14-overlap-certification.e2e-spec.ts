@@ -41,6 +41,16 @@ const AUTH_DIR = `${ROOT}apps/auth-service`;
 const BILLING_DIR = `${ROOT}apps/billing-service`;
 const PAYMENT_DIR = `${ROOT}apps/payment-service`;
 const AUDIT_DIR = `${ROOT}apps/audit-service`;
+/**
+ * Core V2 DO-68: the refund, dispute, recovery, loss and reconciliation audit actions this suite produces and must deliver to audit-service (observed
+ * 2026-11-13: 309 intents, 29 actions in all; the others are invoice, payment request, assistance and payment actions, delivered too).
+ */
+const DO68_FAMILIES = [
+  'refund_case.opened', 'refund_case.authorization_relayed', 'refund_case.completed', 'refund_attempt.authorized', 'refund_attempt.succeeded', 'refund_attempt.failed',
+  'refund_authorization.completed', 'payment_dispute.opened', 'payment_dispute.closed', 'recovery_obligation.opened', 'recovery_obligation.recovered',
+  'recovery_payment.recorded', 'recovery_restriction.suspended', 'recovery_restriction.suspension_revoked', 'financial_loss.recorded', 'reconciliation_case.opened',
+  'reconciliation_case.resolved', 'subscription_purchase.reversed', 'cash_return_obligation.opened',
+];
 const PORT = { auth: 13851, b1: 13852, b2: 13853, payment: 13854, audit: 13856, b3: 13857, b4: 13858 };
 const AUTH_URL = `http://127.0.0.1:${PORT.auth}`;
 const B1 = `http://127.0.0.1:${PORT.b1}`;
@@ -1070,5 +1080,45 @@ describeWithEnv(
       expect((await call(B1, 'GET', owners.a.token, `/billing/admin/recovery-obligations/${obligationId}`)).json).toMatchObject({ outstanding: BASE, status: 'open', collection: 'frozen_overlap', restriction: 'active' });
       ev('V9/V19 final', { admittedRequestsStand: stood, events: 4, auditIntents: 4, outstanding: BASE, restriction: 'active' });
     }, 600_000);
+
+    // ───────────────────────────────────────────────────────────── DO-68: financial audit delivery, cross-process (runs LAST: it reads the whole suite's evidence)
+    it('DO-68: every audit intent Billing and Payment committed in this suite (refund, dispute, recovery, loss and reconciliation families) reached the live audit-service exactly once, as recorded', async () => {
+      type Intent = { id: string; name: string; publishedAt: Date | null; source: string };
+      const intents = async (): Promise<Intent[]> => [
+        ...(await billingAdmin.query(`SELECT id, name, "publishedAt" FROM outbox WHERE name LIKE 'audit.%'`)).rows.map((r) => ({ ...r, source: 'billing-service' })),
+        ...(await paymentAdmin.query(`SELECT id, name, "publishedAt" FROM outbox WHERE name LIKE 'audit.%'`)).rows.map((r) => ({ ...r, source: 'payment-service' })),
+      ];
+      // every intent leaves its producer's outbox through the real relay
+      await waitFor(async () => (await intents()).every((r) => r.publishedAt !== null), 90_000, `every audit intent published\n${tails()}`);
+      const all = await intents();
+      const key = (source: string, id: string) => `${source}:${id}`;
+      const stored = async () => (await auditAdmin.query(
+        `SELECT "eventId", "sourceService", action FROM audit_record WHERE "sourceService" IN ('billing-service', 'payment-service')`)).rows as Array<{ eventId: string; sourceService: string; action: string }>;
+      await waitFor(async () => {
+        const have = new Set((await stored()).map((r) => key(r.sourceService, r.eventId)));
+        return all.every((r) => have.has(key(r.source, r.id)));
+      }, 120_000, `audit-service to record every intent\n${audit.tail()}`);
+      const rows = await stored();
+      const byKey = new Map<string, string[]>();
+      for (const r of rows) byKey.set(key(r.sourceService, r.eventId), [...(byKey.get(key(r.sourceService, r.eventId)) ?? []), r.action]);
+      // exactly once, under the producer's own source, with the action the outbox recorded
+      expect(all.filter((r) => !byKey.has(key(r.source, r.id))).map((r) => r.name), 'an intent never stored').toEqual([]);
+      expect(all.filter((r) => (byKey.get(key(r.source, r.id)) ?? []).length !== 1).map((r) => r.name), 'an intent stored more than once').toEqual([]);
+      expect(all.filter((r) => byKey.get(key(r.source, r.id))?.[0] !== r.name.slice('audit.'.length)).map((r) => r.name), 'an intent stored as another action').toEqual([]);
+      // the families this suite drives are among them (a regression that stops producing one is caught here)
+      const actions = [...new Set(all.map((r) => r.name.slice('audit.'.length)))].sort();
+      expect(actions).toEqual(expect.arrayContaining(DO68_FAMILIES));
+      // and audit-service dead-lettered none of them: the only dead letters are the item 7 identity probe (a raw `{}` published as billing-service,
+      // stored redacted as a 2-byte malformed envelope); every message is read and put back unchanged
+      const ch = await amqpConn.createChannel();
+      const deadMessages: Array<import('amqplib').GetMessage> = [];
+      for (let m = await ch.get('audit-service.audit.dead', { noAck: false }); m; m = await ch.get('audit-service.audit.dead', { noAck: false })) deadMessages.push(m);
+      const dead = deadMessages.map((m) => JSON.parse(m.content.toString()) as Record<string, unknown>);
+      for (const m of deadMessages) ch.nack(m, false, true);
+      await ch.close();
+      expect(dead.filter((d) => !(d.redacted === true && d.reason === 'malformed_envelope' && d.bodyBytes === 2)), 'an audit dead letter other than the identity probe').toEqual([]);
+      // eslint-disable-next-line no-console
+      console.log(`DO68_AUDIT_DELIVERY ${JSON.stringify({ intents: all.length, bySource: { billing: all.filter((r) => r.source === 'billing-service').length, payment: all.filter((r) => r.source === 'payment-service').length }, actions, auditDeadLetters: dead.length, storedFromTheseSources: rows.length })}`);
+    }, 300_000);
   },
 );
