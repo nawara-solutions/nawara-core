@@ -1052,6 +1052,23 @@ SELECT pg_temp.expect_constraint('S0-C12', 'item 16: only the held state: acting
 SELECT pg_temp.expect_error('S0-C12', 'item 16: evidence is never edited', $$UPDATE provider_observation_quarantine SET "currencyShape" = 'null'$$, '23514');
 SELECT pg_temp.expect_error('S0-C12', 'item 16: evidence is never deleted', $$DELETE FROM provider_observation_quarantine$$, '23514');
 
+-- ---------------------------------------------------------------------------- DO-70: stored notifications are never deleted ----
+-- FC-1: "Raw webhooks stay in the existing webhook_event". A notification no fact references (ignored, failed, unmatched, a malformed
+-- dispute: DO-55) was deletable; a referenced one was protected only by a foreign key. Processing bookkeeping stays updatable (0005).
+\o /dev/null
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome) VALUES ('test', 'evt-do70-1', 'payment.dispute.updated', '\x7b7d', 'failed', 'malformed_dispute') RETURNING id AS do70w \gset
+\o
+SELECT pg_temp.expect_error('DO-70', 'an unreferenced stored notification is never deleted', format($$DELETE FROM webhook_event WHERE id = %L$$, :'do70w'), '23514');
+SELECT pg_temp.expect_error('DO-70', 'a referenced stored notification is refused by the guard, not only by its foreign key', format($$DELETE FROM webhook_event WHERE id = %L$$, :'i16w'), '23514');
+SELECT pg_temp.expect_error('DO-70', 'stored notifications are never deleted in bulk', $$DELETE FROM webhook_event$$, '23514');
+SELECT pg_temp.expect_error('DO-70', 'stored notifications are never truncated', $$TRUNCATE webhook_event CASCADE$$, '23514');
+SELECT pg_temp.assert_eq('DO-70', 'the table carries its own delete and truncate guards',
+  (SELECT string_agg(tgname, ',' ORDER BY tgname) FROM pg_trigger WHERE tgrelid = 'webhook_event'::regclass AND tgname IN ('webhook_event_10_no_delete', 'webhook_event_11_no_truncate')),
+  'webhook_event_10_no_delete,webhook_event_11_no_truncate');
+SELECT pg_temp.expect_ok('DO-70', 'negative control: processing bookkeeping stays updatable', format($$UPDATE webhook_event SET attempts = attempts + 1, "lastError" = 'x' WHERE id = %L$$, :'do70w'));
+SELECT pg_temp.expect_error('DO-70', 'negative control: the received evidence stays frozen (0005)', format($$UPDATE webhook_event SET "rawBody" = '\x00' WHERE id = %L$$, :'do70w'), '23514');
+SELECT pg_temp.expect_ok('DO-70', 'negative control: a new notification is still stored', $$INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-do70-2', 'payment.succeeded', '\x7b7d')$$);
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail
