@@ -52,7 +52,7 @@ accounting-service, ledger, wallet or cash-service exists (S0 §1.1: no wallets,
   assisted and recovery purposes. The beneficiary of a personal purchase is a user. **IMPLEMENTED** (S3a, S4a, S4e; S0 S-6).
 - **Purposes and targets (ADR-0044 B2):** `organization_subscription` → `organization`; `direct_purchase` and `assisted_settlement` →
   `personal`; `recovery_settlement` → `none`; plus `non_entitlement` → `none` for invoices that grant nothing (S3a Option C).
-  **IMPLEMENTED** for all but `recovery_settlement`, which is FROZEN (S6f).
+  **IMPLEMENTED**, `recovery_settlement` included (S6f, simulation only). *(Status corrected 2026-11-13, DO-39: this line said FROZEN.)*
 - **Routing is fixed when the invoice is created** (`invoice_entitlement`, register BIL-08) and never changes. Payer, purpose, beneficiary,
   amount, currency and seller of a payment are immutable (S-6); Billing and Payment each enforce the Organization-payer rule
   independently. **IMPLEMENTED** (S3a, S4a; DB-15 pairing).
@@ -108,7 +108,7 @@ The cash workflow of §3 and §5 below (`cash_payment`, cash confirmation) there
 - **T1** (a request past `settleBy`, not settled and not confirmed returned) and **T2** (a cash-return obligation not confirmed by the
   beneficiary) restrict an Organization's **new** assistance requests only, derived from durable rows, never stored, with no
   repeat-violation state (FC-9). **IMPLEMENTED** (S5d, register BIL-13 H, BIL-26 F).
-- **T3** (recovery after an assisted purchase lost at final stage) is **FROZEN** (S6f). **D6 inactivity** is **FROZEN, not active** until
+- **T3** (recovery after an assisted purchase lost at final stage) is **IMPLEMENTED** (S6f, simulation only; S0-C14 adds the Owner's suspension). *(Status corrected 2026-11-13, DO-39: this line said FROZEN.)* **D6 inactivity** is **FROZEN, not active** until
   V-4 supplies the authoritative effective lifecycle state (S0 DN-1.4, S-9).
 - **Inactive Organizations:** existing obligations stay dischargeable by their authorized actors; new activity needs an effectively active
   Organization. **OWNER-APPROVED** policy (V5-1 to V5-9, register §7.1); runtime deferred until V-4 and OD-R6a.
@@ -117,7 +117,7 @@ The cash workflow of §3 and §5 below (`cash_payment`, cash confirmation) there
 
 | Element | Rule | Status |
 |---|---|---|
-| Authorization receipts (ADR-0067 **Proposed**; AUTH-01 to AUTH-03) | Owner-only, factor step-up `refund.authorize`, bound to `{operation, audience, companyId, refundCaseId, paymentId, amount, currency, reason, legalOverride}`, 10 minutes, single use, consumed by payment-service | IMPLEMENTED in Auth (S2-Auth); no consumer yet |
+| Authorization receipts (ADR-0067 **Proposed**; AUTH-01 to AUTH-03) | Owner-only, factor step-up `refund.authorize`, bound to `{operation, audience, companyId, refundCaseId, paymentId, amount, currency, reason, legalOverride}`, 10 minutes, single use, consumed by payment-service | IMPLEMENTED in Auth (S2-Auth); consumed by payment-service since S6b *(status corrected 2026-11-13, DO-39: this cell said "no consumer yet")* |
 | Refund case (BIL-23, BIL-25) | Owner of the seller Company only; a full refund of a verified personal purchase (`direct_purchase`, `assisted_settlement`) or of a verified captured payment that produced no entitlement (eligible late assisted settlements, `non_entitlement`); Organization-subscription refunds excluded; Billing computes the amount; closed reason codes; `legalOverride` grants nothing; states `open`, `cancelled`, `completed`; opening needs no step-up; no new case while a dispute on the payment is open (D3) | IMPLEMENTED (S6a, simulation only; cases only: no attempt, no money moved) |
 | Refund attempt (PAY-07, PAY-08, BIL-24) | a durable intent (`consumeRef` = the attempt = the provider key) → receipt consumption at Auth → `authorized`; asynchronous provider dispatch with the stable key; only Auth's definitive answer ends an authorization (no expiry margin, Q8); a pre-attempt refusal is permanent for its id; one potentially effective attempt per payment; verified `refund` facts; mismatches are `discrepancy`; Billing relays from a durable record and mirrors Payment's state; a case is cancellable only while every relay is proven unconsumed | IMPLEMENTED (S6b, simulation only; the Owner's R6B-1 to R6B-10); no `refund.*` event, allocation, completion or reversal (S6c, S6d) |
 | Allocation and completion (FC-2, FC-3) | lock order `payment` → `refund_authorization`; bounded counter and deferred sum check; `completedAt` set once; a completed case refuses every new attempt (`409 refund_case_completed`) | IMPLEMENTED (S6c, simulation only; the Owner's R6C-1 to R6C-12): cumulative allocation of verified refund facts, excess kept, contested or foreign-currency facts blocked for S6h, `refund.case_completed` from Payment, Billing completes the case once (event or PAY-08 reconciliation); no reversal (S6d) |
@@ -144,7 +144,7 @@ capture's loss cap; repeated and excess losses are reviewed*); the Organization'
 invoice at a time (Payment's narrow `payment.create.recovery_settlement`); only Payment's verified success is a recovery payment, split by
 the database into principal and `recovery_surplus` owed to the Organization (never revenue, never offset, no expiry); T3 clears once when
 principal reaches the base. A surplus is resolved by the full refund of an entirely surplus payment (refund cases) or by the Owner's
-evidenced external repayment confirmed by the Organization. No `billing.recovery` event (EVT-06), no FinancialLoss.
+evidenced external repayment confirmed by the Organization. No `billing.recovery` event (EVT-06); recovery itself records no FinancialLoss (an Owner write-off of an unrecoverable obligation records a `recovery_write_off` FinancialLoss, FC-6, S6h). *(Wording corrected 2026-11-13, DO-39: this sentence said "no FinancialLoss".)*
 **Late assisted settlement: IMPLEMENTED (L-1 to L-3 and L-5 in S5b and S6a to S6d; L-4 / L-6 in S6g, simulation only; the Owner's R6G-1 to R6G-9)**:
 a verified late success is recorded with Payment's original instant and never applied automatically; the default is the full refund of
 that payment; the Owner may apply it as the request's single purchase only with a factor-step-up receipt and the beneficiary's attestation
