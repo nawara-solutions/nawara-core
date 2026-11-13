@@ -51,7 +51,8 @@
         "stage16-5-auth-notification.e2e-spec.ts",
         "s-int-organization-reference.e2e-spec.ts",
         "s-int-production-refusal.e2e-spec.ts",
-        "s4e-organization-payer.e2e-spec.ts"
+        "s4e-organization-payer.e2e-spec.ts",
+        "do49-payment-multi-instance.e2e-spec.ts"
       ]
     }
   ]
