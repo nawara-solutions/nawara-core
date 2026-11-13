@@ -32,6 +32,8 @@ afterAll(() => refStub.close());
  *   - LABELLED DELIVERY CONTROL: Billing stopped, messages purged (a real loss) or re-sent out of order, the genuine bytes under the real
  *     `payment-service` broker identity.
  *   - `ACCESS_TOKEN_TTL_SEC` is raised to its maximum so bearers outlive this long suite and the Auth restart.
+ *   - LABELLED LOCK HOLD (DO-45): a test connection holds one payment row `FOR NO KEY UPDATE` so Payment's real processing of a committed capture fact
+ *     waits exactly in the S0-C12 item 7 window when Payment is SIGKILLed. The fact, the notification and the crash are real; only the timing is held.
  *
  * DEVELOPMENT AND SIMULATION ONLY. No verdict. Prerequisite: `npm run build -w @nawara/service-kit -w @nawara/audit-contract -w auth-service
  * -w billing-service -w payment-service`.
@@ -145,6 +147,7 @@ describeWithEnv(
     const benUnrecognized = actor(ORG_W, false);
     const benSubmitted = actor(ORG_W, false);
     const benInterrupted = actor(ORG_W, false);
+    const benCrashed = actor(ORG_W, false); // Core V2 DO-45: the capture window under a real SIGKILL
     const adminU = actor(ORG_U, true);
     const benU = actor(ORG_U, false);
     const adminT = actor(ORG_T, true);
@@ -159,7 +162,7 @@ describeWithEnv(
     const benQ = actor(ORG_Q, false);
     const adminV = actor(ORG_V, true);
     const benContested = actor(ORG_V, false);
-    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter, adminW, benF01, benF20, benWL3, benDup, benUnrecognized, benSubmitted, benInterrupted, adminV, benContested, adminU, benU, adminT, benT, adminQ, benQ, adminN, benN, adminP, benP, adminH, benH];
+    const everyone = () => [adminS, benS, adminX, benExpiry, benL3, adminF, benL4, benRead, benSecond, benLost, benOrder, adminR, benContra, benCash, benPurchase, adminO, benO, benO2, adminK, benBefore, benAfter, adminW, benF01, benF20, benWL3, benDup, benUnrecognized, benSubmitted, benInterrupted, benCrashed, adminV, benContested, adminU, benU, adminT, benT, adminQ, benQ, adminN, benN, adminP, benP, adminH, benH];
 
     async function purgeQueue(name: string): Promise<void> {
       const ch = await amqpConn.createChannel();
@@ -1306,6 +1309,74 @@ describeWithEnv(
       expect(await caseOf(s.paymentId, 'late_success')).toHaveLength(1);
       await refundExactly(s.paymentId, factId, BASE + 100, 'TND', 'customer_request');
       expect(await deadLettered()).toBe(0);
+    }, 300_000);
+
+    it('S0-C12 item 7, DO-45, REAL CRASH (LABELLED LOCK HOLD only fixes the timing): a genuine signed capture of a final payment commits its fact, Payment is SIGKILLed while that fact\'s processing waits; after restart its durable recovery records the late success exactly once, never acknowledged before, never twice after redelivery', async () => {
+      const s = await failedAtPayment(benCrashed, adminW);
+      const txn = `sim_crash_${randomUUID()}`;
+      const eventId = `sint_${randomUUID()}`;
+      const notification = { eventId, type: 'payment.succeeded', reference: s.attempts[0], providerTransactionId: txn, amount: BASE + 100, currency: 'TND' };
+      // the hold: FOR NO KEY UPDATE lets the fact's own transaction (FOR KEY SHARE) commit and blocks its processing (FOR UPDATE), exactly the item 7 window
+      const holder = await paymentAdmin.connect();
+      let holding = true;
+      let down = false;
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT 1 FROM payment WHERE id = $1 FOR NO KEY UPDATE', [s.paymentId]);
+        const holderPid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+        const delivery = signed(notification).then((status) => ({ status }), (e: unknown) => ({ error: String(e) }));
+        await waitFor(async () => (await paymentAdmin.query(`SELECT 1 FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'capture'`, [txn])).rowCount === 1,
+          30_000, `the fact to commit on its own\n${tails()}`);
+        await waitFor(async () => (await paymentAdmin.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'`, [holderPid])).rowCount === 1,
+          30_000, `Payment's processing to wait on the payment lock\n${tails()}`);
+        const factId = (await paymentAdmin.query(`SELECT id FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'capture'`, [txn])).rows[0].id as string;
+        expect(await paymentLateOf(factId), 'inside the window: the fact is committed, its processing is not').toEqual([]);
+        await payment.kill(); // the real crash: SIGKILL inside the window, no shutdown hook
+        down = true;
+        const answered = await delivery;
+        expect('status' in answered ? answered.status : 'no answer', 'the provider got no acknowledgement for the crashed delivery').toBe('no answer');
+        await holder.query('ROLLBACK'); // the killed process's waiting transaction never committed: nothing of its processing survives
+        holding = false;
+        expect(await paymentLateOf(factId), 'after the crash: only what PostgreSQL committed, the fact').toEqual([]);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM webhook_event WHERE provider = 'simulation' AND "providerEventId" = $1 AND state <> 'processed'`, [eventId]),
+          'the stored notification survives, unprocessed').toBe(1);
+
+        payment = spawnService('payment', PAYMENT_DIR, paymentEnv);
+        down = false;
+        await waitForHealth(`${PAYMENT_URL}/health`, 60_000);
+        // durable recovery from committed records only: the webhook retrier (the stored notification) or the capture reconciler (the fact), whichever runs first
+        await waitFor(async () => (await paymentLateOf(factId)).length === 1, 90_000, `durable recovery after the crash\n${tails()}`);
+        expect(await paymentLateOf(factId)).toEqual([{ id: expect.any(String), amount: BASE + 100, currency: 'TND', paymentStatus: 'failed' }]);
+        const actors = (await paymentAdmin.query(`SELECT payload->'actor' AS a FROM outbox WHERE name = 'audit.payment_late_success.recorded' AND payload->'changes'->>'fact_id' = $1`, [factId])).rows;
+        expect(actors).toHaveLength(1);
+        // the stored notification's retrier records as `payment_webhook`, the fact's reconciler as `payment_capture_reconciler` (the audit actor mapping, unchanged)
+        expect([{ type: 'system', id: 'payment_capture_reconciler' }, { type: 'system', id: 'payment_webhook' }]).toContainEqual(actors[0].a);
+        await billingLateOf(factId);
+        await waitFor(async () => (await caseOf(s.paymentId, 'late_success')).length === 1, 30_000, `the refund-only case\n${tails()}`);
+
+        // the provider redelivers the same notification, then reports the same transaction under a new event id: nothing is recorded twice
+        expect(await signed(notification)).toBeLessThan(500);
+        expect(await signed({ ...notification, eventId: `sint_${randomUUID()}` })).toBeLessThan(500);
+        await new Promise((r) => setTimeout(r, 32_000)); // a capture-reconciler pass and the retrier's passes: a duplicate would be here
+        expect(await paymentLateOf(factId)).toHaveLength(1);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM provider_transaction_fact WHERE "providerTxnId" = $1 AND kind = 'capture'`, [txn])).toBe(1);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.late_success.recorded' AND payload->>'factId' = $1`, [factId])).toBe(1);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.payment_late_success.recorded' AND payload->'changes'->>'fact_id' = $1`, [factId])).toBe(1);
+        expect(await count(billingAdmin, `SELECT count(*)::int AS n FROM payment_late_success WHERE "factId" = $1`, [factId])).toBe(1);
+        expect(await caseOf(s.paymentId, 'late_success')).toHaveLength(1);
+        // isolation: every Billing record of this payment is its own Organization's, under the one Company
+        expect((await billingAdmin.query(`SELECT DISTINCT "organizationId", "companyId" FROM reconciliation_case WHERE "paymentId" = $1`, [s.paymentId])).rows)
+          .toEqual([{ organizationId: ORG_W, companyId: COMPANY }]);
+        expect(await count(paymentAdmin, `SELECT count(*)::int AS n FROM payment WHERE id = $1 AND status = 'failed'`, [s.paymentId]), 'the final status is never reopened').toBe(1);
+        expect(await deadLettered()).toBe(0);
+      } finally {
+        if (holding) await holder.query('ROLLBACK').catch(() => undefined);
+        holder.release();
+        if (down) { // a failure between the crash and the restart must not leave the later tests without Payment
+          payment = spawnService('payment', PAYMENT_DIR, paymentEnv);
+          await waitForHealth(`${PAYMENT_URL}/health`, 60_000);
+        }
+      }
     }, 300_000);
 
     it('S0-C12 12(3), item 8: on a recovery channel a capture contested BEFORE any late success records none, even at finality, and has no refund route; a capture in another valid currency is excluded and D-B refunds exactly its own figures; principal and T3 never change', async () => {
