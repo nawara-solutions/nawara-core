@@ -189,4 +189,54 @@ describeWithEnv('webhooks API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
     const after = await getPayment(payment.id).expect(200);
     expect(after.body.status).toBe('succeeded');
   });
+  // ------------------------------------------------------------------ Core V2 DO-22 (migration 0030; the Owner's Option 1, 2026-11-14)
+  it('DO-22: concurrent first deliveries of one success (5 rounds of 8): every answer is 200, one processed row, one effect', async () => {
+    const provider = t.app.get(TestPaymentProvider);
+    for (let round = 0; round < 5; round++) {
+      const payment = await createPayment();
+      const start = await startAttempt(payment.id, `wh-key-do22-race-${round}`, { scenario: 'success' }).expect(201);
+      const { body, signature } = provider.signSuccessCallback(start.body.id);
+      const answers = (await Promise.all(Array.from({ length: 8 }, () => postWebhook(body, signature)))).map((r) => r.status);
+      expect(answers, `round ${round}`).toEqual(Array(8).fill(200));
+      expect(await webhookEventCount(`evt_${start.body.id}`), `round ${round}`).toEqual([{ state: 'processed', outcome: null }]);
+      const outboxRows = (await t.app.get(DbService).query(`SELECT 1 FROM outbox WHERE name = 'payment.succeeded' AND payload->>'paymentId' = $1`, [payment.id])).rows;
+      expect(outboxRows, `round ${round}`).toHaveLength(1);
+    }
+  });
+
+  it('DO-22: a terminal notification keeps its decision: the duplicate is a 200 no-op, and SQL cannot rewrite it', async () => {
+    const payment = await createPayment();
+    const start = await startAttempt(payment.id, 'wh-key-do22-final', { scenario: 'success' }).expect(201);
+    const { body, signature } = t.app.get(TestPaymentProvider).signSuccessCallback(start.body.id);
+    await postWebhook(body, signature).expect(200);
+    const db = t.app.get(DbService);
+    const before = (await db.query('SELECT state, outcome, attempts, "processedAt" FROM webhook_event WHERE "providerEventId" = $1', [`evt_${start.body.id}`])).rows[0];
+    await postWebhook(body, signature).expect(200);
+    expect((await db.query('SELECT state, outcome, attempts, "processedAt" FROM webhook_event WHERE "providerEventId" = $1', [`evt_${start.body.id}`])).rows[0]).toEqual(before);
+    for (const set of [`state = 'failed', outcome = 'transient_error'`, `state = 'received'`, `outcome = 'other'`, `"matchedAttemptId" = NULL`]) {
+      await expect(db.query(`UPDATE webhook_event SET ${set} WHERE "providerEventId" = $1`, [`evt_${start.body.id}`]), set).rejects.toMatchObject({ code: '23514', constraint: 'webhook_event_terminal' });
+    }
+  });
+
+  it('DO-22: failed stays redeliverable: retries_exhausted and malformed_body do not block the provider redelivery', async () => {
+    const payment = await createPayment();
+    const start = await startAttempt(payment.id, 'wh-key-do22-exhausted', { scenario: 'success' }).expect(201);
+    const { body, signature } = t.app.get(TestPaymentProvider).signSuccessCallback(start.body.id);
+    const db = t.app.get(DbService);
+    // LABELLED FIXTURE: a notification the retrier gave up on (its retry budget used), stored by SQL as the retrier leaves it
+    await db.query(`INSERT INTO webhook_event(provider, "providerEventId", "eventType", "rawBody", state, outcome, attempts) VALUES ('test', $1, 'payment.succeeded', $2, 'failed', 'retries_exhausted', 10)`,
+      [`evt_${start.body.id}`, body]);
+    expect((await t.app.get(WebhookRetriever).drainOnce()).retried, 'the retrier does not pick it up').toBe(0);
+    await postWebhook(body, signature).expect(200);
+    expect(await webhookEventCount(`evt_${start.body.id}`)).toEqual([{ state: 'processed', outcome: null }]);
+    expect((await getPayment(payment.id).expect(200)).body.status).toBe('succeeded');
+
+    const malformed = Buffer.from('{"not": "a recognizable event either"}', 'utf8');
+    const { createHmac } = await import('node:crypto');
+    const malformedSignature = createHmac('sha256', 'test-provider-webhook-secret').update(malformed).digest('hex');
+    await postWebhook(malformed, malformedSignature).expect(200);
+    await postWebhook(malformed, malformedSignature).expect(200); // a redelivery of a malformed body is processed again, and stays failed
+    const { rows } = await db.query(`SELECT state, outcome, attempts FROM webhook_event WHERE "rawBody" = $1`, [malformed]);
+    expect(rows).toEqual([{ state: 'failed', outcome: 'malformed_body', attempts: 2 }]);
+  });
 });

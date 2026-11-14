@@ -9,6 +9,7 @@ import type { DisputeEvidenceFiles, GrantedEvidence } from '../src/disputes/disp
 import { ownerAuthorityUnavailable, type OwnerCompanyAuthority, type VerifiedOwner } from '../src/disputes/owner-company.authority.js';
 import { WEBHOOK_RETRY_MAX_ATTEMPTS, WebhookRetriever } from '../src/webhooks/webhook-retrier.js';
 import { PaymentAudit } from '../src/audit/payment-audit.js';
+import { DisputeIngestionService } from '../src/disputes/dispute-ingestion.service.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-receipts.js';
@@ -475,18 +476,34 @@ describeWithEnv('payment disputes (Core V2 S6e-D) — real PostgreSQL', ['TEST_D
     it('replay and the retrier: one observation, one item, one audit record; a distinct provider event is its own', async () => {
       const f = await settledOnSecond();
       const body = note(f.a1.id, `simd_r-${randomUUID()}`);
+      const stored = async () => (await admin.query(`SELECT state, outcome FROM webhook_event WHERE "providerEventId" = $1`, [body.eventId])).rows[0];
+      // a crash after the observation committed, before its notification's state was marked. Core V2 DO-22: no longer a terminal row set back by SQL
+      // (0030 refuses that); a REAL failure raised right after the real ingestion committed, so the notification is left `failed` / `transient_error`
+      // by the application itself, exactly the state the crash window leaves. The redelivery runs ingestion again and finds the observation.
+      const ingestion = t.app.get(DisputeIngestionService);
+      const committed = ingestion.ingest.bind(ingestion);
+      const crash = vi.spyOn(ingestion, 'ingest').mockImplementationOnce(async (...args: Parameters<DisputeIngestionService['ingest']>) => {
+        await committed(...args);
+        throw new Error('crash after the observation committed');
+      });
+      try {
+        expect((await signed(body)).status).toBe(500);
+      } finally {
+        crash.mockRestore();
+      }
+      expect(await stored()).toEqual({ state: 'failed', outcome: 'transient_error' });
+      expect(await conflictsOf(f.payment.id), 'the observation committed before the crash').toHaveLength(1);
+      expect(await auditsOf(f.payment.id)).toHaveLength(1);
+      await signed(body).expect(200);
+      expect(await stored()).toEqual({ state: 'conflict', outcome: expect.stringMatching(/^dispute_/) });
+      expect(await conflictsOf(f.payment.id)).toHaveLength(1);
+      expect(await auditsOf(f.payment.id), 'the crash window writes no second record').toHaveLength(1);
       await signed(body).expect(200);
       await Promise.all([signed(body), signed(body), signed(body)]);
       await signed(body).expect(200);
       expect(await conflictsOf(f.payment.id)).toHaveLength(1);
       expect(await items(f.payment.id)).toHaveLength(1);
       expect(await auditsOf(f.payment.id)).toHaveLength(1);
-      // a crash after the observation committed, before its notification's state was marked (LABELLED FIXTURE: that state set back by SQL): ingestion runs again and finds it
-      await admin.query(`UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE "providerEventId" = $1`, [body.eventId]);
-      await signed(body).expect(200);
-      expect((await admin.query(`SELECT state FROM webhook_event WHERE "providerEventId" = $1`, [body.eventId])).rows[0].state).toBe('conflict');
-      expect(await conflictsOf(f.payment.id)).toHaveLength(1);
-      expect(await auditsOf(f.payment.id), 'the crash window writes no second record').toHaveLength(1);
       await signed({ ...body, eventId: `raw_${randomUUID()}` }).expect(200);
       expect(await items(f.payment.id)).toHaveLength(2);
       expect(await auditsOf(f.payment.id)).toHaveLength(2);
