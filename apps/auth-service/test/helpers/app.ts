@@ -17,6 +17,7 @@ import { PasswordService } from '../../src/crypto/password.js';
 import { DbService } from '../../src/db/db.service.js';
 import { configureAuthApp } from '../../src/http/configure-auth-app.js';
 import { UsersService } from '../../src/users/users.service.js';
+import { trackPoolClients } from './pool-teardown.js';
 
 export class FakeClock implements Clock {
   constructor(private t = new Date()) {}
@@ -109,6 +110,7 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   await app.init();
 
   const db = new pg.Pool({ connectionString: databaseUrl, max: 3 });
+  const dbClients = trackPoolClients(db); // deliberately no 'error' listener: an unexpected pool error must still fail the run
   const http = request(app.getHttpServer());
   const users = app.get(UsersService);
   const passwords = app.get(PasswordService);
@@ -117,8 +119,13 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   const ctx = {
     app, cfg, clock, bus, auditBus, logger, jsonLogs, db, http, users, dbs, env,
     async close() {
-      await db.end();
+      // The forced drop below must not find a connection of this pool still open (pool-teardown.ts): a still-open client would receive
+      // 57P01 and, with no pool listener, throw it uncaught. If the wait times out the app is still closed, the database is kept (dropping
+      // it would terminate that client) and the timeout fails the test.
+      let poolError: unknown;
+      await dbClients.end().catch((e: unknown) => void (poolError = e));
       await app.close();
+      if (poolError !== undefined) throw poolError;
       const a = new pg.Client({ connectionString: adminUrl });
       await a.connect();
       await a.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
