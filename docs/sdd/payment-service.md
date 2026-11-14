@@ -336,6 +336,7 @@ timestamps; at most one open refund attempt per refund. Provider refund history 
 | Not stored | requests that **fail signature verification**: they are rejected and counted, never persisted (an unauthenticated caller cannot write to the database) [T] |
 | Retention | privacy and legal retention of raw bodies **[B, O-17]** |
 | Never deleted | *Core V2 DO-70 (migration `0029`, development and simulation):* `DELETE` and `TRUNCATE` are refused by trigger for every role (`23514`) and by privilege for the runtime role; bookkeeping columns stay updatable. O-17 stays open: a future approved retention policy that prunes or redacts needs its own migration |
+| Terminal | *Core V2 DO-22 (migration `0030`, development and simulation; the Owner's Option 1 of 2026-11-14):* `processed`, `ignored` and `conflict` are terminal: once a row is in one of them, its decision (`state`, `outcome`, `matchedAttemptId`) never changes (a trigger, `23514`, constraint `webhook_event_terminal`, for every role). Re-recording the same decision and the bookkeeping (`attempts`, `lastError`, `processedAt`) stay writable; the evidence index keeps its write-once rule (0028). `received`, `processing`, `unmatched` and `failed` are not restricted: `failed` stays eligible for the provider's redelivery and the retrier's existing rules, `retries_exhausted` and `malformed_body` included |
 
 ### 4.7 IdempotencyKey
 

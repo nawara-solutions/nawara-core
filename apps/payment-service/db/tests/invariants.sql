@@ -1069,6 +1069,57 @@ SELECT pg_temp.expect_ok('DO-70', 'negative control: processing bookkeeping stay
 SELECT pg_temp.expect_error('DO-70', 'negative control: the received evidence stays frozen (0005)', format($$UPDATE webhook_event SET "rawBody" = '\x00' WHERE id = %L$$, :'do70w'), '23514');
 SELECT pg_temp.expect_ok('DO-70', 'negative control: a new notification is still stored', $$INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-do70-2', 'payment.succeeded', '\x7b7d')$$);
 
+-- ---------------------------------------------------------------------------- DO-22: a terminal notification keeps its decision ----
+-- The Owner's DO-22 decision (Option 1, 2026-11-14): `processed`, `ignored` and `conflict` are terminal; `failed` stays eligible for the
+-- existing redelivery and retry (`retries_exhausted` and `malformed_body` included). A terminal row's state, outcome and matched attempt
+-- never change; its processing bookkeeping (attempts, lastError, processedAt) and the write-once evidence index stay as they were (0028).
+\o /dev/null
+SELECT id AS do22a FROM payment_attempt ORDER BY id LIMIT 1 \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome, "processedAt") VALUES ('test', 'evt-do22-p', 'payment.succeeded', '\x7b7d', 'processed', NULL, now()) RETURNING id AS do22p \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome, "processedAt") VALUES ('test', 'evt-do22-i', 'payment.unknown', '\x7b7d', 'ignored', 'unknown_event_type:payment.unknown', now()) RETURNING id AS do22i \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome, "processedAt", "matchedAttemptId") VALUES ('test', 'evt-do22-c', 'payment.succeeded', '\x7b7d', 'conflict', 'invalid_state_transition', now(), :'do22a') RETURNING id AS do22c \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome, "processedAt") VALUES ('test', 'evt-do22-r', 'refund.succeeded', '\x7b7d', 'processed', 'refund_attempt:x', now()) RETURNING id AS do22r \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome) VALUES ('test', 'evt-do22-x', 'payment.succeeded', '\x7b7d', 'failed', 'retries_exhausted') RETURNING id AS do22x \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome) VALUES ('test', 'evt-do22-m', 'unknown', '\x7b7d', 'failed', 'malformed_body') RETURNING id AS do22m \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome) VALUES ('test', 'evt-do22-u', 'payment.dispute.opened', '\x7b7d', 'unmatched', 'dispute_held:capture_pending') RETURNING id AS do22u \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-do22-n', 'payment.succeeded', '\x7b7d') RETURNING id AS do22n \gset
+\o
+SELECT pg_temp.expect_constraint('DO-22', 'processed never becomes failed', format($$UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE id = %L$$, :'do22p'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'processed never becomes conflict', format($$UPDATE webhook_event SET state = 'conflict', outcome = 'invalid_state_transition' WHERE id = %L$$, :'do22p'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'processed never returns to received', format($$UPDATE webhook_event SET state = 'received' WHERE id = %L$$, :'do22p'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'ignored never becomes processed', format($$UPDATE webhook_event SET state = 'processed', outcome = NULL WHERE id = %L$$, :'do22i'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'ignored never becomes unmatched', format($$UPDATE webhook_event SET state = 'unmatched' WHERE id = %L$$, :'do22i'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'conflict never becomes failed (the former dispute crash fixture''s SQL rewrite)', format($$UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE id = %L$$, :'do22c'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'conflict never becomes processed', format($$UPDATE webhook_event SET state = 'processed' WHERE id = %L$$, :'do22c'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'conflict never becomes processing', format($$UPDATE webhook_event SET state = 'processing' WHERE id = %L$$, :'do22c'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'a terminal outcome is never rewritten', format($$UPDATE webhook_event SET outcome = 'something_else' WHERE id = %L$$, :'do22i'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'a terminal outcome is never cleared', format($$UPDATE webhook_event SET outcome = NULL WHERE id = %L$$, :'do22c'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'a terminal row''s matched attempt is never set afterwards', format($$UPDATE webhook_event SET "matchedAttemptId" = %L WHERE id = %L$$, :'do22a', :'do22p'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'a terminal row''s matched attempt is never cleared', format($$UPDATE webhook_event SET "matchedAttemptId" = NULL WHERE id = %L$$, :'do22c'), 'webhook_event_terminal');
+SELECT pg_temp.expect_constraint('DO-22', 'one statement over every terminal row is refused as a whole', $$UPDATE webhook_event SET state = 'failed' WHERE state IN ('processed', 'ignored', 'conflict')$$, 'webhook_event_terminal');
+SELECT pg_temp.assert_eq('DO-22', 'the refused statements changed nothing',
+  (SELECT string_agg(state || '/' || coalesce(outcome, '-'), ',' ORDER BY "providerEventId") FROM webhook_event WHERE "providerEventId" IN ('evt-do22-p', 'evt-do22-i', 'evt-do22-c')),
+  'conflict/invalid_state_transition,ignored/unknown_event_type:payment.unknown,processed/-');
+SELECT pg_temp.assert_eq('DO-22', 'the update triggers: the terminal guard beside the evidence guards',
+  (SELECT string_agg(tgname, ',' ORDER BY tgname) FROM pg_trigger WHERE tgrelid = 'webhook_event'::regclass AND NOT tgisinternal AND tgtype & 16 = 16),
+  'webhook_event_12_terminal,webhook_event_evidence_index_once,webhook_event_immutable');
+SELECT pg_temp.expect_ok('DO-22', 'negative control: a concurrent duplicate re-records the same decision (bookkeeping only)', format($$UPDATE webhook_event SET state = 'processed', outcome = NULL, attempts = attempts + 1, "processedAt" = now(), "matchedAttemptId" = COALESCE(NULL, "matchedAttemptId") WHERE id = %L$$, :'do22p'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: the same conflict decision is re-recorded with its matched attempt', format($$UPDATE webhook_event SET state = 'conflict', outcome = 'invalid_state_transition', attempts = attempts + 1, "matchedAttemptId" = COALESCE(%L, "matchedAttemptId") WHERE id = %L$$, :'do22a', :'do22c'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: lastError stays bookkeeping on a terminal row', format($$UPDATE webhook_event SET "lastError" = 'x' WHERE id = %L$$, :'do22i'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: the write-once evidence index of a terminal row is still backfilled (0028)', format($$UPDATE webhook_event SET "evidenceIndex" = 'no_reference' WHERE id = %L AND "evidenceIndex" = 'pending'$$, :'do22r'));
+SELECT pg_temp.expect_constraint('DO-22', 'negative control: the evidence index stays write-once (0028), terminal or not', format($$UPDATE webhook_event SET "evidenceIndex" = 'unparseable' WHERE id = %L$$, :'do22r'), 'webhook_event_evidence_index_once');
+SELECT pg_temp.expect_error('DO-22', 'negative control: the received evidence of a terminal row stays frozen (0005)', format($$UPDATE webhook_event SET "rawBody" = '\x00' WHERE id = %L$$, :'do22p'), '23514');
+SELECT pg_temp.expect_ok('DO-22', 'negative control: failed / retries_exhausted is still redelivered (processing)', format($$UPDATE webhook_event SET state = 'processing', attempts = attempts + 1 WHERE id = %L$$, :'do22x'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: ... and its redelivery may finish processed', format($$UPDATE webhook_event SET state = 'processed', outcome = NULL, "processedAt" = now(), "matchedAttemptId" = %L WHERE id = %L$$, :'do22a', :'do22x'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: failed / malformed_body may be failed again', format($$UPDATE webhook_event SET state = 'failed', outcome = 'malformed_body', attempts = attempts + 1 WHERE id = %L$$, :'do22m'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: failed / malformed_body is not barred by the database from a later decision', format($$UPDATE webhook_event SET state = 'conflict', outcome = 'malformed_dispute', "processedAt" = now() WHERE id = %L$$, :'do22m'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: unmatched (held) is still revisited and may stay unmatched', format($$UPDATE webhook_event SET state = 'unmatched', outcome = 'dispute_held:capture_pending', attempts = attempts + 1 WHERE id = %L$$, :'do22u'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: unmatched may become conflict on its last chance', format($$UPDATE webhook_event SET state = 'conflict', outcome = 'dispute_capture_unverified', "processedAt" = now() WHERE id = %L$$, :'do22u'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: received may become failed, then processed', format($$UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE id = %L$$, :'do22n'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: ... failed / transient_error becomes processed', format($$UPDATE webhook_event SET state = 'processed', outcome = NULL, "processedAt" = now() WHERE id = %L$$, :'do22n'));
+SELECT pg_temp.expect_ok('DO-22', 'negative control: a notification may still be stored in any state (fixtures, inserts are not transitions)', $$INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome) VALUES ('test', 'evt-do22-z', 'payment.succeeded', '\x7b7d', 'conflict', 'provider_error')$$);
+SELECT pg_temp.expect_constraint('DO-22', 'a row that became terminal is guarded from then on', format($$UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE id = %L$$, :'do22n'), 'webhook_event_terminal');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail
