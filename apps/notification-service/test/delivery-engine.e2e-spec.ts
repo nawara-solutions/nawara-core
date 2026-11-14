@@ -816,11 +816,18 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
       // V2 A15.3: the overlap is enforced, not timed. Each provider call waits at a two-party barrier until the other call has arrived,
       // so neither delivery can finish before both are in flight (this replaces a "started within 40 ms" wall-clock check). The bound
       // only stops a broken barrier from hanging the test; it is not the assertion.
+      // The barrier wait is part of each provider call, so this case runs on its own worker whose provider timeout (15 s) exceeds the
+      // barrier bound (10 s): with the suite's 300 ms timeout a slow runner turned the wait into a provider timeout (an ambiguous attempt,
+      // resent: PENDING), the failure of run 43435981403. The lease stays >= 2 x the timeout, as the configuration requires.
+      const purgeWorker = (await app({ NOTIFICATION_PROVIDER_TIMEOUT_MS: '15000', NOTIFICATION_LEASE_MS: '30000' })).app.get(DeliveryWorker);
       for (let i = 0; i < 5; i++) {
         let arrived = 0;
         let release!: () => void;
         const together = new Promise<void>((r) => (release = r));
+        let entered = 0;
         const both = async (m: RenderedMessage, ctx: { reference: string; attemptId: string }) => {
+          // round 0: the second call reaches the barrier 2 x TIMEOUT_MS after the first, as on a slow CI runner (run 43435981403)
+          if (++entered === 2 && i === 0) await new Promise((r) => setTimeout(r, 2 * TIMEOUT_MS));
           arrived += 1;
           if (arrived === 2) release();
           let bound: ReturnType<typeof setTimeout> | undefined;
@@ -832,9 +839,11 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
         email.behavior = both;
         sms.behavior = both;
         const nid = await code();
-        await worker.passOnce();
+        await purgeWorker.passOnce();
         expect(arrived, `round ${i}: both deliveries were in flight together`).toBe(2);
-        expect((await deliveries(nid)).map((d) => d.status)).toEqual(['SENT', 'SENT']);
+        const ds = await deliveries(nid);
+        expect(ds.map((d) => d.status), `round ${i}`).toEqual(['SENT', 'SENT']);
+        for (const d of ds) expect((await attempts(d.id)).map((x) => x.outcome), `round ${i}: one attempt each, never ambiguous`).toEqual(['ACCEPTED']);
         expect(await secret(nid), `round ${i}`).toEqual({ c: null, k: null }); // at once, not left to the purge loop
       }
     });
