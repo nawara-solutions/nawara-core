@@ -165,6 +165,8 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'DELETE FROM webhook_event',
         'TRUNCATE webhook_event',
         'ALTER TABLE webhook_event DISABLE TRIGGER webhook_event_10_no_delete',
+        // Core V2 DO-22 (migration 0030): nor can it switch off the terminal guard
+        'ALTER TABLE webhook_event DISABLE TRIGGER webhook_event_12_terminal',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }
@@ -175,6 +177,11 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
       const stored = (await app.query<{ id: string }>(`SELECT id FROM webhook_event ORDER BY "receivedAt" LIMIT 1`)).rows[0]!;
       await app.query(`UPDATE webhook_event SET attempts = attempts WHERE id = $1`, [stored.id]);
       await expect(app.query(`UPDATE webhook_event SET "rawBody" = '\\x00' WHERE id = $1`, [stored.id])).rejects.toMatchObject({ code: '23514' });
+      // DO-22: a terminal notification (the Phase 1 flow processed one) keeps its decision under the runtime role; its bookkeeping stays writable
+      const terminal = (await app.query<{ id: string }>(`SELECT id FROM webhook_event WHERE state = 'processed' ORDER BY "receivedAt" LIMIT 1`)).rows[0]!;
+      await expect(app.query(`UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE id = $1`, [terminal.id]))
+        .rejects.toMatchObject({ code: '23514', constraint: 'webhook_event_terminal' });
+      await app.query(`UPDATE webhook_event SET attempts = attempts + 1 WHERE id = $1`, [terminal.id]);
     } finally {
       await app.end();
     }

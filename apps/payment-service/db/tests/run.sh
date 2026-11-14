@@ -153,3 +153,60 @@ state=$(psql -Atq -d "$db" -c "SELECT count(*) FROM capture_recovery_state")
 perm=$(psql -Atq -d "$db" -c "SELECT string_agg(provider, ',' ORDER BY provider) FROM provider_capture_permission")
 [ "$perm" = "simulation,test" ] || fail "0026 seeded another permission: $perm"
 echo "PASS: 0026 applies over a non-final and an ambiguous historical record, leaves them exactly as recorded, backfills nothing, seeds only simulation and test"
+
+echo "== concurrency: Core V2 DO-22 — a writer waiting on a notification that became terminal cannot change its decision; the same decision is re-recorded =="
+newdb do22race; db="$DBNAME"; apply_all "$db"
+wid=00000000-0000-0000-0000-0000000d0022
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO webhook_event (id, provider, \"providerEventId\", \"eventType\", \"rawBody\") VALUES ('$wid', 'test', 'evt-do22-race', 'payment.succeeded', '\\x7b7d')"
+outdir="$(mktemp -d)"
+# A holds the row (it records `processed`) until BOTH other writers are waiting on its lock, then commits; bounded: 20 s, then it gives up and fails
+( psql -q -v ON_ERROR_STOP=1 -d "$db" >"$outdir/a.out" 2>&1 <<SQL
+BEGIN;
+UPDATE webhook_event SET state = 'processed', outcome = NULL, attempts = attempts + 1, "processedAt" = now() WHERE id = '$wid';
+DO \$\$
+BEGIN
+  FOR i IN 1..400 LOOP
+    PERFORM pg_stat_clear_snapshot();
+    IF (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%do22-race-%') = 2 THEN RETURN; END IF;
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+  RAISE EXCEPTION 'the two waiting writers never arrived';
+END \$\$;
+COMMIT;
+SQL
+) &
+apid=$!
+# B and C start only once A holds the row (its UPDATE done, its wait loop running): bounded, 20 s
+for i in $(seq 1 400); do
+  [ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND query LIKE '%waiting writers never arrived%' AND pid <> pg_backend_pid()")" = 1 ] && break
+  [ "$i" = 400 ] && { cat "$outdir/a.out"; rm -rf "$outdir"; fail "DO-22 race: the lock holder never started"; }
+  sleep 0.05
+done
+# B: a racing duplicate that reached a DIFFERENT decision (refused once it sees the committed terminal row); C: the same decision (allowed)
+( psql -q -d "$db" >"$outdir/b.out" 2>&1 -c "UPDATE webhook_event SET state = 'conflict', outcome = 'invalid_state_transition', attempts = attempts + 1 WHERE id = '$wid' /* do22-race-b */" ) &
+bpid=$!
+( psql -q -v ON_ERROR_STOP=1 -d "$db" >"$outdir/c.out" 2>&1 -c "UPDATE webhook_event SET state = 'processed', outcome = NULL, attempts = attempts + 1, \"processedAt\" = now() WHERE id = '$wid' /* do22-race-c */" ) &
+cpid=$!
+wait "$apid" || { cat "$outdir/a.out"; rm -rf "$outdir"; fail "DO-22 race: the lock holder failed"; }
+wait "$bpid" || true
+wait "$cpid" || { cat "$outdir/c.out"; rm -rf "$outdir"; fail "DO-22 race: the same decision was refused"; }
+grep -q "webhook_event_terminal\|is terminal (processed)" "$outdir/b.out" || { cat "$outdir/b.out"; rm -rf "$outdir"; fail "DO-22 race: a different decision was not refused by the terminal guard"; }
+rm -rf "$outdir"
+final=$(psql -Atq -d "$db" -c "SELECT state || '/' || coalesce(outcome, '-') || '/' || attempts FROM webhook_event WHERE id = '$wid'")
+[ "$final" = "processed/-/2" ] || fail "DO-22 race: final row $final (want processed/-/2)"
+echo "PASS: race — the waiting different decision is refused, the same decision is re-recorded; the row stays processed"
+
+echo "== migration: Core V2 DO-22 — 0030 applies over stored notifications in every state and changes none of them =="
+newdb do22mig; db="$DBNAME"
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0030_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for s in received processing processed ignored unmatched conflict failed; do
+  psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO webhook_event (provider, \"providerEventId\", \"eventType\", \"rawBody\", state, outcome) VALUES ('test', 'evt-do22-h-$s', 'payment.succeeded', '\\x7b7d', '$s', CASE '$s' WHEN 'failed' THEN 'retries_exhausted' WHEN 'conflict' THEN 'provider_error' END)"
+done
+before=$(psql -Atq -d "$db" -c "SELECT md5(string_agg(to_jsonb(w)::text, ',' ORDER BY id)) FROM webhook_event w")
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0030_webhook_event_terminal_guard.sql"
+after=$(psql -Atq -d "$db" -c "SELECT md5(string_agg(to_jsonb(w)::text, ',' ORDER BY id)) FROM webhook_event w")
+[ "$before" = "$after" ] || fail "0030 changed a stored notification"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE webhook_event SET state = 'processed', outcome = NULL WHERE \"providerEventId\" = 'evt-do22-h-failed'" \
+  || fail "0030: a historical failed / retries_exhausted notification can no longer be redelivered"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE webhook_event SET state = 'failed' WHERE \"providerEventId\" = 'evt-do22-h-conflict'" 2>/dev/null; then fail "0030: a historical conflict was rewritten"; fi
+echo "PASS: 0030 applies over history unchanged; a historical failed row is still redelivered, a historical conflict is guarded"
