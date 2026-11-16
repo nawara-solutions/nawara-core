@@ -874,6 +874,37 @@ describeWithEnv(
       }, T);
     }
 
+    it('DO-75 (CHARACTERIZATION, post-closure; the policy stays OPEN): after the attempt\'s discrepancy case is RESOLVED, two LATER contradicting reports on the same attempt: Payment records each once; nothing reopens and no case is added; the resolution and the observation evidence never change; no money moves', async () => {
+      const { o, p } = await buy('direct');
+      const r = await relayed(p.paymentId, p.amount);
+      const { txn } = await r1(p, r, p.amount);
+      await waitCase(() => observationCase(r.attemptId), 'the observation case');
+      await settle();
+      const d = (await discrepancyCase(r.attemptId))!;
+      expect((await ack(B2, d.id, 'provider_statement_reviewed')).status).toBe(200);
+      const resolution = await one(billingAdmin, `SELECT * FROM reconciliation_case_resolution WHERE "caseId" = $1`, [d.id]);
+      expect(resolution).toBeDefined();
+      const oc = (await observationCase(r.attemptId))!;
+      const evidence = await observationEvidence(oc.id);
+      const cases = await n(billingAdmin, `SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1`, [p.paymentId]);
+      const before = await financial(p, o?.org);
+      const observed = (await observationsOf(r.attemptId)).length;
+      // later evidence: two new notifications with other amounts, each also redelivered
+      for (const amount of [p.amount + 3, p.amount - 5]) {
+        const raw = reportFor(r.attemptId, txn, amount);
+        expect(await signedRaw(raw)).toBe(200);
+        expect(await signedRaw(raw)).toBe(200);
+      }
+      await waitObservations(r.attemptId, observed + 2);
+      await settle();
+      expect(await n(billingAdmin, `SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1`, [p.paymentId]), 'no case reopens and none is added').toBe(cases);
+      expect(await n(billingAdmin, `SELECT count(*) AS n FROM reconciliation_case_resolution WHERE "caseId" = $1`, [d.id])).toBe(1);
+      expect(await one(billingAdmin, `SELECT * FROM reconciliation_case_resolution WHERE "caseId" = $1`, [d.id]), 'a resolution is final').toEqual(resolution);
+      expect(await observationEvidence(oc.id), 'the evidence identity never moves').toEqual(evidence);
+      expect((await observationCase(r.attemptId))!.kind, 'the observation case stays open').toBeNull();
+      expect(await financial(p, o?.org), 'no money moved on either side').toEqual(before);
+    }, T);
+
     it('D4 (control, order reversed): the attempt\'s own report first, then the same refund under an unknown reference: one matched fact, no observation, no case', async () => {
       const { p } = await buy('direct');
       const r = await relayed(p.paymentId, p.amount);
