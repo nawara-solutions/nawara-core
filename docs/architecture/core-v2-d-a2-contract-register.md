@@ -1439,6 +1439,15 @@ real application on PostgreSQL 16 and the simulation provider:
   without the consumption (`refund_attempt_authorization_shape`); with the authorization-row insert removed from `commitAuthorized`, I-76 and
   the late-authorization case fail.
 
+**DO-76 S2 authorization-row integrity (dated note, 2026-11-16; the Owner's D-76-3 in the DO-76 Safety Implementation GO; DEVELOPMENT AND
+SIMULATION ONLY; DO-76 stays OPEN).** Payment migration `0031` closes the *Limitation* above at the database boundary: at COMMIT (a deferred
+constraint trigger, so `commitAuthorized`'s order is unchanged), every refund attempt whose `receiptId` was set must have the
+`refund_authorization` row of that attempt and that receipt, or the transaction is refused (`23514`, `refund_attempt_authorization_row`). The
+migration refuses history that already violates I-76 and backfills nothing. No route, event, amount, allocation or liability changes. Limits:
+a superuser can still bypass triggers (the runtime role cannot); stray provider evidence is not affected (DO-76 S1, separate). Evidence: Payment
+`test/do76-authorization-row-integrity.e2e-spec.ts` and the updated S2 case of `test/do76-unauthorized-refund-fact.e2e-spec.ts`; with the trigger
+removed, all four S2 cases fail.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

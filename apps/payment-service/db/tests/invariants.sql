@@ -574,7 +574,11 @@ SELECT pg_temp.expect_error('S6b', 'R6B-3: at most one unresolved or potentially
 SELECT pg_temp.expect_constraint('S6b', 'R6B-3: no skipping to success', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_transition');
 SELECT pg_temp.expect_constraint('S6b', 'authorized needs ALL of Auth''s consumption (receipt, approver, time)', $$UPDATE refund_attempt SET status = 'authorized', "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_authorization_shape');
 SELECT pg_temp.expect_constraint('S6b', 'authorized needs the receipt id too', $$UPDATE refund_attempt SET status = 'authorized', "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_authorization_shape');
+BEGIN; -- Core V2 DO-76 S2 (0031): Auth's consumption and its refund authorization row commit together, as commitAuthorized writes them
 SELECT pg_temp.expect_ok('S6b', 'authorized with Auth''s consumption', $$UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$);
+INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  SELECT id, "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", amount, currency FROM refund_attempt WHERE id = '00000000-0000-4000-8000-0000000006b1';
+COMMIT;
 SELECT pg_temp.expect_constraint('S6b', 'F-11: the consumed authorization never changes', $$UPDATE refund_attempt SET "approvedByUserId" = gen_random_uuid() WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, 'refund_attempt_outcome_with_status');
 SELECT pg_temp.expect_error('S6b', 'the binding is immutable', $$UPDATE refund_attempt SET amount = 1 WHERE id = '00000000-0000-4000-8000-0000000006b1'$$, '23514');
 SELECT pg_temp.expect_ok('S6b', 'dispatching is durable before the provider call', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-0000000006b1'$$);
@@ -651,12 +655,14 @@ SELECT pg_temp.s6b('00000000-0000-4000-8000-0000000006c1', :'c1');
 SELECT "refundCaseId" AS c1case FROM refund_attempt WHERE id = '00000000-0000-4000-8000-0000000006c1' \gset
 SELECT pg_temp.expect_constraint('S6c', 'R6C-1: an authorization only from an attempt Auth authorized', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
   VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', gen_random_uuid(), gen_random_uuid(), 1000, 'TND')$$, :'c1', :'c1case'), 'refund_authorization_from_attempt');
+BEGIN; -- Core V2 DO-76 S2 (0031): the authorization row below commits with the consumption
 UPDATE refund_attempt SET status = 'authorized', "receiptId" = '00000000-0000-4000-8000-0000000006d1', "approvedByUserId" = '00000000-0000-4000-8000-0000000000a6', "consumedAt" = now(), "authorizedAt" = now()
   WHERE id = '00000000-0000-4000-8000-0000000006c1';
 SELECT pg_temp.expect_constraint('S6c', 'R6C-1: an authorization is the attempt''s own (amount)', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
   VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', '00000000-0000-4000-8000-0000000006d1', '00000000-0000-4000-8000-0000000000a6', 999, 'TND')$$, :'c1', :'c1case'), 'refund_authorization_from_attempt');
 SELECT pg_temp.expect_ok('S6c', 'R6C-1: the authorization of the authorized attempt', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
   VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', '00000000-0000-4000-8000-0000000006d1', '00000000-0000-4000-8000-0000000000a6', 1000, 'TND')$$, :'c1', :'c1case'));
+COMMIT;
 SELECT id AS z1 FROM refund_authorization WHERE "refundAttemptId" = '00000000-0000-4000-8000-0000000006c1' \gset
 SELECT pg_temp.expect_error('S6c', 'one authorization per attempt', format($$INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
   VALUES ('00000000-0000-4000-8000-0000000006c1', %L, %L, 'billing-service', '00000000-0000-4000-8000-0000000006d1', '00000000-0000-4000-8000-0000000000a6', 1000, 'TND')$$, :'c1', :'c1case'), '23505');
@@ -1119,6 +1125,30 @@ SELECT pg_temp.expect_ok('DO-22', 'negative control: received may become failed,
 SELECT pg_temp.expect_ok('DO-22', 'negative control: ... failed / transient_error becomes processed', format($$UPDATE webhook_event SET state = 'processed', outcome = NULL, "processedAt" = now() WHERE id = %L$$, :'do22n'));
 SELECT pg_temp.expect_ok('DO-22', 'negative control: a notification may still be stored in any state (fixtures, inserts are not transitions)', $$INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody", state, outcome) VALUES ('test', 'evt-do22-z', 'payment.succeeded', '\x7b7d', 'conflict', 'provider_error')$$);
 SELECT pg_temp.expect_constraint('DO-22', 'a row that became terminal is guarded from then on', format($$UPDATE webhook_event SET state = 'failed', outcome = 'transient_error' WHERE id = %L$$, :'do22n'), 'webhook_event_terminal');
+
+-- ---------------------------------------------------------------------------- Core V2 DO-76 S2 (0031) ----
+-- An attempt that holds Auth's consumption has its refund authorization row at COMMIT. The refusal at COMMIT itself is proven in
+-- test/do76-authorization-row-integrity.e2e-spec.ts (a psql script stops on it); here the check is made IMMEDIATE so it is captured.
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-do76-s2', 'user', 'u-do76', 'company', '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS d76 \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'d76', 1, 'test', false) RETURNING id AS d76a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'d76';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-do76-s2', "submittedAt" = now() WHERE id = :'d76a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'d76a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-do76-s2', 'capture', :'d76', :'d76a', 1000, 'TND', false, 'status_check');
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'d76a', "closedAt" = now() WHERE id = :'d76';
+SELECT pg_temp.expect_ok('DO-76', 'S2 fixture: a refund intent', pg_temp.s6b('00000000-0000-4000-8000-0000000076a1', :'d76'));
+BEGIN;
+SET CONSTRAINTS refund_attempt_21_authorization_row IMMEDIATE;
+SELECT pg_temp.expect_constraint('DO-76', 'S2: Auth''s consumption without its refund authorization row is refused', $$UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000076a1'$$, 'refund_attempt_authorization_row');
+COMMIT;
+BEGIN;
+SELECT pg_temp.expect_ok('DO-76', 'S2 negative control: the consumption with its row in the same transaction commits', $$UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-0000000076a1'$$);
+INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  SELECT id, "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", amount, currency FROM refund_attempt WHERE id = '00000000-0000-4000-8000-0000000076a1';
+COMMIT;
+SELECT pg_temp.expect_constraint('DO-76', 'S2: the consumption is still written once (unchanged 0017 guard)', $$UPDATE refund_attempt SET "receiptId" = gen_random_uuid() WHERE id = '00000000-0000-4000-8000-0000000076a1'$$, 'refund_attempt_outcome_with_status');
 
 -- ---------------------------------------------------------------------------- verdict ----
 \o

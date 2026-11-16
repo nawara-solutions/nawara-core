@@ -76,6 +76,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0028_r3_webhook_evidence_index.sql', // Core V2 R3: the write-once refund-evidence index of stored provider notifications
       '0029_webhook_event_retention_guard.sql', // Core V2 DO-70: a stored provider notification is never deleted or truncated
       '0030_webhook_event_terminal_guard.sql', // Core V2 DO-22: a terminal stored notification keeps its decision
+      '0031_refund_authorization_row_integrity.sql', // Core V2 DO-76 S2: an authorized attempt has its refund authorization row (deferred trigger)
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

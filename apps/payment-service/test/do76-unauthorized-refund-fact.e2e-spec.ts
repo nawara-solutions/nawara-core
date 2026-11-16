@@ -228,7 +228,7 @@ describeWithEnv('DO-76 provider refund evidence on a never-authorized refund att
       await expect(admin.query(`UPDATE refund_attempt SET status = 'authorized' WHERE id = $1`, [attemptId])).rejects.toMatchObject({ code: '23514', constraint: 'refund_attempt_authorization_shape' });
     });
 
-    it('LIMITATION (recorded, not changed): the authorization row is coupled to `authorized` by the application\'s one transaction only; the database does not require it', async () => {
+    it('S2 (D-76-3, migration 0031): the authorization row is now required by the database too: `authorized` without it is refused at COMMIT', async () => {
       const p = await captured();
       auth.unavailable.consume = 1;
       const { attemptId, res } = relay(p);
@@ -236,11 +236,11 @@ describeWithEnv('DO-76 provider refund evidence on a never-authorized refund att
       const c = await admin.connect();
       try {
         await c.query('BEGIN');
-        // a superuser fixture writing what no Payment code path writes: the consumption without its authorization row
+        // a superuser writing what no Payment code path writes: the consumption without its authorization row (accepted by the immediate guards)
         await c.query(`UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = $2, "consumedAt" = now(), "authorizedAt" = now() WHERE id = $1`, [attemptId, OWNER]);
-        expect((await c.query(`SELECT count(*)::int AS n FROM refund_authorization WHERE "refundAttemptId" = $1`, [attemptId])).rows[0].n).toBe(0);
+        await expect(c.query('COMMIT')).rejects.toMatchObject({ code: '23514', constraint: 'refund_attempt_authorization_row' });
       } finally {
-        await c.query('ROLLBACK');
+        await c.query('ROLLBACK').catch(() => undefined);
         c.release();
       }
       expect((await attempt(attemptId)).status).toBe('authorization_pending');

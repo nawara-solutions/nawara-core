@@ -167,6 +167,9 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'ALTER TABLE webhook_event DISABLE TRIGGER webhook_event_10_no_delete',
         // Core V2 DO-22 (migration 0030): nor can it switch off the terminal guard
         'ALTER TABLE webhook_event DISABLE TRIGGER webhook_event_12_terminal',
+        // Core V2 DO-76 S2 (migration 0031): nor the authorization-row rule
+        'ALTER TABLE refund_attempt DISABLE TRIGGER refund_attempt_21_authorization_row',
+        'DROP TRIGGER refund_attempt_21_authorization_row ON refund_attempt',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }
