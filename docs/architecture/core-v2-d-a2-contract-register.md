@@ -1426,6 +1426,27 @@ finding is duplicated).** These findings restate or extend limits already record
 - DO-75 (post-closure evidence): R3 point 12a (R3-F1: `unreconciledFailedAttemptEvidence` stays `true` after resolution) and R3 point 13
   (R3-F2, OPEN: a `refund_completed` closure beside an unassociated unmatched fact).
 
+**DO-75 V2/V3 and post-closure characterization (dated note, 2026-11-16; the Owner's Evidence Integrity and Reliability GO; CHARACTERIZATION
+ONLY: DO-75 stays OPEN, no reopen, link, supersession or correction semantics are introduced, nothing in Payment or Billing changed; R3-F2
+stays OPEN).** Through the real cross-process harnesses (real Auth, two Billing processes, Payment and audit-service, real RabbitMQ):
+- *Already proven before this note.* `do74-observation-certification` D1-D3: two further observations on an attempt whose
+  `refund_observation_conflict` case is OPEN add observations at Payment and leave one case and its first evidence (DO-75 V2); `o2-fact-owner-
+  certification` O2C-2: repeated and multiple observers of one fact owner's contest open one case.
+- *V3, added.* `s0c15b-contest-certification` "DO-75 V3": two LATER contradictions of the same refund fact (distinct notifications, other
+  amounts, each redelivered) after its `refund_fact_contested` case opened: Payment records each distinct contradiction once (three conflict
+  rows, three `provider_fact_conflict.recorded` audit records; a redelivery is the same observation); Billing keeps ONE case, byte-identical,
+  with its opening `reconciliation_contest_evidence` only; none of the contradicting amounts enters Billing; the fact (the verified 100 under
+  its own attempt) is unchanged; no money moves.
+- *Post-closure, added.* `do74-observation-certification` "DO-75 (post-closure)": after the attempt's discrepancy case is RESOLVED
+  (`provider_statement_reviewed`), two later contradicting reports: Payment records each; Billing adds no case and reopens none, the resolution
+  row is unchanged and single, the observation case stays open with its first evidence, and no money moves.
+- *What it rests on.* `reconciliation_case_once` (one case per type and evidence key: discovery skips a key that has a case, open or
+  resolved), one resolution per case and append-only resolutions (Billing `db/tests/invariants.sql`, S6h-B: "resolved once", "a resolution is
+  append-only"), the contest evidence bound to its case (S0-C15B), and Payment's `provider_transaction_fact_conflict_once`, keyed on the
+  notification (`webhookEventId`), so each distinct notification is one observation and a redelivery is none.
+- *Still open.* Whether later evidence needs a new case, a link to the resolved case or an append-only supersession record (DO-75; decision
+  group G2) is unchanged; later details stay visible at Payment only.
+
 #### 7.2.7 FDR-01 v1: financial-liability definition framework (approved as a DEFINITION ONLY, 2026-11-12)
 
 **Approval.** FDR-01 `v1`, approved by the Owner on 2026-11-12 ("OWNER GO: FDR-01 v1 AND FDR-09 v1 DEFINITION ADOPTION", on `main` at
