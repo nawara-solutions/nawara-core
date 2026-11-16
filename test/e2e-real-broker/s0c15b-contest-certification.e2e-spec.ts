@@ -695,6 +695,45 @@ describeWithEnv(
       }
     }
     // every other tested conflict reason
+    it('DO-75 V3 (CHARACTERIZATION; the policy stays OPEN): two LATER contradictions of the same refund fact, each a distinct notification, after its contest case opened: Payment records each once; Billing keeps ONE case with its opening evidence only; no amount of them enters Billing; no money moves', async () => {
+      const { p } = await buy('direct');
+      const r = await relayed(p.paymentId, p.amount);
+      const txn = await providerRef(r.attemptId);
+      expect(await rawRefund(r.attemptId, 100, txn)).toBe(200);
+      await completedCase(r.caseId);
+      await settle();
+      await mirrored(r.attemptId, 'succeeded');
+      const first = JSON.stringify({ eventId: `do75v3_${randomUUID()}`, type: 'refund.succeeded', reference: r.attemptId, providerTransactionId: txn, amount: 150, currency: 'TND' });
+      expect(await signedRaw(first)).toBe(200);
+      const factId = await refundFactOf(txn);
+      await waitCase(() => contestCase(factId), 'the refund contest case');
+      await settle();
+      const c = (await contestCase(factId))!;
+      const opening = await evidenceOf(c.id);
+      const caseRow = await one(billingAdmin, `SELECT * FROM reconciliation_case WHERE id = $1`, [c.id]);
+      const before = await financial(p);
+      // later, contested again: two NEW notifications with other amounts, and a redelivery of each
+      const later = [175, 90].map((amount) => JSON.stringify({ eventId: `do75v3_${randomUUID()}`, type: 'refund.succeeded', reference: r.attemptId, providerTransactionId: txn, amount, currency: 'TND' }));
+      for (const raw of later) {
+        expect(await signedRaw(raw)).toBe(200);
+        expect(await signedRaw(raw)).toBe(200); // the same notification again is the same observation
+      }
+      await waitFor(async () => (await n(paymentAdmin, `SELECT count(*) AS n FROM provider_transaction_fact_conflict WHERE "factId" = $1`, [factId])) === 3, 30_000, 'three distinct contradictions at Payment');
+      await waitFor(async () => (await conflictAudit(factId)).length === 3, 60_000, `Audit to record each contradiction once\n${audit.tail()}`);
+      expect((await conflictAudit(factId)).map((x) => x.changes.observed_amount).sort((x: number, y: number) => x - y)).toEqual([90, 150, 175]);
+      await settle();
+      // Billing: still ONE case, unchanged, with the evidence of its opening only (DO-75 V3 as recorded); later details stay at Payment
+      expect(await n(billingAdmin, `SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [factId])).toBe(1);
+      expect(await one(billingAdmin, `SELECT * FROM reconciliation_case WHERE id = $1`, [c.id])).toEqual(caseRow);
+      expect(await evidenceOf(c.id)).toEqual(opening);
+      expect(await n(billingAdmin, `SELECT count(*) AS n FROM reconciliation_contest_evidence WHERE "caseId" = $1`, [c.id])).toBe(1);
+      expect(await openedIntents(c.id)).toBe(1);
+      expect(await n(billingAdmin, `SELECT count(*) AS n FROM reconciliation_case WHERE "paymentId" = $1 AND amount IN (150, 175, 90)`, [p.paymentId])).toBe(0);
+      // the fact itself is immutable: the verified 100 under its own attempt, whatever was observed later
+      expect(await one(paymentAdmin, `SELECT amount::int AS amount, "refundAttemptId" FROM provider_transaction_fact WHERE id = $1`, [factId])).toEqual({ amount: 100, refundAttemptId: r.attemptId });
+      expect(await financial(p)).toEqual(before);
+    }, T);
+
     it('T4: exposure_mismatch, chargeback_mismatch and chargeback_unverifiable each open one redacted case; no financial effect is then refused on the payment', async () => {
       const cases: Record<string, string> = {};
       const a = await buy('direct');

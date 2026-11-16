@@ -1415,6 +1415,30 @@ inventory ends at DO-74).
 - **DO-77 Non-Company seller case visibility: intended authority model (OPEN).** Who, if anyone, should see and act on reconciliation
   evidence for a seller that is not a Company. The gap itself is DO-75 V1 (cross-reference; not duplicated here).
 
+**DO-76 characterization (dated note, 2026-11-16; the Owner's Evidence Integrity and Reliability GO; CHARACTERIZATION ONLY: DO-76 stays OPEN,
+nothing in Payment or Billing changed; F-29 not involved and LOCKED).** Payment `test/do76-unauthorized-refund-fact.e2e-spec.ts`, through the
+real application on PostgreSQL 16 and the simulation provider:
+- *Invariant I-76.* A `refund_authorization` row exists for a refund attempt exactly when the attempt holds Auth's consumption (`receiptId`):
+  `commitAuthorized` writes both in the authorizing transition's one transaction, the `0018` backfill gave every earlier consumption its row,
+  and `refund_attempt_authorization_shape` ties `receiptId` to every state from `authorized` on. The worker dispatches only `authorized`
+  attempts (then `dispatching`). So Payment never sends a refund without an authorization, and every `no_authorization` block is verified
+  provider evidence of a refund Payment did not send, naming (by its id, the idempotency key) an attempt not authorized at `blockedAt`.
+- *Paths, all reproduced.* The attempt was `authorization_expired`, `authorization_refused`, or still `authorization_pending` when the
+  evidence arrived. Each gives one matched fact, one append-only block, one `audit.refund_fact.allocation_blocked` intent, no allocation, and an
+  unchanged attempt; a redelivery is the same fact.
+- *The cause is derivable, so no new record is written.* From immutable rows only: the attempt's authorization row compared with the block's
+  `blockedAt`, otherwise the attempt's state (`authorization_expired`, `authorization_refused`, `authorization_pending`); a row created after
+  `blockedAt` means `authorized_after_evidence`.
+- *Consequences recorded under approved behaviour (not changed).* (1) A pending attempt authorized LATER (AUTH-03 recovery) keeps the early
+  fact blocked for good, gets its authorization row with nothing allocated, and IS dispatched by the next worker pass, so a stray refund and
+  the real one may both exist for one payment; a redelivery of the stray evidence then makes the in-flight attempt `discrepancy`. (2) The
+  stray fact bars every later refund attempt for that payment (`refund_attempt_no_refund_fact`).
+- *Limitation.* The authorization row is coupled to `authorized` by the application's single transaction; the database does not require it (a
+  superuser fixture can write the consumption without the row). A database guard would need its own GO.
+- *Negative controls.* The database refuses `authorization_pending` → `dispatching` (`refund_attempt_transition`) and an `authorized` state
+  without the consumption (`refund_attempt_authorization_shape`); with the authorization-row insert removed from `commitAuthorized`, I-76 and
+  the late-authorization case fail.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 
@@ -1425,6 +1449,27 @@ finding is duplicated).** These findings restate or extend limits already record
 - DO-75 V3: S0-C15B (`refund_fact_contested` and its contest evidence) and O-2 (the fact owner's case).
 - DO-75 (post-closure evidence): R3 point 12a (R3-F1: `unreconciledFailedAttemptEvidence` stays `true` after resolution) and R3 point 13
   (R3-F2, OPEN: a `refund_completed` closure beside an unassociated unmatched fact).
+
+**DO-75 V2/V3 and post-closure characterization (dated note, 2026-11-16; the Owner's Evidence Integrity and Reliability GO; CHARACTERIZATION
+ONLY: DO-75 stays OPEN, no reopen, link, supersession or correction semantics are introduced, nothing in Payment or Billing changed; R3-F2
+stays OPEN).** Through the real cross-process harnesses (real Auth, two Billing processes, Payment and audit-service, real RabbitMQ):
+- *Already proven before this note.* `do74-observation-certification` D1-D3: two further observations on an attempt whose
+  `refund_observation_conflict` case is OPEN add observations at Payment and leave one case and its first evidence (DO-75 V2); `o2-fact-owner-
+  certification` O2C-2: repeated and multiple observers of one fact owner's contest open one case.
+- *V3, added.* `s0c15b-contest-certification` "DO-75 V3": two LATER contradictions of the same refund fact (distinct notifications, other
+  amounts, each redelivered) after its `refund_fact_contested` case opened: Payment records each distinct contradiction once (three conflict
+  rows, three `provider_fact_conflict.recorded` audit records; a redelivery is the same observation); Billing keeps ONE case, byte-identical,
+  with its opening `reconciliation_contest_evidence` only; none of the contradicting amounts enters Billing; the fact (the verified 100 under
+  its own attempt) is unchanged; no money moves.
+- *Post-closure, added.* `do74-observation-certification` "DO-75 (post-closure)": after the attempt's discrepancy case is RESOLVED
+  (`provider_statement_reviewed`), two later contradicting reports: Payment records each; Billing adds no case and reopens none, the resolution
+  row is unchanged and single, the observation case stays open with its first evidence, and no money moves.
+- *What it rests on.* `reconciliation_case_once` (one case per type and evidence key: discovery skips a key that has a case, open or
+  resolved), one resolution per case and append-only resolutions (Billing `db/tests/invariants.sql`, S6h-B: "resolved once", "a resolution is
+  append-only"), the contest evidence bound to its case (S0-C15B), and Payment's `provider_transaction_fact_conflict_once`, keyed on the
+  notification (`webhookEventId`), so each distinct notification is one observation and a redelivery is none.
+- *Still open.* Whether later evidence needs a new case, a link to the resolved case or an append-only supersession record (DO-75; decision
+  group G2) is unchanged; later details stay visible at Payment only.
 
 #### 7.2.7 FDR-01 v1: financial-liability definition framework (approved as a DEFINITION ONLY, 2026-11-12)
 
