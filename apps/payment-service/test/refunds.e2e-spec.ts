@@ -12,6 +12,7 @@ import { startFakeReceiptServer, type FakeReceiptServer } from './support/fake-r
 
 const paymentMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
 const BUYER = '2f1b8d6c-4e3a-4b7c-8d9e-0f1a2b3c4d5e';
+const SUBSCRIBER = '5b5b5b5b-0000-4000-8000-00000000005b'; // the Organization whose subscription the buyer administers (Core V2 DO-28)
 const COMPANY = '5b0c2f4e-1d3a-4c6b-8e9f-0a1b2c3d4e5f';
 const OWNER = '7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a';
 const SECRET = randomBytes(32).toString('hex');
@@ -31,7 +32,10 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
   const billing = generateServiceToken();
   const other = generateServiceToken();
   const harness = generateServiceToken();
-  const identities: Record<string, AuthIdentity> = { 'buyer-jwt': { id: BUYER, adminTier: null, isActive: true, memberships: [] } };
+  // Core V2 DO-28: an Organization subscription's attempt needs its payer to be an active administrator of that exact Organization
+  const identities: Record<string, AuthIdentity> = { 'buyer-jwt': { id: BUYER, adminTier: null, isActive: true, memberships: [
+    { id: randomUUID(), organization: { id: SUBSCRIBER }, platform: { id: TEST_PLATFORM }, status: 'active', isOrganizationAdmin: true },
+  ] } };
   const authClient: AuthClient = { getIdentity: async (bearer) => identities[bearer] ?? null, hasPlatformAccess: async () => false };
   const server = () => t.app.getHttpServer();
   const cmd = () => `cmd-${randomUUID()}`;
@@ -203,7 +207,7 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
       const open = await createPayment();
       const c1 = randomUUID();
       expect((await refund(open.id, body(c1, receiptFor(open.id, c1).secret)).expect(409)).body.code).toBe('payment_not_refundable');
-      const { payment: sub } = await captured({ purpose: 'organization_subscription', beneficiaryUserId: undefined });
+      const { payment: sub } = await captured({ purpose: 'organization_subscription', beneficiaryUserId: undefined, organizationId: SUBSCRIBER });
       const c2 = randomUUID();
       expect((await refund(sub.id, body(c2, receiptFor(sub.id, c2).secret)).expect(409)).body.code).toBe('payment_not_refundable');
       const orgSeller = randomUUID();

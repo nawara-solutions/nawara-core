@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { describeWithEnv } from './support/env.js';
-import { startFakeAuthServer, type FakeAuthServer } from './support/fake-auth.js';
+import { startFakeAuthServer, type FakeAuthServer, type FakeMembership } from './support/fake-auth.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub, TEST_PLATFORM } from './support/admission.js';
 import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
@@ -70,6 +70,8 @@ describeWithEnv(
     let payment: LiveService;
     let amqpConn: ChannelModel;
     let fakeAuth: FakeAuthServer;
+    /** The payer as the fake Auth answers it, live, on every request (memberships are added per Organization; Core V2 DO-28). */
+    const payerIdentity: { id: string; isActive: boolean; memberships: FakeMembership[] } = { id: PAYER_ID, isActive: true, memberships: [] };
     let proxy: BrokerProxy;
     let billingAdmin: pg.Pool;
     let paymentAdmin: pg.Pool;
@@ -119,7 +121,7 @@ describeWithEnv(
       tap = await tapPaymentEvents(amqpConn);
       await purgeBillingQueues();
 
-      fakeAuth = await startFakeAuthServer({ [PAYER_TOKEN]: { id: PAYER_ID, isActive: true } });
+      fakeAuth = await startFakeAuthServer({ [PAYER_TOKEN]: payerIdentity });
 
       // Both services connect through this proxy so test D can simulate a real broker outage/recovery without
       // touching the shared CI RabbitMQ container. Transparent when not severed (see support/fake-auth.ts's sibling,
@@ -221,6 +223,8 @@ describeWithEnv(
 
     /** Seeds a real recurring invoice + payment-request and waits for the real dispatcher to attach a real Payment. */
     async function requestedRecurringPayment(organizationId: string, priceId: string): Promise<{ invoiceId: string; requestId: string; paymentId: string }> {
+      // Core V2 DO-28: the payer of an Organization subscription starts an attempt only as an active administrator of that Organization
+      payerIdentity.memberships.push({ id: randomUUID(), organization: { id: organizationId }, platform: { id: TEST_PLATFORM }, status: 'active', isOrganizationAdmin: true });
       const invoice = await asProducer('POST', '/billing/invoices', {
         invoiceRequestId: randomUUID(),
         seller: { type: 'organization', id: organizationId },
