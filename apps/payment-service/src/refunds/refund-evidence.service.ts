@@ -122,10 +122,10 @@ export class RefundEvidenceService {
     const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
     const source = webhookEventId ? 'webhook' : 'status_check';
     return this.db.tx(async (q) => {
-      // Core V2 DO-76 S1: the payment row in SHARE mode, held to commit. The refund dispatch transition holds it exclusively (`RefundWorker.startDispatch`
-      // and the 0032 guard), so this fact is either committed before that transition reads the evidence, or written after `dispatching` is durable.
-      // Never a refusal: concurrent facts of one payment share the lock; a fact waits at most for one dispatch transition.
-      await q.query('SELECT 1 FROM payment WHERE id = $1 FOR SHARE', [a.paymentId]);
+      // Core V2 DO-76 S1: the payment's refund-dispatch lock SHARED, held to commit (0032 `refund_dispatch_lock_key`). The dispatch transition holds it
+      // exclusively (`RefundWorker.startDispatch` and the 0032 guard), so this fact is either committed before that transition reads the evidence, or
+      // written after `dispatching` is durable. Never a refusal: facts of one payment share it, and nothing but a dispatch transition delays it.
+      await q.query('SELECT pg_advisory_xact_lock_shared(refund_dispatch_lock_key($1))', [a.paymentId]);
       const { rows } = await q.query<{ id: string }>(
         `INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source, "webhookEventId", "providerOccurredAt")
          VALUES ($1, $2, 'refund', $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT ON CONSTRAINT provider_transaction_fact_identity DO NOTHING RETURNING id`,

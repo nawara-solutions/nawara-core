@@ -1454,9 +1454,10 @@ above is closed for Core-originated refunds:
 - *Rule (D-76-1).* `authorized` -> `dispatching` (the one step after which the provider can learn the attempt id) is not taken while
   `refund_capture_has_evidence(captureFactId)` holds (the frozen `0022` per-capture rule that already refuses a NEW attempt): the attempt is
   not sent and stays `authorized`. No new status, no terminal state, no amount, allocation, liability or refund-policy change.
-- *Boundary.* The transition runs under the payment row lock (`RefundWorker.startDispatch`; the `0032` guard takes it again on its own), and
-  every writer of that evidence holds the same lock: a refund fact in SHARE mode (`RefundEvidenceService`), an association in UPDATE mode
-  (`0021`). Evidence committed first is always seen; evidence written later waits for `dispatching` to be durable and then keeps the S6b
+- *Boundary.* The transition takes the payment's refund-dispatch advisory lock exclusively, then the payment row (`RefundWorker.startDispatch`;
+  the `0032` guard takes both again on its own). A refund fact writer holds the advisory lock shared (`RefundEvidenceService`), an association
+  the payment row (`0021`); nothing else waits on the advisory lock, so a payment row lock held by allocation or disputes never delays a refund
+  fact (FC-1, unchanged). Evidence committed first is always seen; evidence written later waits for `dispatching` to be durable and then keeps the S6b
   semantics. The database refuses the transition independently (`23514`, `refund_attempt_dispatch_hold`).
 - *Hold (D-76-2).* One append-only `refund_safety_escalation` row of kind `dispatch_held` per attempt, with its audit intent
   `refund_safety.escalated` in the same transaction. The worker never picks a held attempt again, and the database refuses its dispatch even

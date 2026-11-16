@@ -27,7 +27,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * PostgreSQL 16, the simulation provider and the fake Auth receipt server.
  *
  * The transactional boundary under test: `authorized` -> `dispatching` (the one step after which the provider can learn the attempt id) runs under the
- * payment row lock, and every writer of refund evidence holds that lock too (a refund fact in SHARE mode, an association in UPDATE mode). The database
+ * payment's refund-dispatch advisory lock (exclusive) and its row lock; a refund fact writer holds the advisory lock shared, an association the row lock. The database
  * guard repeats the check under the same lock on its own. Evidence that arrives after `dispatching` keeps the S6b semantics (the external race).
  */
 describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€” real PostgreSQL', ['TEST_DATABASE_ADMIN_URL'], (env) => {
@@ -229,13 +229,13 @@ describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€
   });
 
   describe('the transactional boundary: concurrency, multiple instances, failure and retry', () => {
-    it('H5a evidence first: an uncommitted refund fact holding the payment SHARE lock (as recordRefundFact does) makes the dispatch wait, then hold', async () => {
+    it('H5a evidence first: an uncommitted refund fact holding the refund-dispatch lock SHARED (as recordRefundFact does) makes the dispatch wait, then hold', async () => {
       const p = await captured();
       const attemptId = await authorizedAttempt(p);
       const c = await admin.connect();
       try {
         await c.query('BEGIN');
-        await c.query('SELECT 1 FROM payment WHERE id = $1 FOR SHARE', [p]);
+        await c.query('SELECT pg_advisory_xact_lock_shared(refund_dispatch_lock_key($1))', [p]);
         await c.query(strayFactSql, [attemptId, `race-a-${attemptId}`]);
         await reset();
         const pass = worker.drainOnce();
@@ -251,7 +251,7 @@ describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€
       expect((await escalations(attemptId)).map((e) => e.kind)).toEqual(['dispatch_held']);
     });
 
-    it('H5b dispatch first: a refund notification arriving while the dispatch transition holds the payment lock waits, and is then applied as today (the external race)', async () => {
+    it('H5b dispatch first: a refund notification arriving while the dispatch transition holds the refund-dispatch lock waits, and is then applied as today (the external race)', async () => {
       const p = await captured();
       const attemptId = await authorizedAttempt(p);
       const txn = `race-b-${attemptId}`;
@@ -259,7 +259,7 @@ describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€
       let delivered: Promise<unknown>;
       try {
         await c.query('BEGIN');
-        await c.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [p]); // what RefundWorker.startDispatch holds
+        await c.query('SELECT pg_advisory_xact_lock(refund_dispatch_lock_key($1))', [p]); // what RefundWorker.startDispatch holds first
         await c.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1`, [attemptId]); // the 0032 guard: no evidence yet
         delivered = Promise.resolve(notify(attemptId, txn));
         await pause(400);
@@ -282,7 +282,7 @@ describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€
       const d = await admin.connect();
       try {
         await c.query('BEGIN');
-        await c.query('SELECT 1 FROM payment WHERE id = $1 FOR SHARE', [p]);
+        await c.query('SELECT pg_advisory_xact_lock_shared(refund_dispatch_lock_key($1))', [p]);
         await c.query(strayFactSql, [attemptId, `race-c-${attemptId}`]);
         const raw = d.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1`, [attemptId]).then(() => 'committed', (e) => e);
         await pause(400);
@@ -295,6 +295,25 @@ describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€
       expect((await attempt(attemptId)).status).toBe('authorized');
       // and with the evidence already committed, a raw dispatch is refused at once
       await expect(admin.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1`, [attemptId])).rejects.toMatchObject({ constraint: 'refund_attempt_dispatch_hold' });
+    });
+
+    it('H5d negative control: a payment row lock held by other processing (allocation, disputes) never delays a refund fact; only a dispatch transition does', async () => {
+      const p = await captured();
+      const attemptId = await authorizedAttempt(p);
+      const txn = `barrier-${attemptId}`;
+      const c = await admin.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [p]); // e.g. an allocation in progress (the certifications' order barrier)
+        const delivered = Promise.resolve(notify(attemptId, txn)).then(() => 'delivered', () => 'delivered');
+        const deadline = Date.now() + 10_000;
+        while ((await factOf(txn)).length === 0 && Date.now() < deadline) await pause(100);
+        expect(await factOf(txn)).toHaveLength(1); // FC-1: committed first, while the row lock is still held
+        await c.query('ROLLBACK');
+        await delivered;
+      } finally {
+        c.release();
+      }
     });
 
     it('H6 two Payment instances race the same attempts: one dispatch for a normal refund; one hold and one audit intent for a held one', async () => {

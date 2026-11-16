@@ -177,7 +177,8 @@ export class RefundWorker {
 
   /**
    * Core V2 DO-76 S1 (the Owner's D-76-1, D-76-2): `authorized` -> `dispatching`, the one step after which the provider can learn the key, under the
-   * payment row lock that every writer of refund evidence also takes (so the evidence read here is complete, and later evidence waits). Refund
+   * payment's refund-dispatch lock (exclusive; refund fact writers hold it shared) and the payment row lock (associations), so the evidence read here is
+   * complete and later evidence waits. Refund
    * evidence of this attempt's capture that already exists (the frozen 0022 rule `refund_capture_has_evidence`, through its fact list) can only be
    * money returned without this dispatch: the attempt is NOT sent and stays `authorized`, held by one append-only escalation (deduplicated per
    * attempt) with its audit intent in the same transaction. Nothing releases, retries, abandons, allocates or resolves it. The database refuses the
@@ -185,6 +186,8 @@ export class RefundWorker {
    */
   private async startDispatch(a: RefundAttemptRow, ctx: EventContext): Promise<boolean> {
     const held = await this.db.tx(async (q) => {
+      // the refund-dispatch lock FIRST (before any row lock: a fact writer holding it shared then needs only its attempt row), then payment, then attempt
+      await q.query('SELECT pg_advisory_xact_lock(refund_dispatch_lock_key($1))', [a.paymentId]);
       const current = await this.attempts.lockAttempt(q, a.id);
       if (current.status !== 'authorized') return { dispatch: false as const };
       const { rows: evidence } = await q.query<{ factId: string }>(`SELECT e AS "factId" FROM refund_capture_evidence_facts($1) e LIMIT 1`, [current.captureFactId]);

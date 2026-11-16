@@ -9,9 +9,11 @@
 -- this migration applies the SAME rule to the one remaining step that sends money: `authorized` -> `dispatching`.
 --
 --   * D-76-1 (hold). `authorized` -> `dispatching` is refused while `refund_capture_has_evidence(captureFactId)` holds, or once the attempt is held
---     (`refund_attempt_dispatch_hold`, 23514). The guard takes the payment row lock first: every writer of that evidence holds the same lock
---     (a refund fact: FOR SHARE in `RefundEvidenceService`; an association: FOR UPDATE in its 0021 insert guard), so evidence committed before
---     the transition is always seen and evidence written after it waits for it. The attempt stays `authorized`: no new status, no terminal state,
+--     (`refund_attempt_dispatch_hold`, 23514). The transition takes the payment's refund-dispatch lock EXCLUSIVELY (a transaction advisory lock,
+--     `refund_dispatch_lock_key`), then the payment row: a refund fact writer holds the same advisory lock SHARED (`RefundEvidenceService`), and
+--     an association locks the payment row (its 0021 insert guard). So evidence committed before the transition is always seen and evidence
+--     written after it waits for it; nothing else waits on the advisory lock (a payment row lock held by allocation or dispute processing never
+--     delays a refund fact). The attempt stays `authorized`: no new status, no terminal state,
 --     no money effect.
 --   * D-76-2 (no automatic release). A hold is an append-only `refund_safety_escalation` row of kind `dispatch_held`; once it exists the attempt is
 --     never dispatched by the database rule above, whatever later happens to the evidence (an association later refused, for example). Nothing
@@ -82,9 +84,17 @@ CREATE TRIGGER refund_safety_escalation_05_insert_guard BEFORE INSERT ON refund_
 CREATE TRIGGER refund_safety_escalation_10_append_only BEFORE UPDATE OR DELETE ON refund_safety_escalation FOR EACH ROW EXECUTE FUNCTION refund_append_only();
 CREATE TRIGGER refund_safety_escalation_11_no_truncate BEFORE TRUNCATE ON refund_safety_escalation FOR EACH STATEMENT EXECUTE FUNCTION refund_append_only();
 
--- D-76-1 at the database: the only transition that sends money waits for the payment row (the evidence writers' lock), then re-reads the evidence
+-- The payment's refund-dispatch lock: EXCLUSIVE for `authorized` -> `dispatching`, SHARED for a refund fact writer (transaction advisory locks; a hash
+-- collision between two payments only makes one wait for the other).
+CREATE FUNCTION refund_dispatch_lock_key(payment uuid) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+  SELECT hashtextextended('payment-refund-dispatch:' || payment::text, 0)
+$$;
+
+-- D-76-1 at the database: the only transition that sends money waits for the evidence writers (the advisory lock) and associations (the payment row),
+-- then re-reads the evidence
 CREATE FUNCTION refund_attempt_dispatch_hold_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  PERFORM pg_advisory_xact_lock(refund_dispatch_lock_key(NEW."paymentId"));
   PERFORM 1 FROM payment WHERE id = NEW."paymentId" FOR UPDATE;
   IF EXISTS (SELECT 1 FROM refund_safety_escalation h WHERE h."refundAttemptId" = NEW.id AND h.kind = 'dispatch_held')
      OR refund_capture_has_evidence(NEW."captureFactId") THEN
