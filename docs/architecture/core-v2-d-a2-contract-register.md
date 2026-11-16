@@ -1439,6 +1439,40 @@ real application on PostgreSQL 16 and the simulation provider:
   without the consumption (`refund_attempt_authorization_shape`); with the authorization-row insert removed from `commitAuthorized`, I-76 and
   the late-authorization case fail.
 
+**DO-76 S2 authorization-row integrity (dated note, 2026-11-16; the Owner's D-76-3 in the DO-76 Safety Implementation GO; DEVELOPMENT AND
+SIMULATION ONLY; DO-76 stays OPEN).** Payment migration `0031` closes the *Limitation* above at the database boundary: at COMMIT (a deferred
+constraint trigger, so `commitAuthorized`'s order is unchanged), every refund attempt whose `receiptId` was set must have the
+`refund_authorization` row of that attempt and that receipt, or the transaction is refused (`23514`, `refund_attempt_authorization_row`). The
+migration refuses history that already violates I-76 and backfills nothing. No route, event, amount, allocation or liability changes. Limits:
+a superuser can still bypass triggers (the runtime role cannot); stray provider evidence is not affected (DO-76 S1, separate). Evidence: Payment
+`test/do76-authorization-row-integrity.e2e-spec.ts` and the updated S2 case of `test/do76-unauthorized-refund-fact.e2e-spec.ts`; with the trigger
+removed, all four S2 cases fail.
+
+**DO-76 S1 dispatch hold and safety escalation (dated note, 2026-11-16; the Owner's D-76-1, D-76-2 and D-76-4 in the DO-76 Safety Implementation
+GO; DEVELOPMENT AND SIMULATION ONLY; DO-76 stays OPEN).** Payment migration `0032` and the refund worker. Consequence (1) of the characterization
+above is closed for Core-originated refunds:
+- *Rule (D-76-1).* `authorized` -> `dispatching` (the one step after which the provider can learn the attempt id) is not taken while
+  `refund_capture_has_evidence(captureFactId)` holds (the frozen `0022` per-capture rule that already refuses a NEW attempt): the attempt is
+  not sent and stays `authorized`. No new status, no terminal state, no amount, allocation, liability or refund-policy change.
+- *Boundary.* The transition takes the payment's refund-dispatch advisory lock exclusively, then the payment row (`RefundWorker.startDispatch`;
+  the `0032` guard takes both again on its own). A refund fact writer holds the advisory lock shared (`RefundEvidenceService`), an association
+  the payment row (`0021`); nothing else waits on the advisory lock, so a payment row lock held by allocation or disputes never delays a refund
+  fact (FC-1, unchanged). Evidence committed first is always seen; evidence written later waits for `dispatching` to be durable and then keeps the S6b
+  semantics. The database refuses the transition independently (`23514`, `refund_attempt_dispatch_hold`).
+- *Hold (D-76-2).* One append-only `refund_safety_escalation` row of kind `dispatch_held` per attempt, with its audit intent
+  `refund_safety.escalated` in the same transaction. The worker never picks a held attempt again, and the database refuses its dispatch even
+  if the evidence later stops counting. Nothing releases, retries, abandons, allocates or resolves it.
+- *Escalation (D-76-4).* Every refund fact newly blocked as `no_authorization` gets one `refund_fact_without_authorization` row and audit
+  intent in the block's transaction: a request for review, never a finding that a provider or a secret was compromised.
+- *Visibility.* PAY-12 `refund_safety_escalation` (Owner only, Company-scoped through the payment; the producer's route refuses the kind).
+- *Limits.* Evidence the provider has not reported yet is not visible to any rule; once `dispatching` is durable a second provider refund is
+  prevented only by the provider's idempotency on the same key. A held attempt keeps its refund case in progress and bars new attempts on the
+  payment (`refund_attempt_one_effective`) until an approved release contract exists. A superuser can bypass triggers.
+- *Evidence.* Payment `test/do76-dispatch-hold.e2e-spec.ts` (H1 to H9), the C3 case of `test/do76-unauthorized-refund-fact.e2e-spec.ts`, and the
+  do73 real-broker certification (the new action delivered to the live audit-service). Mutation controls: without the hold and the guard, nine
+  cases fail (the attempt is dispatched); without the hold alone, the guard still prevents the dispatch (the escalation cases fail); without
+  the guard's lock, or without the evidence writer's lock, the corresponding race case fails.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

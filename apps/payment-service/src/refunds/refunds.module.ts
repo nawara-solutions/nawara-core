@@ -7,6 +7,7 @@ import { HttpReceiptAuthority, RECEIPT_AUTHORITY, type ReceiptAuthority } from '
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
+import { RefundSafetyService } from './refund-safety.service.js';
 import { RefundWorker, RefundWorkerService } from './refund-worker.js';
 import { RefundCapturesController, RefundsController, SettlingCaptureController } from './refunds.controller.js';
 
@@ -27,7 +28,7 @@ export class RefundsModule {
       imports: [AuthModule, PaymentsModule],
       controllers: [RefundsController, RefundCapturesController, SettlingCaptureController],
       providers: [
-        RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundWorker, IdempotencyService,
+        RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundSafetyService, RefundWorker, IdempotencyService,
         ...(opts.worker === false ? [] : [RefundWorkerService]),
         {
           provide: RECEIPT_AUTHORITY,

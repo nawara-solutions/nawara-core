@@ -1226,7 +1226,7 @@ describeWithEnv(
     // ───────────────────────────────────────────────────────────── DO-68: financial audit delivery, cross-process (runs LAST: it reads the whole suite's evidence)
     it('DO-68 (extension): every audit intent Billing and Payment committed in this DO-73 suite reached the live audit-service exactly once, as recorded; the allocation-block and refund-cancellation actions are among them', async () => {
       const delivered = await assertAuditDelivery({
-        billingAdmin, paymentAdmin, auditAdmin, amqpConn, required: ['refund_fact.allocation_blocked', 'refund_case.cancelled', 'reconciliation_case.opened', 'reconciliation_case.resolved'], diagnostics: () => `${tails()}\n--- audit ---\n${audit.tail()}`,
+        billingAdmin, paymentAdmin, auditAdmin, amqpConn, required: ['refund_fact.allocation_blocked', 'refund_safety.escalated' /* Core V2 DO-76 S1 (D-76-4) */, 'refund_case.cancelled', 'reconciliation_case.opened', 'reconciliation_case.resolved'], diagnostics: () => `${tails()}\n--- audit ---\n${audit.tail()}`,
       });
       record('DO-68', 'audit_delivery', delivered);
     }, 300_000);

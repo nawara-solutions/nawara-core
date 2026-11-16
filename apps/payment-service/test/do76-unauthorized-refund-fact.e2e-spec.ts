@@ -158,7 +158,7 @@ describeWithEnv('DO-76 provider refund evidence on a never-authorized refund att
       expect(await derivedCause(await expectBlockedOnce(attemptId, p, txn, 'authorization_refused'))).toBe('authorization_refused');
     });
 
-    it('C3 still authorization_pending, then authorized LATER: the early fact stays blocked for good; cause `authorized_after_evidence`', async () => {
+    it('C3 still authorization_pending, then authorized LATER: the early fact stays blocked for good; cause `authorized_after_evidence`; S1: never dispatched', async () => {
       const p = await captured();
       // Auth consumes but the answer is lost, and Auth's lookup is unreachable during the request: Payment keeps the intent pending
       auth.loseResponse.consume = 1;
@@ -178,14 +178,16 @@ describeWithEnv('DO-76 provider refund evidence on a never-authorized refund att
       const [z] = await authorizationOf(attemptId);
       expect(z).toMatchObject({ allocated: 0, completedAt: null });
       // the block is append-only and permanent: a further allocation pass answers `blocked`, nothing is allocated against the new row.
-      // The now-authorized attempt IS dispatched by the next pass (approved behaviour): the provider is asked for the refund with the same key,
-      // so a stray refund and the real one may both exist for this payment (recorded, never netted; DO-76 stays OPEN).
+      // Core V2 DO-76 S1 (D-76-1, migration 0032): the now-authorized attempt is NOT dispatched (before S1 the next pass sent it, so a stray refund and
+      // the real one could both exist). Refund evidence of its capture existed first: it stays `authorized`, held, and nothing releases it (D-76-2)
       await drain();
-      expect((await attempt(attemptId)).status).toBe('submitted');
-      // a redelivery of the stray evidence is the same fact; on the now in-flight attempt it is a verified refund that is not this attempt's own
-      // refund reference, so the attempt becomes `discrepancy` (S6b: never a silent full refund)
+      expect((await attempt(attemptId)).status).toBe('authorized');
+      expect(Number((await admin.query(`SELECT count(*) FROM simulation_refund_dispatch WHERE "idempotencyKey" = $1`, [attemptId])).rows[0].count)).toBe(0);
+      expect((await admin.query(`SELECT kind FROM refund_safety_escalation WHERE "refundAttemptId" = $1 ORDER BY "escalatedAt", id`, [attemptId])).rows.map((r) => r.kind))
+        .toEqual(['refund_fact_without_authorization', 'dispatch_held']);
+      // a redelivery of the stray evidence is the same fact; on the held (not in-flight) attempt it is evidence only
       await notify(attemptId, txn);
-      expect((await attempt(attemptId)).status).toBe('discrepancy');
+      expect((await attempt(attemptId)).status).toBe('authorized');
       expect(await factOf(txn)).toHaveLength(1);
       expect((await blockOf(factId)).map((b) => b.reason)).toEqual(['no_authorization']);
       expect(await blockAudits(factId)).toHaveLength(1);
@@ -228,7 +230,7 @@ describeWithEnv('DO-76 provider refund evidence on a never-authorized refund att
       await expect(admin.query(`UPDATE refund_attempt SET status = 'authorized' WHERE id = $1`, [attemptId])).rejects.toMatchObject({ code: '23514', constraint: 'refund_attempt_authorization_shape' });
     });
 
-    it('LIMITATION (recorded, not changed): the authorization row is coupled to `authorized` by the application\'s one transaction only; the database does not require it', async () => {
+    it('S2 (D-76-3, migration 0031): the authorization row is now required by the database too: `authorized` without it is refused at COMMIT', async () => {
       const p = await captured();
       auth.unavailable.consume = 1;
       const { attemptId, res } = relay(p);
@@ -236,11 +238,11 @@ describeWithEnv('DO-76 provider refund evidence on a never-authorized refund att
       const c = await admin.connect();
       try {
         await c.query('BEGIN');
-        // a superuser fixture writing what no Payment code path writes: the consumption without its authorization row
+        // a superuser writing what no Payment code path writes: the consumption without its authorization row (accepted by the immediate guards)
         await c.query(`UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = $2, "consumedAt" = now(), "authorizedAt" = now() WHERE id = $1`, [attemptId, OWNER]);
-        expect((await c.query(`SELECT count(*)::int AS n FROM refund_authorization WHERE "refundAttemptId" = $1`, [attemptId])).rows[0].n).toBe(0);
+        await expect(c.query('COMMIT')).rejects.toMatchObject({ code: '23514', constraint: 'refund_attempt_authorization_row' });
       } finally {
-        await c.query('ROLLBACK');
+        await c.query('ROLLBACK').catch(() => undefined);
         c.release();
       }
       expect((await attempt(attemptId)).status).toBe('authorization_pending');

@@ -27,6 +27,8 @@ export type ReconciliationAuditAction = 'provider_fact.associated' | 'provider_f
 /** Core V2 DO-73 (U-3): a verified refund fact permanently blocked from allocation, once per block row (version 1, no trusted scope). */
 export type AllocationBlockAuditAction = 'refund_fact.allocation_blocked';
 export type AllocationBlockReason = 'contested' | 'currency_mismatch' | 'no_authorization';
+/** Core V2 DO-76 S1 (D-76-1, D-76-4): a refund safety escalation for the Owner's review, once per escalation row (version 1, no trusted scope). */
+export type SafetyEscalationAuditAction = 'refund_safety.escalated';
 /** Core V2 S0-C12 item 10: late successes and wrong-amount capture facts (version 1, no trusted scope). */
 export type CaptureAuditAction = 'payment_late_success.recorded' | 'payment_capture_mismatch.recorded';
 /** S0-C12 item 10: the reason a capture fact differs from its payment (a code; the observed currency text never enters the audit record). */
@@ -118,6 +120,22 @@ export class PaymentAudit {
         resource: { type: 'provider_transaction_fact', id: b.factId }, outcome: 'succeeded',
         changes: { payment_id: b.paymentId, refund_attempt_id: b.refundAttemptId, reason: b.reason, amount: b.amount } } as never,
       { eventId: deterministicEventId(b.factId, 'audit.refund_fact.allocation_blocked'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /**
+   * Core V2 DO-76 S1 (the Owner's D-76-1, D-76-4): one refund safety escalation, in its row's transaction. The attempt is the resource; identifiers and
+   * codes only (the kind, the evidence fact, the payment, the attempt's status when escalated): never an amount, a currency, a provider reference or a
+   * notification. The event id derives from the escalation row, so it is written once. A request for review, never a finding of compromise.
+   */
+  async recordSafetyEscalation(q: Queryable, e: { id: string; kind: string; refundAttemptId: string; factId: string; paymentId: string; attemptStatus: string },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    await this.writer.write(
+      q,
+      { action: 'refund_safety.escalated' satisfies SafetyEscalationAuditAction, actor: auditActor(ctx), organizationId,
+        resource: { type: 'refund_attempt', id: e.refundAttemptId }, outcome: 'succeeded',
+        changes: { escalation_id: e.id, kind: e.kind, payment_id: e.paymentId, fact_id: e.factId, attempt_status: e.attemptStatus } } as never,
+      { eventId: deterministicEventId(e.id, 'audit.refund_safety.escalated'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
 

@@ -8,6 +8,7 @@ import { RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
+import { RefundSafetyService } from './refund-safety.service.js';
 import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 
 const BATCH_SIZE = 50;
@@ -53,6 +54,7 @@ export class RefundWorker {
     @Inject(RefundEvidenceService) private readonly evidence: RefundEvidenceService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
     @Inject(RefundAllocationService) private readonly allocations: RefundAllocationService,
+    @Inject(RefundSafetyService) private readonly safety: RefundSafetyService,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -74,6 +76,8 @@ export class RefundWorker {
              OR status IN ('authorized', 'dispatching', 'unknown')
              OR (status = 'submitted' AND "submittedAt" < now() - make_interval(secs => $2)))
             AND ("workAfter" IS NULL OR "workAfter" <= now())
+            -- Core V2 DO-76 S1 (D-76-2): a held attempt is never picked up again: nothing releases, retries or abandons it
+            AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation h WHERE h."refundAttemptId" = refund_attempt.id AND h.kind = 'dispatch_held')
           ORDER BY "requestedAt", id LIMIT $3`,
         [this.recoveryAfterMs / 1000, this.submittedCheckAfterMs / 1000, BATCH_SIZE],
       );
@@ -135,10 +139,7 @@ export class RefundWorker {
 
   private async dispatch(a: RefundAttemptRow, provider: PaymentProvider, ctx: EventContext): Promise<boolean> {
     // `dispatching` is durable BEFORE the provider can learn the key: whatever happens next, this attempt is only ever re-sent with that key
-    if (a.status === 'authorized') {
-      const { rowCount } = await this.db.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1 AND status = 'authorized'`, [a.id]);
-      if (rowCount !== 1) return false;
-    }
+    if (a.status === 'authorized' && !(await this.startDispatch(a, ctx))) return false;
     // Core V2 R6H-5: a capture-specific refund returns exactly its capture's provider transaction (an associated fact's attempt is only an anchor)
     const { rows: tx } = a.captureSpecific
       ? await this.db.query<{ providerTransactionId: string | null }>(`SELECT "providerTxnId" AS "providerTransactionId" FROM provider_transaction_fact WHERE id = $1`, [a.captureFactId])
@@ -172,6 +173,38 @@ export class RefundWorker {
     });
     this.logger.log(`refund_dispatched refundAttempt=${a.id} answer=${result.kind}`);
     return true;
+  }
+
+  /**
+   * Core V2 DO-76 S1 (the Owner's D-76-1, D-76-2): `authorized` -> `dispatching`, the one step after which the provider can learn the key, under the
+   * payment's refund-dispatch lock (exclusive; refund fact writers hold it shared) and the payment row lock (associations), so the evidence read here is
+   * complete and later evidence waits. Refund
+   * evidence of this attempt's capture that already exists (the frozen 0022 rule `refund_capture_has_evidence`, through its fact list) can only be
+   * money returned without this dispatch: the attempt is NOT sent and stays `authorized`, held by one append-only escalation (deduplicated per
+   * attempt) with its audit intent in the same transaction. Nothing releases, retries, abandons, allocates or resolves it. The database refuses the
+   * same transition independently (`refund_attempt_dispatch_hold`, migration 0032). Returns whether the attempt may be sent now.
+   */
+  private async startDispatch(a: RefundAttemptRow, ctx: EventContext): Promise<boolean> {
+    const held = await this.db.tx(async (q) => {
+      // the refund-dispatch lock FIRST (before any row lock: a fact writer holding it shared then needs only its attempt row), then payment, then attempt
+      await q.query('SELECT pg_advisory_xact_lock(refund_dispatch_lock_key($1))', [a.paymentId]);
+      const current = await this.attempts.lockAttempt(q, a.id);
+      if (current.status !== 'authorized') return { dispatch: false as const };
+      const { rows: evidence } = await q.query<{ factId: string }>(`SELECT e AS "factId" FROM refund_capture_evidence_facts($1) e LIMIT 1`, [current.captureFactId]);
+      const { rows: hold } = await q.query<{ id: string }>(
+        `SELECT id FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'dispatch_held'`, [current.id]);
+      if (!evidence[0] && !hold[0]) {
+        await q.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1 AND status = 'authorized'`, [a.id]);
+        return { dispatch: true as const };
+      }
+      if (hold[0] || !evidence[0]) return { dispatch: false as const }; // already held: never written twice
+      const escalation = await this.safety.escalate(q, { kind: 'dispatch_held', refundAttemptId: current.id, factId: evidence[0].factId }, ctx);
+      return { dispatch: false as const, escalation, factId: evidence[0].factId };
+    });
+    if ('escalation' in held && held.escalation) {
+      this.logger.error(`refund_dispatch_held refundAttempt=${a.id} payment=${a.paymentId} evidenceFact=${held.factId} escalation=${held.escalation} — refund evidence of this capture exists before dispatch; nothing is sent, the attempt stays authorized for the Owner's review (DO-76)`);
+    }
+    return held.dispatch;
   }
 }
 
