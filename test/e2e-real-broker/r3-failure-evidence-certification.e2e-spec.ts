@@ -13,6 +13,7 @@ import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/s
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { assertAuditDelivery } from './support/audit-delivery.js';
 import { billingPolicy, startReferenceStub, TEST_PLATFORM } from './support/admission.js';
 import { createPaymentIdentity, type PaymentIdentity } from './support/payment-identity.js';
 import { createBillingIdentity, type BillingIdentity } from './support/billing-identity.js';
@@ -1073,5 +1074,13 @@ describeWithEnv(
       expect(await auditMentions(u.factId)).toBe(0);
       expect(await n(billingAdmin, `SELECT count(*) AS n FROM refund_relay_failure_evidence WHERE "paymentId" = $1`, [px.paymentId])).toBe(0); // Billing holds no relay of X's attempt
     }, T);
+
+    // ───────────────────────────────────────────────────────────── DO-68: financial audit delivery, cross-process (runs LAST: it reads the whole suite's evidence)
+    it('DO-68 (extension): every audit intent Billing and Payment committed in this R3 suite reached the live audit-service exactly once, as recorded', async () => {
+      const delivered = await assertAuditDelivery({
+        billingAdmin, paymentAdmin, auditAdmin, amqpConn, required: ['refund_attempt.failed', 'financial_loss.recorded', 'recovery_obligation.opened', 'reconciliation_case.opened', 'reconciliation_case.resolved'], diagnostics: () => `${tails()}\n--- audit ---\n${audit.tail()}`,
+      });
+      record('DO-68', 'audit_delivery', delivered);
+    }, 300_000);
   },
 );
