@@ -1448,6 +1448,30 @@ a superuser can still bypass triggers (the runtime role cannot); stray provider 
 `test/do76-authorization-row-integrity.e2e-spec.ts` and the updated S2 case of `test/do76-unauthorized-refund-fact.e2e-spec.ts`; with the trigger
 removed, all four S2 cases fail.
 
+**DO-76 S1 dispatch hold and safety escalation (dated note, 2026-11-16; the Owner's D-76-1, D-76-2 and D-76-4 in the DO-76 Safety Implementation
+GO; DEVELOPMENT AND SIMULATION ONLY; DO-76 stays OPEN).** Payment migration `0032` and the refund worker. Consequence (1) of the characterization
+above is closed for Core-originated refunds:
+- *Rule (D-76-1).* `authorized` -> `dispatching` (the one step after which the provider can learn the attempt id) is not taken while
+  `refund_capture_has_evidence(captureFactId)` holds (the frozen `0022` per-capture rule that already refuses a NEW attempt): the attempt is
+  not sent and stays `authorized`. No new status, no terminal state, no amount, allocation, liability or refund-policy change.
+- *Boundary.* The transition runs under the payment row lock (`RefundWorker.startDispatch`; the `0032` guard takes it again on its own), and
+  every writer of that evidence holds the same lock: a refund fact in SHARE mode (`RefundEvidenceService`), an association in UPDATE mode
+  (`0021`). Evidence committed first is always seen; evidence written later waits for `dispatching` to be durable and then keeps the S6b
+  semantics. The database refuses the transition independently (`23514`, `refund_attempt_dispatch_hold`).
+- *Hold (D-76-2).* One append-only `refund_safety_escalation` row of kind `dispatch_held` per attempt, with its audit intent
+  `refund_safety.escalated` in the same transaction. The worker never picks a held attempt again, and the database refuses its dispatch even
+  if the evidence later stops counting. Nothing releases, retries, abandons, allocates or resolves it.
+- *Escalation (D-76-4).* Every refund fact newly blocked as `no_authorization` gets one `refund_fact_without_authorization` row and audit
+  intent in the block's transaction: a request for review, never a finding that a provider or a secret was compromised.
+- *Visibility.* PAY-12 `refund_safety_escalation` (Owner only, Company-scoped through the payment; the producer's route refuses the kind).
+- *Limits.* Evidence the provider has not reported yet is not visible to any rule; once `dispatching` is durable a second provider refund is
+  prevented only by the provider's idempotency on the same key. A held attempt keeps its refund case in progress and bars new attempts on the
+  payment (`refund_attempt_one_effective`) until an approved release contract exists. A superuser can bypass triggers.
+- *Evidence.* Payment `test/do76-dispatch-hold.e2e-spec.ts` (H1 to H9), the C3 case of `test/do76-unauthorized-refund-fact.e2e-spec.ts`, and the
+  do73 real-broker certification (the new action delivered to the live audit-service). Mutation controls: without the hold and the guard, nine
+  cases fail (the attempt is dispatched); without the hold alone, the guard still prevents the dispatch (the escalation cases fail); without
+  the guard's lock, or without the evidence writer's lock, the corresponding race case fails.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

@@ -170,6 +170,10 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         // Core V2 DO-76 S2 (migration 0031): nor the authorization-row rule
         'ALTER TABLE refund_attempt DISABLE TRIGGER refund_attempt_21_authorization_row',
         'DROP TRIGGER refund_attempt_21_authorization_row ON refund_attempt',
+        // Core V2 DO-76 S1 (migration 0032): nor the dispatch hold, nor the escalation record
+        'ALTER TABLE refund_attempt DISABLE TRIGGER refund_attempt_09_dispatch_hold',
+        'ALTER TABLE refund_safety_escalation DISABLE TRIGGER refund_safety_escalation_10_append_only',
+        'TRUNCATE refund_safety_escalation',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }

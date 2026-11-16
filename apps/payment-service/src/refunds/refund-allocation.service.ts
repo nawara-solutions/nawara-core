@@ -3,6 +3,7 @@ import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
 import { PaymentAudit } from '../audit/payment-audit.js';
 import { refundCaseCompletedEvent, type EventContext } from '../events/payment-events.js';
 import type { PaymentRow } from '../payments/payment.types.js';
+import { RefundSafetyService } from './refund-safety.service.js';
 
 /** A `refund_authorization` row (migration 0018). */
 export interface RefundAuthorizationRow {
@@ -56,6 +57,7 @@ export class RefundAllocationService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(OutboxService) private readonly outbox: OutboxService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
+    @Inject(RefundSafetyService) private readonly safety: RefundSafetyService,
   ) {}
 
   async allocate(factId: string, ctx: EventContext): Promise<AllocationOutcome> {
@@ -72,6 +74,7 @@ export class RefundAllocationService {
       : undefined;
     const fact = found0 && associated ? { ...found0, paymentId: associated.paymentId, refundAttemptId: associated.refundAttemptId } : found0;
     if (!fact || fact.kind !== 'refund' || !fact.refundAttemptId || !fact.paymentId) throw new Error('refund_allocation_not_a_refund_fact');
+    let escalation: string | null = null; // Core V2 DO-76 S1: set only by the transaction that recorded it (logged after its commit)
     const outcome = await this.db.tx(async (q) => {
       const { rows: pay } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [fact.paymentId]); // FC-2 lock order: payment first
       const payment = pay[0]!;
@@ -89,6 +92,11 @@ export class RefundAllocationService {
         // Core V2 DO-73 (U-3): exactly once per newly recorded block, in its transaction; the `already blocked` path above writes nothing
         await this.audit.recordAllocationBlock(q, { factId: fact.id, paymentId: fact.paymentId!, refundAttemptId: fact.refundAttemptId!, reason, amount: Number(fact.amount) },
           payment.organizationId, ctx);
+        // Core V2 DO-76 S1 (the Owner's D-76-4): verified refund evidence naming an attempt Auth never authorized is escalated for review at once, in the
+        // block's transaction, once per fact. Never a finding of compromise; nothing else changes (the fact stays blocked and unallocated).
+        if (reason === 'no_authorization') {
+          escalation = await this.safety.escalate(q, { kind: 'refund_fact_without_authorization', refundAttemptId: fact.refundAttemptId!, factId: fact.id }, ctx);
+        }
         return { kind: 'blocked' as const, reason };
       }
       // V-3: once the case or the payment is complete (through any authorization), nothing more is intended: it is all excess
@@ -119,6 +127,9 @@ export class RefundAllocationService {
       return { kind: 'allocated' as const, intended, excess, completed };
     });
     if (outcome.kind === 'blocked') this.log.warn(`refund_fact_allocation_blocked fact=${fact.id} reason=${outcome.reason} — kept pending for reconciliation (S6h); the fact is unchanged`);
+    if (escalation) {
+      this.log.error(`refund_safety_escalation kind=refund_fact_without_authorization fact=${fact.id} refundAttempt=${fact.refundAttemptId} escalation=${escalation} — verified refund evidence names an attempt with no refund authorization; review required (not a determination of compromise)`);
+    }
     if (outcome.kind === 'allocated') {
       this.log.log(`refund_fact_allocated fact=${fact.id} intended=${outcome.intended} excess=${outcome.excess}${outcome.completed ? ' completed=true' : ''}`);
       if (outcome.excess > 0) this.log.warn(`refund_excess_recorded fact=${fact.id} excess=${outcome.excess} — money returned beyond the approved refund; kept for reconciliation (S6h)`);

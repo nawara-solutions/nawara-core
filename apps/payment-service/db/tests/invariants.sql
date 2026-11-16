@@ -1150,6 +1150,22 @@ INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId"
 COMMIT;
 SELECT pg_temp.expect_constraint('DO-76', 'S2: the consumption is still written once (unchanged 0017 guard)', $$UPDATE refund_attempt SET "receiptId" = gen_random_uuid() WHERE id = '00000000-0000-4000-8000-0000000076a1'$$, 'refund_attempt_outcome_with_status');
 
+-- ---------------------------------------------------------------------------- Core V2 DO-76 S1 (0032) ----
+-- the attempt authorized above (76a1) has no refund evidence yet: a hold for it is refused; then evidence of its capture arrives and its dispatch is refused
+SELECT pg_temp.expect_constraint('DO-76', 'S1: no hold without refund evidence of the capture', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus")
+  SELECT 'dispatch_held', a.id, a."captureFactId", a."paymentId", a."companyId", a."captureFactId", a.status FROM refund_attempt a WHERE a.id = %L$$, '00000000-0000-4000-8000-0000000076a1'), 'refund_safety_escalation_evidence');
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'rtx-do76-stray', 'refund', :'d76', :'d76a', '00000000-0000-4000-8000-0000000076a1', 1000, 'TND', false, 'status_check') RETURNING id AS d76f \gset
+SELECT pg_temp.expect_constraint('DO-76', 'S1: authorized -> dispatching is refused over refund evidence of the capture', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-0000000076a1'$$, 'refund_attempt_dispatch_hold');
+SELECT pg_temp.expect_ok('DO-76', 'S1: the hold is recorded on that evidence, its fields derived from the attempt', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus")
+  VALUES ('dispatch_held', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x')$$, '00000000-0000-4000-8000-0000000076a1', :'d76f'));
+SELECT pg_temp.expect_error('DO-76', 'S1: one hold per attempt', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus")
+  VALUES ('dispatch_held', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x')$$, '00000000-0000-4000-8000-0000000076a1', :'d76f'), '23505');
+SELECT pg_temp.expect_error('DO-76', 'S1: an escalation is never changed', $$UPDATE refund_safety_escalation SET kind = kind$$, '23514');
+SELECT pg_temp.expect_error('DO-76', 'S1: an escalation is never deleted', $$DELETE FROM refund_safety_escalation$$, '23514');
+SELECT pg_temp.expect_constraint('DO-76', 'S1: a refund_fact_without_authorization escalation needs that no_authorization block', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus")
+  VALUES ('refund_fact_without_authorization', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x')$$, '00000000-0000-4000-8000-0000000076a1', :'d76f'), 'refund_safety_escalation_evidence');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

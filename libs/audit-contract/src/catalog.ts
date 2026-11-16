@@ -920,6 +920,22 @@ const SPEC = {
     },
     purpose: 'A verified provider refund fact can never be allocated to its refund authorization: it is kept unchanged and unallocated for reconciliation, with no commercial effect.',
   },
+  // Core V2 DO-76 S1 (the Owner's D-76-1, D-76-4): a refund safety escalation for the Owner's review, once per escalation row, in its transaction. Version 1,
+  // no trusted scope. `dispatch_held`: an authorized refund attempt NOT sent because refund evidence of its capture already exists; `refund_fact_without_authorization`:
+  // a verified refund fact names an attempt with no refund authorization. Identifiers and codes only: never an amount, a currency or a provider reference.
+  // A request for review, never a finding that a provider or a secret was compromised.
+  'refund_safety.escalated': {
+    producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
+    resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      escalation_id: { type: 'uuid', shape: 'value', required: true },
+      kind: { type: 'code', shape: 'value', required: true, values: ['dispatch_held', 'refund_fact_without_authorization'] },
+      payment_id: { type: 'uuid', shape: 'value', required: true },
+      fact_id: { type: 'uuid', shape: 'value', required: true },
+      attempt_status: { type: 'code', shape: 'value', required: true, values: ['authorization_pending', 'authorized', 'authorization_expired', 'authorization_refused'] },
+    },
+    purpose: 'A refund attempt is held from dispatch, or a verified refund fact names an unauthorized attempt: an escalation for review, with no commercial effect.',
+  },
   // Core V2 S0-C12 item 10: a verified late success of any kind (S4c F-4, S0-C11 item 6, S0-C12 items 2, 6, 7), in its row's transaction, once. Identifiers, the
   // observed integer amount and the payment's status at recording only; the currency stays on the row (S0-C12 item 10: never a non-ISO value here).
   // Version 1, no trusted scope (S2-Audit D3). Attributed to the observation's channel, or to the reconciliation pass that completed it.
