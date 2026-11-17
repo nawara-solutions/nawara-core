@@ -1166,6 +1166,49 @@ SELECT pg_temp.expect_error('DO-76', 'S1: an escalation is never deleted', $$DEL
 SELECT pg_temp.expect_constraint('DO-76', 'S1: a refund_fact_without_authorization escalation needs that no_authorization block', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus")
   VALUES ('refund_fact_without_authorization', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x')$$, '00000000-0000-4000-8000-0000000076a1', :'d76f'), 'refund_safety_escalation_evidence');
 
+-- ---------------------------------------------------------------------------- Core V2 RLSC-1 (0033) ----
+-- a FAILED attempt (7c01) with its own refund fact while ANOTHER attempt of the same payment and capture (7c02) is effective
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'inv-rlsc1', 'user', 'u-rlsc1', 'company', '00000000-0000-4000-8000-00000000c6b0', 1000, 'TND', 'non_entitlement', false) RETURNING id AS l1p \gset
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'l1p', 1, 'test', false) RETURNING id AS l1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'l1p';
+UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-rlsc1', "submittedAt" = now() WHERE id = :'l1a';
+UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = :'l1a';
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'ptx-rlsc1', 'capture', :'l1p', :'l1a', 1000, 'TND', false, 'status_check');
+UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = :'l1a', "closedAt" = now() WHERE id = :'l1p';
+SELECT pg_temp.expect_ok('RLSC-1', 'fixture: the first refund intent', pg_temp.s6b('00000000-0000-4000-8000-000000007c01', :'l1p'));
+BEGIN;
+UPDATE refund_attempt SET status = 'authorized', "receiptId" = gen_random_uuid(), "approvedByUserId" = gen_random_uuid(), "consumedAt" = now(), "authorizedAt" = now() WHERE id = '00000000-0000-4000-8000-000000007c01';
+INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", "approvedAmount", currency)
+  SELECT id, "paymentId", "refundCaseId", producer, "receiptId", "approvedByUserId", amount, currency FROM refund_attempt WHERE id = '00000000-0000-4000-8000-000000007c01';
+COMMIT;
+SELECT pg_temp.expect_ok('RLSC-1', 'fixture: dispatched', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-000000007c01'$$);
+SELECT pg_temp.expect_ok('RLSC-1', 'fixture: provider-confirmed failure', $$UPDATE refund_attempt SET status = 'failed', "failureCode" = 'card_closed', "completedAt" = now() WHERE id = '00000000-0000-4000-8000-000000007c01'$$);
+SELECT pg_temp.expect_ok('RLSC-1', 'fixture: a second attempt of the payment, effective', pg_temp.s6b('00000000-0000-4000-8000-000000007c02', :'l1p'));
+INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+  VALUES ('test', 'rtx-rlsc1-late', 'refund', :'l1p', :'l1a', '00000000-0000-4000-8000-000000007c01', 1000, 'TND', false, 'status_check') RETURNING id AS l1f \gset
+SELECT pg_temp.expect_error('RLSC-1', 'the one-effective index is unchanged: failed -> discrepancy is still refused while 7c02 is effective', $$UPDATE refund_attempt SET status = 'discrepancy' WHERE id = '00000000-0000-4000-8000-000000007c01'$$, '23505'); -- refund_attempt_one_effective (a unique index: its name is in the detail)
+SELECT pg_temp.expect_constraint('RLSC-1', 'no exception without a competing attempt', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus")
+  VALUES ('failed_attempt_refund_evidence', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x')$$, '00000000-0000-4000-8000-000000007c01', :'l1f'), 'refund_safety_escalation_evidence');
+SELECT pg_temp.expect_constraint('RLSC-1', 'the competing attempt is never the failed attempt itself', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId")
+  VALUES ('failed_attempt_refund_evidence', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', %L)$$, '00000000-0000-4000-8000-000000007c01', :'l1f', '00000000-0000-4000-8000-000000007c01'), 'refund_safety_escalation_evidence');
+SELECT pg_temp.expect_constraint('RLSC-1', 'the competing attempt belongs to the same payment and capture', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId")
+  VALUES ('failed_attempt_refund_evidence', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', %L)$$, '00000000-0000-4000-8000-000000007c01', :'l1f', '00000000-0000-4000-8000-0000000076a1'), 'refund_safety_escalation_evidence');
+SELECT pg_temp.expect_constraint('RLSC-1', 'only a FAILED attempt, and only on its own refund fact', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId")
+  VALUES ('failed_attempt_refund_evidence', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', %L)$$, '00000000-0000-4000-8000-000000007c02', :'l1f', '00000000-0000-4000-8000-000000007c01'), 'refund_safety_escalation_evidence');
+SELECT pg_temp.expect_ok('RLSC-1', 'the exception is recorded, its Company, payment, capture and both statuses derived', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId", "competingAttemptStatus")
+  VALUES ('failed_attempt_refund_evidence', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', %L, 'x')$$, '00000000-0000-4000-8000-000000007c01', :'l1f', '00000000-0000-4000-8000-000000007c02'));
+SELECT pg_temp.expect_ok('RLSC-1', 'derived fields (a division by zero when they are not)', format($q$SELECT 1 / count(*)::int FROM refund_safety_escalation e JOIN refund_attempt a ON a.id = e."refundAttemptId"
+  WHERE e."factId" = %L AND e."paymentId" = a."paymentId" AND e."companyId" = a."companyId" AND e."captureFactId" = a."captureFactId" AND e."attemptStatus" = 'failed'
+    AND e."competingAttemptStatus" = 'authorization_pending'$q$, :'l1f'));
+SELECT pg_temp.expect_error('RLSC-1', 'one exception per fact', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId")
+  VALUES ('failed_attempt_refund_evidence', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', %L)$$, '00000000-0000-4000-8000-000000007c01', :'l1f', '00000000-0000-4000-8000-000000007c02'), '23505'); -- refund_safety_escalation_failed_evidence_once
+SELECT pg_temp.expect_constraint('RLSC-1', 'a competing attempt only on this kind', format($$INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId")
+  VALUES ('refund_fact_without_authorization', %L, %L, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', %L)$$, '00000000-0000-4000-8000-000000007c01', :'l1f', '00000000-0000-4000-8000-000000007c02'), 'refund_safety_escalation_evidence');
+SELECT pg_temp.expect_error('RLSC-1', 'the exception is never changed', $$UPDATE refund_safety_escalation SET "competingAttemptStatus" = 'failed' WHERE kind = 'failed_attempt_refund_evidence'$$, '23514');
+SELECT pg_temp.expect_error('RLSC-1', 'the exception is never deleted', $$DELETE FROM refund_safety_escalation WHERE kind = 'failed_attempt_refund_evidence'$$, '23514');
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

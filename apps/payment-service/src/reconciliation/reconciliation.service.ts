@@ -28,6 +28,7 @@ export const ITEM_KINDS = [
   'dispute_conflict_presence',
   'refund_fact_contested', // Core V2 O-2 (PAY-12 M): the fact OWNER's view of its own contested refund fact (Owner and producer)
   'refund_safety_escalation', // Core V2 DO-76 S1 (D-76-1, D-76-4): held refund dispatches and refund facts without authorization (Owner only)
+  'refund_failed_attempt_evidence', // Core V2 RLSC-1 (OD-RLSC-2, additive visibility): a failed attempt's refund evidence kept as an exception (Owner and producer)
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 /** Core V2 S0-C12 items 14(f), 15 and S0-C13 Part A: `multiple_captures`, `capture_recovery_exhausted` and `dispute_conflict` are the Owner's alone; a service read never reaches them. */
@@ -167,8 +168,21 @@ const ITEM_SQL: Record<ItemKind, string> = {
   // releases it) or `refund_fact_without_authorization` (a verified refund fact names an attempt Auth never authorized). The evidence fact's own verified
   // figures; the attempt, its capture and its status when escalated. A request for review, never a finding of compromise. Read-only.
   refund_safety_escalation: `SELECT e.id, e."paymentId", e."factId", f.amount, f.currency, e."escalatedAt" AS at,
-      jsonb_build_object('kind', e.kind, 'refundAttemptId', e."refundAttemptId", 'captureFactId', e."captureFactId", 'attemptStatus', e."attemptStatus") AS detail
+      jsonb_build_object('kind', e.kind, 'refundAttemptId', e."refundAttemptId", 'captureFactId', e."captureFactId", 'attemptStatus', e."attemptStatus",
+        'competingAttemptId', e."competingAttemptId", 'competingAttemptStatus', e."competingAttemptStatus") AS detail -- Core V2 RLSC-1: null for the 0032 kinds
     FROM refund_safety_escalation e JOIN provider_transaction_fact f ON f.id = e."factId" JOIN payment p ON p.id = e."paymentId"`,
+  // Core V2 RLSC-1 (0033; the Owner's OD-RLSC-2: additive visibility only): verified refund evidence of a FAILED attempt kept as an exception because
+  // another attempt of the same payment and capture was effective; the failed attempt stays `failed` (never a `refund_discrepancy`). One row per fact,
+  // append-only; the evidence fact's own verified figures; its refund case, the failed and the competing attempt and their statuses when recorded. Its
+  // Company is the payment's seller (checked, not only joined). Read-only: it resolves, allocates, completes and compensates nothing.
+  refund_failed_attempt_evidence: `SELECT e.id, e."paymentId", e."factId", f.amount, f.currency, e."escalatedAt" AS at,
+      jsonb_build_object('refundAttemptId', e."refundAttemptId", 'refundCaseId', a."refundCaseId", 'captureFactId', e."captureFactId",
+        'attemptStatus', e."attemptStatus", 'competingAttemptId', e."competingAttemptId", 'competingAttemptStatus', e."competingAttemptStatus") AS detail
+    FROM refund_safety_escalation e
+    JOIN provider_transaction_fact f ON f.id = e."factId" AND f."paymentId" = e."paymentId" AND f."refundAttemptId" = e."refundAttemptId"
+    JOIN refund_attempt a ON a.id = e."refundAttemptId" AND a."paymentId" = e."paymentId" AND a."companyId" = e."companyId"
+    JOIN payment p ON p.id = e."paymentId" AND p."sellerType" = 'company' AND p."sellerId" = e."companyId"::text
+   WHERE e.kind = 'failed_attempt_refund_evidence'`,
   // Core V2 S0-C15B (B-D1): the same rows as `dispute_conflict`, REDACTED for the producer: identity, payment and time only; no figure, no detail
   dispute_conflict_presence: `SELECT o.id, o."paymentId", NULL::uuid AS "factId", NULL::bigint AS amount, NULL::text AS currency, o."observedAt" AS at, '{}'::jsonb AS detail
     FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,

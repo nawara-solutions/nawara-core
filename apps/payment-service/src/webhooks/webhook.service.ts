@@ -205,8 +205,12 @@ export class WebhookService {
       return { status: 200 };
     }
     try {
-      await this.refunds.apply(attempt.id, status, webhookContext(provider.id, eventId));
-      await this.markState(eventId, 'processed', `refund_attempt:${attempt.id}`, undefined, claim);
+      // Core V2 RLSC-1: `applyWithOutcome` returns only after the fact (its own transaction) and the attempt change or the failed-attempt evidence
+      // exception with its audit intent (one transaction) are committed; any failure throws and stays a retryable 500 below. A 200 for the exception
+      // acknowledges durable evidence held for review, never a resolution of the financial conflict.
+      const r = await this.refunds.applyWithOutcome(attempt.id, status, webhookContext(provider.id, eventId));
+      await this.markState(eventId, 'processed',
+        r.failedAttemptEvidenceId ? `failed_attempt_refund_evidence:${r.failedAttemptEvidenceId}` : `refund_attempt:${attempt.id}`, undefined, claim);
       return { status: 200 };
     } catch {
       await this.markState(eventId, 'failed', 'transient_error', undefined, claim);

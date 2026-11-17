@@ -1473,6 +1473,41 @@ above is closed for Core-originated refunds:
   cases fail (the attempt is dispatched); without the hold alone, the guard still prevents the dispatch (the escalation cases fail); without
   the guard's lock, or without the evidence writer's lock, the corresponding race case fails.
 
+**RLSC-1 failed-attempt refund evidence (dated note, 2026-11-17; the Owner's RLSC-1 GO, Phase A; DEVELOPMENT AND SIMULATION ONLY).** RLSC-1
+(refund late-success collision) is recorded OUTSIDE DO-1 to DO-77; the DO inventory is not renumbered. It was observed, unnamed, in S0 §1.5
+(DO-74 item 10, DO-76 S1 item 5). Payment migration `0033`.
+- *The defect.* A verified refund success for a `failed` attempt moves it to `discrepancy` (S6b). `discrepancy` is effective for
+  `refund_attempt_one_effective` (per payment, ordinary attempts) and `refund_attempt_one_effective_capture` (per capture), so while another
+  attempt of the same payment and capture is effective the move failed (`23505`). The webhook answered `500` until `retries_exhausted`,
+  although the fact was durable; no `refund_discrepancy` ever appeared.
+- *The correction.* Both indexes are unchanged. Under the payment row lock (the lock every refund attempt insert takes first), the `failed`
+  attempt's OWN refund fact, while such a competing attempt exists, is kept as one append-only `refund_safety_escalation` row of kind
+  `failed_attempt_refund_evidence` per fact, with one `refund_safety.escalated` audit intent (category `commercial`, unchanged) in the same
+  transaction. The attempt stays `failed`. A savepoint around `failed` -> `discrepancy` is a backstop: only a `23505` from one of the two named
+  indexes takes the same path; any other error propagates.
+- *Database (0033).* Additive: the kind, `competingAttemptId` (validated: another attempt of the same payment and capture, effective at the
+  recording boundary) and `competingAttemptStatus` (derived), a shape check, one row per fact. Payment, Company, capture and both statuses are
+  derived from the attempts; the 0032 branches are unchanged.
+- *Acknowledgement.* The webhook answers `200` (`processed`, outcome `failed_attempt_refund_evidence:<id>`) only after the fact, the row and the
+  audit intent have committed: evidence held for review, never a resolution of the financial conflict. A failure of that transaction answers
+  `500` and stays retryable.
+- *Visibility (OD-RLSC-2, additive only).* PAY-12 / R6H-6 item kind `refund_failed_attempt_evidence` for Billing (its own payments) and the Owner
+  (its Company; the row's Company must equal the payment's seller), with the refund case, both attempts and their statuses. Never
+  `refund_discrepancy`. The Owner's `refund_safety_escalation` item lists the row too. Billing's allocation, completion, resolution and
+  liability rules are unchanged.
+- *Unchanged, NOT approved (OD-RLSC-1 open).* S6c / R6C-4 allocation is fact-based: the failed attempt's late fact is allocated to that attempt's
+  authorization and can complete the refund case (`refund.case_completed`) while the competing refund is in flight; when that refund also
+  succeeds it is an `over_return` and the payment's `netRetained` is negative. Since RLSC-1 the allocation runs in the webhook request, as for
+  every refund fact, instead of the next worker pass. This is an UNRESOLVED financial-safety risk, pinned by a regression test. OD-RLSC-3
+  (the timing-dependent `discrepancy` path, kept) and OD-RLSC-4 (no release or resolution) stay open; nothing releases, resolves, reverses or
+  compensates anything.
+- *Limits.* Evidence whose provider reference is already another attempt's fact is a recorded conflict, not this attempt's own refund: it is
+  no exception and still fails as before. A superuser can bypass triggers.
+- *Evidence.* Payment `test/rlsc1-failed-attempt-refund-evidence.e2e-spec.ts` (L1 to L15), H4 of `test/do76-dispatch-hold.e2e-spec.ts`, and the RLSC-1
+  cases of `db/tests/invariants.sql`. Mutation controls: without the pre-check, the savepoint backstop alone passes every case; without
+  either, ten cases fail; without the `ROLLBACK TO SAVEPOINT`, the same ten fail; without the guard's competing-attempt check, the guard
+  case fails; answering `200` on a failure fails five cases.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

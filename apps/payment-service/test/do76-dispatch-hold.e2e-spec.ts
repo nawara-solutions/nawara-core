@@ -212,14 +212,15 @@ describeWithEnv('Core V2 DO-76 S1: refund dispatch hold and safety escalation â€
       await sim(`refunds/${first}/outcomes`, { commandId: cmd(), outcome: 'failed', failureCode: 'card_closed' }).expect(201);
       expect((await attempt(first)).status).toBe('failed');
       const second = await authorizedAttempt(p); // no evidence yet: admitted
-      // the failed attempt's refund turns out to have happened. The fact is recorded first, in its own transaction (FC-1). PRE-EXISTING, recorded and NOT
-      // changed here: moving the failed attempt to `discrepancy` collides with `refund_attempt_one_effective` while the second attempt is live, so the
-      // webhook answers 500 (the notification stays retryable) and the failed attempt stays `failed`
+      // the failed attempt's refund turns out to have happened. The fact is recorded first, in its own transaction (FC-1). `discrepancy` is impossible while
+      // the second attempt is effective (`refund_attempt_one_effective`): since Core V2 RLSC-1 (0033) the failed attempt stays `failed`, the evidence is kept
+      // as a `failed_attempt_refund_evidence` escalation and the webhook answers 200 (before RLSC-1: 500, retried until exhausted)
       const raw = Buffer.from(JSON.stringify({ eventId: `t_${randomUUID()}`, type: 'refund.succeeded', reference: first, providerTransactionId: `late-${first}`, amount: 9000, currency: 'TND' }));
       await request(server()).post('/payment/webhooks/simulation').set('content-type', 'application/json')
-        .set('x-simulation-signature', createHmac('sha256', SECRET).update(raw).digest('hex')).send(raw.toString('utf8')).expect(500);
+        .set('x-simulation-signature', createHmac('sha256', SECRET).update(raw).digest('hex')).send(raw.toString('utf8')).expect(200);
       expect(await factOf(`late-${first}`)).toHaveLength(1);
       expect((await attempt(first)).status).toBe('failed');
+      expect((await escalations(first)).map((e) => [e.kind, e.attemptStatus])).toEqual([['failed_attempt_refund_evidence', 'failed']]);
       await drain();
       expect((await attempt(second)).status).toBe('authorized');
       expect(await dispatches(second)).toBe(0);
