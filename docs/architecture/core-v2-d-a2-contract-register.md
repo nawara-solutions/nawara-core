@@ -1575,6 +1575,36 @@ ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO
 - *Evidence.* Billing `test/stalled-work.e2e-spec.ts`: thresholds and clocks, episodes and two instances, the DO-42 trust rule, auth_fault,
   exits, guards and append-only, a failed audit intent writing nothing, subjects byte-identical, and Owner isolation by Company and Platform.
 
+**G2 Billing follow-up evidence (dated note, 2026-11-18; the Owner's G3 + G2 GO, package C; DEVELOPMENT AND SIMULATION ONLY; FDR-08 LEVEL A
+ONLY; DO-75 V2 and V3).** Billing migration `0057`.
+- *Record.* `reconciliation_case_followup` holds one append-only row per (case, kind, Payment item) for evidence Payment states after a case exists:
+  - a later observation of the same refund attempt (`refund_observation`, a `refund_observation_conflict` case);
+  - a later contest of the same verified fact (`refund_contest`, a `refund_fact_contested` case).
+- *Identity.* The evidence is Payment's stable item id (`PaymentItem.id`, the provider-fact conflict id), with the observing attempt and, for V3,
+  the fact.
+- *Guard.*
+  - It refuses another payment, another attempt (V2) or another fact (V3), so the capture follows from the attempt or fact.
+  - It refuses the case's own opening item. For V2 that is `reconciliation_observation_evidence."observationId"`. For V3 it is the new
+    append-only `reconciliation_case_opening_ref`, written in the opening transaction from `0057` on.
+  - The Company is derived from the case.
+- *Where.* At the two existing-case early exits (`refundContest`, `observationConflict`), and where `openForPayment` returns nothing because a
+  concurrent pass opened the case. That case is looked up explicitly: an absent case (for example a non-Company seller, DO-77) is never a reason
+  to open or infer one.
+- *Audit.* One commercial `reconciliation_case.evidence_followed_up` intent per new row, written only by the insert that returned it (additive
+  catalog; Billing write grants 51 -> 52).
+- *Reads.* `GET /billing/admin/reconciliation-cases[/:id]` adds `followUps` and a derived `evidenceAfterResolution` for the two case types
+  (level A only).
+- *Not changed.* No case, resolution or opening evidence is rewritten. Nothing reopens, supersedes, reallocates, refunds, reverses, abandons or
+  amends anything.
+- *Limits.*
+  - A V3 case opened before `0057` has no recorded opening item and takes no follow-up (never misattributed).
+  - DO-75 V1 and DO-77 stay gated on Organization authority.
+  - Discovery depends on Payment continuing to list the item; each pass rescans in full (DO-48).
+- *Evidence.* Billing `test/recovery.e2e-spec.ts`, three G2 cases:
+  - V2 follow-ups, concurrent writers, the Owner read, and refusal of foreign or opening evidence.
+  - A post-resolution labelled fixture: after_resolution set, the resolution unchanged.
+  - V3 follow-ups, refusal of another fact, and a pre-`0057` case taking none.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

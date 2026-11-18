@@ -31,7 +31,8 @@ export type BillingAuditAction =
   | 'reconciliation_case.opened' | 'reconciliation_case.resolved' | 'financial_loss.recorded' | 'financial_loss.adjusted' | 'recovery_obligation.written_off' // Core V2 S6h-B (R6H-11)
   | 'recovery_restriction.suspended' | 'recovery_restriction.suspension_revoked' // Core V2 S0-C14 WP C (items 10, 11): the Owner, with dedicated receipts
   | 'stalled_work.escalated' | 'stalled_work.state_exited' // Core V2 G3 (DO-31, DO-33, DO-41, DO-42): escalation-only review evidence (commercial)
-  | 'stalled_work.auth_fault_escalated' | 'stalled_work.auth_fault_exited'; // Core V2 G3 (DO-41): Billing-internal credential faults (security)
+  | 'stalled_work.auth_fault_escalated' | 'stalled_work.auth_fault_exited' // Core V2 G3 (DO-41): Billing-internal credential faults (security)
+  | 'reconciliation_case.evidence_followed_up'; // Core V2 G2 (DO-75 V2, V3): follow-up evidence of an existing case
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in

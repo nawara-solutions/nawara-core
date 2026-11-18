@@ -327,6 +327,11 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         'ALTER TABLE stalled_work_exit DISABLE TRIGGER stalled_work_exit_05_guard',
         'TRUNCATE stalled_work_review CASCADE',
         'TRUNCATE stalled_work_exit',
+        // Core V2 G2 (migration 0057): nor switch off the follow-up guards, nor erase follow-up evidence or an opening ref
+        'ALTER TABLE reconciliation_case_followup DISABLE TRIGGER reconciliation_case_followup_05_guard',
+        'ALTER TABLE reconciliation_case_followup DISABLE TRIGGER reconciliation_case_followup_10_append_only',
+        'TRUNCATE reconciliation_case_followup',
+        'TRUNCATE reconciliation_case_opening_ref',
         'ALTER TABLE currency DROP CONSTRAINT currency_pkey CASCADE',
         'SET session_replication_role = replica',
         'CREATE OR REPLACE FUNCTION billing_allocate_invoice_number(text, text) RETURNS text LANGUAGE sql AS $$ SELECT \'1\' $$',
