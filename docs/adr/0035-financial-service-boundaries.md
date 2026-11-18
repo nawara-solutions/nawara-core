@@ -10,6 +10,10 @@
 > whose *rules* survive but whose *location* and *actor model* change (see ADR-0038 and ADR-0036). Back-pointers to be added
 > (added; the full list is in section 11 of [financial-architecture.md](../architecture/financial-architecture.md)).
 
+> **Core V2 G8 status note (2026-11-18; governance only, not an acceptance).** The S0 clarifications C1–C4 below are the only owner-approved
+> changes. Billing and Payment are implemented within these boundaries; `accounting-service` is not built. Its status stays `Proposed` until
+> the owner changes it explicitly. Open, preserved: who computes invoice tax (financial-architecture item 10). See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
+
 ## Context
 
 `payment-service` is only a starter; its design conflated *what is owed*, *how it was paid* and *what the customer may use*

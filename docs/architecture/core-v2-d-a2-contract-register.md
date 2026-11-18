@@ -1508,6 +1508,34 @@ above is closed for Core-originated refunds:
   either, ten cases fail; without the `ROLLBACK TO SAVEPOINT`, the same ten fail; without the guard's competing-attempt check, the guard
   case fails; answering `200` on a failure fails five cases.
 
+**OD-RLSC-1 open policy record (dated note, 2026-11-18; the Owner's "NEXT BATCH" GO, Phase 4; DEVELOPMENT AND SIMULATION ONLY; NOTHING
+APPROVED).** OD-RLSC-1, OD-RLSC-3, OD-RLSC-4 and DO-76 stay **OPEN**; F-29 stays **LOCKED**; R3-F2 stays **OPEN**. No refund hold, timing
+threshold, allocation rule, case-completion rule or financial resolution is approved by this note.
+
+- *The reproduced risk.* A captured 9000 payment; attempt A of a refund case is sent and the provider reports it `failed`; attempt B of the
+  same case is authorized and sent; the provider then reports A's refund as succeeded. A's fact is allocated to A's authorization (intended
+  9000), the case completes (`refund.case_completed`) while B is in flight; when B also succeeds it is allocated as excess (intended 0) and the
+  payment shows an `over_return` of 9000 (`refundedNet` 18000, `netRetained` −9000). Two provider refunds left for one 9000 capture: a
+  potential double refund. Reproduced before RLSC-1 (`a5818b6`) and after it (`c4990f7`); pinned by L15 of
+  `test/rlsc1-failed-attempt-refund-evidence.e2e-spec.ts`.
+- *Why allocation timing does not resolve it.* Before RLSC-1 the same fact was allocated by the refund worker's pending-facts sweep (its
+  next pass); since RLSC-1 the unchanged allocation call runs in the webhook request, after the exception commits. Both reach the same
+  allocation, completion and over-return. The money leaves at B's dispatch, before either allocation, so no change to when or how A's fact
+  is allocated can prevent the second provider refund; it changes only how the overlap is recorded. The Owner's direction (2026-11-18):
+  the allocation timing is not changed merely to restore the earlier behaviour.
+- *Preferred direction, not authorized (Option D).* Do not dispatch a replacement refund on a capture while an earlier attempt's provider
+  failure is still uncertain. It is the only option that can reduce the second outbound refund; holding allocation or deferring completion
+  change only Core's records. (When A's evidence is recorded before B is dispatched, the DO-76 S1 hold already keeps B `authorized`, L3; the
+  open window is a provider success that arrives only after B was sent.) It needs, first:
+  - **provider evidence (FDR-10):** whether, and for how long, a provider's refund failure can still be followed by a success for the same
+    refund; whether its refund idempotency key is honoured across a failure (a retry under the same key never pays twice); and which
+    signal, if any, is final. Only simulation and test providers exist; none of this is established;
+  - **closure evidence (FDR-08):** the resolution kind and the evidence that could close a `failed_attempt_refund_evidence` exception, an
+    `over_return`, or release a held replacement (OD-RLSC-4: none exists);
+  - **liability (FDR-01):** who bears a surplus refund (definition only; no bearer is assigned).
+- *Until decided.* The behaviour recorded in the RLSC-1 note above is unchanged: the exception is durable and visible, allocation is
+  fact-based (S6c / R6C-4), and nothing releases, resolves, reverses or compensates anything.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

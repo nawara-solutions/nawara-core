@@ -1002,6 +1002,10 @@ immutable; a later decision is a new ADR). Reciprocal notes on Accepted ADRs nee
 
 ADR number 0066 is skipped: a draft ADR-0066 exists on an unmerged branch. Numbering is re-checked at merge.
 
+*G8 status notes (dated, 2026-11-18; non-retroactive).* ADR-0032, ADR-0035, ADR-0057 and ADR-0067 each gained one dated status note that
+points to the [G8 record](./core-v2-g8-adr-governance-status.md) (status, approvals so far, implementation, open dependencies; DO-12
+replay enforcement per consumer). No status changed and no decision text was revised; every ADR above keeps the status shown.
+
 ## 3. Contract register
 
 ### 3.1 Financial facts, refunds and reversal
