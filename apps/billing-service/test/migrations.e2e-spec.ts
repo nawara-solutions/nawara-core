@@ -67,6 +67,7 @@ const BILLING_MIGRATIONS = [
   '0053_do73_unallocated_refund_evidence.sql', // Core V2 DO-73: refund_fact_unallocated, its evidence, the acknowledgement rule and the cancellation guard
   '0054_do74_refund_observation_conflict.sql', // Core V2 DO-74 (observer side): refund_observation_conflict, its evidence and the contest rule's extension
   '0055_r3_failure_evidence_attestation.sql', // Core V2 R3: failure-evidence markers, effect attestations and the two effect guards' extension
+  '0056_g3_stalled_work_review.sql', // Core V2 G3: escalation-only stalled-work review items and their exit observations
 ];
 /** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022) and S3d's billing_platform (0023) and S3f's fee tables (0025) and checkout_idempotency (0026) and S5a's assistance tables (0029) and S5b's settlement channel, cash-return obligation and late-settlement record (0030) and S5c's disputes, dispute responses and corrections (0031) and S6a's refund cases and their idempotency (0033) and S6b's authorization relays (0034) and S6c's case completions (0035) and S6d's commercial effects (0036). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
@@ -79,7 +80,7 @@ const STAGE_2_TABLES = [
   'payment_event_origin', 'payment_event_receipt', 'payment_late_success', 'payment_request', 'personal_subscription', 'platform_currency', 'price', 'product',
   'reconciliation_case', 'reconciliation_case_resolution', 'reconciliation_contest_evidence', 'reconciliation_observation_evidence', 'reconciliation_unallocated_evidence', 'recovery_obligation', 'recovery_payment', 'recovery_restriction_suspension_event', 'recovery_review', 'recovery_settlement_channel',
   'recovery_surplus', 'recovery_surplus_confirmation', 'recovery_surplus_external', 'recovery_surplus_refund', 'refund_authorization_relay', 'refund_case',
-  'refund_case_completion', 'refund_case_effect', 'refund_case_effect_attempt', 'refund_command_idempotency', 'refund_relay_failure_evidence', 'schema_migrations', 'subscription',
+  'refund_case_completion', 'refund_case_effect', 'refund_case_effect_attempt', 'refund_command_idempotency', 'refund_relay_failure_evidence', 'schema_migrations', 'stalled_work_exit', 'stalled_work_review', 'subscription',
   'subscription_purchase', 'subscription_purchase_reversal', 'subscription_purchase_reversal_cause', 'subscription_settlement',
 ];
 

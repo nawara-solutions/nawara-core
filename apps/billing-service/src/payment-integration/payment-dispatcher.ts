@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { runWithRequestContext, PollLoop, describeFailure, safeToken, type DrainOutcome } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { jobTransitionContext, type TransitionContext } from '../domain/actors.js';
 import { buildPaymentRequestBody } from '../domain/payment-request-mapping.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
+import { StalledWorkService } from '../stalled-work/stalled-work.service.js';
 import { PAYMENT_CLIENT } from './payment-client.token.js';
 import type { PaymentClient } from './payment-client.js';
 
@@ -34,6 +35,8 @@ export class PaymentDispatcher {
     private readonly requests: PaymentRequestRepository,
     @Inject(PAYMENT_CLIENT) private readonly paymentClient: PaymentClient,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
+    /** Core V2 G3 (DO-41): present only where the stalled-work module is mounted (never in production). */
+    @Optional() private readonly stalledWork?: StalledWorkService,
   ) {}
 
   start(intervalMs = this.config.dispatch.intervalMs): void {
@@ -93,6 +96,8 @@ export class PaymentDispatcher {
           } else if (outcome.kind === 'auth_fault') {
             this.logger.error(`payment_dispatch_failure request=${claim.request.id} correlationId=${claim.correlationId} reason=auth_fault — Payment refused Billing's own service token (configuration fault); will retry`);
             // stays `sending`; the next pass (or the reconciler) retries once the token is fixed
+            // Core V2 G3 (DO-41): one Billing-internal review item per request (security), immediately; it never affects dispatch or the retry
+            await this.stalledWork?.recordAuthFault(claim.request.id, claim.correlationId);
           } else {
             this.logger.warn(`payment_dispatch_failure request=${claim.request.id} correlationId=${claim.correlationId} reason=transient — will retry (safe by the natural key)`);
           }

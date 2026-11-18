@@ -743,6 +743,50 @@ const SPEC = {
     resource: ['recovery_surplus'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: "The receiving Organization's administrator confirmed an external surplus repayment: the surplus is resolved.",
   },
+  // Core V2 G3 (DO-31, DO-33, DO-41, DO-42; the Owner's G3 GO, 2026-11-18): escalation-only review evidence, once per review row, in its transaction.
+  // Version 1, no trusted scope. Identifiers and codes only. A request for review: it closes, retries, releases, changes and assigns nothing.
+  'stalled_work.escalated': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['stalled_work_sweep'] }, organization: 'optional',
+    resource: ['stalled_work_review'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      kind: { type: 'code', shape: 'value', required: true, values: ['assistance_dispute_open', 'settlement_channel_uncertain', 'payment_request_sending', 'payment_event_conflict'] },
+      subject_id: { type: 'uuid', shape: 'value', required: true },
+      reason: { type: 'code', shape: 'value', required: true, values: ['elapsed', 'send_attempts', 'conflict_observed'] },
+      payment_request_id: { type: 'uuid', shape: 'value', required: false },
+      threshold_seconds: { type: 'integer', shape: 'value', required: true, min: 0, max: 31536000 },
+    },
+    purpose: 'Billing work stayed in a state with no exit past its threshold (a J-1 dispute, an uncertain settlement channel, a sending payment request, a conflicting payment event): a review item, with no commercial effect.',
+  },
+  'stalled_work.state_exited': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['stalled_work_sweep'] }, organization: 'optional',
+    resource: ['stalled_work_review'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      kind: { type: 'code', shape: 'value', required: true, values: ['assistance_dispute_open', 'settlement_channel_uncertain', 'payment_request_sending'] },
+      subject_id: { type: 'uuid', shape: 'value', required: true },
+      exited_state: { type: 'code', shape: 'value', required: true, values: ['resolved', 'open', 'settled', 'closed', 'requested', 'rejected'] },
+    },
+    purpose: 'The subject of an escalated review item left the state it was escalated for: an observation only; the review item stays and nothing else changes.',
+  },
+  // Core V2 G3 (DO-41; the Owner's G3 rule 3): Payment refused Billing's OWN service token while a request is sending. Billing-internal, never an
+  // Organization's or a Company Owner's item; security. Once per request (escalation) and once when the request leaves `sending` (exit).
+  'stalled_work.auth_fault_escalated': {
+    producer: 'billing-service', category: 'security', since: 1, actors: { system: ['payment_dispatcher'] }, organization: 'none',
+    resource: ['stalled_work_review'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_request_id: { type: 'uuid', shape: 'value', required: true },
+      send_attempts: { type: 'integer', shape: 'value', required: true, min: 0, max: 2147483647 },
+    },
+    purpose: "Payment refused Billing's own service credential for a sending payment request (a configuration fault): a Billing-internal review item; the dispatcher keeps retrying.",
+  },
+  'stalled_work.auth_fault_exited': {
+    producer: 'billing-service', category: 'security', since: 1, actors: { system: ['stalled_work_sweep'] }, organization: 'none',
+    resource: ['stalled_work_review'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      payment_request_id: { type: 'uuid', shape: 'value', required: true },
+      exited_state: { type: 'code', shape: 'value', required: true, values: ['requested', 'rejected'] },
+    },
+    purpose: 'The payment request of a Billing-internal credential-fault review item left `sending`: an observation only; the review item stays.',
+  },
 
   // Core V2 S6g (register BIL-32; S0 §3.4 L-4, L-6; ADR-0044 B14; the Owner's R6G-1 to R6G-9): the exceptional application of a verified late
   // assisted settlement. Version 1, no trusted scope. The beneficiary attests; the Owner (Auth `late_settlement_apply` receipt) applies, which

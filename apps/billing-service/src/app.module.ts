@@ -22,6 +22,7 @@ import type { DisputeExposure, LateSettlementExposure } from './refunds/dispute-
 import { RefundModule } from './refunds/refund.module.js';
 import { RecoveryModule } from './recovery/recovery.module.js';
 import { ReconciliationModule } from './reconciliation/reconciliation.module.js';
+import { StalledWorkModule } from './stalled-work/stalled-work.module.js';
 import type { PaymentReconciliationClient } from './reconciliation/payment-reconciliation-client.js';
 import { LateSettlementModule } from './late-settlements/late-settlement.module.js';
 import type { PaymentRefundClient } from './refunds/payment-refund-client.js';
@@ -124,6 +125,8 @@ export class AppModule {
         LateSettlementModule.register(config, overrides.ownerAuthority),
         // Core V2 S6h-B (BIL-33, BIL-34, EVT-10): reconciliation cases, late successes, FinancialLoss; development and simulation only
         ReconciliationModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler, paymentReconciliationClient: overrides.paymentReconciliationClient }),
+        // Core V2 G3 (DO-31, DO-33, DO-41, DO-42): escalation-only stalled-work review; development and simulation only
+        StalledWorkModule.register(config, overrides.ownerAuthority, { worker: overrides.refundRelayReconciler }),
       ],
     };
   }

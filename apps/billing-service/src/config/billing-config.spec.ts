@@ -75,7 +75,7 @@ describe('loadBillingConfig', () => {
       'assistanceSweep', 'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
       'metrics', // V2 A12.2: the kit's metrics listener settings (off by default), used by configureApp
       'nodeEnv', 'organizationReference', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
-      'serviceName', 'servicePolicy', 'serviceTokens', 'supportedCurrencies', 'trustProxy', 'trustProxyHops',
+      'serviceName', 'servicePolicy', 'serviceTokens', 'stalledWorkSweep' /* Core V2 G3 */, 'supportedCurrencies', 'trustProxy', 'trustProxyHops',
     ]);
   });
 
