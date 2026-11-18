@@ -78,6 +78,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0030_webhook_event_terminal_guard.sql', // Core V2 DO-22: a terminal stored notification keeps its decision
       '0031_refund_authorization_row_integrity.sql', // Core V2 DO-76 S2: an authorized attempt has its refund authorization row (deferred trigger)
       '0032_refund_dispatch_hold.sql', // Core V2 DO-76 S1: refund_safety_escalation, the authorized -> dispatching evidence guard
+      '0033_failed_attempt_refund_evidence.sql', // Core V2 RLSC-1: a failed attempt's refund evidence kept as an escalation, the attempt stays failed
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([
