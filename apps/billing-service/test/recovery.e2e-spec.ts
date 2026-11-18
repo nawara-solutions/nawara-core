@@ -3568,10 +3568,10 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         await reconciliation().drainOnce();
         const followUps = async () => (await admin.query(`SELECT "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "factId", "companyId" FROM reconciliation_case_followup
           WHERE "caseId" = $1 ORDER BY "evidenceRef"`, [c.id])).rows;
-        expect(await followUps()).toEqual([second, third].sort().map((ref) => ({ evidenceKind: 'refund_observation', evidenceRef: ref, paymentId: p.paymentId,
+        expect(await followUps()).toEqual([second, third].sort((x, y) => x.localeCompare(y)).map((ref) => ({ evidenceKind: 'refund_observation', evidenceRef: ref, paymentId: p.paymentId,
           refundAttemptId: r.attemptId, factId: null, companyId: caseRow.companyId })));
         const audits = (await admin.query(`SELECT payload FROM outbox WHERE name = 'audit.reconciliation_case.evidence_followed_up' AND payload->'resource'->>'id' = $1`, [c.id])).rows;
-        expect(audits.map((a) => a.payload.changes.evidence_id).sort()).toEqual([second, third].sort());
+        expect(audits.map((a) => a.payload.changes.evidence_id).sort((x, y) => x.localeCompare(y))).toEqual([second, third].sort((x, y) => x.localeCompare(y)));
         expect(audits.every((a) => a.payload.changes.after_resolution === false && a.payload.changes.evidence_kind === 'refund_observation')).toBe(true);
         // concurrent writers of the same item: one row, one audit intent
         const fourth = randomUUID();
@@ -3588,7 +3588,7 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         expect(await records(p)).toEqual(before);
         // the Owner's read: the follow-ups, none after a resolution
         const listed = (await send(request(server()).get(`/billing/admin/reconciliation-cases/${c.id}`), 'owner-tok', null)).body as Record<string, any>;
-        expect(listed.followUps.map((x: { evidenceId: string }) => x.evidenceId).sort()).toEqual([second, third, fourth].sort());
+        expect(listed.followUps.map((x: { evidenceId: string }) => x.evidenceId).sort((x: string, y: string) => x.localeCompare(y))).toEqual([second, third, fourth].sort((x, y) => x.localeCompare(y)));
         expect(listed.evidenceAfterResolution).toBe(false);
         // the database refuses: another payment's item, another attempt, the opening item; and keeps follow-ups append-only
         const ins = (payment: string, attempt: string, ref: string) => admin.query(`INSERT INTO reconciliation_case_followup ("caseId", "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "companyId")
