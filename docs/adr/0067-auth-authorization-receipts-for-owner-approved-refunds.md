@@ -9,6 +9,12 @@
 > stays `Proposed` until the owner changes it explicitly. Nothing in it is implemented. Number 0066 is skipped here because a draft
 > ADR-0066 exists on an unmerged branch; numbering is re-checked when this ADR is merged.
 
+> **Core V2 G8 status note (2026-11-18; governance only, not an acceptance).** The S0 note's "Nothing in it is implemented" was true on
+> 2026-10-21 and is historical: the decision is implemented for Core V2 development and simulation (Auth #351, #352; Payment #388), and Auth
+> now issues ten receipt operations for two audiences, each owner-approved in the receipts contract §17a–§17g. This ADR's text still states
+> the refund operation only (F-22, open), and the central receipt audit actions carry no operation or target (DO-62, open). Its status stays
+> `Proposed` until the owner changes it explicitly; nothing here revises its decision. See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
+
 ## Context
 
 Refunds of Nawara-sold Premium are owner-only, require a factor step-up, and go back to the original payment method (approved Core V2

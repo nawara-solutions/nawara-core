@@ -52,6 +52,12 @@
 > and nothing is implemented. Five implementation slices are named; none is authorized here. No broker, grant or queue is changed. OD-BRK
 > stays open and S1e-5 stays blocked. This is not an acceptance: this ADR's status stays `Proposed`.
 
+> **Core V2 G8 status note (2026-11-18; governance only, not an acceptance).** The notes above remain each decision's record. Since them,
+> S1e-5's integrated certification passed for local evidence only (2026-10-30); no production certification exists. Open dependencies,
+> preserved: OD-BRK (OD-BRK-4 Audit migration, OD-BRK-5 shared-fanout retirement), the A3M findings F1–F7, S1e-5 production
+> certification (with S1-R, AP-R, NP-K, C-4, G-7), §13.7 re-emission beyond Payment, and P-11 (replay enforcement per consumer: DO-12,
+> recorded in the G8 record §3). This ADR's status stays `Proposed` until the owner changes it explicitly. See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the

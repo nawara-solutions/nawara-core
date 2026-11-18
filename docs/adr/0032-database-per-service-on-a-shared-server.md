@@ -4,6 +4,10 @@
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 
+> **Core V2 G8 status note (2026-11-18; governance only, not an acceptance).** The decision is implemented on `main` (one database and one
+> login role per service, per-service migrations). Its status stays `Proposed` until the owner changes it explicitly. Open dependency,
+> preserved: DO-5, a tested restore (the production blocker named under Consequences). See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
+
 ## Context
 
 Every Core service owns its data and no service may read another's tables. Production is currently one VPS running
