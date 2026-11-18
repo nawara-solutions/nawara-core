@@ -167,10 +167,17 @@ const ITEM_SQL: Record<ItemKind, string> = {
   // listed item never disappears): `dispatch_held` (an authorized attempt NOT sent: refund evidence of its capture existed first; it stays held, nothing
   // releases it) or `refund_fact_without_authorization` (a verified refund fact names an attempt Auth never authorized). The evidence fact's own verified
   // figures; the attempt, its capture and its status when escalated. A request for review, never a finding of compromise. Read-only.
+  // Core V2 G3 (DO-44, 0034): `dispatch_stalled` (a dispatch whose outcome stays unknown 72 h after its authorization; review only, the attempt and its
+  // retry unchanged) has no evidence fact, so no figures; its detail adds the authorization time and, once observed, the exit (status, time).
   refund_safety_escalation: `SELECT e.id, e."paymentId", e."factId", f.amount, f.currency, e."escalatedAt" AS at,
       jsonb_build_object('kind', e.kind, 'refundAttemptId', e."refundAttemptId", 'captureFactId', e."captureFactId", 'attemptStatus', e."attemptStatus",
-        'competingAttemptId', e."competingAttemptId", 'competingAttemptStatus', e."competingAttemptStatus") AS detail -- Core V2 RLSC-1: null for the 0032 kinds
-    FROM refund_safety_escalation e JOIN provider_transaction_fact f ON f.id = e."factId" JOIN payment p ON p.id = e."paymentId"`,
+        'competingAttemptId', e."competingAttemptId", 'competingAttemptStatus', e."competingAttemptStatus") -- Core V2 RLSC-1: null for the 0032 kinds
+        || CASE WHEN e.kind = 'dispatch_stalled' THEN jsonb_build_object('authorizedAt', a."authorizedAt",
+             'exit', CASE WHEN x."escalationId" IS NULL THEN NULL ELSE jsonb_build_object('status', x."exitedStatus", 'observedAt', x."observedAt") END)
+           ELSE '{}'::jsonb END AS detail
+    FROM refund_safety_escalation e LEFT JOIN provider_transaction_fact f ON f.id = e."factId" JOIN payment p ON p.id = e."paymentId"
+    LEFT JOIN refund_attempt a ON a.id = e."refundAttemptId" AND e.kind = 'dispatch_stalled'
+    LEFT JOIN refund_safety_escalation_exit x ON x."escalationId" = e.id`,
   // Core V2 RLSC-1 (0033; the Owner's OD-RLSC-2: additive visibility only): verified refund evidence of a FAILED attempt kept as an exception because
   // another attempt of the same payment and capture was effective; the failed attempt stays `failed` (never a `refund_discrepancy`). One row per fact,
   // append-only; the evidence fact's own verified figures; its refund case, the failed and the competing attempt and their statuses when recorded. Its

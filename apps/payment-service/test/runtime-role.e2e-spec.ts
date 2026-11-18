@@ -174,6 +174,10 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
         'ALTER TABLE refund_attempt DISABLE TRIGGER refund_attempt_09_dispatch_hold',
         'ALTER TABLE refund_safety_escalation DISABLE TRIGGER refund_safety_escalation_10_append_only',
         'TRUNCATE refund_safety_escalation',
+        // Core V2 G3 (migration 0034): nor the stalled-dispatch exit guard, nor erase an exit
+        'ALTER TABLE refund_safety_escalation_exit DISABLE TRIGGER refund_safety_escalation_exit_05_guard',
+        'ALTER TABLE refund_safety_escalation DISABLE TRIGGER refund_safety_escalation_05_insert_guard',
+        'TRUNCATE refund_safety_escalation_exit',
       ]) {
         await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' }); // insufficient_privilege
       }
