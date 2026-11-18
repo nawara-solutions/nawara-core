@@ -101,6 +101,7 @@ export type BillingErrorCode =
   | 'recovery_authorization_unavailable'
   // Core V2 S6h-B reconciliation and losses (register BIL-33, BIL-34; R6H-1 to R6H-12)
   | 'invalid_reconciliation_request'
+  | 'invalid_stalled_work_request' // Core V2 G3
   | 'reconciliation_case_not_acknowledgeable'
   | 'reconciliation_case_in_overlap' // Core V2 S0-C14 item 9
   | 'reconciliation_case_in_exposure' // Core V2 S0-C15A item 6

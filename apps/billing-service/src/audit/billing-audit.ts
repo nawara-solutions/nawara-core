@@ -29,7 +29,9 @@ export type BillingAuditAction =
   | 'recovery_surplus.recorded' | 'recovery_surplus.resolved' | 'recovery_surplus.recipient_confirmed'
   | 'assistance_late_settlement.attested' | 'assistance_late_settlement.applied' | 'cash_return_obligation.superseded' // Core V2 S6g (R6G-9)
   | 'reconciliation_case.opened' | 'reconciliation_case.resolved' | 'financial_loss.recorded' | 'financial_loss.adjusted' | 'recovery_obligation.written_off' // Core V2 S6h-B (R6H-11)
-  | 'recovery_restriction.suspended' | 'recovery_restriction.suspension_revoked'; // Core V2 S0-C14 WP C (items 10, 11): the Owner, with dedicated receipts
+  | 'recovery_restriction.suspended' | 'recovery_restriction.suspension_revoked' // Core V2 S0-C14 WP C (items 10, 11): the Owner, with dedicated receipts
+  | 'stalled_work.escalated' | 'stalled_work.state_exited' // Core V2 G3 (DO-31, DO-33, DO-41, DO-42): escalation-only review evidence (commercial)
+  | 'stalled_work.auth_fault_escalated' | 'stalled_work.auth_fault_exited'; // Core V2 G3 (DO-41): Billing-internal credential faults (security)
 
 /**
  * The catalog actor of a Billing change, from Billing's own verified attribution (the `TransitionContext` the change already records in
@@ -50,6 +52,8 @@ export function auditActor(ctx: TransitionContext): AuditActor {
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'fraud_hold_sweep') return { type: 'system', id: 'fraud_hold_sweep' }; // Core V2 S6e-H
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'recovery_worker') return { type: 'system', id: 'recovery_worker' }; // Core V2 S6f
   if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'reconciliation_worker') return { type: 'system', id: 'reconciliation_worker' }; // Core V2 S6h-B
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'sweep' && ctx.actor.id === 'stalled_work_sweep') return { type: 'system', id: 'stalled_work_sweep' }; // Core V2 G3
+  if (ctx.actor.type === 'system' && ctx.cause.type === 'dispatcher' && ctx.actor.id === 'payment_dispatcher') return { type: 'system', id: 'payment_dispatcher' }; // Core V2 G3 (auth_fault)
   throw new Error(`billing_audit_actor_not_cataloged actor=${ctx.actor.type} cause=${ctx.cause.type}`);
 }
 

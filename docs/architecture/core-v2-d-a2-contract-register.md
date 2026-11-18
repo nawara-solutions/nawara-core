@@ -1536,6 +1536,45 @@ threshold, allocation rule, case-completion rule or financial resolution is appr
 - *Until decided.* The behaviour recorded in the RLSC-1 note above is unchanged: the exception is durable and visible, allocation is
   fact-based (S6c / R6C-4), and nothing releases, resolves, reverses or compensates anything.
 
+**G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
+ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
+`authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.
+- *Kinds and thresholds* are constants of the migration, never configuration:
+  - DO-31: an open `cash_not_returned` or `collection_not_made` dispute (J-1), 30 days after `openedAt`.
+  - DO-33: an `uncertain` settlement channel (E-6), `settleBy` + 7 days. It is a separate kind linked to its payment request, and writes no
+    second operational log line.
+  - DO-41: a `sending` payment request at 20 send attempts or 24 hours after its append-only `billing_transition` into `sending`.
+    `sendingSince` is re-stamped by every claim and is not the clock.
+  - DO-41: `payment_request_auth_fault`, recorded immediately by the dispatcher. It is Billing-internal: its scope is NULL by a CHECK, and its
+    audit category is security.
+  - DO-42: a `conflict` receipt at the next sweep, one review per event id. Every delivery and every reconciler pass leaves its own receipt row.
+- *Provenance.* The caller gives a kind and a subject; the database guard derives the episode, state, clock, threshold, reason, related request
+  and scope, and refuses (`stalled_work_review_not_due`) unless the subject is in the qualifying state past its threshold. `(kind, episodeKey)`
+  is unique. `stalled_work_exit` is one row per review, refused while the subject is still in the state; a conflict review has no exit.
+  Both tables are append-only.
+- *Scope.*
+  - Assistance kinds take the request's Platform, Company and Organization.
+  - Payment-request kinds take the invoice's Company only for a Company seller.
+  - A conflict has a scope only when it names an existing Billing payment request whose `paymentId` equals the receipt's (the Owner's DO-42
+    rule); otherwise it stays Billing-internal. Nothing is inferred.
+- *Audit (additive catalog):*
+  - `stalled_work.escalated` and `stalled_work.state_exited` are commercial.
+  - `stalled_work.auth_fault_escalated` and `stalled_work.auth_fault_exited` are security, with organization `none`.
+  - Each is written once, in its row's transaction, only by the insert that returned a row.
+  - Billing's broker topic grants are regenerated (write 47 -> 51); nothing is provisioned or deployed.
+- *Reads.*
+  - `GET /billing/admin/stalled-work`: the Company Owner of the seller Company (live), each item's Platform checked live, payment kinds only.
+  - `GET /billing/admin/assistance-stalled-work?platformId=`: the live Platform Owner under S5c's authority, assistance kinds only; another
+    Platform answers `404`.
+  - Read-only, no step-up, and no acknowledgement action in V1.
+- *Not changed.* Nothing closes a case, stops or caps a retry, releases a hold, changes a status, assigns liability or moves money. The sweep
+  (`BILLING_STALLED_WORK_SWEEP_INTERVAL_MS`, interval only) and the routes are not mounted in production.
+- *Limits.* A superuser can bypass triggers (the runtime role cannot). The DO-42 candidate scan reads every conflict receipt each pass (bounded
+  by the batch; conflict receipts grow with reconciler passes). A request whose invoice has lines on more than one Platform has no Platform
+  scope and is visible to its Company Owner.
+- *Evidence.* Billing `test/stalled-work.e2e-spec.ts`: thresholds and clocks, episodes and two instances, the DO-42 trust rule, auth_fault,
+  exits, guards and append-only, a failed audit intent writing nothing, subjects byte-identical, and Owner isolation by Company and Platform.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

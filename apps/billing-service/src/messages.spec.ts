@@ -133,6 +133,7 @@ describe('BILLING_MESSAGES', () => {
       [en('recoveryAuthorizationRefused'), 'The authorization of this external repayment record was refused or has expired.'], // Core V2 S6f
       [en('recoveryAuthorizationUnresolved'), 'The authorization could not be confirmed; repeat the same request.'], // Core V2 S6f
       [en('invalidReconciliationRequest'), 'The reconciliation request is invalid.'], // Core V2 S6h-B
+      [en('invalidStalledWorkRequest'), 'The stalled-work review request is invalid.'], // Core V2 G3
       [en('reconciliationCaseNotAcknowledgeable'), 'This reconciliation case is resolved only by its financial evidence, never by an acknowledgement.'], // Core V2 S6h-B
       [en('reconciliationCaseResolved'), 'This reconciliation case is already resolved.'], // Core V2 S6h-B
       [en('recoveryCollectionFrozen'), 'This recovery obligation is in a refund and chargeback overlap: no new settlement can start. The debt stays open; a settlement already started continues.'], // Core V2 S0-C14

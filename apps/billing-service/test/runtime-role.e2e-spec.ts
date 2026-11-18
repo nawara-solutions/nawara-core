@@ -321,6 +321,12 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         'DROP TABLE billing_transition',
         'TRUNCATE invoice CASCADE',
         'TRUNCATE billing_transition',
+        // Core V2 G3 (migration 0056): nor switch off the stalled-work guards, nor erase a review or an exit
+        'ALTER TABLE stalled_work_review DISABLE TRIGGER stalled_work_review_05_guard',
+        'ALTER TABLE stalled_work_review DISABLE TRIGGER stalled_work_review_10_append_only',
+        'ALTER TABLE stalled_work_exit DISABLE TRIGGER stalled_work_exit_05_guard',
+        'TRUNCATE stalled_work_review CASCADE',
+        'TRUNCATE stalled_work_exit',
         'ALTER TABLE currency DROP CONSTRAINT currency_pkey CASCADE',
         'SET session_replication_role = replica',
         'CREATE OR REPLACE FUNCTION billing_allocate_invoice_number(text, text) RETURNS text LANGUAGE sql AS $$ SELECT \'1\' $$',
