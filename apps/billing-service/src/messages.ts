@@ -575,6 +575,11 @@ export const BILLING_MESSAGES = defineMessages({
     fr: 'La requête de rapprochement est invalide.',
     ar: 'طلب التسوية غير صالح.',
   },
+  invalidStalledWorkRequest: { // Core V2 G3
+    en: 'The stalled-work review request is invalid.',
+    fr: 'La requête de revue des traitements bloqués est invalide.',
+    ar: 'طلب مراجعة الأعمال المتوقفة غير صالح.',
+  },
   reconciliationCaseNotAcknowledgeable: { // Core V2 S6h-B
     en: 'This reconciliation case is resolved only by its financial evidence, never by an acknowledgement.',
     fr: "Ce dossier de rapprochement n'est résolu que par sa preuve financière, jamais par un accusé de réception.",

@@ -76,6 +76,8 @@ export interface BillingConfig extends BaseConfig {
   reconcile: { intervalMs: number; staleRequestedMs: number };
   /** Core V2 S5b (E-6): how often the cash-return sweep looks for requests past their deadline (never mounted in production). */
   assistanceSweep: { intervalMs: number };
+  /** Core V2 G3: how often the stalled-work review sweep runs (never mounted in production). Its thresholds are code constants, never configuration. */
+  stalledWorkSweep: { intervalMs: number };
   /**
    * Retry policy of the Payment event consumer's RabbitMQ bus (audit M-07): how many times a possibly-transient processing failure is retried
    * (0 = dead-letter on the first failure) and how long each retry waits in `billing.payment-events.retry`. Technical tuning, no business meaning.
@@ -151,6 +153,9 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     },
     assistanceSweep: {
       intervalMs: reader.int('BILLING_ASSISTANCE_SWEEP_INTERVAL_MS', { default: 60_000, min: 1000, max: 3_600_000 }),
+    },
+    stalledWorkSweep: {
+      intervalMs: reader.int('BILLING_STALLED_WORK_SWEEP_INTERVAL_MS', { default: 300_000, min: 1000, max: 3_600_000 }),
     },
     reconcile: {
       intervalMs: reader.int('BILLING_RECONCILE_INTERVAL_MS', { default: 30_000, min: 1000, max: 3_600_000 }),
