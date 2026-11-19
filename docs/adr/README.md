@@ -106,7 +106,7 @@ Number 0066 is not used on `main`: a draft ADR-0066 exists on an unmerged branch
 | [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Accepted (2026-10-09, A5.2-G owner authorization; partly superseded by ADR-0030, 2026-10-09) |
 | [0030](./0030-multi-organization-membership-and-revoked-state.md) | Multi-organization membership: one identity, many memberships, and the REVOKED state | Accepted (2026-10-09, A5.2-H owner authorization; two sentences revised before acceptance) |
 | [0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service is the intended future owner of Company, Platform and Organization (mechanism deferred) | Accepted (2026-10-09, A5.2-D owner authorization; partly superseded by ADR-0039) |
-| [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
+| [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Accepted (2026-11-19, by the owner, G8; DO-5 tested restore remains a production blocker) |
 | [0033](./0033-service-to-service-authentication-and-user-identity.md) | Service-to-service authentication, and how services identify the end user | Accepted (2026-09-26, Stage 19.1 D1) |
 | [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Superseded by ADR-0056 (2026-10-07) |
 | [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed (Core V2 S0 clarifications C1–C4, 2026-10-21) |
