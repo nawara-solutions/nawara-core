@@ -1536,6 +1536,36 @@ threshold, allocation rule, case-completion rule or financial resolution is appr
 - *Until decided.* The behaviour recorded in the RLSC-1 note above is unchanged: the exception is durable and visible, allocation is
   fact-based (S6c / R6C-4), and nothing releases, resolves, reverses or compensates anything.
 
+**G3 Payment stalled refund dispatch (dated note, 2026-11-18; the Owner's G3 + G2 GO, package B; DEVELOPMENT AND SIMULATION ONLY;
+ESCALATION ONLY; DO-44).** Payment migration `0034` extends `refund_safety_escalation`, following `0033`'s precedent.
+- *Kind and threshold.* `dispatch_stalled`: the attempt is `dispatching` or `unknown`, has no `submittedAt`, and is at least 72 hours past
+  `authorizedAt`. The threshold is a migration constant. One row per attempt: the R6B-4 retry happens inside `unknown`, so the whole stay
+  counts from one authorization.
+- *`authorization_pending` is not covered.* S6h's PAY-12 `authorization_pending` item (15 minutes) and Billing's case already surface it.
+- *Schema.*
+  - `factId` is optional for `dispatch_stalled` only; a shape check keeps it required for the three existing kinds.
+  - The insert guard gains one branch, which refuses with `refund_safety_escalation_not_due`. Its three existing branches are textually
+    unchanged.
+  - `refund_safety_escalation_exit` holds one append-only row per `dispatch_stalled` escalation, refused while the attempt is still stuck.
+- *Not changed.*
+  - The row does **not** hold the attempt: the `0032` dispatch rule reads `dispatch_held` only.
+  - The worker's same-key retry (R6B-4, R6B-9) is unchanged.
+  - Nothing releases, cancels, resolves, allocates or refunds anything.
+- *Audit.*
+  - `refund_safety.escalated` is extended additively: kind `dispatch_stalled`, attempt statuses `dispatching` and `unknown`, and `fact_id`
+    optional (absent only for this kind).
+  - New commercial action `refund_safety.state_exited`, the exit's audit intent under the Owner's G3 rule 1.
+  - Payment's topic grants are regenerated (write 29 -> 30).
+- *Visibility.* PAY-12 `refund_safety_escalation` (Owner only, Company-scoped). The new kind carries no figures; its detail adds
+  `authorizedAt` and `exit`.
+- *Sweep.* Every 5 minutes (a code constant), with the refund worker's identity (`payment_refund_worker`), only where refunds are mounted
+  (never in production).
+- *Evidence.* Payment `test/g3-refund-dispatch-stalled.e2e-spec.ts`:
+  - the threshold and two instances;
+  - an unknown attempt still retried by the worker, then its exit;
+  - the guards: not due, a forged fact, fact required for the existing kinds, an early exit, append-only;
+  - a failed audit intent writing nothing;
+  - Owner and producer isolation.
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
 ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
 `authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.

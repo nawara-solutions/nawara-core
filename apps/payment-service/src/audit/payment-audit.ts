@@ -28,7 +28,7 @@ export type ReconciliationAuditAction = 'provider_fact.associated' | 'provider_f
 export type AllocationBlockAuditAction = 'refund_fact.allocation_blocked';
 export type AllocationBlockReason = 'contested' | 'currency_mismatch' | 'no_authorization';
 /** Core V2 DO-76 S1 (D-76-1, D-76-4): a refund safety escalation for the Owner's review, once per escalation row (version 1, no trusted scope). */
-export type SafetyEscalationAuditAction = 'refund_safety.escalated';
+export type SafetyEscalationAuditAction = 'refund_safety.escalated' | 'refund_safety.state_exited'; // + Core V2 G3 (DO-44): the stalled dispatch's exit
 /** Core V2 S0-C12 item 10: late successes and wrong-amount capture facts (version 1, no trusted scope). */
 export type CaptureAuditAction = 'payment_late_success.recorded' | 'payment_capture_mismatch.recorded';
 /** S0-C12 item 10: the reason a capture fact differs from its payment (a code; the observed currency text never enters the audit record). */
@@ -128,14 +128,27 @@ export class PaymentAudit {
    * codes only (the kind, the evidence fact, the payment, the attempt's status when escalated): never an amount, a currency, a provider reference or a
    * notification. The event id derives from the escalation row, so it is written once. A request for review, never a finding of compromise.
    */
-  async recordSafetyEscalation(q: Queryable, e: { id: string; kind: string; refundAttemptId: string; factId: string; paymentId: string; attemptStatus: string },
+  async recordSafetyEscalation(q: Queryable, e: { id: string; kind: string; refundAttemptId: string; factId: string | null; paymentId: string; attemptStatus: string },
     organizationId: string | null, ctx: EventContext): Promise<void> {
     await this.writer.write(
       q,
       { action: 'refund_safety.escalated' satisfies SafetyEscalationAuditAction, actor: auditActor(ctx), organizationId,
         resource: { type: 'refund_attempt', id: e.refundAttemptId }, outcome: 'succeeded',
-        changes: { escalation_id: e.id, kind: e.kind, payment_id: e.paymentId, fact_id: e.factId, attempt_status: e.attemptStatus } } as never,
+        // Core V2 G3 (DO-44): a `dispatch_stalled` escalation has no evidence fact, so `fact_id` is absent for it only
+        changes: { escalation_id: e.id, kind: e.kind, payment_id: e.paymentId, ...(e.factId ? { fact_id: e.factId } : {}), attempt_status: e.attemptStatus } } as never,
       { eventId: deterministicEventId(e.id, 'audit.refund_safety.escalated'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
+    );
+  }
+
+  /** Core V2 G3 (DO-44; the Owner's G3 rule 1): the exit of a stalled-dispatch escalation, once per exit row, in its transaction. */
+  async recordSafetyExit(q: Queryable, e: { escalationId: string; refundAttemptId: string; paymentId: string; exitedStatus: string },
+    organizationId: string | null, ctx: EventContext): Promise<void> {
+    await this.writer.write(
+      q,
+      { action: 'refund_safety.state_exited' satisfies SafetyEscalationAuditAction, actor: auditActor(ctx), organizationId,
+        resource: { type: 'refund_attempt', id: e.refundAttemptId }, outcome: 'succeeded',
+        changes: { escalation_id: e.escalationId, kind: 'dispatch_stalled', payment_id: e.paymentId, exited_status: e.exitedStatus } } as never,
+      { eventId: deterministicEventId(e.escalationId, 'audit.refund_safety.state_exited'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
 

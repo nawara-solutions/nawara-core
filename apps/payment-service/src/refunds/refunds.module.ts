@@ -8,6 +8,7 @@ import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
+import { RefundStalledDispatchSweep, RefundStalledDispatchSweepService } from './refund-stalled-dispatch.sweep.js';
 import { RefundWorker, RefundWorkerService } from './refund-worker.js';
 import { RefundCapturesController, RefundsController, SettlingCaptureController } from './refunds.controller.js';
 
@@ -29,13 +30,14 @@ export class RefundsModule {
       controllers: [RefundsController, RefundCapturesController, SettlingCaptureController],
       providers: [
         RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundSafetyService, RefundWorker, IdempotencyService,
-        ...(opts.worker === false ? [] : [RefundWorkerService]),
+        RefundStalledDispatchSweep, // Core V2 G3 (DO-44): escalation-only review of dispatches whose outcome stays unknown
+        ...(opts.worker === false ? [] : [RefundWorkerService, RefundStalledDispatchSweepService]),
         {
           provide: RECEIPT_AUTHORITY,
           useValue: opts.receiptAuthority ?? new HttpReceiptAuthority({ baseUrl: config.authServiceUrl, serviceToken: refunds.authServiceToken, timeoutMs: config.authTimeoutMs }),
         },
       ],
-      exports: [RefundEvidenceService, RefundWorker, RefundAttemptService, RefundAllocationService, RECEIPT_AUTHORITY],
+      exports: [RefundEvidenceService, RefundWorker, RefundAttemptService, RefundAllocationService, RefundStalledDispatchSweep, RECEIPT_AUTHORITY],
     };
   }
 }
