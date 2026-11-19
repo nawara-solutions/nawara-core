@@ -386,4 +386,132 @@ describeWithEnv('fee caps, delegations and proposals (Core V2 S3f) — real Post
         .rejects.toMatchObject({ constraint: 'fee_proposal_delegation_active' });
     });
   });
+
+  // ──────────────────────────────────────────────────────────────────────────────── Core V2 G6-A (DO-67)
+
+  describe('Core V2 G6-A: each fee command fact has exactly one audit intent, written in its transaction', () => {
+    const audits = async (resourceId: string) => (await admin.query(
+      `SELECT name, payload FROM outbox WHERE name LIKE 'audit.fee_%' AND payload->'resource'->>'id' = $1 ORDER BY "occurredAt", name`, [resourceId])).rows as Row[];
+    const names = async (resourceId: string) => (await audits(resourceId)).map((a) => a.name);
+
+    it('the full lifecycle: seven actions, each once, with the verified actor, its Organization (or none) and identifiers only; no scope row claimed', async () => {
+      const p = await platform();
+      assign(OP, p);
+      const c1 = await setCap(p, 5000);
+      expect(c1.status).toBe(201);
+      const capRow = (await admin.query(`SELECT id FROM fee_cap WHERE "platformId" = $1 AND version = 1`, [p])).rows[0].id as string;
+      const [cap] = await audits(capRow);
+      expect(cap.name).toBe('audit.fee_cap.set');
+      expect(cap.payload).toMatchObject({ actor: { type: 'user', id: OWNER, userKind: 'owner' }, resource: { type: 'fee_cap', id: capRow },
+        changes: { platform_id: p, version: 1, amount: 5000 } });
+      expect(cap.payload.organizationId ?? null).toBeNull();
+      const d = await delegate(p, OP);
+      expect((await audits(d.body.id)).map((a) => [a.name, a.payload.changes])).toEqual([['audit.fee_delegation.granted', { platform_id: p, operator_user_id: OP }]]);
+      const org = organization(p);
+      const prod = await product(p);
+      const pr = await propose(p, { organizationId: org, productId: prod, amount: 4000 });
+      expect(pr.status).toBe(201);
+      const created = (await audits(pr.body.id))[0]!;
+      expect(created).toMatchObject({ name: 'audit.fee_proposal.created', payload: { organizationId: org, actor: { type: 'user', id: OP, userKind: 'operator' },
+        changes: { platform_id: p, product_id: prod, delegation_id: d.body.id, amount: 4000 } } });
+      expect((await approve(pr.body.id)).status).toBe(200);
+      expect((await audits(pr.body.id)).map((a) => [a.name, a.payload.changes])).toEqual([['audit.fee_proposal.created', expect.anything()],
+        ['audit.fee_proposal.approved', { platform_id: p, cap_version: 1, amount: 4000 }]]);
+      const second = await propose(p, { organizationId: org, productId: prod, amount: 10 });
+      expect((await reject(second.body.id)).status).toBe(200);
+      expect(await names(second.body.id)).toEqual(['audit.fee_proposal.created', 'audit.fee_proposal.rejected']);
+      const third = await propose(p, { organizationId: org, productId: prod, amount: 20 });
+      expect((await withdraw(p, third.body.id)).status).toBe(200);
+      expect(await names(third.body.id)).toEqual(['audit.fee_proposal.created', 'audit.fee_proposal.withdrawn']);
+      expect((await revoke(p, d.body.id)).status).toBe(200);
+      expect(await names(d.body.id)).toEqual(['audit.fee_delegation.granted', 'audit.fee_delegation.revoked']);
+      // data minimization and provenance: no currency, bearer or token in any payload; no trusted scope row asserted
+      for (const id of [capRow, d.body.id, pr.body.id, second.body.id, third.body.id]) {
+        for (const a of await audits(id)) {
+          const text = JSON.stringify(a.payload);
+          for (const leak of ['TND', B.owner, B.op]) expect(text, `${a.name} ${leak}`).not.toContain(`"${leak}"`);
+          expect(a.payload.scope, a.name).toBeUndefined();
+        }
+      }
+    });
+
+    it('nothing new, nothing recorded: an unchanged cap, a repeat delegation or revocation, and an idempotent replay add no intent', async () => {
+      const p = await platform();
+      assign(OP, p);
+      const idem = key();
+      expect((await setCap(p, 300, B.owner, idem)).status).toBe(201);
+      expect((await setCap(p, 300, B.owner, idem)).headers['idempotent-replayed']).toBe('true'); // replay of the same key
+      expect((await setCap(p, 300)).status).toBe(200); // the current amount again: no new version
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.fee_cap.set' AND payload->'changes'->>'platform_id' = $1`, [p])).rows[0].n).toBe(1);
+      const d = await delegate(p, OP);
+      expect((await delegate(p, OP)).body.id).toBe(d.body.id); // the active delegation, answered
+      await revoke(p, d.body.id);
+      await revoke(p, d.body.id); // already revoked, answered
+      expect(await names(d.body.id)).toEqual(['audit.fee_delegation.granted', 'audit.fee_delegation.revoked']);
+    });
+
+    it('a refused command writes no intent: above the cap, not pending, unauthorized, product not available', async () => {
+      const { p, org, prod } = await ready(1000);
+      const before = (await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.fee_proposal.%'`)).rows[0].n;
+      expect((await propose(p, { organizationId: org, productId: prod, amount: 1001 })).body.code).toBe('fee_above_cap');
+      expect((await propose(p, { organizationId: org, productId: randomUUID(), amount: 1 })).body.code).toBe('product_not_available');
+      assign(OP2, p); // assigned to the Platform but never delegated: 403
+      expect((await propose(p, { organizationId: org, productId: prod, amount: 1 }, B.op2)).status).toBe(403);
+      const ok = await propose(p, { organizationId: org, productId: prod, amount: 1 });
+      await approve(ok.body.id);
+      expect((await approve(ok.body.id)).body.code).toBe('fee_proposal_not_pending');
+      expect((await reject(ok.body.id)).body.code).toBe('fee_proposal_not_pending');
+      expect((await approve(ok.body.id, B.op)).status).toBe(403);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.fee_proposal.%'`)).rows[0].n).toBe(before + 2); // created + approved only
+    });
+
+    it('concurrency: 8 cap versions at once give 8 intents (one per version); one key 8 times gives 1; racing decisions give exactly one decision intent', async () => {
+      const p = await platform();
+      await Promise.all(Array.from({ length: 8 }, (_, i) => setCap(p, 100 + i)));
+      const versions = (await admin.query(`SELECT (payload->'changes'->>'version')::int AS v FROM outbox WHERE name = 'audit.fee_cap.set' AND payload->'changes'->>'platform_id' = $1 ORDER BY 1`, [p])).rows.map((r) => r.v);
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      const q = await platform();
+      const idem = key();
+      await Promise.all(Array.from({ length: 8 }, () => setCap(q, 42, B.owner, idem)));
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.fee_cap.set' AND payload->'changes'->>'platform_id' = $1`, [q])).rows[0].n).toBe(1);
+      const { p: p2, org, prod } = await ready();
+      const r = await propose(p2, { organizationId: org, productId: prod, amount: 1 });
+      await Promise.all([approve(r.body.id), reject(r.body.id), approve(r.body.id), reject(r.body.id)]);
+      const decisions = (await names(r.body.id)).filter((n) => n !== 'audit.fee_proposal.created');
+      expect(decisions).toHaveLength(1);
+      const status = (await admin.query(`SELECT status FROM fee_proposal WHERE id = $1`, [r.body.id])).rows[0].status as string;
+      expect(decisions[0]).toBe(`audit.fee_proposal.${status}`);
+    });
+
+    it('an audit-write failure rolls the command back (no fact without its evidence); the retry then records both once', async () => {
+      const p = await platform();
+      await admin.query(`CREATE FUNCTION g6a_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.name = 'audit.fee_cap.set' THEN RAISE EXCEPTION 'injected outbox failure'; END IF; RETURN NEW; END $$`);
+      await admin.query(`CREATE TRIGGER zz_g6a_fail_audit BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION g6a_fail_audit()`);
+      const idem = key();
+      try {
+        const failed = await setCap(p, 777, B.owner, idem);
+        expect(failed.status).toBeGreaterThanOrEqual(500);
+        expect(await caps(p)).toEqual([]); // the cap version was rolled back with its intent
+      } finally {
+        await admin.query(`DROP TRIGGER zz_g6a_fail_audit ON outbox`);
+        await admin.query(`DROP FUNCTION g6a_fail_audit()`);
+      }
+      expect((await setCap(p, 777, B.owner, idem)).status).toBe(201); // the same key: nothing was stored for it, so it runs now
+      expect(await caps(p)).toEqual([{ version: 1, amount: 777 }]);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.fee_cap.set' AND payload->'changes'->>'platform_id' = $1`, [p])).rows[0].n).toBe(1);
+    });
+
+    it('no event for a derived reading: a later approval or a lowered cap adds only its own fact (no supersession or usability event)', async () => {
+      const { p, org, prod } = await ready(5000);
+      const first = await propose(p, { organizationId: org, productId: prod, amount: 4000 });
+      await approve(first.body.id);
+      const before = await names(first.body.id);
+      const second = await propose(p, { organizationId: org, productId: prod, amount: 3000 });
+      await approve(second.body.id);
+      await setCap(p, 1000); // both approved fees are now above the cap
+      expect(await names(first.body.id)).toEqual(before);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.fee_%' AND (name LIKE '%supersed%' OR name LIKE '%usab%')`)).rows[0].n).toBe(0);
+    });
+  });
 });

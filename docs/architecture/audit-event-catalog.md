@@ -61,7 +61,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
-## billing-service (51)
+## billing-service (58)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -109,6 +109,13 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `recovery_restriction.suspended` | commercial | user (owner) | required | recovery_obligation | — | succeeded | `suspension_id`: uuid<br>`dispute_id`: uuid<br>`refund_case_id`: uuid<br>`reason_code`: refund_chargeback_overlap | The Owner suspended T3 for one recovery obligation in a refund and chargeback overlap, with a dedicated receipt: the debt, the collection freeze and the overlap case stay; nothing is forgiven or resolved. |
 | `recovery_restriction.suspension_revoked` | commercial | user (owner) | required | recovery_obligation | — | succeeded | `suspension_id`: uuid<br>`reason_code`: owner_reinstated_restriction | The Owner revoked an active T3 suspension of one recovery obligation, with a dedicated receipt: T3 applies again to new assistance requests only, never retroactively. |
 | `recovery_surplus.recipient_confirmed` | commercial | user (member) | required | recovery_surplus | — | succeeded | — | The receiving Organization's administrator confirmed an external surplus repayment: the surplus is resolved. |
+| `fee_cap.set` | commercial | user (owner) | none (platform) | fee_cap | — | succeeded | `platform_id`: uuid<br>`version`: integer 1–2147483647<br>`amount`: integer 0–9007199254740991 | The Owner set a new immutable version of a Platform's Organization fee cap. |
+| `fee_delegation.granted` | commercial | user (owner) | none (platform) | fee_delegation | — | succeeded | `platform_id`: uuid<br>`operator_user_id`: uuid | The Owner delegated proposing Organization fees on a Platform to one operator of their Company (no expiry). |
+| `fee_delegation.revoked` | commercial | user (owner) | none (platform) | fee_delegation | — | succeeded | `platform_id`: uuid<br>`operator_user_id`: uuid | The Owner revoked a fee delegation (final); pending proposals stay pending for the Owner to decide. |
+| `fee_proposal.created` | commercial | user (operator) | required | fee_proposal | — | succeeded | `platform_id`: uuid<br>`product_id`: uuid<br>`delegation_id`: uuid<br>`amount`: integer 0–9007199254740991 | A delegated operator proposed an Organization fee for one Organization and one personal subscription product, within the Platform's current cap. |
+| `fee_proposal.withdrawn` | commercial | user (operator) | required | fee_proposal | — | succeeded | `platform_id`: uuid | The proposing operator, still delegated, withdrew their own pending fee proposal. |
+| `fee_proposal.approved` | commercial | user (owner) | required | fee_proposal | — | succeeded | `platform_id`: uuid<br>`cap_version`: integer 1–2147483647<br>`amount`: integer 0–9007199254740991 | The Owner of the proposal's Platform approved a pending fee proposal within the current cap version it records. |
+| `fee_proposal.rejected` | commercial | user (owner) | required | fee_proposal | — | succeeded | `platform_id`: uuid | The Owner of the proposal's Platform rejected a pending fee proposal. |
 | `stalled_work.escalated` | commercial | system (`stalled_work_sweep`) | as recorded (UUID or null) | stalled_work_review | — | succeeded | `kind`: assistance_dispute_open \| settlement_channel_uncertain \| payment_request_sending \| payment_event_conflict<br>`subject_id`: uuid<br>`reason`: elapsed \| send_attempts \| conflict_observed<br>`payment_request_id`?: uuid<br>`threshold_seconds`: integer 0–31536000 | Billing work stayed in a state with no exit past its threshold (a J-1 dispute, an uncertain settlement channel, a sending payment request, a conflicting payment event): a review item, with no commercial effect. |
 | `stalled_work.state_exited` | commercial | system (`stalled_work_sweep`) | as recorded (UUID or null) | stalled_work_review | — | succeeded | `kind`: assistance_dispute_open \| settlement_channel_uncertain \| payment_request_sending<br>`subject_id`: uuid<br>`exited_state`: resolved \| open \| settled \| closed \| requested \| rejected | The subject of an escalated review item left the state it was escalated for: an observation only; the review item stays and nothing else changes. |
 | `stalled_work.auth_fault_escalated` | security | system (`payment_dispatcher`) | none (platform) | stalled_work_review | — | succeeded | `payment_request_id`: uuid<br>`send_attempts`: integer 0–2147483647 | Payment refused Billing's own service credential for a sending payment request (a configuration fault): a Billing-internal review item; the dispatcher keeps retrying. |
@@ -177,4 +184,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 124 actions.**
+**Total: 131 actions.**
