@@ -32,6 +32,7 @@ import { DbService } from '@nawara/service-kit';
 import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '../src/reconciliation/payment-reconciliation-client.js';
 import { ReconciliationModule } from '../src/reconciliation/reconciliation.module.js';
 import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
+import { ReconciliationCases } from '../src/reconciliation/reconciliation-cases.js';
 import { RefundAuthorizationService } from '../src/refunds/refund-authorization.service.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -2695,6 +2696,66 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         });
       }
 
+      it('G2 (DO-75 V3): later contests of the same fact become follow-ups of its existing case (never the opening contest); another fact\'s case gets none; a case opened before 0057 (no opening ref) takes none', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const factId = randomUUID();
+        pay08States(p.paymentId, r.attemptId, factId, p.amount, true);
+        contradiction(p.paymentId, factId, r.attemptId, p.amount + 5000);
+        await reconciliation().drainOnce();
+        const c = await caseOf('refund_fact_contested', factId);
+        const opening = await evidenceOf(c.id);
+        const openingRef = (await one(`SELECT "evidenceRef" FROM reconciliation_case_opening_ref WHERE "caseId" = $1`, [c.id])).evidenceRef;
+        const caseRow = await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id]);
+        contradiction(p.paymentId, factId, r.attemptId, p.amount + 75);
+        contradiction(p.paymentId, factId, r.attemptId, p.amount - 10);
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        const rows = (await admin.query(`SELECT "evidenceKind", "evidenceRef", "factId", "refundAttemptId", "paymentId" FROM reconciliation_case_followup WHERE "caseId" = $1`, [c.id])).rows;
+        expect(rows).toHaveLength(2);
+        expect(rows.every((x) => x.evidenceKind === 'refund_contest' && x.factId === factId && x.paymentId === p.paymentId && x.refundAttemptId === r.attemptId)).toBe(true);
+        expect(rows.some((x) => x.evidenceRef === openingRef)).toBe(false);
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1`, [factId])).toBe(1);
+        expect(await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id])).toEqual(caseRow);
+        expect(await evidenceOf(c.id)).toEqual(opening);
+        expect(await openedAudits(c.id)).toBe(1);
+        // a follow-up naming ANOTHER fact is refused by the database
+        await expect(admin.query(`INSERT INTO reconciliation_case_followup ("caseId", "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "factId", "companyId")
+          VALUES ($1, 'refund_contest', $2, $3, $4, $5, $6)`, [c.id, randomUUID(), p.paymentId, r.attemptId, randomUUID(), randomUUID()])).rejects.toMatchObject({ constraint: 'reconciliation_case_followup_evidence' });
+        // an opening ref can only name a refund_fact_contested case
+        const other = (await one(`SELECT id FROM reconciliation_case WHERE "caseType" <> 'refund_fact_contested' LIMIT 1`))?.id;
+        if (other) await expect(admin.query(`INSERT INTO reconciliation_case_opening_ref ("caseId", "evidenceRef") VALUES ($1, $2)`, [other, randomUUID()])).rejects.toMatchObject({ constraint: 'reconciliation_case_opening_ref_case' });
+        // a case opened before 0057 has no opening ref: it takes no follow-up (its opening item cannot be told apart; never misattributed)
+        const p2 = await directPurchase();
+        const r2 = await relayed(p2.paymentId);
+        const fact2 = randomUUID();
+        pay08States(p2.paymentId, r2.attemptId, fact2, p2.amount, true);
+        contradiction(p2.paymentId, fact2, r2.attemptId, p2.amount + 1);
+        await reconciliation().drainOnce();
+        const c2 = await caseOf('refund_fact_contested', fact2);
+        await expect(t.app.get(DbService).tx((q) => t.app.get(ReconciliationCases).followUp(q, { caseId: c2.id, evidenceKind: 'refund_contest', evidenceRef: randomUUID(),
+          paymentId: p2.paymentId, refundAttemptId: r2.attemptId, factId: fact2, at: null }))).resolves.toBe(true); // control: with its opening ref, it takes one
+        // LABELLED FIXTURE: a contest case as opened before 0057 (no opening ref), placed with triggers off; it takes no follow-up, by the service or directly
+        const legacyFact = randomUUID();
+        const legacyCase = randomUUID();
+        const cl = await admin.connect();
+        try {
+          await cl.query('BEGIN');
+          await cl.query('SET LOCAL session_replication_role = replica');
+          await cl.query(`INSERT INTO reconciliation_case (id, "caseType", "evidenceKey", "companyId", "paymentId") SELECT $1, 'refund_fact_contested', $2, "companyId", "paymentId" FROM reconciliation_case WHERE id = $3`,
+            [legacyCase, legacyFact, c2.id]);
+          await cl.query(`INSERT INTO reconciliation_contest_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId") VALUES ($1, $2, $3, NULL)`, [legacyCase, p2.paymentId, legacyFact]);
+          await cl.query('COMMIT');
+        } finally {
+          cl.release();
+        }
+        await expect(t.app.get(DbService).tx((q) => t.app.get(ReconciliationCases).followUp(q, { caseId: legacyCase, evidenceKind: 'refund_contest', evidenceRef: randomUUID(),
+          paymentId: p2.paymentId, refundAttemptId: r2.attemptId, factId: legacyFact, at: null }))).resolves.toBe(false);
+        await expect(admin.query(`INSERT INTO reconciliation_case_followup ("caseId", "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "factId", "companyId")
+          VALUES ($1, 'refund_contest', $2, $3, NULL, $4, $5)`, [legacyCase, randomUUID(), p2.paymentId, legacyFact, randomUUID()])).rejects.toMatchObject({ constraint: 'reconciliation_case_followup_opening' });
+        expect(await count(`SELECT count(*) AS n FROM reconciliation_case_followup WHERE "caseId" = $1`, [legacyCase])).toBe(0);
+      });
+
       it('T12 (B-D6): inconsistent or unavailable Payment reads open nothing and change nothing; the same evidence opens its case once the reads agree (retry never discards it)', async () => {
         const p = await assistedPaid();
         const r = await relayed(p.paymentId);
@@ -3489,6 +3550,86 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
           expect(await caseOf('refund_fact_contested', factId)).toBeUndefined(); // never S0-C15B's case: the fact is not this payment's
         });
       }
+
+      it('G2 (DO-75 V2): later observations of the same attempt become append-only follow-ups of the existing case, once each (never the opening one), concurrent passes included; case and opening evidence unchanged; the Owner sees them; foreign or opening evidence is refused', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const first = observation(p.paymentId, r.attemptId);
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [first]));
+        await reconciliation().drainOnce();
+        const c = (await caseOf('refund_observation_conflict', r.attemptId))!;
+        const caseRow = await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id]);
+        const opening = await evidenceOf(c.id);
+        const before = await records(p);
+        const second = observation(p.paymentId, r.attemptId);
+        const third = observation(p.paymentId, r.attemptId, randomUUID());
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [first, second, third]));
+        await reconciliation().drainOnce();
+        await reconciliation().drainOnce();
+        const followUps = async () => (await admin.query(`SELECT "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "factId", "companyId" FROM reconciliation_case_followup
+          WHERE "caseId" = $1 ORDER BY "evidenceRef"`, [c.id])).rows;
+        expect(await followUps()).toEqual([second, third].sort((x, y) => x.localeCompare(y)).map((ref) => ({ evidenceKind: 'refund_observation', evidenceRef: ref, paymentId: p.paymentId,
+          refundAttemptId: r.attemptId, factId: null, companyId: caseRow.companyId })));
+        const audits = (await admin.query(`SELECT payload FROM outbox WHERE name = 'audit.reconciliation_case.evidence_followed_up' AND payload->'resource'->>'id' = $1`, [c.id])).rows;
+        expect(audits.map((a) => a.payload.changes.evidence_id).sort((x, y) => x.localeCompare(y))).toEqual([second, third].sort((x, y) => x.localeCompare(y)));
+        expect(audits.every((a) => a.payload.changes.after_resolution === false && a.payload.changes.evidence_kind === 'refund_observation')).toBe(true);
+        // concurrent writers of the same item: one row, one audit intent
+        const fourth = randomUUID();
+        const cases = t.app.get(ReconciliationCases);
+        const write = () => t.app.get(DbService).tx((q) => cases.followUp(q, { caseId: c.id, evidenceKind: 'refund_observation', evidenceRef: fourth, paymentId: p.paymentId,
+          refundAttemptId: r.attemptId, factId: null, at: null }));
+        expect((await Promise.all([write(), write(), write()])).filter(Boolean)).toHaveLength(1);
+        expect((await followUps()).filter((x) => x.evidenceRef === fourth)).toHaveLength(1);
+        expect(await count(`SELECT count(*) AS n FROM outbox WHERE name = 'audit.reconciliation_case.evidence_followed_up' AND payload->'changes'->>'evidence_id' = $1`, [fourth])).toBe(1);
+        // nothing else moved: the case, its opening evidence, its opened audit and every financial record
+        expect(await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id])).toEqual(caseRow);
+        expect(await evidenceOf(c.id)).toEqual(opening);
+        expect(await openedAudits(c.id)).toBe(1);
+        expect(await records(p)).toEqual(before);
+        // the Owner's read: the follow-ups, none after a resolution
+        const listed = (await send(request(server()).get(`/billing/admin/reconciliation-cases/${c.id}`), 'owner-tok', null)).body as Record<string, any>;
+        expect(listed.followUps.map((x: { evidenceId: string }) => x.evidenceId).sort((x: string, y: string) => x.localeCompare(y))).toEqual([second, third, fourth].sort((x, y) => x.localeCompare(y)));
+        expect(listed.evidenceAfterResolution).toBe(false);
+        // the database refuses: another payment's item, another attempt, the opening item; and keeps follow-ups append-only
+        const ins = (payment: string, attempt: string, ref: string) => admin.query(`INSERT INTO reconciliation_case_followup ("caseId", "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "companyId")
+          VALUES ($1, 'refund_observation', $2, $3, $4, $5)`, [c.id, ref, payment, attempt, randomUUID()]);
+        await expect(ins(randomUUID(), r.attemptId, randomUUID())).rejects.toMatchObject({ constraint: 'reconciliation_case_followup_evidence' });
+        await expect(ins(p.paymentId, randomUUID(), randomUUID())).rejects.toMatchObject({ constraint: 'reconciliation_case_followup_evidence' });
+        await expect(ins(p.paymentId, r.attemptId, first)).rejects.toMatchObject({ constraint: 'reconciliation_case_followup_opening' });
+        await expect(admin.query(`UPDATE reconciliation_case_followup SET "evidenceRef" = $2 WHERE "caseId" = $1`, [c.id, randomUUID()])).rejects.toMatchObject({ code: '23514' });
+        await expect(admin.query(`DELETE FROM reconciliation_case_followup WHERE "caseId" = $1`, [c.id])).rejects.toMatchObject({ code: '23514' });
+      });
+
+      it('G2 (DO-75 post-closure, labelled fixture): evidence after a resolution is linked and marked after_resolution; the resolution and the case never change', async () => {
+        const p = await directPurchase();
+        const r = await relayed(p.paymentId);
+        const first = observation(p.paymentId, r.attemptId);
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [first]));
+        await reconciliation().drainOnce();
+        const c = (await caseOf('refund_observation_conflict', r.attemptId))!;
+        // LABELLED FIXTURE: no approved path resolves this case type today; a resolution row is placed with triggers off to exercise the read and the guards
+        const cl = await admin.connect();
+        try {
+          await cl.query('BEGIN');
+          await cl.query('SET LOCAL session_replication_role = replica');
+          await cl.query(`INSERT INTO reconciliation_case_resolution ("caseId", kind, reason, "resolvedByUserId", "resolvedAt") VALUES ($1, 'acknowledged', 'provider_statement_reviewed', $2, now() - interval '1 minute')`, [c.id, U.owner]);
+          await cl.query('COMMIT');
+        } finally {
+          cl.release();
+        }
+        const resolution = await one(`SELECT * FROM reconciliation_case_resolution WHERE "caseId" = $1`, [c.id]);
+        const caseRow = await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id]);
+        const late = observation(p.paymentId, r.attemptId);
+        pay08Observed(p.paymentId, r.attemptId, own(r.attemptId, [first, late]));
+        await reconciliation().drainOnce();
+        const audit = (await admin.query(`SELECT payload FROM outbox WHERE name = 'audit.reconciliation_case.evidence_followed_up' AND payload->'resource'->>'id' = $1`, [c.id])).rows;
+        expect(audit.map((a) => a.payload.changes)).toMatchObject([{ evidence_id: late, after_resolution: true }]);
+        expect(await one(`SELECT * FROM reconciliation_case_resolution WHERE "caseId" = $1`, [c.id])).toEqual(resolution);
+        expect(await one(`SELECT * FROM reconciliation_case WHERE id = $1`, [c.id])).toEqual(caseRow);
+        const read = (await send(request(server()).get(`/billing/admin/reconciliation-cases/${c.id}`), 'owner-tok', null)).body as Record<string, any>;
+        expect(read).toMatchObject({ status: 'resolved', evidenceAfterResolution: true });
+        expect(read.followUps).toMatchObject([{ evidenceId: late, afterResolution: true }]);
+      });
 
       it('D9 (B-D6): every disagreement or unavailable read opens nothing and changes nothing; the same evidence opens its case once the reads agree (retry never discards it)', async () => {
         const p = await assistedPaid();

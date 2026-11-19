@@ -79,6 +79,41 @@ export class ReconciliationCases {
     return ins.id;
   }
 
+  /**
+   * Core V2 G2 (DO-75 V2 and V3; the Owner's G2 GO, package C): one append-only follow-up of an EXISTING case, for evidence Payment states after it —
+   * a later observation of the same refund attempt (`refund_observation`) or a later contest of the same fact (`refund_contest`) — with one audit intent
+   * (`reconciliation_case.evidence_followed_up`) when, and only when, the row is new. The case, its resolution and its opening evidence never change;
+   * nothing is reopened, superseded, allocated, refunded or reversed (FDR-08 level A). The opening evidence itself, and a V3 case opened before 0057
+   * (no recorded opening item), take none: nothing is written (the database refuses them too). The database checks the payment, attempt and fact.
+   */
+  async followUp(q: Queryable, f: { caseId: string; evidenceKind: 'refund_observation' | 'refund_contest'; evidenceRef: string; paymentId: string;
+    refundAttemptId: string | null; factId: string | null; at: string | null }): Promise<boolean> {
+    const opening = (await q.query<{ ref: string | null }>(
+      `SELECT CASE WHEN $2 = 'refund_observation' THEN (SELECT e."observationId" FROM reconciliation_observation_evidence e WHERE e."caseId" = $1)
+                   ELSE (SELECT o."evidenceRef" FROM reconciliation_case_opening_ref o WHERE o."caseId" = $1) END AS ref`, [f.caseId, f.evidenceKind])).rows[0]?.ref ?? null;
+    if (opening === null || opening === f.evidenceRef) return false;
+    const at = f.at !== null && !Number.isNaN(Date.parse(f.at)) ? f.at : null;
+    const ins = (await q.query<{ id: string }>(
+      `INSERT INTO reconciliation_case_followup ("caseId", "evidenceKind", "evidenceRef", "paymentId", "refundAttemptId", "factId", "itemObservedAt", "companyId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, '00000000-0000-0000-0000-000000000000') ON CONFLICT ON CONSTRAINT reconciliation_case_followup_once DO NOTHING RETURNING id`,
+      [f.caseId, f.evidenceKind, f.evidenceRef, f.paymentId, f.refundAttemptId, f.factId, at])).rows[0];
+    if (!ins) return false;
+    const c = (await q.query<{ organizationId: string | null; resolved: boolean }>(
+      `SELECT c."organizationId", EXISTS (SELECT 1 FROM reconciliation_case_resolution r WHERE r."caseId" = c.id) AS resolved FROM reconciliation_case c WHERE c.id = $1`,
+      [f.caseId])).rows[0]!;
+    await this.audit.record(q, 'reconciliation_case.evidence_followed_up', {
+      organizationId: c.organizationId, resource: { type: 'reconciliation_case', id: f.caseId }, identity: ins.id,
+      changes: { followup_id: ins.id, evidence_kind: f.evidenceKind, evidence_id: f.evidenceRef, after_resolution: c.resolved },
+    }, workerContext(f.evidenceRef));
+    return true;
+  }
+
+  /** Core V2 G2: the existing case of this type and evidence (and payment), or null — an absent case is never a reason to open or infer one. */
+  async existing(q: Queryable, caseType: CaseType, evidenceKey: string, paymentId: string): Promise<string | null> {
+    return (await q.query<{ id: string }>(
+      `SELECT id FROM reconciliation_case WHERE "caseType" = $1 AND "evidenceKey" = $2 AND "paymentId" = $3`, [caseType, evidenceKey, paymentId])).rows[0]?.id ?? null;
+  }
+
   /** Records a resolution once (a concurrent identical one is answered as already resolved); the database checks its evidence. */
   async resolve(q: Queryable, caseId: string, kind: ResolutionKind,
     refs: { refundCaseId?: string; lossId?: string; recoveryPaymentId?: string; disputeId?: string; userId?: string; reason?: string }, ctx: TransitionContext): Promise<boolean> {

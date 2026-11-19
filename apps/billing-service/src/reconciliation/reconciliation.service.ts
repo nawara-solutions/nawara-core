@@ -52,6 +52,7 @@ interface CaseRow {
   unreconciledFailedAttemptEvidence: boolean | null;
   kind: string | null; refundCaseId: string | null; lossId: string | null; recoveryPaymentId: string | null; resolvedByUserId: string | null; reason: string | null;
   resolvedAt: Date | null;
+  followUps: Array<{ id: string; evidenceKind: string; evidenceId: string; refundAttemptId: string | null; observedAt: string | null; recordedAt: string; afterResolution: boolean }> | null;
 }
 const CASE_SELECT = `SELECT c.id, c."caseType", c."evidenceKey", c."companyId", c."platformId", c."organizationId", c."paymentId", c."paymentRequestId", c."captureFactId",
     c.amount, trim(c.currency) AS currency, c.detail, c."openedAt",
@@ -68,7 +69,13 @@ const CASE_SELECT = `SELECT c.id, c."caseType", c."evidenceKey", c."companyId", 
     -- markers; only on the three loss cases whose evidence is the loss (the case itself, its status and its resolution are never rewritten)
     CASE WHEN c."caseType" IN ('chargeback_refund_overlap', 'chargeback_effect_waiting', 'chargeback_refund_exposure')
       THEN billing_loss_movement_marked(c."evidenceKey") END AS "unreconciledFailedAttemptEvidence",
-    r.kind, r."refundCaseId", r."lossId", r."recoveryPaymentId", r."resolvedByUserId", r.reason, r."resolvedAt"
+    r.kind, r."refundCaseId", r."lossId", r."recoveryPaymentId", r."resolvedByUserId", r.reason, r."resolvedAt",
+    -- Core V2 G2 (DO-75 V2, V3): the case's append-only follow-up evidence, in the order recorded; "after resolution" is derived from the two times
+    CASE WHEN c."caseType" IN ('refund_observation_conflict', 'refund_fact_contested') THEN (
+      SELECT coalesce(jsonb_agg(jsonb_build_object('id', f.id, 'evidenceKind', f."evidenceKind", 'evidenceId', f."evidenceRef", 'refundAttemptId', f."refundAttemptId",
+               'observedAt', f."itemObservedAt", 'recordedAt', f."recordedAt", 'afterResolution', r."resolvedAt" IS NOT NULL AND f."recordedAt" > r."resolvedAt")
+               ORDER BY f."recordedAt", f.id), '[]'::jsonb)
+        FROM reconciliation_case_followup f WHERE f."caseId" = c.id) END AS "followUps"
   FROM reconciliation_case c LEFT JOIN reconciliation_case_resolution r ON r."caseId" = c.id`;
 const representCase = (c: CaseRow) => ({
   id: c.id, caseType: c.caseType, evidenceId: c.evidenceKey, companyId: c.companyId, platformId: c.platformId, organizationId: c.organizationId, paymentId: c.paymentId,
@@ -78,6 +85,8 @@ const representCase = (c: CaseRow) => ({
   // Core V2 R3-F1: failed-attempt refund evidence is RECORDED on this loss's movement and no approved evidence-resolution path has reconciled it (none
   // exists). It asserts no further refund, double payment, liability or ownership; it carries no fact, figure or provider reference.
   ...(R3_F1_CASE_TYPES.includes(c.caseType) ? { unreconciledFailedAttemptEvidence: c.unreconciledFailedAttemptEvidence === true } : {}),
+  // Core V2 G2 (FDR-08 level A only): follow-up evidence and whether any arrived after the resolution. It reopens, supersedes and changes nothing.
+  ...(c.followUps !== null ? { followUps: c.followUps, evidenceAfterResolution: c.followUps.some((f) => f.afterResolution) } : {}),
   resolution: c.kind ? { kind: c.kind, refundCaseId: c.refundCaseId, lossId: c.lossId, recoveryPaymentId: c.recoveryPaymentId,
     resolvedBy: c.resolvedByUserId ? { userId: c.resolvedByUserId } : null, reason: c.reason, resolvedAt: iso(c.resolvedAt) } : null,
 });
@@ -268,8 +277,16 @@ export class ReconciliationService {
     if (!attemptId) return inconsistent('refund_attempt_unreadable');
     // Core V2 O-2: only THIS payment's own contest case ends the item here. The fact owner's case (O-2, under the owner's payment) must not stop an
     // observing payment's item from reaching DO-74's observer case below
-    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1 AND "paymentId" = $2`,
-      [factId, i.paymentId])).rows.length > 0) return;
+    // Core V2 G2 (DO-75 V3): an EXISTING case takes this item as follow-up evidence (once per item; never its opening item), and nothing else changes
+    const contestFollowUp = (q: Queryable, caseId: string) => this.cases.followUp(q, { caseId, evidenceKind: 'refund_contest', evidenceRef: i.id, paymentId: i.paymentId,
+      refundAttemptId: attemptId, factId, at: i.at });
+    const existingContest = (await this.db.query<{ id: string }>(`SELECT id FROM reconciliation_case WHERE "caseType" = 'refund_fact_contested' AND "evidenceKey" = $1 AND "paymentId" = $2`,
+      [factId, i.paymentId])).rows[0];
+    if (existingContest) {
+      await this.db.tx((q) => contestFollowUp(q, existingContest.id))
+        .catch((e: unknown) => this.log.warn(`reconciliation_followup_failure item=${i.id} ${describeFailure(e)} — nothing written; the next pass reads again`));
+      return;
+    }
     let read: Awaited<ReturnType<PaymentRefundClient['refunds']>>;
     try {
       read = await this.captures.refunds(i.paymentId);
@@ -297,9 +314,16 @@ export class ReconciliationService {
         `SELECT r."captureFactId" FROM refund_authorization_relay x JOIN refund_case r ON r.id = x."refundCaseId" WHERE x.id = $1 AND x."paymentId" = $2`, [attemptId, i.paymentId])).rows[0];
       const caseId = await this.cases.openForPayment(q, { caseType: 'refund_fact_contested', evidenceKey: factId, paymentId: i.paymentId, captureFactId: relay?.captureFactId ?? null,
         amount: fact.amount, currency: fact.currency, detail: allocated ? 'contested_after_allocation' : 'contested_unallocated' });
-      if (!caseId) return; // opened by another pass, or no Company Owner exists to see it
+      if (!caseId) {
+        // opened by another pass (Core V2 G2: this item is then its follow-up, looked up explicitly), or no Company Owner exists to see it (nothing)
+        const concurrent = await this.cases.existing(q, 'refund_fact_contested', factId, i.paymentId);
+        if (concurrent) await contestFollowUp(q, concurrent);
+        return;
+      }
       await q.query(`INSERT INTO reconciliation_contest_evidence ("caseId", "paymentId", "refundFactId", "refundAttemptId") VALUES ($1, $2, $3, $4)`,
         [caseId, i.paymentId, factId, relay ? attemptId : null]);
+      // Core V2 G2: the item that opened the case, so a later pass never takes it for follow-up evidence
+      await q.query(`INSERT INTO reconciliation_case_opening_ref ("caseId", "evidenceRef") VALUES ($1, $2)`, [caseId, i.id]);
       tally.opened++;
     }).catch((e: unknown) => this.log.warn(`refund_contest_open_failure item=${i.id} ${describeFailure(e)} — nothing opened; the next pass reads again`));
   }
@@ -312,13 +336,27 @@ export class ReconciliationService {
    * retried). The case and its evidence are one transaction (the database refuses one without the other at commit). Nothing financial is written.
    */
   private async observationConflict(i: PaymentItem, attemptId: string, inconsistent: (why: string) => void, tally: { opened: number }): Promise<void> {
-    if ((await this.db.query(`SELECT 1 FROM reconciliation_case WHERE "caseType" = 'refund_observation_conflict' AND "evidenceKey" = $1`, [attemptId])).rows.length > 0) return;
+    // Core V2 G2 (DO-75 V2): an EXISTING case of this attempt takes this observation as follow-up evidence (once per item; never its opening item)
+    const observationFollowUp = (q: Queryable, caseId: string) => this.cases.followUp(q, { caseId, evidenceKind: 'refund_observation', evidenceRef: i.id,
+      paymentId: i.paymentId, refundAttemptId: attemptId, factId: null, at: i.at });
+    const existingObservation = (await this.db.query<{ id: string }>(`SELECT id FROM reconciliation_case WHERE "caseType" = 'refund_observation_conflict' AND "evidenceKey" = $1`,
+      [attemptId])).rows[0];
+    if (existingObservation) {
+      await this.db.tx((q) => observationFollowUp(q, existingObservation.id))
+        .catch((e: unknown) => this.log.warn(`reconciliation_followup_failure item=${i.id} ${describeFailure(e)} — nothing written; the next pass reads again`));
+      return;
+    }
     await this.db.tx(async (q) => {
       const relay = (await q.query<{ captureFactId: string | null }>(
         `SELECT r."captureFactId" FROM refund_authorization_relay x JOIN refund_case r ON r.id = x."refundCaseId" WHERE x.id = $1 AND x."paymentId" = $2`, [attemptId, i.paymentId])).rows[0];
       if (!relay) return inconsistent('refund_attempt_unknown_to_billing');
       const caseId = await this.cases.openForPayment(q, { caseType: 'refund_observation_conflict', evidenceKey: attemptId, paymentId: i.paymentId, captureFactId: relay.captureFactId });
-      if (!caseId) return; // opened by another pass, or no Company Owner exists to see it
+      if (!caseId) {
+        // opened by another pass (Core V2 G2: this item is then its follow-up, looked up explicitly), or no Company Owner exists to see it (nothing)
+        const concurrent = await this.cases.existing(q, 'refund_observation_conflict', attemptId, i.paymentId);
+        if (concurrent) await observationFollowUp(q, concurrent);
+        return;
+      }
       await q.query(`INSERT INTO reconciliation_observation_evidence ("caseId", "paymentId", "refundAttemptId", "observationId") VALUES ($1, $2, $3, $4)`,
         [caseId, i.paymentId, attemptId, i.id]);
       tally.opened++;

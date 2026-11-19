@@ -678,6 +678,19 @@ const SPEC = {
     },
     purpose: 'The reconciliation worker opened one durable case for one piece of unresolved financial evidence (deterministic per type and evidence; nothing is discarded).',
   },
+  // Core V2 G2 (DO-75 V2, V3; the Owner's G2 GO, 2026-11-18): append-only follow-up evidence linked to an existing case, once per follow-up row, in its
+  // transaction. Version 1, no trusted scope. FDR-08 level A only: it reopens, supersedes, allocates, refunds and reverses nothing.
+  'reconciliation_case.evidence_followed_up': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['reconciliation_worker'] }, organization: 'optional',
+    resource: ['reconciliation_case'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      followup_id: { type: 'uuid', shape: 'value', required: true },
+      evidence_kind: { type: 'code', shape: 'value', required: true, values: ['refund_observation', 'refund_contest'] },
+      evidence_id: { type: 'uuid', shape: 'value', required: true },
+      after_resolution: { type: 'boolean', shape: 'value', required: true },
+    },
+    purpose: 'Payment stated further evidence about an existing reconciliation case (a later observation of its refund attempt or a later contest of its fact): linked to the case; the case and any resolution are unchanged.',
+  },
   'reconciliation_case.resolved': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'], system: ['reconciliation_worker'] }, organization: 'optional',
     resource: ['reconciliation_case'], subject: NO_SUBJECT, outcomes: OK,
