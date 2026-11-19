@@ -1,12 +1,17 @@
 # 0032. Database per service on a shared PostgreSQL server
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-19, by the owner, G8 direction "OWNER GO: G8 ADR ACCEPTANCE", decision 1; the existing architectural decision only. DO-5, a tested restore, remains OPEN as a production blocker; not a production certification)
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 
 > **Core V2 G8 status note (2026-11-18; governance only, not an acceptance).** The decision is implemented on `main` (one database and one
 > login role per service, per-service migrations). Its status stays `Proposed` until the owner changes it explicitly. Open dependency,
 > preserved: DO-5, a tested restore (the production blocker named under Consequences). See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
+
+> **Acceptance (2026-11-19, by the owner).** The owner explicitly accepted this decision as written: one database and one login role per
+> service on a shared PostgreSQL server, with per-service migrations and `DATABASE_URL`. The acceptance covers the architectural decision
+> only. It does not certify production: DO-5 (backups and a tested restore, "an unresolved production blocker for every database" under
+> Consequences) remains OPEN, and nothing here changes a database, role, migration or configuration.
 
 ## Context
 

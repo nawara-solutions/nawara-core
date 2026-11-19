@@ -1,6 +1,6 @@
 # 0035. Financial service boundaries: billing, payment and accounting
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-19, by the owner, G8 direction "OWNER GO: G8 ADR ACCEPTANCE", decision 2; limited to the boundaries as clarified by the approved S0 clarifications C1–C4. Invoice tax treatment, financial-architecture item 10 and the accounting-service implementation remain OPEN; no tax or accounting policy is accepted; not a production certification)
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 
@@ -13,6 +13,15 @@
 > **Core V2 G8 status note (2026-11-18; governance only, not an acceptance).** The S0 clarifications C1–C4 below are the only owner-approved
 > changes. Billing and Payment are implemented within these boundaries; `accounting-service` is not built. Its status stays `Proposed` until
 > the owner changes it explicitly. Open, preserved: who computes invoice tax (financial-architecture item 10). See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
+
+> **Acceptance (2026-11-19, by the owner; limited).** The owner explicitly accepted the financial service boundaries as clarified by the S0
+> clarifications C1–C4 below, which "clarify, and do not change, the boundaries above". Nothing else is accepted by this change:
+> - invoice tax treatment, who computes invoice tax (financial-architecture item 10), stays OPEN;
+> - `accounting-service` stays FUTURE and unbuilt; no ledger, tax or accounting policy is decided;
+> - C4's wording ("the consumption of refund authorization receipts") predates the further Payment receipt operations recorded in
+>   [ADR-0067](./0067-auth-authorization-receipts-for-owner-approved-refunds.md) Amendment 1; that reconciliation is F-22, still open.
+>
+> The acceptance is not a production certification.
 
 ## Context
 
@@ -47,7 +56,7 @@ cash and gateway payments, refunds, tax and a double-entry ledger, without coupl
 
 The architecture owner approved these clarifications at the Core V2 S0 freeze
 ([S0 record](../architecture/core-v2-s0-architecture-freeze.md)). They clarify, and do not change, the boundaries above; this ADR's
-status stays `Proposed`.
+status stayed `Proposed` until the acceptance of 2026-11-19 (limited, see the note at the top).
 
 - **C1. Cash obligations.** payment-service's *cash workflow* covers cash received by an invoice's seller as a payment method. Cash
   collected by a school from a student under Pay with School is a commercial obligation between school and student; billing-service

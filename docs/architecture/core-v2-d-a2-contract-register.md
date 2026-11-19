@@ -1651,6 +1651,29 @@ release audit-test fix (`1b3e6f7`). Each is for development and simulation only.
 DO-76, DO-77, OD-RLSC-1, OD-RLSC-3 and OD-RLSC-4 stay OPEN. F-29 stays LOCKED, R3-F2 stays OPEN. Production activation of any of these
 safeguards is not authorized.
 
+**G6-A fee audit actions (dated note, 2026-11-19; the Owner's G6-A GO; DEVELOPMENT AND SIMULATION ONLY; DO-67 stays OPEN until the
+Owner's review).** The seven S3f fee command facts (BIL-04 to BIL-07) now have commercial audit actions. Each intent is written in the
+command's own idempotent transaction, only when the command writes a new fact.
+
+| Action | Fact | Actor | Organization | Changes |
+|---|---|---|---|---|
+| `fee_cap.set` | a new `fee_cap` version | owner | none | `platform_id`, `version`, `amount` |
+| `fee_delegation.granted` | a new `fee_delegation` | owner | none | `platform_id`, `operator_user_id` |
+| `fee_delegation.revoked` | its `fee_delegation_revocation` | owner | none | `platform_id`, `operator_user_id` |
+| `fee_proposal.created` | a new `fee_proposal` | operator | the proposal's | `platform_id`, `product_id`, `delegation_id`, `amount` |
+| `fee_proposal.withdrawn` / `.approved` / `.rejected` | its one-way decision | operator / owner / owner | the proposal's | `platform_id` (+ `cap_version`, `amount` when approved) |
+
+- *Identity.* Each event id derives from the fact's row and the action. An unchanged cap, a repeated delegation or revocation, an
+  idempotent replay and every refused command write no intent. A failed intent rolls its command back.
+- *Minimization and provenance.* Identifiers, versions and integer amounts only; the currency stays on the row. The actor is the one Auth
+  verified live for the command. No trusted Company or Platform scope row is claimed (DO-59 open).
+- *Not events.* A later approval superseding an earlier one and a fee made unusable by a lowered cap are derived readings and G4 policy
+  (DO-32, DO-35, DO-36), not facts.
+- *Unchanged.* No command, authorization, cap, calculation or fee policy changes. Billing write grants go from 52 to 59; nothing is
+  provisioned or deployed.
+- *Evidence.* Billing `test/fees.e2e-spec.ts` (G6-A cases): the full lifecycle, no-op and replay, refused commands, concurrency, an
+  audit-write failure rolling back, and no derived events.
+
 **G6-D outbox-to-Audit comparator (dated note, 2026-11-19; the Owner's G6-D GO; DEVELOPMENT AND CERTIFICATION TEST TOOL ONLY; DO-69 and
 DO-43 stay OPEN).** `test/e2e-audit-producers/support/outbox-audit-comparator.ts` compares ONE producer's kit `outbox` audit intents
 (`audit.*`) with `audit_record` where `"sourceService"` is that producer.
