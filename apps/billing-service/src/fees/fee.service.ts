@@ -1,11 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { httpError, type Queryable } from '@nawara/service-kit';
+import { BillingAudit } from '../audit/billing-audit.js';
+import { requestTransitionContext, type TransitionContext } from '../domain/actors.js';
 import { billingError, notFound, operationNotPermitted } from '../domain/errors.js';
 import { BILLING_MESSAGES } from '../messages.js';
 import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authority.client.js';
 import type { FeeActor } from './fee-actor.guard.js';
 import { FeeCommandIdempotency, type CommandResult } from './fee-idempotency.js';
-import { FeeRepository, representCap, representDelegation, representProposal, type BillingPlatformFacts } from './fee.repository.js';
+import { FeeRepository, representCap, representDelegation, representProposal, type BillingPlatformFacts, type FeeProposalRow } from './fee.repository.js';
 
 /** The existing Billing answer for an Organization outside the caller's scope (unknown or invisible: one answer). */
 const ORGANIZATION_NOT_PERMITTED = () => httpError(403, 'organization_not_permitted', BILLING_MESSAGES.organizationNotPermitted);
@@ -24,7 +26,13 @@ export class FeeService {
     private readonly fees: FeeRepository,
     private readonly idempotency: FeeCommandIdempotency,
     @Inject(OWNER_AUTHORITY) private readonly auth: OwnerAuthority,
+    private readonly audit: BillingAudit,
   ) {}
+
+  /** Core V2 G6-A (DO-67): the catalog actor of a fee fact is the actor Auth verified live for this command, with the kind Auth verified. */
+  private ctx(actor: FeeActor): TransitionContext {
+    return requestTransitionContext({ type: 'user', id: actor.userId, userKind: actor.kind });
+  }
 
   /** The Owner's own configured Platform: 404 when its projection names another Company; 409 `platform_not_configured` when none. */
   private async ownersPlatform(q: Queryable, owner: FeeActor, platformId: string): Promise<BillingPlatformFacts> {
@@ -45,6 +53,9 @@ export class FeeService {
     return this.idempotency.run(owner.userId, key, 'fee_cap.set', { platformId, ...input }, async (q): Promise<CommandResult> => {
       const p = await this.ownersPlatform(q, owner, platformId);
       const { cap, changed } = await this.fees.setCap(q, p, input.amount, owner.userId);
+      // Core V2 G6-A: one audit intent per NEW cap version, in this transaction (an unchanged cap writes nothing, so it records nothing)
+      if (changed) await this.audit.record(q, 'fee_cap.set', { organizationId: null, resource: { type: 'fee_cap', id: cap.id },
+        changes: { platform_id: cap.platformId, version: cap.version, amount: Number(cap.amount) } }, this.ctx(owner));
       return { status: changed ? 201 : 200, body: representCap(cap) };
     });
   }
@@ -58,6 +69,8 @@ export class FeeService {
     return this.idempotency.run(owner.userId, key, 'fee_delegation.grant', { platformId, ...input }, async (q) => {
       await this.ownersPlatform(q, owner, platformId);
       const { delegation, changed } = await this.fees.grantDelegation(q, platformId, input.operatorUserId, owner.userId);
+      if (changed) await this.audit.record(q, 'fee_delegation.granted', { organizationId: null, resource: { type: 'fee_delegation', id: delegation.id },
+        changes: { platform_id: delegation.platformId, operator_user_id: delegation.operatorUserId } }, this.ctx(owner));
       return { status: changed ? 201 : 200, body: representDelegation(delegation) };
     });
   }
@@ -66,7 +79,9 @@ export class FeeService {
   revokeDelegation(owner: FeeActor, key: string, platformId: string, delegationId: string) {
     return this.idempotency.run(owner.userId, key, 'fee_delegation.revoke', { platformId, delegationId }, async (q) => {
       await this.ownersPlatform(q, owner, platformId);
-      const { delegation } = await this.fees.revokeDelegation(q, platformId, delegationId, owner.userId);
+      const { delegation, changed } = await this.fees.revokeDelegation(q, platformId, delegationId, owner.userId);
+      if (changed) await this.audit.record(q, 'fee_delegation.revoked', { organizationId: null, resource: { type: 'fee_delegation', id: delegation.id },
+        changes: { platform_id: delegation.platformId, operator_user_id: delegation.operatorUserId } }, this.ctx(owner));
       return { status: 200, body: representDelegation(delegation) };
     });
   }
@@ -84,7 +99,10 @@ export class FeeService {
       const d = await this.fees.activeDelegation(q, platformId, operator.userId);
       if (!d) throw operationNotPermitted(); // never delegated, or revoked: fail closed
       if (!(await this.fees.isFeeableProduct(q, platformId, input.productId))) throw billingError(409, 'product_not_available', BILLING_MESSAGES.productNotAvailable);
-      return { status: 201, body: representProposal(await this.fees.propose(q, p, d, input)) };
+      const proposal = await this.fees.propose(q, p, d, input);
+      await this.audit.record(q, 'fee_proposal.created', { organizationId: proposal.organizationId, resource: { type: 'fee_proposal', id: proposal.id },
+        changes: { platform_id: proposal.platformId, product_id: proposal.productId, delegation_id: proposal.delegationId, amount: Number(proposal.amount) } }, this.ctx(operator));
+      return { status: 201, body: representProposal(proposal) };
     });
   }
 
@@ -94,7 +112,9 @@ export class FeeService {
       const proposal = await this.fees.proposal(id, q);
       if (!proposal || proposal.platformId !== platformId || proposal.proposedBy !== operator.userId) throw notFound();
       if (!(await this.fees.activeDelegation(q, platformId, operator.userId))) throw operationNotPermitted();
-      return { status: 200, body: representProposal(await this.fees.decide(q, id, 'withdrawn', operator.userId)) };
+      const decided = await this.fees.decide(q, id, 'withdrawn', operator.userId);
+      await this.recordDecision(q, decided, operator);
+      return { status: 200, body: representProposal(decided) };
     });
   }
 
@@ -107,7 +127,19 @@ export class FeeService {
     if (!proposal || !(await this.auth.platformAllowed(owner.bearer, proposal.platformId, owner.deadline))) throw notFound();
     return this.idempotency.run(owner.userId, key, status === 'approved' ? 'fee_proposal.approve' : 'fee_proposal.reject', { id }, async (q) => {
       await this.ownersPlatform(q, owner, proposal.platformId);
-      return { status: 200, body: representProposal(await this.fees.decide(q, id, status, owner.userId)) };
+      const decided = await this.fees.decide(q, id, status, owner.userId);
+      await this.recordDecision(q, decided, owner);
+      return { status: 200, body: representProposal(decided) };
     });
+  }
+
+  /** Core V2 G6-A: a proposal's one-way decision (pending -> withdrawn | approved | rejected happens once, so its intent is written once). */
+  private async recordDecision(q: Queryable, p: FeeProposalRow, actor: FeeActor): Promise<void> {
+    const fact = { organizationId: p.organizationId, resource: { type: 'fee_proposal', id: p.id } };
+    if (p.status === 'withdrawn') await this.audit.record(q, 'fee_proposal.withdrawn', { ...fact, changes: { platform_id: p.platformId } }, this.ctx(actor));
+    else if (p.status === 'rejected') await this.audit.record(q, 'fee_proposal.rejected', { ...fact, changes: { platform_id: p.platformId } }, this.ctx(actor));
+    else if (p.status === 'approved') {
+      await this.audit.record(q, 'fee_proposal.approved', { ...fact, changes: { platform_id: p.platformId, cap_version: p.capVersion!, amount: Number(p.amount) } }, this.ctx(actor));
+    }
   }
 }

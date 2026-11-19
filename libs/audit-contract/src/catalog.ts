@@ -756,6 +756,71 @@ const SPEC = {
     resource: ['recovery_surplus'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: "The receiving Organization's administrator confirmed an external surplus repayment: the surplus is resolved.",
   },
+  // Core V2 G6-A (DO-67; the Owner's G6-A GO, 2026-11-19): the committed facts of the S3f fee commands (BIL-04 to BIL-07), once per fact, in the
+  // command's own idempotent transaction. Version 1, no trusted scope (no Company or Platform scope row is claimed). Identifiers, versions and the
+  // integer amount only (the currency stays on the row). No event for a derived reading (a later approval superseding an earlier one; a fee
+  // unusable under a lowered cap): those are G4 policy, not facts.
+  'fee_cap.set': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['fee_cap'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+      version: { type: 'integer', shape: 'value', required: true, min: 1, max: 2147483647 },
+      amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
+    },
+    purpose: "The Owner set a new immutable version of a Platform's Organization fee cap.",
+  },
+  'fee_delegation.granted': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['fee_delegation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+      operator_user_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The Owner delegated proposing Organization fees on a Platform to one operator of their Company (no expiry).',
+  },
+  'fee_delegation.revoked': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['fee_delegation'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+      operator_user_id: { type: 'uuid', shape: 'value', required: true },
+    },
+    purpose: 'The Owner revoked a fee delegation (final); pending proposals stay pending for the Owner to decide.',
+  },
+  'fee_proposal.created': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['operator'] }, organization: 'required',
+    resource: ['fee_proposal'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      delegation_id: { type: 'uuid', shape: 'value', required: true },
+      amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
+    },
+    purpose: "A delegated operator proposed an Organization fee for one Organization and one personal subscription product, within the Platform's current cap.",
+  },
+  'fee_proposal.withdrawn': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['operator'] }, organization: 'required',
+    resource: ['fee_proposal'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { platform_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'The proposing operator, still delegated, withdrew their own pending fee proposal.',
+  },
+  'fee_proposal.approved': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['fee_proposal'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      platform_id: { type: 'uuid', shape: 'value', required: true },
+      cap_version: { type: 'integer', shape: 'value', required: true, min: 1, max: 2147483647 },
+      amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
+    },
+    purpose: "The Owner of the proposal's Platform approved a pending fee proposal within the current cap version it records.",
+  },
+  'fee_proposal.rejected': {
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
+    resource: ['fee_proposal'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { platform_id: { type: 'uuid', shape: 'value', required: true } },
+    purpose: "The Owner of the proposal's Platform rejected a pending fee proposal.",
+  },
   // Core V2 G3 (DO-31, DO-33, DO-41, DO-42; the Owner's G3 GO, 2026-11-18): escalation-only review evidence, once per review row, in its transaction.
   // Version 1, no trusted scope. Identifiers and codes only. A request for review: it closes, retries, releases, changes and assigns nothing.
   'stalled_work.escalated': {
