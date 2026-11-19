@@ -58,6 +58,13 @@
 > certification (with S1-R, AP-R, NP-K, C-4, G-7), §13.7 re-emission beyond Payment, and P-11 (replay enforcement per consumer: DO-12,
 > recorded in the G8 record §3). This ADR's status stays `Proposed` until the owner changes it explicitly. See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
 
+> **DO-12 per-consumer enforcement (dated note, 2026-11-19; descriptive, not an acceptance; P-11 unchanged).** As implemented on `main`
+> (G8 record §3): Billing (Payment events) and Notification (its `EVENT_MAP` events) apply §13.4 with `strictEnforcement`, fixed in code:
+> an unverified original or an unverifiable replay is refused, and a lookup failure holds. Audit enforces admission always and provenance
+> by `AUDIT_PROVENANCE_ENFORCEMENT`: `compatibility` (default) records unverified provenance and ingests (including `replay_no_provenance`,
+> which S0-C6 lists for refusal after the C-4 disposition), `strict` refuses. No other service consumes events. Widening enforcement and the
+> exit from Audit's compatibility phase stay P-11. The status stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the

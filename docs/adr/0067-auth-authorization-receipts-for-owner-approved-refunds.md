@@ -15,6 +15,28 @@
 > the refund operation only (F-22, open), and the central receipt audit actions carry no operation or target (DO-62, open). Its status stays
 > `Proposed` until the owner changes it explicitly; nothing here revises its decision. See the [G8 record](../architecture/core-v2-g8-adr-governance-status.md).
 
+> **Amendment 1 (2026-11-19; the Owner's G8 direction of 2026-11-19; descriptive only).** The refund-only wording below is no longer the
+> whole mechanism. The same receipt mechanism (Decisions 1 to 5: factor step-up, purpose-bound binding, single use, deny-by-default
+> consumption by the bound audience, durable intent) is used for **ten** operations and **two** audiences. Each was approved by the owner in
+> the receipts contract ([§17a–§17g](../architecture/core-v2-d-a2-auth-authorization-receipts.md)), not here:
+>
+> | Operation | Audience | Approved in |
+> |---|---|---|
+> | `refund` | `payment-service` | this ADR; R6H-5 `captureFactId` (§17f) |
+> | `dispute_decision` | `payment-service` | §17a (R6E-3) |
+> | `provider_fact_associate` | `payment-service` | §17e (R6H-3) |
+> | `fraud_hold_place`, `fraud_hold_release` | `billing-service` | §17b (H-2) |
+> | `recovery_surplus_external` | `billing-service` | §17c (R6F-5) |
+> | `late_settlement_apply` | `billing-service` | §17d (R6G-1, R6G-3) |
+> | `recovery_write_off` | `billing-service` | §17e (R6H-8) |
+> | `recovery_restriction_suspend`, `recovery_restriction_revoke` | `billing-service` | §17g (S0-C14 items 10, 11) |
+>
+> Decision 1's `audience: 'payment-service'` and `operation: 'refund'` describe the refund operation. Every other operation's binding,
+> audience and step-up purpose is the one its contract section states; the source of truth for the matrix is
+> `apps/auth-service/src/receipts/receipt-binding.ts`. This amendment approves no operation, audience or purpose, and changes no rule.
+> **Still open:** F-22 (whether this ADR, a successor ADR or the receipts contract governs the general mechanism, and the title's scope),
+> and DO-62 (the central `authorization_receipt.*` audit actions carry no operation or target). The status stays `Proposed`.
+
 ## Context
 
 Refunds of Nawara-sold Premium are owner-only, require a factor step-up, and go back to the original payment method (approved Core V2
@@ -40,7 +62,7 @@ The existing mechanisms do not provide that proof:
 
 ## Decision
 
-1. **Issue.** auth-service issues a receipt to the active Owner of a Company after a factor step-up for purpose `refund.authorize`
+1. **Issue.** (Refund operation; for the other nine operations and the `billing-service` audience, see Amendment 1.) auth-service issues a receipt to the active Owner of a Company after a factor step-up for purpose `refund.authorize`
    (TOTP or passkey; never the secret key). The binding is `{operation: 'refund', audience: 'payment-service', companyId,
    refundCaseId, paymentId, amount, currency, reason, legalOverride}`; `companyId` must equal the Owner's Company. The receipt lives
    10 minutes. Auth stores only digests of the secret and of the canonical binding, the issuer and the session; the plaintext secret
