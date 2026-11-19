@@ -4,6 +4,7 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { APPS, PROHIBITED, deadDepth, resetAuditQueues, sql, startAudit, type LiveAudit } from './support/audit.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { AUDIT_RECORD_IDENTIFIERS, privateValueLeaks } from './support/leaks.js';
 
 /**
  * Stage 20.3: REAL release-service (HTTP, its dist build) → its outbox → its kit relay → a REAL RabbitMQ → a live audit-service →
@@ -77,7 +78,10 @@ describeWithEnv('Release → outbox → RabbitMQ → audit-service (all real)', 
     for (const r of rows) {
       const text = JSON.stringify(r);
       for (const re of PROHIBITED) expect(text).not.toMatch(re);
-      for (const leak of ['1.4.0', '1400', 'a1b2c3d4e5f6', 'notes.example', ci.token]) expect(text).not.toContain(leak);
+      // every value and key, `changes` included, holds none of the release's private values; the contract's generated identifiers are checked by their
+      // exact grammar instead (a random UUID or a sequence id may contain a short value such as the build number by chance: support/leaks.ts)
+      expect(privateValueLeaks(r, ['1.4.0', '1400', 'a1b2c3d4e5f6', 'notes.example', ci.token],
+        { ...AUDIT_RECORD_IDENTIFIERS, 'changes.product_id': 'uuid', 'changes.component_id': 'uuid' })).toEqual([]);
     }
 
     const from = new Date(Date.now() - 3_600_000).toISOString();
