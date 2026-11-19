@@ -1674,6 +1674,23 @@ command's own idempotent transaction, only when the command writes a new fact.
 - *Evidence.* Billing `test/fees.e2e-spec.ts` (G6-A cases): the full lifecycle, no-op and replay, refused commands, concurrency, an
   audit-write failure rolling back, and no derived events.
 
+**G6-D outbox-to-Audit comparator (dated note, 2026-11-19; the Owner's G6-D GO; DEVELOPMENT AND CERTIFICATION TEST TOOL ONLY; DO-69 and
+DO-43 stay OPEN).** `test/e2e-audit-producers/support/outbox-audit-comparator.ts` compares ONE producer's kit `outbox` audit intents
+(`audit.*`) with `audit_record` where `"sourceService"` is that producer.
+- *Boundaries.* Two READ ONLY transactions. It reads event ids, action names and times only. It writes, replays, deletes, requeues and
+  redelivers nothing. It is never mounted in a service and never pointed at production.
+- *Classes.* `present`, `missing` (published, past the grace window, not explained), `dead_lettered` (named by caller-supplied evidence),
+  `within_grace` (the Owner's initial development window: 5 minutes), `unverifiable` (Audit's own retention cutoff for the action's
+  category, or the producer's outbox retention horizon, reached the event), `not_eligible` (not yet published), and `orphan` (an Audit
+  record of this source with no outbox row inside the producer's horizon).
+- *Verdict.* `missing` and `orphan` are diagnostic failures only. A 5-minute delay is not proof of permanent loss or of production readiness.
+- *Dead-letter inspection: STOPPED (the Owner's G6-D rule 5).* RabbitMQ classic queues offer no non-destructive browse. The management API's
+  "get messages" requeues each message (`redelivered` set, position not guaranteed), and `basic.get` or a consumer consumes. No dead-letter
+  source is therefore wired: `deadLettered` is an explicit input, empty unless a safe source supplies it. Safer sources are proposed for the
+  Owner (a durable header-only observation written by audit-service when it dead-letters, or a development-only copy binding).
+- *Evidence.* `test/e2e-audit-producers/outbox-audit-comparator.e2e-spec.ts`: pure classification cases, and a real PostgreSQL 16 case on the
+  kit outbox and audit-service schemas (source isolation, read-only snapshots, a retention run turning `missing` into `unverifiable`).
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 
