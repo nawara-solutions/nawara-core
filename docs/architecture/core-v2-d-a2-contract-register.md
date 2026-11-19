@@ -1635,6 +1635,22 @@ ONLY; DO-75 V2 and V3).** Billing migration `0057`.
   - A post-resolution labelled fixture: after_resolution set, the resolution unchanged.
   - V3 follow-ups, refusal of another fact, and a pre-`0057` case taking none.
 
+**G3 and G2 coverage status record (dated note, 2026-11-19; the Owner's G8 + G6 direction, Phase 1; main `96ff9fa`, Core CI 44509002557
+FULL 30/30).** Merged by the Owner: #521 Billing G3 (`181bf36`), #522 Payment G3 (`4f934c5`), #523 Billing G2 (`96ff9fa`), and #524, the
+release audit-test fix (`1b3e6f7`). Each is for development and simulation only. **No observation is closed by this record.**
+
+| Observation | Safeguard implemented (development and simulation) | Underlying concern, still open |
+|---|---|---|
+| DO-31 | Escalation review item after 30 days, exit record, Platform Owner read | J-1 disputes still have no resolution, by decision; nothing acknowledges or resolves an item |
+| DO-33 | Escalation review item at `settleBy` + 7 days, linked to its payment request | E-6: an uncertain channel still blocks the sweep with no release timeout, by decision |
+| DO-41 | Escalation at 20 attempts or 24 h; auth_fault immediate and Billing-internal (security) | Dispatch still has no retry limit, by decision; the credential fault itself is operational |
+| DO-42 | Escalation per conflicting event; scoped only through a trusted request | No route acts on a conflict; untrusted conflicts stay Billing-internal |
+| DO-44 | `dispatch_stalled` escalation at 72 h (`dispatching` / `unknown`, never submitted); `authorization_pending` keeps S6h's 15-minute item | No timeout, by decision (R6B-4, R6B-9, Q8); nothing releases or resolves |
+| DO-75 | V2 and V3: later evidence linked as append-only follow-ups (FDR-08 level A) | V1 (non-Company sellers, with DO-77); pre-`0057` V3 cases take none; supersession and financial consequence (FDR-01, FDR-08 C/D) |
+
+DO-76, DO-77, OD-RLSC-1, OD-RLSC-3 and OD-RLSC-4 stay OPEN. F-29 stays LOCKED, R3-F2 stays OPEN. Production activation of any of these
+safeguards is not authorized.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

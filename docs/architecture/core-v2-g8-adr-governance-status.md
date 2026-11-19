@@ -63,3 +63,16 @@ ADR-0057 §13.4 is the rule; S0-C6 states how each consumer applies it. Facts on
 No ADR status, no ADR decision text, no Accepted ADR, no code, migration, configuration, broker permission or workflow. DO-5, OD-BRK-4,
 A3M F1–F7, S1e-5, F-22, DO-62, P-11 and every other unresolved dependency stay open. Acceptance recommendations are for the Owner's review
 and are not recorded here as decisions.
+
+## 5. The Owner's G8 direction (2026-11-19) and what this record does with it
+
+| ADR | Owner direction | Done here | Held, and why |
+|---|---|---|---|
+| 0032 | Accept the architectural approach; DO-5 (tested restore) stays a production blocker | nothing to its status | **Held.** The status change needs its own pull request: ADR status changes are "one ADR at a time, never in bulk" ([README](../adr/README.md) §Status lifecycle), "each in its own pull request with Core CI" (A5 record; S0 record "every ADR status change: separate explicit approval, one ADR at a time") |
+| 0035 | Accept limited to C1–C4; tax treatment and `accounting-service` stay outstanding | nothing to its status | **Held**, for the same rule |
+| 0057 | Keep `Proposed`, every open dependency intact | the DO-12 per-consumer enforcement note; the index row corrected | none |
+| 0067 | Amend the refund-only description to the actual operation and audience matrix; F-22 and DO-62 stay open | Amendment 1 (descriptive: ten operations, two audiences); the index row corrected; status `Proposed` | none |
+
+`Accepted` is never a production certification (README: "It does not imply that every consequence is implemented"). DO-5, F-22, DO-62,
+P-11, OD-BRK-4/5, A3M F1–F7 and the S1e-5 production certification stay open.
+
