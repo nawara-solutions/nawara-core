@@ -77,6 +77,7 @@ describe('audit contract version 2 (S2-Audit.1)', () => {
   const G6C = [
     'fee_cap.set', 'fee_delegation.granted', 'fee_delegation.revoked', 'fee_proposal.approved', 'fee_proposal.created', 'fee_proposal.rejected', 'fee_proposal.withdrawn',
     'fraud_hold.expired', 'fraud_hold.placed', 'fraud_hold.released',
+    'refund_attempt.authorized', 'refund_attempt.failed', 'refund_attempt.succeeded', 'refund_authorization.completed',
     'refund_case.authorization_relayed', 'refund_case.cancelled', 'refund_case.completed', 'refund_case.opened',
   ];
 

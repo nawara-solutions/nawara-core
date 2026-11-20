@@ -959,12 +959,14 @@ const SPEC = {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true, system: ['payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
     changes: { payment_id: { type: 'uuid', shape: 'value', required: true }, refund_case_id: { type: 'uuid', shape: 'value', required: true } },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'Auth confirmed the Owner\'s single-use refund authorization for exactly this refund attempt: the refund may now be sent to the provider.',
   },
   'refund_attempt.failed': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
     changes: { payment_id: { type: 'uuid', shape: 'value', required: true }, refund_case_id: { type: 'uuid', shape: 'value', required: true } },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The provider definitively refused or failed an authorized refund (a further attempt needs a new authorization).',
   },
   // Core V2 S6c (register EVT-02; S0 FC-2, FC-3; the Owner's R6C-7, R6C-11): the cumulative verified allocation of a refund authorization reached
@@ -1136,6 +1138,7 @@ const SPEC = {
       refund_case_id: { type: 'uuid', shape: 'value', required: true },
       refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'Verified provider refund evidence reached the full approved refund: the refund is financially complete, once.',
   },
   'refund_attempt.succeeded': {
@@ -1146,6 +1149,7 @@ const SPEC = {
       refund_case_id: { type: 'uuid', shape: 'value', required: true },
       fact_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The provider\'s verified evidence shows the full refund was made (money returned); its commercial effects are later stages.',
   },
 

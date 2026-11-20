@@ -58,6 +58,17 @@ export function auditActor(ctx: EventContext): AuditActor {
  * (resource) and the organization recorded on the payment row; never an amount, a party, a description, a reference or provider data.
  * The event id is derived from (payment, action): a retried transition writes the same event once.
  */
+/**
+ * Core V2 G6-C (DO-59): the Company a refund fact may assert as trusted scope. `refund_attempt.companyId` is copied from the payment's
+ * seller (Billing's assertion) when the attempt is created; it becomes AUTHORITATIVE only once Auth consumed the Owner's receipt for exactly
+ * that Company (`receiptId` is set then, once: the 0017 CHECK and `refund_attempt_authorization_immutable`). Without a consumed receipt
+ * there is no authoritative Company: refused (the transaction rolls back), never an unchecked seller promoted to scope.
+ */
+export function receiptBoundCompany(a: { id: string; companyId: string; receiptId: string | null }): string {
+  if (!a.receiptId || !a.companyId) throw new Error(`refund_scope_without_consumed_receipt refundAttempt=${a.id}`);
+  return a.companyId;
+}
+
 @Injectable()
 export class PaymentAudit {
   private readonly writer: AuditEventWriter<Queryable>;
@@ -81,14 +92,16 @@ export class PaymentAudit {
    * attempt is the resource; its payment, case and, for a success, its verified refund fact); never an amount, the receipt, its secret or the
    * approver (kept on Payment's row: `approvedBy` v2 is not granted). The event id is derived from (attempt, action): written once.
    */
-  async recordRefund(q: Queryable, action: RefundAuditAction, attempt: { id: string; paymentId: string; refundCaseId: string; succeededFactId?: string | null },
+  async recordRefund(q: Queryable, action: RefundAuditAction,
+    attempt: { id: string; paymentId: string; refundCaseId: string; companyId: string; receiptId: string | null; succeededFactId?: string | null },
     organizationId: string | null, ctx: EventContext): Promise<void> {
+    const companyId = receiptBoundCompany(attempt);
     const changes = action === 'refund_attempt.succeeded'
       ? { payment_id: attempt.paymentId, refund_case_id: attempt.refundCaseId, fact_id: attempt.succeededFactId as string }
       : { payment_id: attempt.paymentId, refund_case_id: attempt.refundCaseId };
     await this.writer.write(
       q,
-      { action, actor: auditActor(ctx), organizationId, resource: { type: 'refund_attempt', id: attempt.id }, outcome: 'succeeded', changes } as never,
+      { action, actor: auditActor(ctx), organizationId, resource: { type: 'refund_attempt', id: attempt.id }, outcome: 'succeeded', changes, companyId } as never,
       { eventId: deterministicEventId(attempt.id, `audit.${action}`), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }
@@ -98,10 +111,15 @@ export class PaymentAudit {
    * no trusted scope, no `approvedBy`: identifiers only (the authorization is the resource; its payment, case and attempt as changes).
    */
   async recordRefundCompletion(q: Queryable, z: { id: string; paymentId: string; refundCaseId: string; refundAttemptId: string }, organizationId: string | null, ctx: EventContext): Promise<void> {
+    // Core V2 G6-C (DO-59): the Company of the authorization's own attempt, bound by the receipt Auth consumed for it (read in this transaction)
+    const attempt = (await q.query<{ id: string; companyId: string; receiptId: string | null }>(
+      `SELECT a.id, a."companyId", a."receiptId" FROM refund_attempt a JOIN refund_authorization z ON z."refundAttemptId" = a.id AND z."receiptId" = a."receiptId"
+        WHERE z.id = $1 AND a.id = $2`, [z.id, z.refundAttemptId])).rows[0];
+    const companyId = receiptBoundCompany(attempt ?? { id: z.refundAttemptId, companyId: '', receiptId: null });
     await this.writer.write(
       q,
       { action: 'refund_authorization.completed', actor: auditActor(ctx), organizationId, resource: { type: 'refund_authorization', id: z.id }, outcome: 'succeeded',
-        changes: { payment_id: z.paymentId, refund_case_id: z.refundCaseId, refund_attempt_id: z.refundAttemptId } } as never,
+        changes: { payment_id: z.paymentId, refund_case_id: z.refundCaseId, refund_attempt_id: z.refundAttemptId }, companyId } as never,
       { eventId: deterministicEventId(z.id, 'audit.refund_authorization.completed'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }

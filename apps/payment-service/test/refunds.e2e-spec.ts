@@ -85,6 +85,7 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
         AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
+        PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000', // G6-C adds attempts for one buyer; this file asserts no rate limit (as the reconciliation suite)
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create'], allowedPlatforms: [TEST_PLATFORM] },
           'other-producer': { operations: ['payment.create', 'payment.read'], allowedPlatforms: [TEST_PLATFORM] },
@@ -613,6 +614,57 @@ describeWithEnv('refund attempts (Core V2 S6b) — real PostgreSQL', ['TEST_DATA
       const open = await createPayment();
       await fail(`INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId", provider, "liveMode", "receiptDigest")
         VALUES (gen_random_uuid(), $1, 'billing-service', gen_random_uuid(), $2, 9000, 'TND', 'customer_request', false, $3, $4, 'simulation', false, repeat('a', 64))`, [open.id, COMPANY, a.captureFactId, a.capturedAttemptId]);
+    });
+  });
+
+  // Core V2 G6-C (DO-59; the Owner's G6-C GO, 2026-11-20): only a refund fact with a CONSUMED Owner receipt asserts a Company, the receipt's
+  describe('Core V2 G6-C: receipt-bound refund facts carry the Company of the consumed receipt (version 2), never a Platform', () => {
+    const scoped = async (paymentId: string) => (await admin.query(
+      `SELECT name, "eventVersion" AS v, payload FROM outbox WHERE name LIKE 'audit.%' AND (payload->'changes'->>'payment_id' = $1 OR payload->'resource'->>'id' = $1)
+        ORDER BY "occurredAt", name`, [paymentId])).rows as Row[];
+
+    it('authorized, succeeded and the authorization\'s completion assert the receipt\'s Company; the payment\'s own facts stay version 1, unscoped', async () => {
+      const { payment } = await captured();
+      const { body: b } = await authorized(payment.id);
+      await drain();
+      const out = (await sim(`refunds/${b.refundAttemptId}/outcomes`, { commandId: cmd(), outcome: 'succeeded', delivery: 'held' }).expect(201)).body;
+      await sim(`refund-commands/${out.commandId}/deliver`, {}).expect(200);
+      const all = await scoped(payment.id);
+      const refundSide = all.filter((x) => /^audit\.refund_(attempt|authorization)\./.test(x.name));
+      expect(refundSide.map((x) => x.name).sort((a, c) => String(a).localeCompare(String(c))))
+        .toEqual(['audit.refund_attempt.authorized', 'audit.refund_attempt.succeeded', 'audit.refund_authorization.completed']);
+      for (const x of refundSide) expect([x.name, x.v, x.payload.companyId, x.payload.platformId], x.name).toEqual([x.name, 2, COMPANY, undefined]);
+      // the seller Billing asserted on the payment is never promoted: payment.* stays version 1 with no Company
+      for (const x of all.filter((y) => y.name.startsWith('audit.payment.'))) expect([x.name, x.v, x.payload.companyId], x.name).toEqual([x.name, 1, undefined]);
+    });
+
+    it('a provider-confirmed failure asserts the receipt\'s Company too', async () => {
+      const { payment } = await captured();
+      const { body: b } = await authorized(payment.id);
+      await drain();
+      await sim(`refunds/${b.refundAttemptId}/outcomes`, { commandId: cmd(), outcome: 'failed', failureCode: 'card_closed' }).expect(201);
+      const failed = (await scoped(payment.id)).filter((x) => x.name === 'audit.refund_attempt.failed');
+      expect(failed.map((x) => [x.v, x.payload.companyId, x.payload.platformId])).toEqual([[2, COMPANY, undefined]]);
+    });
+
+    it('wrong receipt/attempt binding: a receipt bound to another Company or another case authorizes nothing and nothing is scoped', async () => {
+      const OTHER = randomUUID();
+      const { payment } = await captured();
+      for (const over of [{ companyId: OTHER }, { refundCaseId: randomUUID() }]) {
+        const caseId = randomUUID();
+        const wrong = receiptFor(payment.id, caseId, over);
+        const b = body(caseId, wrong.secret);
+        expect((await refund(payment.id, b).expect(409)).body.code).toBe('refund_authorization_invalid');
+        expect(await attemptRow(b.refundAttemptId)).toMatchObject({ status: 'authorization_refused', receiptId: null });
+        expect(await audits(b.refundAttemptId)).toEqual([]);
+      }
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.%' AND payload->>'companyId' = $1`, [OTHER])).rows[0].n).toBe(0);
+    });
+
+    it('no consumed receipt, no Company: the writer refuses to promote an unconsumed attempt\'s seller Company (fail closed)', async () => {
+      const { receiptBoundCompany } = await import('../src/audit/payment-audit.js');
+      expect(() => receiptBoundCompany({ id: 'a1', companyId: COMPANY, receiptId: null })).toThrow('refund_scope_without_consumed_receipt');
+      expect(receiptBoundCompany({ id: 'a1', companyId: COMPANY, receiptId: randomUUID() })).toBe(COMPANY);
     });
   });
 });

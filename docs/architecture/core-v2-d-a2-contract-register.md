@@ -1691,15 +1691,16 @@ DO-43 stay OPEN).** `test/e2e-audit-producers/support/outbox-audit-comparator.ts
 - *Evidence.* `test/e2e-audit-producers/outbox-audit-comparator.e2e-spec.ts`: pure classification cases, and a real PostgreSQL 16 case on the
   kit outbox and audit-service schemas (source isolation, read-only snapshots, a retention run turning `missing` into `unverifiable`).
 
-**G6-C trusted Company scope, Billing group (dated note, 2026-11-20; the Owner's G6-C GO; DEVELOPMENT AND SIMULATION ONLY; DO-59, DO-60
-and DO-61 stay OPEN).** Fourteen Billing actions now assert their Company as trusted scope (catalog `scope.company: required`, never a
-Platform). Each one's Company is authoritative in Billing's own row, written in the fact's transaction and immutable afterwards:
+**G6-C trusted Company scope, Billing and Payment receipt groups (dated note, 2026-11-20; the Owner's G6-C GO; DEVELOPMENT AND SIMULATION ONLY; DO-59, DO-60
+and DO-61 stay OPEN).** Fourteen Billing and four Payment actions now assert their Company as trusted scope (catalog `scope.company: required`, never a
+Platform). Each one's Company is authoritative in the producer's own row, written in the fact's transaction and immutable afterwards:
 
 | Actions | The Company's source |
 |---|---|
 | `refund_case.opened` / `.cancelled` / `.authorization_relayed` / `.completed` | `refund_case.companyId`: the Owner's Company by Auth's live answer (with Auth's live Platform check); the database also requires it to equal the invoice seller; immutable |
 | `fraud_hold.placed` / `.released` / `.expired` | `fraud_hold.companyId`: the Owner's Company, bound in the Auth receipt Billing consumed; append-only |
 | `fee_cap.set`, `fee_delegation.granted` / `.revoked`, `fee_proposal.created` / `.withdrawn` / `.approved` / `.rejected` | the fact's Platform's `billing_platform.companyId` (append-only, never re-pointed), read in the command's transaction |
+| Payment: `refund_attempt.authorized` / `.failed` / `.succeeded`, `refund_authorization.completed` | `refund_attempt.companyId` once Auth CONSUMED the Owner's receipt for exactly that Company (`receiptId` set once; the 0017 CHECK); without a consumed receipt the writer refuses (fail closed) |
 
 - *Contract.* A scope rule is a version-2 rule: the writer emits version 2 for a scoped action (`emittedVersion`); each action keeps
   `since: 1`, so an earlier version-1 event of it stays valid and unscoped. Audit makes a trusted scope row only for a broker-verified
@@ -1707,9 +1708,10 @@ Platform). Each one's Company is authoritative in Billing's own row, written in 
 - *Unchanged.* The read routes, their authority, retention and legal holds. Fee proposals stay Company-only (no operator read of other
   operators' proposals is established).
 - *Deferred (kept unscoped).* Recovery, assistance, reconciliation, loss and stalled-work facts; products, prices, invoices, payment
-  requests and subscriptions (a service caller asserts their seller, B-029 / B-031); Payment's facts (a separate package).
+  requests and subscriptions (a service caller asserts their seller, B-029 / B-031); Payment's other facts (`payment.*`, disputes, provider
+  observations, `refund_safety.*`, `refund_fact.allocation_blocked`: their Company is Billing's unchecked assertion or the attempt may be unauthorized).
 - *Evidence.* `libs/audit-contract/test/contract-v2.spec.ts` and `writer.spec.ts`; Billing `test/fees.e2e-spec.ts`,
-  `test/refund-cases.e2e-spec.ts`, `test/refund-authorizations.e2e-spec.ts`; audit-service `test/contract-v2.e2e-spec.ts` and
+  `test/refund-cases.e2e-spec.ts`, `test/refund-authorizations.e2e-spec.ts`; Payment `test/refunds.e2e-spec.ts`; audit-service `test/contract-v2.e2e-spec.ts` and
   `test/scoped-query.e2e-spec.ts`.
 
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
