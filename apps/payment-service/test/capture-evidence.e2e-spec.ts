@@ -126,7 +126,11 @@ describeWithEnv('capture evidence (Core V2 S0-C11) — real PostgreSQL', ['TEST_
       await capture(a.id, 8000, `ptx_${a.id}`).send().expect(200);
       const res = await sync(p.id, a.id);
       expect([res.status, res.body.code]).toEqual([502, 'provider_error']);
-      expect(JSON.stringify(res.body)).not.toContain('8000');
+      // The random request id may contain '8000' by chance (CI 44601575812: '4ef98000-…'): it must be a bare UUID, and every other field
+      // of the response must name no provider value.
+      const { requestId, ...rest } = res.body as { requestId: unknown };
+      expect(requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(JSON.stringify(rest)).not.toContain('8000');
       expect((await facts(a.id)).map((f) => f.amount)).toEqual([8000]);
       expect(await conflicts(a.id)).toEqual([{ amount: 9000, source: 'status_check' }]);
       expect(await status(p.id)).toBe('pending');
