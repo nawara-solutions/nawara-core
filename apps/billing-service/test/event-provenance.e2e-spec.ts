@@ -401,7 +401,12 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
       expect(await applied(s.id)).toBe(0);
       expect(await status(s.request.id)).not.toBe('paid');
       expect(await origin(s.id)).toEqual([]);
-      expect(c.notices.some((m) => m.startsWith('event_dead_lettered') && m.includes('reason=untrusted_origin_unavailable'))).toBe(true);
+      // The bus logs `event_dead_lettered` only AFTER the dead-letter copy is confirmed, so the queue depth can be seen first: wait
+      // (bounded) for THIS event's notice on THIS queue, never an unrelated one.
+      const deadLettered = () => c.notices.some((m) => m.startsWith('event_dead_lettered') && m.includes(`queue=${queue} event=${s.id} `)
+        && m.includes('reason=untrusted_origin_unavailable'));
+      await until(deadLettered);
+      expect(deadLettered()).toBe(true);
     });
 
     it('a forged injection that changes the facts under the same event id is REFUSED (replay_mismatch): nothing financial changes', async () => {
