@@ -87,6 +87,47 @@ export interface EventSubscription {
    * `broker-dead-lettering.ts`). The in-memory bus ignores it.
    */
   brokerDeadLettering?: NoBrokerDeadLettering;
+  /**
+   * Core V2 DO-43b (optional; RabbitMQ implementation; the Owner's D43-1, D43-2; DEVELOPMENT AND SIMULATION DIAGNOSTICS ONLY): told, best
+   * effort, about each PHYSICAL attempt to copy a failed delivery into `<queue>.dead`. Each attempt gets a fresh UUID, also stamped on the
+   * copy as `x-nawara-dead-letter-attempt` (a diagnostic label, never producer identity; `nawara-dlq replay` strips it). The bus calls
+   * `observe` synchronously and never awaits it: `attempted` before the copy is sent, then `transfer_confirmed` once the broker confirmed
+   * the copy (before the original is acknowledged) or `transfer_unconfirmed` when it could not be (the original is then held and requeued,
+   * as without an observer). Whatever the observer does (throws, returns a rejected promise, is slow to return), settlement,
+   * acknowledgement, retries, ordering and prefetch are exactly as without it. Without it the bus behaves exactly as before and no header
+   * is added. `npm run check:repo` allows it only for reviewed services (`DEAD_LETTER_OBSERVATION_APPROVED_SERVICES`). The in-memory bus
+   * ignores it.
+   */
+  deadLetterObserver?: DeadLetterObserver;
+}
+
+/** Core V2 DO-43b: the three transitions of one physical dead-letter transfer attempt. */
+export type DeadLetterTransition = 'attempted' | 'transfer_confirmed' | 'transfer_unconfirmed';
+
+/**
+ * Core V2 DO-43b: one observation of one transfer attempt. Header-only: identifiers, codes and counters, never the body, a header value
+ * other than these, or an error message. `eventId`, `eventName` and `source` are the delivery's own labels when they are safe tokens (''
+ * otherwise): they are NOT verified identity.
+ */
+export interface DeadLetterObservation {
+  attemptId: string;
+  transition: DeadLetterTransition;
+  queue: string;
+  eventId: string;
+  eventName: string;
+  source: string;
+  failure: 'malformed' | 'permanent' | 'retries_exhausted';
+  reason: string | null;
+  errorClass: string;
+  retryCount: number;
+  replayCount: number;
+  redelivered: boolean;
+  observedAt: Date;
+}
+
+/** Core V2 DO-43b: must return at once (queue the observation, never do I/O inline); its result and errors are ignored by the bus. */
+export interface DeadLetterObserver {
+  observe(observation: DeadLetterObservation): void;
 }
 
 /** What an `admission` check answers: admitted, or refused with a short stable reason code (never payload data). */

@@ -18,6 +18,11 @@ export const HEADER = {
   consumer: 'x-nawara-consumer',
   /** Stage 18.8: the dead-letter copy's body was replaced (a `deadLetterPolicy` said `redacted`); such a copy is never replayed. */
   bodyRedacted: 'x-nawara-body-redacted',
+  /**
+   * Core V2 DO-43b: the physical transfer attempt that produced this dead-letter copy (a fresh UUID per attempt, only for a subscription
+   * with a `deadLetterObserver`). A diagnostic label: never producer identity, never trusted. Stripped on replay.
+   */
+  deadLetterAttempt: 'x-nawara-dead-letter-attempt',
 } as const;
 
 export type FailureClass = 'malformed' | 'permanent' | 'retries_exhausted';

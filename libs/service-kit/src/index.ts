@@ -60,7 +60,7 @@ export {
   type ProvenanceFactsEvaluation, type ProvenanceKeyRing, type ProvenanceAssessment, REPLAY_ORIGINALS, REPLAY_OUTCOMES, replayCandidate, type ReplayCandidate, type ReplayClassification,
   type ReplayOriginal, type ReplayClassificationOutcome,
 } from './events/provenance.js';
-export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventAdmission, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
+export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventAdmission, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision, type DeadLetterObservation, type DeadLetterObserver, type DeadLetterTransition } from './events/types.js';
 export { isCanonicalJsonBody } from './events/canonical-body.js';
 // Core V2 S1e-1 (ADR-0057 S0-C6): consumer trust decisions and the per-subscription enforcement policy (no consumer adopts one yet).
 export {
@@ -96,5 +96,6 @@ export { LABEL_NAMES, OTHER, UNMATCHED, closedSet, isForbiddenLabelName, type La
 export { canonicalJson, sha256Hex, digestRows, sealSnapshot, serializeSnapshot, verifySnapshot, SnapshotError, type SealedSnapshot, type SealInput, type SnapshotRow, type VerifyResult } from './snapshot/snapshot.js';
 export { inspectDeadLetters, replayDeadLetter, type DeadLetterInfo, type Inspection, type ReplayOutcome, type ReplayResult } from './events/dlq-tools.js';
 export { HEADER as DEAD_LETTER_HEADER, deadQueueName, retryQueueName } from './events/dead-letter.js';
+export { BoundedObservationBuffer, type ObservationBufferOptions, type ObservationBufferStats, type ObservationSink, type ObservationSinkResult } from './events/observation-buffer.js';
 export { noBrokerDeadLettering, type IsolatedTopologyStatus, type NoBrokerDeadLettering } from './events/broker-dead-lettering.js';
 export { PollLoop, DEFAULT_DRAIN_TIMEOUT_MS, type DrainOutcome } from './workers/poll-loop.js';
