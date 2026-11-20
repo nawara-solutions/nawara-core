@@ -1,5 +1,5 @@
 import { validateAuditEvent } from '../src/consumer.js';
-import { AUDIT_CATALOG, AUDIT_ACTIONS, type AuditAction } from '../src/index.js';
+import { AUDIT_CATALOG, AUDIT_ACTIONS, emittedVersion, type AuditAction } from '../src/index.js';
 import { SAMPLE_IDS, sampleAuditPayload } from '../src/testing.js';
 
 const EVENT_ID = '5f0c2d1e-8a7b-4c6d-9e5f-4a3b2c1d0e99';
@@ -16,7 +16,7 @@ function envelope(action: AuditAction, overrides: { name?: unknown; payload?: un
       occurredAt: '2026-09-25T10:00:00.123Z',
       correlationId: 'corr-0001-abcd',
       source: AUDIT_CATALOG.get(action)!.producer,
-      version: AUDIT_CATALOG.get(action)!.since, // S2-Audit.2: the action's own version (1, or 2 for the authorization receipts)
+      version: emittedVersion(action), // S2-Audit.2: the action's own version (1, or 2 for the receipts and, G6-C, a scoped action)
       ...overrides.headers,
     },
   };
@@ -31,7 +31,7 @@ describe('validateAuditEvent (consumer side, the input of 18.5)', () => {
       eventType: `audit.${action}`,
       sourceService: e.producer,
       category: e.category,
-      schemaVersion: e.since, // S2-Audit.2: the action's own version
+      schemaVersion: emittedVersion(action), // S2-Audit.2 / G6-C: the action's emitted version
       occurredAt: '2026-09-25T10:00:00.123Z',
       correlationId: 'corr-0001-abcd',
       payload: sampleAuditPayload(action, 'complete'),

@@ -137,7 +137,7 @@ export class FraudHoldService {
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now() + interval '14 days') RETURNING *`,
           [holdId, sub.id, owner.companyId, sub.platformId, productId, beneficiaryUserId, reason, owner.userId, consumption.receiptId])).rows[0]!;
         for (const r of refs) await q.query(`INSERT INTO fraud_hold_evidence ("holdId", "grantId", "fileId") VALUES ($1, $2, $3)`, [holdId, r.grantId, r.fileId]);
-        await this.audit.record(q, 'fraud_hold.placed', { organizationId: null, resource: { type: 'fraud_hold', id: holdId }, changes: { product_id: productId, reason: reason as never } }, this.ownerContext(owner));
+        await this.audit.record(q, 'fraud_hold.placed', { organizationId: null, resource: { type: 'fraud_hold', id: holdId }, companyId: h.companyId, changes: { product_id: productId, reason: reason as never } }, this.ownerContext(owner));
         return h;
       });
       this.log.log(`fraud_hold_placed hold=${holdId} subscription=${sub.id} reason=${reason}`);
@@ -164,7 +164,7 @@ export class FraudHoldService {
       await this.db.tx(async (q) => {
         if ((await q.query(`SELECT 1 FROM fraud_hold_release WHERE "holdId" = $1`, [holdId])).rows.length > 0) return;
         await q.query(`INSERT INTO fraud_hold_release ("holdId", "releasedAt", "releasedByUserId", "receiptId") VALUES ($1, now(), $2, $3)`, [holdId, owner.userId, consumption.receiptId]);
-        await this.audit.record(q, 'fraud_hold.released', { organizationId: null, resource: { type: 'fraud_hold', id: holdId }, changes: { product_id: h.productId } }, this.ownerContext(owner));
+        await this.audit.record(q, 'fraud_hold.released', { organizationId: null, resource: { type: 'fraud_hold', id: holdId }, companyId: h.companyId, changes: { product_id: h.productId } }, this.ownerContext(owner));
       });
     } catch (e) {
       if (pgConstraint(e) === 'fraud_hold_not_active') throw billingError(409, 'fraud_hold_not_active', BILLING_MESSAGES.fraudHoldNotActive);
@@ -253,7 +253,7 @@ export class FraudHoldService {
       const ins = await q.query(`INSERT INTO fraud_hold_expiry ("holdId", "expiredAt") SELECT $1, "expiresAt" FROM fraud_hold WHERE id = $1 ON CONFLICT ("holdId") DO NOTHING RETURNING "holdId"`, [holdId]);
       if (ins.rows.length === 0) return false;
       const h = (await this.byId(q, holdId))!;
-      await this.audit.record(q, 'fraud_hold.expired', { organizationId: null, resource: { type: 'fraud_hold', id: holdId }, changes: { product_id: h.productId } }, ctx);
+      await this.audit.record(q, 'fraud_hold.expired', { organizationId: null, resource: { type: 'fraud_hold', id: holdId }, companyId: h.companyId, changes: { product_id: h.productId } }, ctx);
       this.log.log(`fraud_hold_expired hold=${holdId}`);
       return true;
     });

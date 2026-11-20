@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
-import { AUDIT_ACTIONS, AUDIT_CATALOG, type AuditAction } from '@nawara/audit-contract';
+import { AUDIT_ACTIONS, AUDIT_CATALOG, emittedVersion, type AuditAction } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
 import { sampleAuditPayload } from '@nawara/audit-contract/testing';
 import { auditMigrationsDir } from '../src/app.module.js';
@@ -39,7 +39,7 @@ describeWithEnv('audit contract → audit_record compatibility (real PostgreSQL)
       id,
       name: `audit.${action}`,
       payload: JSON.parse(JSON.stringify(sampleAuditPayload(action, variant))),
-      headers: { eventId: id, occurredAt, correlationId: variant === 'complete' ? `corr-${id.slice(0, 8)}` : undefined, source: AUDIT_CATALOG.get(action)!.producer, version: AUDIT_CATALOG.get(action)!.since } // S2-Audit.2: its own version,
+      headers: { eventId: id, occurredAt, correlationId: variant === 'complete' ? `corr-${id.slice(0, 8)}` : undefined, source: AUDIT_CATALOG.get(action)!.producer, version: emittedVersion(action) } // S2-Audit.2 / G6-C: its emitted version,
     };
   };
 
@@ -58,7 +58,7 @@ describeWithEnv('audit contract → audit_record compatibility (real PostgreSQL)
     expect(row.sourceService).toBe(v.sourceService);
     expect(row.action).toBe(action);
     expect(row.category).toBe(AUDIT_CATALOG.get(action)!.category);
-    expect(row.schemaVersion).toBe(AUDIT_CATALOG.get(action)!.since); // S2-Audit.2: 2 for the authorization receipts
+    expect(row.schemaVersion).toBe(emittedVersion(action)); // S2-Audit.2: 2 for the receipts; G6-C: 2 for a scoped action
     // version-2 facts round-trip unchanged (none for a version-1 action)
     expect([row.companyId, row.platformId, row.approvedByUserId, row.approvedByUserKind])
       .toEqual([p.companyId ?? null, p.platformId ?? null, p.approvedBy?.id ?? null, p.approvedBy?.userKind ?? null]);

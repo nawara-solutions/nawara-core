@@ -150,7 +150,7 @@ export class RefundCaseService {
           basis.captureFactId ?? null, basis.captureFactId ? 'late_capture' : null])).rows[0]!;
       const c = await this.load(q, id);
       await this.audit.record(q, 'refund_case.opened', {
-        organizationId: c.organizationId, resource: { type: 'refund_case', id },
+        organizationId: c.organizationId, resource: { type: 'refund_case', id }, companyId: c.companyId, // G6-C: the Owner's live Company, as stored
         changes: { payment_id: c.paymentId, company_id: c.companyId, platform_id: c.platformId, amount: Number(c.amount), eligibility: c.eligibility as never, reason: c.reason as never,
           legal_override: c.legalOverride },
       }, ctx);
@@ -208,7 +208,7 @@ export class RefundCaseService {
           input.reason, input.legalOverride, owner.userId, factId, basis.basis])).rows[0]!;
       const c = await this.load(q, id);
       await this.audit.record(q, 'refund_case.opened', {
-        organizationId: c.organizationId, resource: { type: 'refund_case', id },
+        organizationId: c.organizationId, resource: { type: 'refund_case', id }, companyId: c.companyId, // G6-C: the Owner's live Company, as stored
         changes: { payment_id: c.paymentId, company_id: c.companyId, platform_id: c.platformId, amount: Number(c.amount), eligibility: 'capture_specific', reason: c.reason as never,
           legal_override: c.legalOverride },
       }, ctx);
@@ -272,7 +272,7 @@ export class RefundCaseService {
       await q.query(`UPDATE refund_case SET status = 'cancelled', "cancelledBy" = $2 WHERE id = $1`, [id, owner.userId]);
       const c = await this.load(q, id);
       await this.audit.record(q, 'refund_case.cancelled', {
-        organizationId: c0.organizationId, resource: { type: 'refund_case', id },
+        organizationId: c0.organizationId, resource: { type: 'refund_case', id }, companyId: c0.companyId,
         changes: { payment_id: c0.paymentId, company_id: c0.companyId, platform_id: c0.platformId },
       }, ctx);
       return { status: 200, body: representCase(c, await this.relays(q, id)) };

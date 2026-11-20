@@ -54,7 +54,8 @@ export class FeeService {
       const p = await this.ownersPlatform(q, owner, platformId);
       const { cap, changed } = await this.fees.setCap(q, p, input.amount, owner.userId);
       // Core V2 G6-A: one audit intent per NEW cap version, in this transaction (an unchanged cap writes nothing, so it records nothing)
-      if (changed) await this.audit.record(q, 'fee_cap.set', { organizationId: null, resource: { type: 'fee_cap', id: cap.id },
+      // Core V2 G6-C (DO-59): the Company of every fee fact is its Platform's immutable `billing_platform` row, read in this transaction
+      if (changed) await this.audit.record(q, 'fee_cap.set', { organizationId: null, resource: { type: 'fee_cap', id: cap.id }, companyId: p.companyId,
         changes: { platform_id: cap.platformId, version: cap.version, amount: Number(cap.amount) } }, this.ctx(owner));
       return { status: changed ? 201 : 200, body: representCap(cap) };
     });
@@ -67,9 +68,9 @@ export class FeeService {
   async grantDelegation(owner: FeeActor, key: string, platformId: string, input: { operatorUserId: string }) {
     if (!(await this.auth.operatorAssigned(owner.bearer, input.operatorUserId, platformId, owner.deadline))) throw notFound();
     return this.idempotency.run(owner.userId, key, 'fee_delegation.grant', { platformId, ...input }, async (q) => {
-      await this.ownersPlatform(q, owner, platformId);
+      const p = await this.ownersPlatform(q, owner, platformId);
       const { delegation, changed } = await this.fees.grantDelegation(q, platformId, input.operatorUserId, owner.userId);
-      if (changed) await this.audit.record(q, 'fee_delegation.granted', { organizationId: null, resource: { type: 'fee_delegation', id: delegation.id },
+      if (changed) await this.audit.record(q, 'fee_delegation.granted', { organizationId: null, resource: { type: 'fee_delegation', id: delegation.id }, companyId: p.companyId,
         changes: { platform_id: delegation.platformId, operator_user_id: delegation.operatorUserId } }, this.ctx(owner));
       return { status: changed ? 201 : 200, body: representDelegation(delegation) };
     });
@@ -78,9 +79,9 @@ export class FeeService {
   /** A3: `POST /billing/admin/platforms/:platformId/fee-delegations/:delegationId/revoke`. Final; a repeat answers the revoked delegation. */
   revokeDelegation(owner: FeeActor, key: string, platformId: string, delegationId: string) {
     return this.idempotency.run(owner.userId, key, 'fee_delegation.revoke', { platformId, delegationId }, async (q) => {
-      await this.ownersPlatform(q, owner, platformId);
+      const p = await this.ownersPlatform(q, owner, platformId);
       const { delegation, changed } = await this.fees.revokeDelegation(q, platformId, delegationId, owner.userId);
-      if (changed) await this.audit.record(q, 'fee_delegation.revoked', { organizationId: null, resource: { type: 'fee_delegation', id: delegation.id },
+      if (changed) await this.audit.record(q, 'fee_delegation.revoked', { organizationId: null, resource: { type: 'fee_delegation', id: delegation.id }, companyId: p.companyId,
         changes: { platform_id: delegation.platformId, operator_user_id: delegation.operatorUserId } }, this.ctx(owner));
       return { status: 200, body: representDelegation(delegation) };
     });
@@ -100,7 +101,7 @@ export class FeeService {
       if (!d) throw operationNotPermitted(); // never delegated, or revoked: fail closed
       if (!(await this.fees.isFeeableProduct(q, platformId, input.productId))) throw billingError(409, 'product_not_available', BILLING_MESSAGES.productNotAvailable);
       const proposal = await this.fees.propose(q, p, d, input);
-      await this.audit.record(q, 'fee_proposal.created', { organizationId: proposal.organizationId, resource: { type: 'fee_proposal', id: proposal.id },
+      await this.audit.record(q, 'fee_proposal.created', { organizationId: proposal.organizationId, resource: { type: 'fee_proposal', id: proposal.id }, companyId: p.companyId,
         changes: { platform_id: proposal.platformId, product_id: proposal.productId, delegation_id: proposal.delegationId, amount: Number(proposal.amount) } }, this.ctx(operator));
       return { status: 201, body: representProposal(proposal) };
     });
@@ -112,8 +113,9 @@ export class FeeService {
       const proposal = await this.fees.proposal(id, q);
       if (!proposal || proposal.platformId !== platformId || proposal.proposedBy !== operator.userId) throw notFound();
       if (!(await this.fees.activeDelegation(q, platformId, operator.userId))) throw operationNotPermitted();
+      const p = await this.configured(q, platformId);
       const decided = await this.fees.decide(q, id, 'withdrawn', operator.userId);
-      await this.recordDecision(q, decided, operator);
+      await this.recordDecision(q, decided, operator, p.companyId);
       return { status: 200, body: representProposal(decided) };
     });
   }
@@ -126,16 +128,16 @@ export class FeeService {
     const proposal = await this.fees.proposal(id);
     if (!proposal || !(await this.auth.platformAllowed(owner.bearer, proposal.platformId, owner.deadline))) throw notFound();
     return this.idempotency.run(owner.userId, key, status === 'approved' ? 'fee_proposal.approve' : 'fee_proposal.reject', { id }, async (q) => {
-      await this.ownersPlatform(q, owner, proposal.platformId);
+      const p = await this.ownersPlatform(q, owner, proposal.platformId);
       const decided = await this.fees.decide(q, id, status, owner.userId);
-      await this.recordDecision(q, decided, owner);
+      await this.recordDecision(q, decided, owner, p.companyId);
       return { status: 200, body: representProposal(decided) };
     });
   }
 
   /** Core V2 G6-A: a proposal's one-way decision (pending -> withdrawn | approved | rejected happens once, so its intent is written once). */
-  private async recordDecision(q: Queryable, p: FeeProposalRow, actor: FeeActor): Promise<void> {
-    const fact = { organizationId: p.organizationId, resource: { type: 'fee_proposal', id: p.id } };
+  private async recordDecision(q: Queryable, p: FeeProposalRow, actor: FeeActor, companyId: string): Promise<void> {
+    const fact = { organizationId: p.organizationId, resource: { type: 'fee_proposal', id: p.id }, companyId };
     if (p.status === 'withdrawn') await this.audit.record(q, 'fee_proposal.withdrawn', { ...fact, changes: { platform_id: p.platformId } }, this.ctx(actor));
     else if (p.status === 'rejected') await this.audit.record(q, 'fee_proposal.rejected', { ...fact, changes: { platform_id: p.platformId } }, this.ctx(actor));
     else if (p.status === 'approved') {

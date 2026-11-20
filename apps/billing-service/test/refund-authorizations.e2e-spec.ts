@@ -182,6 +182,7 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       expect(audit).toHaveLength(1);
       expect(audit[0].payload.actor).toEqual({ type: 'user', id: OWNER, userKind: 'owner' });
       expect(audit[0].payload.changes).toEqual({ payment_id: paymentId, refund_attempt_id: relay!.id, company_id: COMPANY, platform_id: PLATFORM });
+      expect([audit[0].payload.companyId, audit[0].payload.platformId]).toEqual([COMPANY, undefined]); // G6-C: the case's Company, never a Platform
       // F-12: the secret is nowhere in Billing's database (relays, idempotency, outbox, transitions)
       const dump = (await admin.query(`SELECT string_agg(t::text, ' ') AS all FROM (SELECT row_to_json(r)::text AS t FROM refund_authorization_relay r UNION ALL SELECT payload::text FROM outbox
         UNION ALL SELECT row_to_json(i)::text FROM refund_command_idempotency i UNION ALL SELECT row_to_json(b)::text FROM billing_transition b) x`)).rows[0].all as string;
@@ -350,6 +351,7 @@ describeWithEnv('refund authorization relay (Core V2 S6b, simulation) — real P
       expect(audits).toHaveLength(1);
       expect(audits[0].payload.actor).toEqual({ type: 'system', id: 'payment_event_consumer' });
       expect(audits[0].payload.changes).toEqual({ payment_id: c.paymentId, refund_approval_id: ev.payload.refundAuthorizationId, refund_attempt_id: c.attemptId });
+      expect(audits[0].payload.companyId).toBe(COMPANY); // G6-C: the case's own Company (set at opening), not one Payment's event names
       // FC-3 / V-3: no new relay, no cancellation; S6d stays out: no reversal, no obligation
       expect((await authorize(c.caseId, { receiptSecret: secret() }).expect(409)).body.code).toBe('refund_case_completed');
       expect((await cancel(c.caseId).expect(409)).body.code).toBe('refund_case_not_open');

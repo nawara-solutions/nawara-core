@@ -44,8 +44,8 @@ export class RefundCompletionService {
       return this.refused('binding_mismatch', c, 'malformed');
     }
     const outcome = await this.db.tx(async (q) => {
-      const kase = (await q.query<{ id: string; paymentId: string; amount: string; currency: string; status: string; organizationId: string | null }>(
-        `SELECT id, "paymentId", amount, trim(currency) AS currency, status, "organizationId" FROM refund_case WHERE id = $1 FOR UPDATE`, [c.refundCaseId])).rows[0];
+      const kase = (await q.query<{ id: string; paymentId: string; amount: string; currency: string; status: string; organizationId: string | null; companyId: string }>(
+        `SELECT id, "paymentId", amount, trim(currency) AS currency, status, "organizationId", "companyId" FROM refund_case WHERE id = $1 FOR UPDATE`, [c.refundCaseId])).rows[0];
       if (!kase) return { o: 'binding_mismatch' as const, why: 'unknown_case' };
       const prior = (await q.query<{ refundAuthorizationId: string }>(`SELECT "refundAuthorizationId" FROM refund_case_completion WHERE "refundCaseId" = $1`, [c.refundCaseId])).rows[0];
       if (prior) return prior.refundAuthorizationId === c.refundAuthorizationId ? { o: 'duplicate' as const } : { o: 'conflict' as const, why: 'another_authorization' };
@@ -61,7 +61,7 @@ export class RefundCompletionService {
       );
       await q.query(`UPDATE refund_case SET status = 'completed', "completedAt" = $2 WHERE id = $1`, [c.refundCaseId, c.completedAt]);
       await this.audit.record(q, 'refund_case.completed', {
-        organizationId: kase.organizationId, resource: { type: 'refund_case', id: c.refundCaseId },
+        organizationId: kase.organizationId, resource: { type: 'refund_case', id: c.refundCaseId }, companyId: kase.companyId, // G6-C: the case's, set at opening
         changes: { payment_id: c.paymentId, refund_approval_id: c.refundAuthorizationId, refund_attempt_id: c.refundAttemptId },
       }, ctx);
       return { o: 'completed' as const };

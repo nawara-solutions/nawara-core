@@ -1,4 +1,4 @@
-import { AUDIT_ACTIONS, AUDIT_CATALOG } from '@nawara/audit-contract';
+import { AUDIT_ACTIONS, AUDIT_CATALOG, emittedVersion } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
 import { sampleAuditPayload } from '@nawara/audit-contract/testing';
 import { toNewAuditRecord } from './audit-record.mapper.js';
@@ -9,7 +9,7 @@ const envelopeOf = (action: (typeof AUDIT_ACTIONS)[number], variant: 'minimal' |
   id: EVENT_ID,
   name: `audit.${action}`,
   payload: JSON.parse(JSON.stringify(sampleAuditPayload(action, variant))),
-  headers: { eventId: EVENT_ID, occurredAt: '2026-09-25T10:00:00.123Z', correlationId: 'corr-0001-abcd', source: AUDIT_CATALOG.get(action)!.producer, version: AUDIT_CATALOG.get(action)!.since },
+  headers: { eventId: EVENT_ID, occurredAt: '2026-09-25T10:00:00.123Z', correlationId: 'corr-0001-abcd', source: AUDIT_CATALOG.get(action)!.producer, version: emittedVersion(action) },
 });
 
 describe('toNewAuditRecord (contract → persistence, the one mapping)', () => {
@@ -22,7 +22,7 @@ describe('toNewAuditRecord (contract → persistence, the one mapping)', () => {
       sourceService: AUDIT_CATALOG.get(action)!.producer,
       action,
       category: AUDIT_CATALOG.get(action)!.category,
-      schemaVersion: AUDIT_CATALOG.get(action)!.since, // S2-Audit.2: 2 for the authorization receipts
+      schemaVersion: emittedVersion(action), // S2-Audit.2: 2 for the receipts; G6-C: 2 for a scoped action
       actor: p.actor,
       organizationId: p.organizationId,
       resource: p.resource,

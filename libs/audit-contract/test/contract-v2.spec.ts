@@ -1,4 +1,4 @@
-import { AUDIT_ACTIONS, AUDIT_CATALOG, AUDIT_CONTRACT_VERSION, AuditContractError, SUPPORTED_AUDIT_VERSIONS, type AuditAction, type CatalogEntry } from '../src/index.js';
+import { AUDIT_ACTIONS, AUDIT_CATALOG, AUDIT_CONTRACT_VERSION, AuditContractError, SUPPORTED_AUDIT_VERSIONS, emittedVersion, type AuditAction, type CatalogEntry } from '../src/index.js';
 import { mayRetainRefusedAuditBody, validateAuditEvent } from '../src/consumer.js';
 import { SAMPLE_IDS, sampleAuditPayload } from '../src/testing.js';
 import { validateAuditPayloadWith } from '../src/validate.js';
@@ -72,13 +72,43 @@ describe('audit contract version 2 (S2-Audit.1)', () => {
     expect(code(() => validateAuditEvent(envelope('membership.revoked', { ...base('membership.revoked'), ...approver })))).toBe('invalid_approval');
   });
 
-  it('scope is granted ONLY to the three authorization receipt actions, Company only (D3): a forged companyId or platformId is refused for every other action', () => {
-    const RECEIPTS = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided'];
-    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.scope !== undefined).sort()).toEqual(RECEIPTS);
-    for (const a of RECEIPTS) expect(AUDIT_CATALOG.get(a as AuditAction)!.scope).toEqual({ company: 'required' });
-    for (const a of AUDIT_ACTIONS.filter((x) => !RECEIPTS.includes(x))) {
+  // Core V2 G6-C (DO-59; the Owner's G6-C GO, 2026-11-20): the reviewed matrix. Company only, never a Platform; nothing else gains scope.
+  const RECEIPTS = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided'];
+  const G6C = [
+    'fee_cap.set', 'fee_delegation.granted', 'fee_delegation.revoked', 'fee_proposal.approved', 'fee_proposal.created', 'fee_proposal.rejected', 'fee_proposal.withdrawn',
+    'fraud_hold.expired', 'fraud_hold.placed', 'fraud_hold.released',
+    'refund_case.authorization_relayed', 'refund_case.cancelled', 'refund_case.completed', 'refund_case.opened',
+  ];
+
+  it('scope is granted ONLY to the receipts (D3) and the G6-C matrix, Company only: a forged companyId or platformId is refused for every other action', () => {
+    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.scope !== undefined).sort()).toEqual([...RECEIPTS, ...G6C].sort());
+    for (const a of [...RECEIPTS, ...G6C]) expect(AUDIT_CATALOG.get(a as AuditAction)!.scope, a).toEqual({ company: 'required' });
+    for (const a of AUDIT_ACTIONS.filter((x) => !RECEIPTS.includes(x) && !G6C.includes(x))) {
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), companyId: COMPANY }))), a).toBe('invalid_scope');
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), platformId: PLATFORM }))), a).toBe('invalid_scope');
+    }
+  });
+
+  it('G6-C: a scoped action is written as version 2 with its Company; a missing Company or ANY Platform in version 2 is refused', () => {
+    for (const a of G6C as AuditAction[]) {
+      expect(emittedVersion(a), a).toBe(2);
+      expect(AUDIT_CATALOG.get(a)!.since, a).toBe(1); // the action keeps its own version: its earlier events stay valid
+      expect(validateAuditEvent(envelope(a, { ...base(a), companyId: COMPANY })).payload.companyId, a).toBe(COMPANY);
+      const { companyId: _c, ...unscoped } = base(a);
+      expect(code(() => validateAuditEvent(envelope(a, unscoped))), a).toBe('invalid_scope');
+      expect(code(() => validateAuditEvent(envelope(a, { ...base(a), companyId: COMPANY, platformId: PLATFORM }))), a).toBe('invalid_scope');
+      expect(code(() => validateAuditEvent(envelope(a, { ...base(a), companyId: 'not-a-uuid' }))), a).toBe('invalid_scope');
+    }
+    // every unscoped action still writes its own version (1, or 2 for the receipts)
+    for (const a of AUDIT_ACTIONS.filter((x) => !G6C.includes(x))) expect(emittedVersion(a), a).toBe(AUDIT_CATALOG.get(a)!.since);
+  });
+
+  it('G6-C version-1 compatibility: an earlier version-1 event of a scoped action stays valid with NO scope; it can never carry one', () => {
+    for (const a of G6C as AuditAction[]) {
+      const { companyId: _c, ...v1 } = base(a);
+      const e = validateAuditEvent(envelope(a, v1, { version: 1 }));
+      expect([e.schemaVersion, e.payload.companyId, e.payload.platformId], a).toEqual([1, undefined, undefined]);
+      expect(code(() => validateAuditEvent(envelope(a, { ...v1, companyId: COMPANY }, { version: 1 }))), a).toBe('unknown_field');
     }
   });
 

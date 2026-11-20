@@ -342,4 +342,59 @@ describeWithEnv('S2-Audit.3 scoped human reads: Owner Company timeline and opera
       expect(Object.keys(svc.body).sort()).toEqual(['items', 'nextCursor']); // the older reads keep their shape
     });
   });
+
+  // Core V2 G6-C (DO-59, DO-61): Billing's Company-scoped facts on the UNCHANGED read routes (their own November window: the
+  // October fixtures above are untouched). The Company is the only scope they carry; their Platform is a change field, never a scope.
+  describe('G6-C: Billing Company-scoped facts on the unchanged reads', () => {
+    const NOV = { from: '2026-11-01T00:00:00Z', to: '2026-11-30T00:00:00Z' };
+    const nov = (minutes: number) => new Date(Date.parse('2026-11-02T00:00:00.000Z') + minutes * 60_000);
+    const mine: string[] = [];
+    const theirs: string[] = [];
+    const billingRec = (minutes: number, action: string, resourceType: string, companyId: string, over: Partial<NewAuditRecord> = {}): NewAuditRecord => ({
+      eventId: randomUUID(), sourceService: 'billing-service', action, category: 'commercial', schemaVersion: 2,
+      actor: { type: 'user', id: OWNER_A, userKind: 'owner' }, organizationId: null, resource: { type: resourceType, id: randomUUID() },
+      outcome: 'succeeded', changes: { platform_id: P1 } as never, occurredAt: nov(minutes), companyId, delivery: verified, ...over,
+    });
+    beforeAll(async () => {
+      const repo = t.app.get(AuditRecordRepository);
+      let m = 0;
+      for (const [action, type] of [['refund_case.opened', 'refund_case'], ['fraud_hold.placed', 'fraud_hold'], ['fee_cap.set', 'fee_cap'], ['fee_proposal.created', 'fee_proposal']] as const) {
+        const r = billingRec(m++, action, type, COMPANY_A);
+        expect((await repo.insertOnce(r)).kind).toBe('inserted');
+        mine.unshift(r.eventId);
+      }
+      const b = billingRec(m++, 'refund_case.opened', 'refund_case', COMPANY_B);
+      expect((await repo.insertOnce(b)).kind).toBe('inserted');
+      theirs.push(b.eventId);
+      // asserted but never trusted: an unverified Billing delivery of Company A
+      expect((await repo.insertOnce(billingRec(m++, 'refund_case.cancelled', 'refund_case', COMPANY_A, { delivery: { producerIdentityVerified: false, replayed: false } }))).kind).toBe('inserted');
+    });
+
+    it('cross-Company isolation: each Owner reads exactly their Company\'s trusted Billing facts; an unverified one is never shown', async () => {
+      expect(ids(await company('owner-a', NOV).expect(200))).toEqual(mine);
+      expect(ids(await company('owner-b', NOV).expect(200))).toEqual(theirs);
+    });
+
+    it('revoked Owner access: an Owner Auth no longer answers for reads nothing (401), and the read is not recorded as a success', async () => {
+      auth.state.revoked.add('owner-a');
+      try {
+        const r = await company('owner-a', NOV);
+        expect(r.status).toBe(401);
+        expect(r.body.records).toBeUndefined();
+      } finally {
+        auth.state.revoked.delete('owner-a');
+      }
+    });
+
+    it('no unintended Platform visibility: the operator of the Platform named in their changes sees none of them; a revoked assignment is 404', async () => {
+      const r = await platform(P1, 'op-1', NOV).expect(200);
+      expect(ids(r).filter((id) => mine.includes(id) || theirs.includes(id))).toEqual([]);
+      auth.state.override.set('op-1', g('operator', { userId: IDENTITIES['op-1']!.userId, platformAssignments: [] }));
+      try {
+        expect((await platform(P1, 'op-1', NOV)).status).toBe(404);
+      } finally {
+        auth.state.override.delete('op-1');
+      }
+    });
+  });
 });

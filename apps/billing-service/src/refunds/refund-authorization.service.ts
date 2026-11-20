@@ -75,7 +75,7 @@ export class RefundAuthorizationService {
             `INSERT INTO refund_authorization_relay (id, "refundCaseId", "paymentId", "requestedBy", "idempotencyKey", "requestHash") VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
             [id, caseId, c.paymentId, owner.userId, key, hash])).rows[0]!;
           await this.audit.record(q, 'refund_case.authorization_relayed', {
-            organizationId: c.organizationId, resource: { type: 'refund_case', id: caseId }, identity: id,
+            organizationId: c.organizationId, resource: { type: 'refund_case', id: caseId }, identity: id, companyId: c.companyId,
             changes: { payment_id: c.paymentId, refund_attempt_id: id, company_id: c.companyId, platform_id: c.platformId },
           }, ctx);
           return row;
