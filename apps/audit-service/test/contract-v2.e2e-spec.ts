@@ -369,4 +369,43 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
       }
     });
   });
+
+  // Core V2 G6-C: Payment's receipt-bound refund facts (the Company of the consumed Owner receipt)
+  describe('G6-C: Payment\'s receipt-bound refund facts', () => {
+    const PAY = ['refund_attempt.authorized', 'refund_attempt.failed', 'refund_attempt.succeeded', 'refund_authorization.completed'] as const;
+    const payment = (action: (typeof PAY)[number], over: Record<string, unknown> = {}, headers: Record<string, unknown> = {}): EventEnvelope => {
+      const id = randomUUID();
+      return {
+        id, name: `audit.${action}`, payload: { ...JSON.parse(JSON.stringify(sampleAuditPayload(action, 'complete'))), companyId: COMPANY, ...over },
+        headers: { eventId: id, occurredAt: '2026-11-20T10:00:00.000Z', correlationId: 'corr-g6c-0002', source: 'payment-service', version: 2, ...headers } as EventEnvelope['headers'],
+      };
+    };
+    const verifiedAs = (e: EventEnvelope) =>
+      ({ decision: 'accept', basis: 'verified_original', origin: { from: 'verified_delivery', source: 'payment-service', eventId: e.id, name: e.name, routingKey: e.name, producerUserId: 'payment-service' } }) as never;
+    const reason = async (p: Promise<unknown>) => p.then(() => 'stored', (x: { reason?: string }) => x.reason);
+
+    it.each(PAY)('%s: verified → its Company and one Company-only trusted scope row; unverified → no scope row', async (action) => {
+      const e = payment(action);
+      expect(await ingestion.ingest(e, verifiedAs(e))).toBe('persisted');
+      const row = (await repo.findBySourceAndEventId('payment-service', e.id))!;
+      expect(await scopeRows(row.id)).toEqual([{ basis: 'verified_producer', companyId: COMPANY, platformId: null }]);
+      const u = payment(action);
+      expect(await ingestion.ingest(u, { decision: 'compatibility', basis: 'unverified_original', verified: false } as never)).toBe('persisted');
+      expect(await scopeRows((await repo.findBySourceAndEventId('payment-service', u.id))!.id)).toEqual([]);
+    });
+
+    it('refused: another source, a Platform, no Company; and Payment\'s unscoped facts can never assert one', async () => {
+      expect(await reason(ingestion.ingest(payment('refund_attempt.authorized', {}, { source: 'billing-service' }), verifiedAs(payment('refund_attempt.authorized'))))).toBe('producer_not_admitted');
+      const p1 = payment('refund_attempt.succeeded', { platformId: PLATFORM });
+      expect(await reason(ingestion.ingest(p1, verifiedAs(p1)))).toBe('invalid_scope');
+      const p2 = payment('refund_attempt.failed', { companyId: undefined });
+      expect(await reason(ingestion.ingest({ ...p2, payload: JSON.parse(JSON.stringify(p2.payload)) }, verifiedAs(p2)))).toBe('invalid_scope');
+      for (const action of ['payment.succeeded', 'refund_safety.escalated', 'refund_fact.allocation_blocked'] as const) {
+        const id = randomUUID();
+        const e = { id, name: `audit.${action}`, payload: { ...JSON.parse(JSON.stringify(sampleAuditPayload(action, 'complete'))), companyId: COMPANY },
+          headers: { eventId: id, occurredAt: '2026-11-20T10:00:00.000Z', correlationId: 'corr-g6c-0003', source: 'payment-service', version: 2 } } as unknown as EventEnvelope;
+        expect(await reason(ingestion.ingest(e, verifiedAs(e))), action).toBe('invalid_scope');
+      }
+    });
+  });
 });
