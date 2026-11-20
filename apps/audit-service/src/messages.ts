@@ -67,6 +67,12 @@ export const AUDIT_MESSAGES = defineMessages({
     fr: 'la fenêtre de temps ne peut pas dépasser {days} jours',
     ar: 'لا يجوز أن تتجاوز النافذة الزمنية {days} يومًا',
   },
+  windowTooLargeHours: {
+    en: 'the time window may not exceed {hours} hours',
+    fr: 'la fenêtre de temps ne peut pas dépasser {hours} heures',
+    ar: 'لا يجوز أن تتجاوز النافذة الزمنية {hours} ساعة',
+  },
+  diagnosticFilterInvalid: { en: '{name} is not valid', fr: "{name} n'est pas valide", ar: '{name} غير صالح' },
   limitRange: {
     en: 'limit must be an integer from 1 to {max}',
     fr: 'limit doit être un entier de 1 à {max}',
