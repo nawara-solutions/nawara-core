@@ -42,7 +42,7 @@ export interface AuditPage {
 
 /** The fixed rate-limit window (A66). */
 export const QUERY_WINDOW_SECONDS = 60;
-export const QUERY_LIMITER_BUCKETS = ['audit_query_org_caller', 'audit_query_org_pair', 'audit_query_platform_caller', 'audit_query_owner', 'audit_query_operator'] as const;
+export const QUERY_LIMITER_BUCKETS = ['audit_query_org_caller', 'audit_query_org_pair', 'audit_query_platform_caller', 'audit_query_owner', 'audit_query_operator', 'audit_query_dead_letter'] as const;
 const PLATFORM_QUERY_ACTION = 'platform_query.executed';
 const CORRELATION = /^[A-Za-z0-9._:-]{8,128}$/;
 const DAY_MS = 86_400_000;

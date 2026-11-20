@@ -35,6 +35,8 @@ describe('AUDIT_MESSAGES', () => {
       fromToRequired: 'from and to are required',
       toAfterFrom: 'to must be after from',
       windowTooLarge: 'the time window may not exceed {days} days',
+      windowTooLargeHours: 'the time window may not exceed {hours} hours',
+      diagnosticFilterInvalid: '{name} is not valid',
       limitRange: 'limit must be an integer from 1 to {max}',
       actionNotCataloged: 'action is not a cataloged action',
       categoryInvalid: 'category is not valid',

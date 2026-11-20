@@ -1691,6 +1691,20 @@ DO-43 stay OPEN).** `test/e2e-audit-producers/support/outbox-audit-comparator.ts
 - *Evidence.* `test/e2e-audit-producers/outbox-audit-comparator.e2e-spec.ts`: pure classification cases, and a real PostgreSQL 16 case on the
   kit outbox and audit-service schemas (source isolation, read-only snapshots, a retention run turning `missing` into `unverifiable`).
 
+**DO-43a dead-letter observation storage (dated note, 2026-11-20; the Owner's DO-43 GO, D43-1 to D43-8; DEVELOPMENT AND SIMULATION
+DIAGNOSTICS ONLY; DO-43 and DO-65 stay OPEN).** audit-service migration `0009` and a service-token read; nothing observes yet (DO-43b adds the
+kit hook, DO-43c wires audit-service and the G6-D verdicts).
+- *Identity (D43-2).* One row per (physical transfer attempt, transition). The attempt id is minted per transfer by the bus, never derived from
+  the event id, retry count, queue or failure class, so a replay, a duplicated publication or a crash redelivery that is transferred again is a
+  separate attempt. An attempt has at most one outcome; every row of an attempt describes the same delivery.
+- *Coverage (D43-3, D43-8).* Per process instance: `started`, `heartbeat` (cumulative counters: observed, persisted, dropped on overflow,
+  dropped on sink failure, rejected), `stopped`. One forward sequence per instance: a counter reset can only appear as a new instance.
+- *Read (D43-4).* `GET /audit/diagnostics/dead-letter/transitions` and `/coverage`: service token plus `read_dead_letter_diagnostics`, at most
+  24 hours and 100 rows, mounted only with `AUDIT_DEAD_LETTER_OBSERVATION=enabled`, which production refuses. Every page says
+  `best_effort_development_diagnostics`: an empty page never proves that no dead letter exists (D43-7).
+- *Limits.* Header-only (no payload, body, digest, actor or tenant identifier). Append-only for every role; no purge until DO-65 (D43-5); not
+  production retention or evidence certification.
+
 **G6-C trusted Company scope, Billing and Payment receipt groups (dated note, 2026-11-20; the Owner's G6-C GO; DEVELOPMENT AND SIMULATION ONLY; DO-59, DO-60
 and DO-61 stay OPEN).** Fourteen Billing and four Payment actions now assert their Company as trusted scope (catalog `scope.company: required`, never a
 Platform). Each one's Company is authoritative in the producer's own row, written in the fact's transaction and immutable afterwards:

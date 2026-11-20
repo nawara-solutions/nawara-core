@@ -36,7 +36,8 @@ export interface ParsedQuery {
   target?: QueryScope & { kind: 'platform' };
 }
 
-function instant(value: string, name: string): Date {
+/** A strict UTC instant (also the DO-43a diagnostics read's grammar). */
+export function instant(value: string, name: string): Date {
   const d = new Date(value);
   if (!INSTANT.test(value) || Number.isNaN(d.getTime())) throw badRequest('invalid_query', AUDIT_MESSAGES.invalidInstant, { name });
   const normalized = value.length === 20 ? `${value.slice(0, 19)}.000Z` : value;
