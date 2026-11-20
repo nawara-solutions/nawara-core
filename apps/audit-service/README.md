@@ -95,7 +95,10 @@ Migration `0009` adds two append-only tables (every role is refused UPDATE, DELE
 transition; an attempt has at most one outcome) and `audit_dead_letter_coverage` (per process instance: `started`, a `heartbeat` every 60 s
 with cumulative counters, `stopped` after a clean flush; one forward sequence per instance, so a counter reset is only ever a new instance).
 Header-only: identifiers, codes, counters and times; no payload, body, digest, actor or tenant identifier. The service-token read exists only
-with `AUDIT_DEAD_LETTER_OBSERVATION=enabled`. The observations themselves arrive in DO-43b/DO-43c; until then the tables stay empty.
+with `AUDIT_DEAD_LETTER_OBSERVATION=enabled`. DO-43c: with the same setting, Audit's consumer observes its own dead-letter transfers through
+the kit's never-awaited observer (a 1000-item buffer flushed every second; losses counted) and each process instance writes `started`, a
+`heartbeat` every 60 s and `stopped` after its final flush. Disabled (the default), the consumer has no observer and the copy carries no
+attempt header. The G6-D verdicts that read these facts are in `test/e2e-audit-producers/support/dead-letter-verdicts.ts`.
 
 ## Legal holds (Core V2 S2-Audit.4, AUD-05)
 

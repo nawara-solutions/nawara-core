@@ -1,6 +1,6 @@
 import amqp from 'amqplib';
 import {
-  Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
+  Inject, Injectable, Logger, Optional, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
 import {
@@ -8,6 +8,7 @@ import {
   type EnforcementPolicy, type HandlerTrust,
 } from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
+import { DeadLetterObservationService } from '../diagnostics/dead-letter-observation.service.js';
 import type { AuditConfig } from '../config/audit-config.js';
 import { auditEventOwner } from './admission.js';
 import { BrokerNotices } from './broker-notices.js';
@@ -65,6 +66,7 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     @Inject(ReadinessRegistry) private readonly readiness: ReadinessRegistry,
     @Inject(AUDIT_CONFIG) private readonly config: AuditConfig,
     @Inject(BrokerNotices) private readonly notices: BrokerNotices,
+    @Optional() @Inject(DeadLetterObservationService) private readonly deadLetters?: DeadLetterObservationService,
   ) {
     this.provenance = { ownerOf: auditEventOwner, store: new PgProvenanceStore(this.db) };
     this.enforcement = auditEnforcement(this.config.provenanceEnforcement); // throws on any other mode: never a fallback
@@ -99,6 +101,7 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     try {
       const blocker = await this.startBlocker();
       if (blocker) throw new Error(blocker);
+      const observer = this.deadLetters?.observer();
       const sub = await this.bus.subscribe({
         queue: AUDIT_QUEUE, bindings: [...AUDIT_BINDINGS], handler: (e, trust) => this.handle(e, trust),
         deadLetterPolicy: auditDeadLetterPolicy, // Stage 18.8: refused content is not kept verbatim in the DLQ
@@ -110,6 +113,9 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
         // accepted one (or, in the compatibility phase, an unverified one); refusals are permanent (under the policy above), failures held.
         // Retention: none yet (gate AP-R, P-A2 open).
         enforcement: this.enforcement,
+        // Core V2 DO-43c (D43-1, development diagnostics only): best-effort observation of this consumer's own dead-letter transfers; absent
+        // unless AUDIT_DEAD_LETTER_OBSERVATION=enabled (production refuses it). The kit never awaits it: settlement is unchanged.
+        ...(observer ? { deadLetterObserver: observer } : {}),
       });
       if (this.stopped) {
         await sub.close();
@@ -175,6 +181,7 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
 
   async beforeApplicationShutdown(): Promise<void> {
     await this.close(); // in-flight deliveries finish (bounded by the kit) while the database pool is still open
+    await this.deadLetters?.stop(); // DO-43c: no delivery can dead-letter any more: the last observations, then `stopped`, while the pool is open
   }
 
   async onApplicationShutdown(): Promise<void> {

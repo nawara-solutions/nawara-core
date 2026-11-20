@@ -1705,6 +1705,24 @@ kit hook, DO-43c wires audit-service and the G6-D verdicts).
 - *Limits.* Header-only (no payload, body, digest, actor or tenant identifier). Append-only for every role; no purge until DO-65 (D43-5); not
   production retention or evidence certification.
 
+**DO-43b/DO-43c dead-letter observation and G6-D verdicts (dated note, 2026-11-20; the Owner's DO-43 GO; DEVELOPMENT AND SIMULATION
+DIAGNOSTICS ONLY; DO-43 and DO-65 stay OPEN).**
+- *Kit (DO-43b).* `deadLetterObserver` on a subscription: called synchronously, never awaited, errors absorbed. A fresh UUID per physical
+  transfer attempt is stamped on the copy as `x-nawara-dead-letter-attempt` (a diagnostic label, never identity) and stripped on replay.
+  `BoundedObservationBuffer` drops and counts on overflow and on sink failure. `check:repo` allows only audit-service to opt in.
+- *Audit (DO-43c).* With `AUDIT_DEAD_LETTER_OBSERVATION=enabled` (production refuses it), Audit's consumer observes its own transfers through a
+  1000-item buffer flushed every second, and each process instance writes `started`, a `heartbeat` every 60 s and `stopped` after its final
+  flush. A failed write is counted (transitions) or simply absent (coverage): the gap is the signal.
+- *G6-D verdicts.* `test/e2e-audit-producers/support/dead-letter-verdicts.ts`: `confirmed`, `unconfirmed`, `within_grace`, `unresolved`
+  (10 minutes), `coverage_unknown`, `not_observed`. Coverage requires an expected instance set established OUTSIDE the Audit database plus
+  continuous facts (no gap over two intervals, nothing dropped, rejected or still buffered, no unexpected instance); otherwise
+  `coverage_unknown`. Only `confirmed` explains an absence as `dead_lettered`; `not_observed` is never proof that no dead letter exists.
+  Monitoring rules (15-minute window): observation dropped, heartbeat missing, instance restarted, unresolved attempt, observation
+  unavailable. They read facts only and never settle a message.
+- *Limitations.* An Audit database outage (Audit's main dead-letter cause) loses the observations and heartbeats of that period: it shows only
+  as `coverage_unknown`. A crash loses the unflushed buffer, and a copy can exist without its fact. A delivery that never reached the consumer
+  is outside what this sees. The facts and rules rest on the same Audit database. No retention or purge until DO-65.
+
 **G6-C trusted Company scope, Billing and Payment receipt groups (dated note, 2026-11-20; the Owner's G6-C GO; DEVELOPMENT AND SIMULATION ONLY; DO-59, DO-60
 and DO-61 stay OPEN).** Fourteen Billing and four Payment actions now assert their Company as trusted scope (catalog `scope.company: required`, never a
 Platform). Each one's Company is authoritative in the producer's own row, written in the fact's transaction and immutable afterwards:
