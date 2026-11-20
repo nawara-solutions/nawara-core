@@ -2947,6 +2947,31 @@ export function keyedCommitmentProblems(files, sources = {}) {
 }
 
 /**
+ * Core V2 DO-43b (the Owner's D43-1 and safety requirement 9): the kit's dead-letter observer is a DEVELOPMENT diagnostic, opted into per
+ * subscription. Only a service on `DEAD_LETTER_OBSERVATION_APPROVED_SERVICES` may pass `deadLetterObserver:` in its (non-test) source, so
+ * the hook cannot silently reach any other consumer; and the kit bus must call the observer synchronously, never awaiting it (an observer
+ * can then never delay or change settlement). Limits: a source-text scan; the settlement-equivalence suites prove the behaviour.
+ */
+export const DEAD_LETTER_OBSERVATION_APPROVED_SERVICES = Object.freeze(['audit-service']);
+const DEAD_LETTER_OBSERVER_OPT_IN = /\bdeadLetterObserver\s*:/;
+export function checkDeadLetterObservationOptIn(sources, kitBus) {
+  const problems = [];
+  for (const [app, appFiles] of Object.entries(sources)) {
+    if (DEAD_LETTER_OBSERVATION_APPROVED_SERVICES.includes(app)) continue;
+    for (const [relPath, text] of Object.entries(appFiles)) {
+      if (DEAD_LETTER_OBSERVER_OPT_IN.test(text)) problems.push(`${relPath}: passes a deadLetterObserver, but ${app} is not on DEAD_LETTER_OBSERVATION_APPROVED_SERVICES (Core V2 DO-43: a reviewed, development-only opt-in)`);
+    }
+  }
+  if (kitBus !== undefined) {
+    if (/await\s+(this\.observeDeadLetter|sub\.deadLetterObserver)/.test(kitBus)) {
+      problems.push(`${KIT_EVENT_BUS}: the dead-letter observer must be called synchronously and never awaited (Core V2 DO-43, D43-1)`);
+    }
+    if (!kitBus.includes('private observeDeadLetter(')) problems.push(`${KIT_EVENT_BUS}: the dead-letter observer must go through observeDeadLetter (synchronous, errors absorbed; Core V2 DO-43)`);
+  }
+  return problems;
+}
+
+/**
  * `contracts`: application directory -> the text of its contracts/events.json. `sources`: application directory -> { relPath: text } of
  * its non-test source. `files`: the fixed files of the Audit admission boundary and of Notification's keyed commitment (`AUDIT_ADMISSION_FILES`,
  * `NOTIFICATION_KEYED_FILES`, `KIT_EVENT_BUS`, `KIT_PROVENANCE`) -> text.

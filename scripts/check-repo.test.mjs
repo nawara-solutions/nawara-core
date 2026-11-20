@@ -4426,3 +4426,19 @@ test('A1: the plan command prints the matrix derived from the manifest', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, `matrix=${JSON.stringify(rbMatrixOf(RB_MANIFEST))}\n`);
 });
+
+test('DO-43b: only a reviewed service may opt into the dead-letter observer, and the kit never awaits it', async () => {
+  const { DEAD_LETTER_OBSERVATION_APPROVED_SERVICES, KIT_EVENT_BUS, checkDeadLetterObservationOptIn } = await import('./lib/checks.mjs');
+  assert.deepEqual(DEAD_LETTER_OBSERVATION_APPROVED_SERVICES, ['audit-service']);
+  const root = new URL('..', import.meta.url).pathname;
+  const bus = readFileSync(join(root, KIT_EVENT_BUS), 'utf8');
+  const optIn = 'bus.subscribe({ queue, handler, deadLetterObserver: observer })';
+  assert.deepEqual(checkDeadLetterObservationOptIn({ 'audit-service': { 'apps/audit-service/src/c.ts': optIn } }, bus), []); // the repository as it stands
+  for (const app of ['billing-service', 'payment-service', 'notification-service']) {
+    assert.match(checkDeadLetterObservationOptIn({ [app]: { [`apps/${app}/src/c.ts`]: optIn } }, bus).join(), /is not on DEAD_LETTER_OBSERVATION_APPROVED_SERVICES/, app);
+  }
+  assert.deepEqual(checkDeadLetterObservationOptIn({ 'billing-service': { 'apps/billing-service/src/c.ts': 'bus.subscribe({ queue, handler })' } }, bus), []);
+  // awaiting the observer, or bypassing observeDeadLetter, is refused
+  assert.match(checkDeadLetterObservationOptIn({}, bus.replace("this.observeDeadLetter(sub, attempt, 'attempted');", "await this.observeDeadLetter(sub, attempt, 'attempted');")).join(), /never awaited/);
+  assert.match(checkDeadLetterObservationOptIn({}, bus.replace('private observeDeadLetter(', 'private tellObserver(')).join(), /must go through observeDeadLetter/);
+});

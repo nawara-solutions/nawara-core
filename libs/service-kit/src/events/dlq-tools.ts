@@ -175,7 +175,8 @@ export async function replayDeadLetter(conn: ChannelModel, queue: string, eventI
       return { ...base, outcome: 'not_replayable', replayCount: counter(found.properties.headers?.[HEADER.replayCount]) };
     }
     const h = withoutBrokerHistory(found.properties.headers);
-    for (const k of [HEADER.failure, HEADER.failureReason, HEADER.failureError, HEADER.failedAt, HEADER.consumer]) delete h[k];
+    // Core V2 DO-43b: the diagnostic attempt id belongs to the transfer that made this copy, never to the replayed delivery
+    for (const k of [HEADER.failure, HEADER.failureReason, HEADER.failureError, HEADER.failedAt, HEADER.consumer, HEADER.deadLetterAttempt]) delete h[k];
     replayCount = counter(h[HEADER.replayCount]) + 1;
     h[HEADER.replayCount] = replayCount;
     h[HEADER.replayedAt] = new Date().toISOString();

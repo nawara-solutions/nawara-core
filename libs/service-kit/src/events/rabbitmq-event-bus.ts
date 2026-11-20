@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
 import { bodySha256, evaluateProvenanceFacts, replayCandidate, type ReplayClassification, type ReplayOriginal, type ReplayClassificationOutcome } from './provenance.js';
@@ -5,7 +6,7 @@ import { assertBrokerDeadLettering, type IsolatedTopologyStatus } from './broker
 import { assertEnforceable, decideOriginal, decideReplayTrust, refusalReason, type HandlerTrust, type TrustDecision } from './trust.js';
 import { consumeIssuedReemissionPlan, type ReemissionPlan, type ReemissionPublishOutcome, type ReemissionPublisher } from './reemission.js';
 import { eventMessage } from './serialization.js';
-import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
+import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type DeadLetterObservation, type DeadLetterTransition, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
   url: string;
@@ -124,6 +125,8 @@ export type NoticeLevel = 'info' | 'warn' | 'error';
 
 // Message ids reach a log line: anything that is not a short, predictable token (a malformed or foreign message) is not echoed.
 const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** Core V2 DO-43b: a delivery's source label kept in a dead-letter observation only when it is a service name ('' otherwise). */
+const SOURCE_LABEL = /^[a-z][a-z0-9-]{1,62}$/;
 const messageIdOf = (id: unknown): string => safeToken(id, MESSAGE_ID, '-');
 
 /** Waits `ms`, or less if `signal` aborts first (already aborted: returns at once). Never rejects. */
@@ -839,6 +842,9 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
     const reason = permanent ? safeToken((error as PermanentEventFailure).reason, REASON_CODE, 'unspecified') : undefined;
     const outcome = `${who} classification=${failure}${reason ? ` reason=${reason}` : ''} retries=${retryCount} error=${errorName}`;
     const copy = sub.deadLetterPolicy ? deadLetterCopy(sub, msg, event, failure, reason) : undefined;
+    // Core V2 DO-43b: only an opted-in subscription gets an attempt id (a fresh one per PHYSICAL transfer attempt) and observations
+    const attempt = sub.deadLetterObserver ? this.deadLetterAttempt(sub, msg, failure, reason, errorName, retryCount) : undefined;
+    this.observeDeadLetter(sub, attempt, 'attempted');
     try {
       await this.ensureDeadQueue(ch, sub);
       await this.republish(deadQueueName(sub.queue), msg, {
@@ -849,11 +855,14 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
         [HEADER.consumer]: sub.queue,
         [HEADER.retryCount]: retryCount,
         ...(copy?.redacted ? { [HEADER.bodyRedacted]: 'true' } : {}),
+        ...(attempt ? { [HEADER.deadLetterAttempt]: attempt.attemptId } : {}),
       }, undefined, copy);
+      this.observeDeadLetter(sub, attempt, 'transfer_confirmed');
       this.notice(`event_dead_lettered ${outcome}${copy?.redacted ? ' body=redacted' : ''}`, 'error');
       this.settle(() => ch.ack(msg), sub);
       return `dead_lettered_${failure}`;
     } catch {
+      this.observeDeadLetter(sub, attempt, 'transfer_unconfirmed');
       // The copy could not be confirmed: the original is never handed to the broker's own dead-lettering. Stage 18.8 did this for a
       // consumer with a dead-letter policy; V2 A3M.4 (finding G7, ADR-0057 §8) does it for every consumer, because `<exchange>.dlx` is a
       // fanout shared by every `<queue>.dead`: a `nack` without requeue copied the untouched original into EVERY consumer's dead-letter
@@ -867,6 +876,38 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
       await holdUnless(delayMs, stopping);
       this.settle(() => ch.nack(msg, false, true), sub);
       return 'dead_letter_deferred';
+    }
+  }
+
+  /** Core V2 DO-43b: the header-only description of ONE physical transfer attempt (a fresh UUID each time this branch runs). */
+  private deadLetterAttempt(sub: EventSubscription, msg: ConsumeMessage, failure: FailureClass, reason: string | undefined, errorName: string, retryCount: number): Omit<DeadLetterObservation, 'transition' | 'observedAt'> {
+    const h = msg.properties.headers ?? {};
+    return {
+      attemptId: randomUUID(),
+      queue: sub.queue,
+      eventId: safeToken(msg.properties.messageId, MESSAGE_ID, ''),
+      eventName: safeToken(msg.properties.type, EVENT_NAME, ''),
+      source: safeToken(h.source, SOURCE_LABEL, ''),
+      failure,
+      reason: reason ?? null,
+      errorClass: errorName,
+      retryCount,
+      replayCount: counter(h[HEADER.replayCount]),
+      redelivered: msg.fields?.redelivered === true,
+    };
+  }
+
+  /**
+   * Core V2 DO-43b (D43-1): tells the subscription's observer, synchronously, never awaiting it. Nothing it does can reach settlement: a
+   * throw is swallowed, a returned promise's rejection is absorbed, and the return value is ignored. Without an observer, nothing happens.
+   */
+  private observeDeadLetter(sub: EventSubscription, attempt: Omit<DeadLetterObservation, 'transition' | 'observedAt'> | undefined, transition: DeadLetterTransition): void {
+    if (!attempt || !sub.deadLetterObserver) return;
+    try {
+      const r = (sub.deadLetterObserver.observe as (o: DeadLetterObservation) => unknown)({ ...attempt, transition, observedAt: new Date() });
+      if (r !== null && typeof r === 'object' && typeof (r as { then?: unknown }).then === 'function') (r as Promise<unknown>).then(undefined, () => undefined);
+    } catch {
+      // an observation failure is never a transfer failure: the observer counts its own losses (coverage facts)
     }
   }
 
