@@ -10,6 +10,7 @@ import { IngestionModule } from './ingestion/ingestion.module.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
 import type { OwnerAuthority } from './owner/owner-authority.client.js';
 import { QueryModule } from './query/query.module.js';
+import { DiagnosticsModule } from './diagnostics/diagnostics.module.js';
 
 /** The service's own migrations (Stage 18.3: the append-only `audit_record`), applied by the explicit `npm run migrate` step and never at startup. */
 export const auditMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -89,6 +90,8 @@ export class AppModule {
         PersistenceModule,
         IngestionModule,
         QueryModule.register(config, overrides.ownerAuthority),
+        // Core V2 DO-43a: dead-letter observation storage; its diagnostics read only with AUDIT_DEAD_LETTER_OBSERVATION=enabled (never production)
+        DiagnosticsModule.register(config),
       ],
     };
   }

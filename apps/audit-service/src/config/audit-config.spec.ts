@@ -143,4 +143,17 @@ describe('audit-service configuration', () => {
     expect(c.callerPolicy.allows('some-core-service', 'read_organization')).toBe(true);
     expect(c.callerPolicy.allows('some-core-service', 'read_platform')).toBe(false);
   });
+  it('Core V2 DO-43: AUDIT_DEAD_LETTER_OBSERVATION is disabled by default, enabled only outside production, and nothing else is accepted', () => {
+    const dev = (over: NodeJS.ProcessEnv) => env({ NODE_ENV: 'development', ...over });
+    expect(loadAuditConfig(dev({})).deadLetterObservation).toBe(false);
+    expect(loadAuditConfig(dev({ AUDIT_DEAD_LETTER_OBSERVATION: 'disabled' })).deadLetterObservation).toBe(false);
+    expect(loadAuditConfig(dev({ AUDIT_DEAD_LETTER_OBSERVATION: 'enabled' })).deadLetterObservation).toBe(true);
+    expect(loadAuditConfig(env({ NODE_ENV: 'test', AUDIT_DEAD_LETTER_OBSERVATION: 'enabled' })).deadLetterObservation).toBe(true);
+    expect(() => loadAuditConfig(dev({ AUDIT_DEAD_LETTER_OBSERVATION: 'on' }))).toThrow();
+    // production is the default environment: enabling it there (explicitly or by default) refuses to start
+    expect(() => loadAuditConfig(env({ NODE_ENV: 'production', DATABASE_URL: 'postgres://audit_app:pw@db/audit', AUDIT_DEAD_LETTER_OBSERVATION: 'enabled' })))
+      .toThrow(/development and simulation only/);
+    expect(() => loadAuditConfig(env({ AUDIT_DEAD_LETTER_OBSERVATION: 'enabled' }))).toThrow(/development and simulation only/);
+    expect(loadAuditConfig(env({ NODE_ENV: 'production', DATABASE_URL: 'postgres://audit_app:pw@db/audit' })).deadLetterObservation).toBe(false);
+  });
 });

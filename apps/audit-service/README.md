@@ -88,6 +88,15 @@ value, contact data, free text, an unknown field, malformed or binary input) is 
 `not_replayable`, exit 5). Either way only the validated kit headers (`eventId`, `source`, `occurredAt`, `version`, `correlationId`) and
 the kit annotations survive; any other header a publisher attached is dropped.
 
+## Dead-letter observation diagnostics (Core V2 DO-43a; development and simulation only)
+
+Migration `0009` adds two append-only tables (every role is refused UPDATE, DELETE and TRUNCATE; no purge until DO-65):
+`audit_dead_letter_transition` (`attempted`, `transfer_confirmed`, `transfer_unconfirmed`, one row per physical transfer attempt and
+transition; an attempt has at most one outcome) and `audit_dead_letter_coverage` (per process instance: `started`, a `heartbeat` every 60 s
+with cumulative counters, `stopped` after a clean flush; one forward sequence per instance, so a counter reset is only ever a new instance).
+Header-only: identifiers, codes, counters and times; no payload, body, digest, actor or tenant identifier. The service-token read exists only
+with `AUDIT_DEAD_LETTER_OBSERVATION=enabled`. The observations themselves arrive in DO-43b/DO-43c; until then the tables stay empty.
+
 ## Legal holds (Core V2 S2-Audit.4, AUD-05)
 
 An active **Company owner** places or releases a legal hold on **their own Company's** audit evidence, with their own Auth bearer and a
@@ -149,6 +158,7 @@ There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: r
 | `AUTH_SERVICE_URL` | unset (no owner route; Audit calls no other service) | `http:` / `https:` | Stage 19.3 Audit-X: mounts `GET /audit/owner/organizations/{id}/records`, which verifies the Company owner and the organization through Auth with the owner's own bearer |
 | `AUDIT_OWNER_QUERY_RATE_PER_OWNER`, `AUTH_TIMEOUT_MS` | 30, 3000 | 1–100000, 100–30000 | owner reads per verified owner per 60 s; Auth slower than the timeout fails the read closed (503) |
 | `AUDIT_CURSOR_KEYS`, `AUDIT_CURSOR_ACTIVE_KEY_ID` | unset (no scoped reads) | `id:base64(32 bytes)[,…]` (**secret, file**), an id of the ring | Core V2 S2-Audit.3: mounts `GET /audit/owner/company/records` (AUD-03) and `GET /audit/operator/platforms/{id}/records` (AUD-04); requires `AUTH_SERVICE_URL`. A key ring dedicated to signing their cursors (HMAC-SHA-256); during a rotation the previous key keeps verifying while the active one signs |
+| `AUDIT_DEAD_LETTER_OBSERVATION` | `disabled` | `disabled`, `enabled` (exactly) | Core V2 DO-43 (DEVELOPMENT AND SIMULATION DIAGNOSTICS ONLY; production refuses `enabled`): mounts the service-token, header-only `GET /audit/diagnostics/dead-letter/transitions` and `…/coverage` (operation `read_dead_letter_diagnostics`; at most 24 hours and 100 rows per page). Best-effort observations, never complete or production evidence: an empty result does not prove that no dead letter exists |
 | `AUDIT_CURSOR_TTL_SEC`, `AUDIT_OPERATOR_QUERY_RATE_PER_OPERATOR` | 900, 30 | 60–3600, 1–100000 | a scoped-read cursor older than this is refused (`invalid_cursor`); operator reads per verified operator per 60 s |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 characters | OpenAPI at `/audit/docs`, mounted only with a password |
 
