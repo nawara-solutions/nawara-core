@@ -739,6 +739,34 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
       expect((await recordExternal(s.surplusId, externalProof(s))).body).toMatchObject({ code: 'surplus_not_owed' });
     });
 
+    it('G6-C2 (5a): Path A applies nothing when the refund case\'s Company is not the obligation\'s; kept for review, never rewritten', async () => {
+      const s = await surplusFixture();
+      // a caller cannot supply a Company: the open contract refuses the field (the case's Company is derived from the invoice seller)
+      const forged = await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: s.surplusPaymentId, reason: 'recovery_surplus', companyId: randomUUID() });
+      expect(forged.status).toBe(400);
+      expect(forged.body).toMatchObject({ code: 'invalid_refund_request' });
+      const open = await send(request(server()).post('/billing/admin/refund-cases'), 'owner-tok', key()).send({ paymentId: s.surplusPaymentId, reason: 'recovery_surplus' });
+      expect(open.status, JSON.stringify(open.body)).toBe(201);
+      await send(request(server()).post(`/billing/admin/refund-cases/${open.body.id}/authorizations`), 'owner-tok', key()).send({ receiptSecret: randomBytes(32).toString('base64url') }).expect(201);
+      const att = await one(`SELECT id FROM refund_authorization_relay WHERE "refundCaseId" = $1`, [open.body.id]);
+      const ev = randomUUID();
+      await t.bus.deliver({ id: ev, name: 'refund.case_completed', payload: { refundCaseId: open.body.id, refundAuthorizationId: randomUUID(), refundAttemptId: att.id, paymentId: s.surplusPaymentId,
+        paymentRequestId: s.surplusPaymentRequestId, producer: 'billing-service', approvedAmount: 6100, currency: 'TND', completedAt: new Date().toISOString(), liveMode: false,
+        organizationId: ORG, purpose: 'recovery_settlement' }, headers: { eventId: ev, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+      // TEST FIXTURE: an inconsistent ownership no S6f path produces (the obligation's Company is immutable, so the case's is changed instead)
+      const other = randomUUID();
+      await backdate(open.body.id, `UPDATE refund_case SET "companyId" = $2 WHERE id = $1`, [other]);
+      expect(await t.app.get(RefundEffectService).apply(open.body.id)).toEqual({ kind: 'review', reason: 'surplus_company_mismatch' });
+      // a retry re-checks and fails closed again; a later pass never applies it
+      expect(await t.app.get(RefundEffectService).apply(open.body.id)).toEqual({ kind: 'review', reason: 'surplus_company_mismatch' });
+      expect(await one(`SELECT state, reason FROM refund_case_effect_attempt WHERE "refundCaseId" = $1`, [open.body.id])).toEqual({ state: 'review', reason: 'surplus_company_mismatch' });
+      expect(await count(`SELECT count(*) AS n FROM refund_case_effect WHERE "refundCaseId" = $1`, [open.body.id])).toBe(0);
+      expect(await count(`SELECT count(*) AS n FROM recovery_surplus_refund WHERE "surplusId" = $1`, [s.surplusId])).toBe(0);
+      expect((await readRecovery(s.obligationId)).body.surpluses).toEqual([expect.objectContaining({ id: s.surplusId, status: 'owed_to_organization' })]);
+      expect((await audit(s.surplusId)).filter((x) => x.name === 'audit.recovery_surplus.resolved')).toEqual([]);
+      expect((await one(`SELECT "companyId" FROM refund_case WHERE id = $1`, [open.body.id])).companyId).toBe(other); // nothing rewritten
+    });
+
     it('Path A refuses a mixed payment (principal and surplus) and a payment that recovered principal; the database agrees', async () => {
       const s = await surplusFixture();
       const principal = await one(`SELECT pr."paymentId", pr.id FROM recovery_payment p JOIN payment_request pr ON pr.id = p."paymentRequestId" WHERE p."obligationId" = $1 AND p."principalAmount" > 0`, [s.obligationId]);

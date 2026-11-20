@@ -116,9 +116,15 @@ export class RefundEffectService {
         // Core V2 S6f (R6F-5 Path A, R-3a): the completed full refund of an entirely surplus recovery payment resolves that surplus; no purchase,
         // no entitlement, no obligation
         if (c.eligibility === 'recovery_surplus') {
-          const s = (await q.query<{ surplusId: string; organizationId: string }>(
-            `SELECT rc."surplusId", su."organizationId" FROM refund_case rc JOIN recovery_surplus su ON su.id = rc."surplusId" WHERE rc.id = $1`, [c.id])).rows[0];
+          const s = (await q.query<{ surplusId: string; organizationId: string; obligationCompanyId: string }>(
+            `SELECT rc."surplusId", su."organizationId", o."companyId" AS "obligationCompanyId"
+               FROM refund_case rc JOIN recovery_surplus su ON su.id = rc."surplusId" JOIN recovery_obligation o ON o.id = su."obligationId" WHERE rc.id = $1`, [c.id])).rows[0];
           if (!s || c.purchaseId || c.lateSettlementId) throw new Contradiction('basis_mismatch');
+          // Core V2 G6-C2 (the Owner's G6C2-1, path 5a): the refund case's Company (its invoice seller) must be the recovery obligation's Company,
+          // the authoritative one (bound to the immutable billing_platform at the obligation's insert). The recovery invoice's seller is set
+          // to it by code only (the channel guard does not bind the seller), so a disagreement is never reconciled or rewritten: nothing is
+          // applied and the case is kept for review, like every other contradiction here.
+          if (c.companyId !== s.obligationCompanyId) throw new Contradiction('surplus_company_mismatch');
           await q.query(`INSERT INTO recovery_surplus_refund ("surplusId", "refundCaseId") VALUES ($1, $2)`, [s.surplusId, c.id]);
           await this.audit.record(q, 'recovery_surplus.resolved', {
             organizationId: s.organizationId, resource: { type: 'recovery_surplus', id: s.surplusId }, changes: { method: 'full_refund', refund_case_id: c.id },
