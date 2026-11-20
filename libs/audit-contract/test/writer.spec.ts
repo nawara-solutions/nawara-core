@@ -35,6 +35,19 @@ describe('AuditEventWriter', () => {
     expect(tx.statements).toEqual(['SAVEPOINT nawara_audit_intent', 'RELEASE SAVEPOINT nawara_audit_intent', 'INSERT INTO outbox']);
   });
 
+  it('Core V2 G6-C: a scoped action is written as version 2 with its Company; without the Company nothing is written (fail closed)', async () => {
+    const { w, outbox } = writer('billing-service');
+    const tx = new FakeTx();
+    const input = sampleAuditPayload('refund_case.cancelled', 'complete');
+    expect(input.companyId).toBe(SAMPLE_IDS.company);
+    await w.write(tx, input as never);
+    expect(outbox.events).toEqual([{ name: 'audit.refund_case.cancelled', payload: input, version: 2 }]);
+    const { companyId: _c, ...unscoped } = input;
+    await expect(w.write(new FakeTx(), unscoped as never)).rejects.toThrow('invalid_scope');
+    await expect(w.write(new FakeTx(), { ...input, platformId: SAMPLE_IDS.platform } as never)).rejects.toThrow('invalid_scope');
+    expect(outbox.events).toHaveLength(1);
+  });
+
   it('never opens, commits or rolls back a transaction itself', async () => {
     const { w } = writer();
     const tx = new FakeTx();

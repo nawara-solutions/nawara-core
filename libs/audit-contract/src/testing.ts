@@ -1,7 +1,7 @@
 // @nawara/audit-contract/testing — TEST tooling only (the kit's `./testing` precedent): a valid payload for any cataloged action, derived
 // mechanically from its catalog entry, so contract matrices and the audit-service persistence suite cover every action without a
 // hand-written fixture per action (a new action is covered the moment it is cataloged).
-import { AUDIT_CATALOG, catalogEntry, type AuditAction, type ChangeSpec } from './catalog.js';
+import { AUDIT_CATALOG, catalogEntry, emittedVersion, type AuditAction, type ChangeSpec } from './catalog.js';
 import type { AuditActor, AuditPayload, AuditReference, ChangeScalar, ChangeValue } from './contract.js';
 
 export const SAMPLE_IDS = Object.freeze({
@@ -18,9 +18,9 @@ export const SAMPLE_IDS = Object.freeze({
   approver: 'f6a7b8c9-d0e1-4f2a-9b3c-5d6e7f8a9baa',
 });
 
-/** Core V2 S2-Audit.2: the envelope version an action's events carry (its `since`; version 1 for every earlier action). */
+/** Core V2 S2-Audit.2: the envelope version an action's events carry (its `since`; version 2 for a scoped action, Core V2 G6-C). */
 export function sampleVersion(action: AuditAction): number {
-  return Math.max(1, catalogEntry(action)!.since);
+  return emittedVersion(action);
 }
 const T1 = '2026-09-25T10:00:00.000Z';
 const T2 = '2026-10-25T10:00:00.000Z';

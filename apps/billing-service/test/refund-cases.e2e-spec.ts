@@ -513,6 +513,46 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
     expect((await openCase({ paymentId: p.paymentId, reason: 'customer_request' })).status).toBe(201);
   });
 
+  // Core V2 G6-C (DO-59): a refund case's intents assert the Owner's live Company, as stored on the case; never a seller a service caller named
+  describe('Core V2 G6-C: refund-case intents carry the Owner\'s Company (version 2), never a Platform', () => {
+    const intents = async (paymentId: string) => (await admin.query(
+      `SELECT name, "eventVersion" AS v, payload FROM outbox WHERE name LIKE 'audit.refund_case.%' AND payload->'changes'->>'payment_id' = $1 ORDER BY "occurredAt", name`,
+      [paymentId])).rows as Row[];
+
+    it('opened and cancelled assert the case\'s Company (the Owner\'s, verified live), as version 2, with no Platform scope', async () => {
+      const p = await producerPayment({ target: 'none' });
+      const c = await openCase({ paymentId: p.paymentId, reason: 'customer_request' });
+      expect(c.status).toBe(201);
+      expect((await cancelCase(c.body.id)).status).toBe(200);
+      expect((await intents(p.paymentId)).map((x) => [x.name, x.v, x.payload.companyId, x.payload.platformId]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))).toEqual([
+        ['audit.refund_case.cancelled', 2, COMPANY, undefined], ['audit.refund_case.opened', 2, COMPANY, undefined]]);
+    });
+
+    it('revoked or foreign authority records nothing: an Owner Auth no longer knows (401) and another Company\'s Owner (404) write no intent', async () => {
+      const p = await producerPayment({ target: 'none' });
+      const body = { paymentId: p.paymentId, reason: 'customer_request' };
+      const owner = auth.identities.get('owner-tok')!;
+      auth.identities.delete('owner-tok'); // the Owner's authority was revoked at Auth
+      expect((await openCase(body)).status).toBe(401);
+      auth.identities.set('owner-tok', owner);
+      expect((await openCase(body, { bearer: 'foreign-owner-tok' })).status).toBe(404);
+      expect(await intents(p.paymentId)).toEqual([]);
+    });
+
+    it('service-token seller spoofing: a producer naming another Company as seller promotes nothing to scope; that Company\'s facts stay unscoped version 1', async () => {
+      // a service caller asserts OTHER_COMPANY as the seller (B-029 / B-031: the seller is whatever the caller asserted)
+      const spoof = await producerPayment({ target: 'none', seller: { type: 'company', id: OTHER_COMPANY } });
+      const serviceFacts = (await admin.query(`SELECT name, "eventVersion" AS v, payload FROM outbox WHERE name IN ('audit.invoice.issued', 'audit.payment_request.created', 'audit.invoice.paid')
+        AND (payload->'resource'->>'id' = $1 OR payload->'changes'->>'invoice_id' = $1)`, [spoof.invoiceId])).rows as Row[];
+      expect(serviceFacts.length).toBeGreaterThanOrEqual(2);
+      for (const f of serviceFacts) expect([f.name, f.v, f.payload.companyId], f.name).toEqual([f.name, 1, undefined]);
+      // the asserting Company's Owner never acted, and this Company's Owner cannot act on it: no scoped intent names OTHER_COMPANY
+      expect((await openCase({ paymentId: spoof.paymentId, reason: 'customer_request' })).status).toBe(404);
+      expect(await intents(spoof.paymentId)).toEqual([]);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.%' AND payload->>'companyId' = $1`, [OTHER_COMPANY])).rows[0].n).toBe(0);
+    });
+  });
+
   // ─────────────────────────────────────────────────────────────────────────────────────────────── uniqueness, lifecycle, idempotency (R6A-6, FC-3)
 
   describe('lifecycle and uniqueness (R6A-6, FC-3)', () => {
@@ -1033,6 +1073,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(await memberItem('b2', U.b2, productId)).toMatchObject({ valid: true });
       const a = (await audit(h.holdId)).filter((x) => x.name === 'audit.fraud_hold.placed');
       expect(a.map((x) => [x.payload.actor, x.payload.changes])).toEqual([[{ type: 'user', id: U.owner, userKind: 'owner' }, { product_id: productId, reason: 'account_takeover' }]]);
+      expect(a.map((x) => [x.payload.companyId, x.payload.platformId])).toEqual([[COMPANY, undefined]]); // G6-C: the Owner's Company, never a Platform
       expect(await place(h, { secret, evidence: [ev] }).then((x) => x.status)).toBe(200); // the same holdId: the hold
       expect((await send(request(server()).get(`/billing/admin/fraud-holds/${h.holdId}`), 'owner-tok', null).expect(200)).body).toMatchObject({ state: 'active', evidence: [{ grantId: ev.grantId, fileId: ev.fileId }], release: null });
       // a second hold of the same entitlement while one restricts it: refused (no stacking, no silent extension)
@@ -1124,6 +1165,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(await holds().sweepOnce()).toMatchObject({ compensated: 0 });
       expect(Number((await holdRows(h.holdId)).deniedMs)).toBe(denied);
       expect((await audit(h.holdId)).map((x) => x.name).sort()).toEqual(['audit.fraud_hold.placed', 'audit.fraud_hold.released']);
+      expect((await audit(h.holdId)).map((x) => [x.payload.companyId, x.payload.platformId])).toEqual([[COMPANY, undefined], [COMPANY, undefined]]); // G6-C
     });
 
     it('the 14-day deadline ends the restriction by itself (a delayed sweep changes nothing); the sweep records the expiry once, by the system actor', async () => {
@@ -1151,6 +1193,7 @@ describeWithEnv('refund cases (Core V2 S6a, simulation) — real PostgreSQL', ['
       expect(Number(after.deniedMs)).toBe(denied);
       const ex = (await audit(h.holdId)).filter((x) => x.name === 'audit.fraud_hold.expired');
       expect(ex.map((x) => x.payload.actor)).toEqual([{ type: 'system', id: 'fraud_hold_sweep' }]);
+      expect(ex.map((x) => x.payload.companyId)).toEqual([COMPANY]); // G6-C: the hold's own Company, as stored when the Owner placed it
       // a new hold after the old one ended needs its own evidence and receipt (the old ones are spent)
       expect((await place(holdFor(p))).status).toBe(201);
     });

@@ -79,7 +79,14 @@ export class BillingAudit {
   async record<A extends BillingAuditAction>(
     q: Queryable,
     action: A,
-    fact: { organizationId: string | null; resource: { type: string; id: string }; changes?: AuditChangesOf<A>; identity?: string },
+    fact: {
+      organizationId: string | null; resource: { type: string; id: string }; changes?: AuditChangesOf<A>; identity?: string;
+      /**
+       * Core V2 G6-C (DO-59): the AUTHORITATIVE Company of a scoped action (catalog `scope.company`), from the row the caller just read or
+       * wrote in this transaction: never a request value, never a seller a service caller asserted. Refused for an unscoped action.
+       */
+      companyId?: string;
+    },
     ctx: TransitionContext,
   ): Promise<void> {
     const causationId = ctx.cause.type === 'payment_event' && ctx.cause.id && UUID.test(ctx.cause.id) ? ctx.cause.id : undefined;
@@ -91,6 +98,7 @@ export class BillingAudit {
       outcome: 'succeeded',
       ...(fact.changes ? { changes: fact.changes } : {}),
       ...(causationId ? { causationId } : {}),
+      ...(fact.companyId !== undefined ? { companyId: fact.companyId } : {}),
     } as unknown as AuditEventInput<A>;
     await this.writer.write(q, input, {
       eventId: deterministicEventId(fact.resource.id, `audit.${action}`, ...(fact.identity ? [fact.identity] : [])),

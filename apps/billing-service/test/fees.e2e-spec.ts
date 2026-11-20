@@ -514,4 +514,60 @@ describeWithEnv('fee caps, delegations and proposals (Core V2 S3f) — real Post
       expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.fee_%' AND (name LIKE '%supersed%' OR name LIKE '%usab%')`)).rows[0].n).toBe(0);
     });
   });
+
+  // ───────────────────────────────────────────────────────────────────────
+
+  describe('Core V2 G6-C (DO-59): every fee intent asserts its Platform\'s immutable billing_platform Company, version 2, never a Platform', () => {
+    const intents = async (platformId: string) => (await admin.query(
+      `SELECT name, "eventVersion" AS v, payload FROM outbox WHERE name LIKE 'audit.fee_%' AND payload->'changes'->>'platform_id' = $1 ORDER BY "occurredAt", name`, [platformId])).rows as Row[];
+
+    it('the seven actions carry the Company of billing_platform (Owner and operator commands alike), as version 2, with no Platform scope', async () => {
+      const p = await platform();
+      assign(OP, p);
+      await setCap(p, 5000);
+      const d = await delegate(p, OP);
+      const org = organization(p);
+      const prod = await product(p);
+      const a = await propose(p, { organizationId: org, productId: prod, amount: 4000 });
+      await approve(a.body.id);
+      const b = await propose(p, { organizationId: org, productId: prod, amount: 10 });
+      await reject(b.body.id);
+      const c = await propose(p, { organizationId: org, productId: prod, amount: 20 });
+      await withdraw(p, c.body.id);
+      await revoke(p, d.body.id);
+      const all = await intents(p);
+      expect([...new Set(all.map((x) => x.name as string))].sort((a, b) => a.localeCompare(b))).toEqual(['audit.fee_cap.set', 'audit.fee_delegation.granted', 'audit.fee_delegation.revoked',
+        'audit.fee_proposal.approved', 'audit.fee_proposal.created', 'audit.fee_proposal.rejected', 'audit.fee_proposal.withdrawn']);
+      for (const x of all) {
+        expect([x.name, x.v, x.payload.companyId], x.name).toEqual([x.name, 2, COMPANY]);
+        expect(x.payload.platformId, x.name).toBeUndefined(); // no operator visibility through a Platform scope (this package)
+      }
+    });
+
+    it('cross-Company isolation: another Company\'s Platform asserts that Company; another Company\'s Owner records nothing on this one', async () => {
+      const mine = await platform();
+      const theirs = await platform({ company: OTHER_COMPANY });
+      expect((await setCap(theirs, 700, B.otherOwner)).status).toBe(201);
+      expect((await intents(theirs)).map((x) => x.payload.companyId)).toEqual([OTHER_COMPANY]);
+      expect((await setCap(mine, 700, B.otherOwner)).status).toBe(404);
+      expect(await intents(mine)).toEqual([]);
+    });
+
+    it('historical identity: billing_platform cannot be re-pointed; Auth later naming another Company changes neither earlier nor later evidence', async () => {
+      const p = await platform();
+      assign(OP, p);
+      await setCap(p, 5000);
+      await delegate(p, OP);
+      await expect(admin.query(`UPDATE billing_platform SET "companyId" = $2 WHERE "platformId" = $1`, [p, OTHER_COMPANY])).rejects.toThrow();
+      // Auth's live answer moves the Platform to another Company: its Owner passes Auth's check, but Billing's own row still names COMPANY
+      auth.platforms.set(p, OTHER_COMPANY);
+      expect((await setCap(p, 6000, B.otherOwner)).status).toBe(404); // never re-pointed by a live answer (S3d)
+      const org = organization(p);
+      const prod = await product(p);
+      expect((await propose(p, { organizationId: org, productId: prod, amount: 100 })).status).toBe(201);
+      expect((await intents(p)).map((x) => x.payload.companyId)).toEqual([COMPANY, COMPANY, COMPANY]); // cap, delegation, the later proposal
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name LIKE 'audit.fee_%' AND payload->>'companyId' = $1
+        AND payload->'changes'->>'platform_id' = $2`, [OTHER_COMPANY, p])).rows[0].n).toBe(0);
+    });
+  });
 });

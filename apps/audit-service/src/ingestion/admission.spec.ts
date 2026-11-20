@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { AUDIT_ACTIONS, AUDIT_CATALOG, type AuditAction } from '@nawara/audit-contract';
+import { AUDIT_ACTIONS, AUDIT_CATALOG, emittedVersion, type AuditAction } from '@nawara/audit-contract';
 import { sampleAuditPayload } from '@nawara/audit-contract/testing';
 import type { EventEnvelope } from '@nawara/service-kit';
 import { auditAdmission, auditEventOwner } from './admission.js';
@@ -16,7 +16,7 @@ const envelope = (action: AuditAction, over: { payload?: Record<string, unknown>
     id,
     name: over.name ?? `audit.${action}`,
     payload: over.payload ?? JSON.parse(JSON.stringify(sampleAuditPayload(action, 'complete'))),
-    headers: { eventId: id, occurredAt: new Date().toISOString(), correlationId: `corr-${id.slice(0, 8)}`, source: over.source ?? AUDIT_CATALOG.get(action)!.producer, version: AUDIT_CATALOG.get(action)!.since }, // S2-Audit.2: its own version
+    headers: { eventId: id, occurredAt: new Date().toISOString(), correlationId: `corr-${id.slice(0, 8)}`, source: over.source ?? AUDIT_CATALOG.get(action)!.producer, version: emittedVersion(action) }, // S2-Audit.2 / G6-C: its emitted version
   };
 };
 /** The bytes the kit publisher writes for an envelope's payload (canonical by construction). */

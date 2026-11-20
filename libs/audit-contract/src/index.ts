@@ -6,7 +6,7 @@ export {
   type AuditActor, type AuditReference, type ChangeScalar, type ChangeValue, type AuditPayload,
 } from './contract.js';
 export {
-  AUDIT_CATALOG, AUDIT_ACTIONS, CORE_PRODUCERS, catalogEntry, actionsOwnedBy,
+  AUDIT_CATALOG, AUDIT_ACTIONS, CORE_PRODUCERS, catalogEntry, actionsOwnedBy, emittedVersion,
   type AuditAction, type CatalogEntry, type ChangeSpec, type ChangeType, type OrganizationRule, type SubjectRule, type ActorRule, type ScopeRule, type ApprovalRule,
   type CoreProducer, type AuditChangesOf, type AuditResourceTypeOf, type AuditOutcomeOf, type AuditSubjectOf,
 } from './catalog.js';

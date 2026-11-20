@@ -300,4 +300,73 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
       expect(half.constraint).toBe('audit_record_approved_by_valid');
     });
   });
+
+  // Core V2 G6-C (DO-59; the Owner's G6-C GO, 2026-11-20): Billing's Company-scoped facts, through the real IngestionService as the runtime role
+  describe('G6-C: Billing\'s Company-scoped facts', () => {
+    const G6C = ['refund_case.opened', 'refund_case.cancelled', 'refund_case.authorization_relayed', 'refund_case.completed', 'fraud_hold.placed',
+      'fraud_hold.released', 'fraud_hold.expired', 'fee_cap.set', 'fee_delegation.granted', 'fee_delegation.revoked', 'fee_proposal.created',
+      'fee_proposal.withdrawn', 'fee_proposal.approved', 'fee_proposal.rejected'] as const;
+    const billing = (action: (typeof G6C)[number], over: Record<string, unknown> = {}, headers: Record<string, unknown> = {}): EventEnvelope => {
+      const id = randomUUID();
+      return {
+        id, name: `audit.${action}`, payload: { ...JSON.parse(JSON.stringify(sampleAuditPayload(action, 'complete'))), companyId: COMPANY, ...over },
+        headers: { eventId: id, occurredAt: '2026-11-20T10:00:00.000Z', correlationId: 'corr-g6c-0001', source: 'billing-service', version: 2, ...headers } as EventEnvelope['headers'],
+      };
+    };
+    const verifiedAs = (e: EventEnvelope, producerUserId = 'billing-service') =>
+      ({ decision: 'accept', basis: 'verified_original', origin: { from: 'verified_delivery', source: 'billing-service', eventId: e.id, name: e.name, routingKey: e.name, producerUserId } }) as never;
+    const unverified = { decision: 'compatibility', basis: 'unverified_original', verified: false } as never;
+    const reason = async (p: Promise<unknown>) => p.then(() => 'stored', (x: { reason?: string }) => x.reason);
+    const count = async () => Number((await sql<{ n: string }>(d.adminUrl, 'SELECT count(*) AS n FROM audit_record'))[0]!.n);
+
+    it.each(G6C)('%s: a verified delivery is stored with its Company and exactly one trusted scope row, Company only', async (action) => {
+      const e = billing(action);
+      expect(await ingestion.ingest(e, verifiedAs(e))).toBe('persisted');
+      const row = (await repo.findBySourceAndEventId('billing-service', e.id))!;
+      expect(row).toMatchObject({ schemaVersion: 2, category: 'commercial', companyId: COMPANY, platformId: null, producerIdentityVerified: true });
+      expect(await scopeRows(row.id)).toEqual([{ basis: 'verified_producer', companyId: COMPANY, platformId: null }]);
+    });
+
+    it('missing or unverified broker identity: an unverified delivery is stored but never becomes trusted scope', async () => {
+      for (const action of G6C) {
+        const e = billing(action);
+        expect(await ingestion.ingest(e, unverified)).toBe('persisted');
+        const row = (await repo.findBySourceAndEventId('billing-service', e.id))!;
+        expect([row.companyId, row.producerIdentityVerified], action).toEqual([COMPANY, false]);
+        expect(await scopeRows(row.id), action).toEqual([]);
+      }
+    });
+
+    it('forged producer scope is refused before anything is stored: another source, a Platform, no Company, a malformed Company', async () => {
+      const before = await count();
+      const cases: Array<[EventEnvelope, string]> = [
+        [billing('refund_case.opened', {}, { source: 'payment-service' }), 'producer_not_admitted'],
+        [billing('fraud_hold.placed', { platformId: PLATFORM }), 'invalid_scope'],
+        [billing('fee_proposal.created', { companyId: undefined }), 'invalid_scope'],
+        [billing('fee_cap.set', { companyId: 'company-a' }), 'invalid_scope'],
+        [billing('refund_case.cancelled', { companyId: COMPANY }, { version: 1 }), 'unknown_field'],
+      ];
+      for (const [e, expected] of cases) {
+        const payload = JSON.parse(JSON.stringify(e.payload)); // drops an `undefined` field, as the wire would
+        expect(await reason(ingestion.ingest({ ...e, payload }, verifiedAs(e))), expected).toBe(expected);
+      }
+      // an unscoped Billing action asserting a Company (a service-token seller promoted to scope) is refused too
+      const base = envelopeV(2);
+      const spoof = { ...base, name: 'audit.invoice.issued', payload: { ...JSON.parse(JSON.stringify(sampleAuditPayload('invoice.issued', 'complete'))), companyId: COMPANY },
+        headers: { ...base.headers, source: 'billing-service' } } as EventEnvelope;
+      expect(await reason(ingestion.ingest(spoof, verifiedAs(spoof)))).toBe('invalid_scope');
+      expect(await count()).toBe(before);
+    });
+
+    it('version-1 compatibility: an earlier version-1 event of a scoped action is stored as before, with no Company and no scope row', async () => {
+      for (const action of G6C) {
+        const { companyId: _c, ...v1 } = billing(action).payload as Record<string, unknown>;
+        const e = { ...billing(action, {}, { version: 1 }), payload: v1 };
+        expect(await ingestion.ingest(e, verifiedAs(e)), action).toBe('persisted');
+        const row = (await repo.findBySourceAndEventId('billing-service', e.id))!;
+        expect([row.schemaVersion, row.companyId], action).toEqual([1, null]);
+        expect(await scopeRows(row.id), action).toEqual([]);
+      }
+    });
+  });
 });

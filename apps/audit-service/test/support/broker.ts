@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Channel } from 'amqplib';
-import { AUDIT_CATALOG, type AuditAction } from '@nawara/audit-contract';
+import { AUDIT_CATALOG, emittedVersion, type AuditAction } from '@nawara/audit-contract';
 import { sampleAuditPayload } from '@nawara/audit-contract/testing';
 import type { EventEnvelope } from '@nawara/service-kit';
 import { AUDIT_EXCHANGE, AUDIT_QUEUE } from '../../src/ingestion/ingestion.constants.js';
@@ -26,7 +26,7 @@ export function auditEnvelope(
       occurredAt: new Date().toISOString(),
       correlationId: `corr-${id.slice(0, 8)}`,
       source: AUDIT_CATALOG.get(action)!.producer,
-      version: AUDIT_CATALOG.get(action)!.since, // Core V2 S2-Audit.2: the action's own version (2 for the authorization receipts)
+      version: emittedVersion(action), // Core V2 S2-Audit.2 / G6-C: the action's emitted version (2 for the receipts and a scoped action)
       ...over.headers,
     } as EventEnvelope['headers'],
   };

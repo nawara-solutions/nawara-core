@@ -47,9 +47,9 @@ export type SubjectRule = { rule: 'forbidden' } | { rule: 'required' | 'optional
 /**
  * Core V2 S2-Audit.1 (ADR-0069 decisions 2 and 4): whether the action's producer may assert a Company and / or a Platform in a version-2
  * event (`required`: always; `optional`: when recorded on the resource). Absent = the field is refused for the action. Granting it to an
- * action is a reviewed catalog decision (like adding the action itself); in this slice NO entry grants it, so no production event can
- * assert scope yet. An assertion becomes trusted scope only when the producer's identity is broker-verified (decision 4); ownership is
- * never inferred.
+ * action is a reviewed catalog decision (like adding the action itself). A rule applies to version-2 events (Core V2 G6-C): the writer
+ * emits version 2 for a scoped action, and a version-1 event of it carries no scope. An assertion becomes trusted scope only when the
+ * producer's identity is broker-verified (decision 4); ownership is never inferred.
  */
 export interface ScopeRule {
   company?: 'required' | 'optional';
@@ -88,8 +88,9 @@ export interface CatalogEntry {
   outcomes: readonly AuditOutcome[];
   changes: Readonly<Record<string, ChangeSpec>>;
   /**
-   * Core V2 S2-Audit.1: the scope a version-2 event of this action may assert. Granted ONLY to the three `authorization_receipt.*` actions
-   * (S2-Audit.2, Owner decision D3: Company, from Auth's own Owner–Company row); every other action asserts none.
+   * Core V2 S2-Audit.1: the scope a version-2 event of this action may assert. Granted to the three `authorization_receipt.*` actions
+   * (S2-Audit.2, Owner decision D3: Company, from Auth's own Owner–Company row) and, Company only, to the Billing and Payment facts of the
+   * approved G6-C matrix (`G6C_COMPANY_SCOPE`); every other action asserts none.
    */
   scope?: Readonly<ScopeRule>;
   /** Core V2 S2-Audit.2: whether the action records `approvedBy` (only `authorization_receipt.consumed`, D5). */
@@ -107,6 +108,13 @@ const SUBJECT_USER = { rule: 'required', type: 'user' } as const;
 const NONE = {} as const;
 /** Core V2 S2-Audit.2 (D3): the authorization receipts' scope: their Company, always. No Platform. */
 const RECEIPT_SCOPE = { company: 'required' } as const;
+/**
+ * Core V2 G6-C (DO-59; the Owner's G6-C GO, 2026-11-20): the Company, required, of a Billing or Payment fact whose Company is
+ * AUTHORITATIVE in the producer's own row: the Owner's Company per Auth's live answer (refund cases, fraud holds), the immutable
+ * `billing_platform` of the fact's Platform (fee facts), or the Company of an Auth-consumed receipt (refund attempts). Never a Platform
+ * (no operator visibility); never from a seller a service caller asserted. Granted per action by the reviewed matrix only.
+ */
+const G6C_COMPANY_SCOPE = { company: 'required' } as const;
 
 
 const SPEC = {
@@ -538,6 +546,7 @@ const SPEC = {
       reason: { type: 'code', shape: 'value', required: true, values: ['duplicate_charge', 'service_not_provided', 'customer_request', 'late_settlement_unapplied', 'legal_requirement', 'recovery_surplus'] },
       legal_override: { type: 'boolean', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The Owner of the seller Company opened a refund case for one verified captured payment, in full (no refund attempt yet; nothing moved).',
   },
   'refund_case.cancelled': {
@@ -548,6 +557,7 @@ const SPEC = {
       company_id: { type: 'uuid', shape: 'value', required: true },
       platform_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The Owner of the seller Company cancelled an open refund case before any refund processing (the payment may get a new case).',
   },
   // Core V2 S6b (register BIL-24; ADR-0067 decision 5; the Owner's R6B-7, R6B-10): the Owner relayed an Auth refund authorization receipt for
@@ -562,6 +572,7 @@ const SPEC = {
       company_id: { type: 'uuid', shape: 'value', required: true },
       platform_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The Owner of the seller Company relayed a refund authorization for a case to Payment, as one identified refund attempt (money moves only after Auth confirms the authorization).',
   },
 
@@ -575,6 +586,7 @@ const SPEC = {
       refund_approval_id: { type: 'uuid', shape: 'value', required: true }, // Payment's refund authorization id (a key naming 'authorization' is screened as sensitive)
       refund_attempt_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'Payment\'s verified evidence shows the case\'s full refund was returned: the refund case is completed (no new attempt is ever accepted).',
   },
 
@@ -602,16 +614,19 @@ const SPEC = {
       product_id: { type: 'uuid', shape: 'value', required: true },
       reason: { type: 'code', shape: 'value', required: true, values: ['account_takeover', 'stolen_payment_method', 'identity_fraud', 'chargeback_abuse', 'promotion_abuse'] },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: "The Owner of the seller Company suspended one beneficiary's Personal entitlement to one product, with verified evidence, for at most 14 days.",
   },
   'fraud_hold.released': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'none',
     resource: ['fraud_hold'], subject: NO_SUBJECT, outcomes: OK, changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The Owner released a fraud hold before its 14-day review deadline; the denied paid time is compensated.',
   },
   'fraud_hold.expired': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['fraud_hold_sweep'] }, organization: 'none',
     resource: ['fraud_hold'], subject: NO_SUBJECT, outcomes: OK, changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'A fraud hold reached its 14-day review deadline unreleased: its restriction ended there; the denied paid time is compensated.',
   },
 
@@ -768,6 +783,7 @@ const SPEC = {
       version: { type: 'integer', shape: 'value', required: true, min: 1, max: 2147483647 },
       amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: "The Owner set a new immutable version of a Platform's Organization fee cap.",
   },
   'fee_delegation.granted': {
@@ -777,6 +793,7 @@ const SPEC = {
       platform_id: { type: 'uuid', shape: 'value', required: true },
       operator_user_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The Owner delegated proposing Organization fees on a Platform to one operator of their Company (no expiry).',
   },
   'fee_delegation.revoked': {
@@ -786,6 +803,7 @@ const SPEC = {
       platform_id: { type: 'uuid', shape: 'value', required: true },
       operator_user_id: { type: 'uuid', shape: 'value', required: true },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The Owner revoked a fee delegation (final); pending proposals stay pending for the Owner to decide.',
   },
   'fee_proposal.created': {
@@ -797,12 +815,14 @@ const SPEC = {
       delegation_id: { type: 'uuid', shape: 'value', required: true },
       amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: "A delegated operator proposed an Organization fee for one Organization and one personal subscription product, within the Platform's current cap.",
   },
   'fee_proposal.withdrawn': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['operator'] }, organization: 'required',
     resource: ['fee_proposal'], subject: NO_SUBJECT, outcomes: OK,
     changes: { platform_id: { type: 'uuid', shape: 'value', required: true } },
+    scope: G6C_COMPANY_SCOPE,
     purpose: 'The proposing operator, still delegated, withdrew their own pending fee proposal.',
   },
   'fee_proposal.approved': {
@@ -813,12 +833,14 @@ const SPEC = {
       cap_version: { type: 'integer', shape: 'value', required: true, min: 1, max: 2147483647 },
       amount: { type: 'integer', shape: 'value', required: true, min: 0, max: 9007199254740991 },
     },
+    scope: G6C_COMPANY_SCOPE,
     purpose: "The Owner of the proposal's Platform approved a pending fee proposal within the current cap version it records.",
   },
   'fee_proposal.rejected': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'] }, organization: 'required',
     resource: ['fee_proposal'], subject: NO_SUBJECT, outcomes: OK,
     changes: { platform_id: { type: 'uuid', shape: 'value', required: true } },
+    scope: G6C_COMPANY_SCOPE,
     purpose: "The Owner of the proposal's Platform rejected a pending fee proposal.",
   },
   // Core V2 G3 (DO-31, DO-33, DO-41, DO-42; the Owner's G3 GO, 2026-11-18): escalation-only review evidence, once per review row, in its transaction.
@@ -1324,6 +1346,17 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = Object.freeze([...AUDIT_CAT
 
 export function catalogEntry(action: string): Readonly<CatalogEntry> | undefined {
   return AUDIT_CATALOG.get(action as AuditAction);
+}
+
+/**
+ * The envelope version a producer writes for an action (never the caller's choice): its `since`, and version 2 for an action whose
+ * entry declares a `scope` rule (Core V2 G6-C, DO-59: scope travels only in version 2). An action keeps `since: 1` when it gains a rule,
+ * so its earlier version-1 events (an outbox row written before the change, a replay) stay valid, unscoped.
+ */
+export function emittedVersion(action: string): number {
+  const e = catalogEntry(action);
+  if (!e) return 1;
+  return Math.max(1, e.since, e.scope ? 2 : 1);
 }
 
 /** The actions a service owns (empty for a service that emits nothing). */

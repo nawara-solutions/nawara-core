@@ -150,8 +150,12 @@ function organizationOf(o: Rec, entry: Readonly<CatalogEntry>, resource: AuditRe
  * `scope` rule. Refused (`invalid_scope`): a malformed id, an assertion the entry does not allow, a missing required one, and a
  * contradiction the event itself proves (the resource IS the Company / Platform under another id; one id used for two scope levels).
  * Nothing is inferred: no Company from a Platform, no Platform or Company from an Organization.
+ *
+ * Core V2 G6-C (DO-59): a rule is a VERSION-2 rule. A version-1 event of an action that gained a scope rule later (its earlier contract:
+ * an outbox row written before the change, a replay) carries no scope and stays valid; it can never become trusted scope.
  */
-function scopeOf(o: Rec, entry: Readonly<CatalogEntry>, resource: AuditReference, organizationId: string | null): { companyId?: string; platformId?: string } {
+function scopeOf(o: Rec, entry: Readonly<CatalogEntry>, resource: AuditReference, organizationId: string | null, version: number): { companyId?: string; platformId?: string } {
+  if (version < AUDIT_CONTRACT_V2) return {}; // a version-1 payload cannot hold the scope keys (refused above as unknown_field)
   const rule = entry.scope ?? {};
   const out: { companyId?: string; platformId?: string } = {};
   for (const [field, level, kind] of [['companyId', rule.company, 'company'], ['platformId', rule.platform, 'platform']] as const) {
@@ -331,7 +335,7 @@ export function validateAuditPayloadWith(
   }
 
   // version 2 only (a version-1 payload cannot hold these keys: refused above)
-  const scope = scopeOf(o, entry, resource, organizationId);
+  const scope = scopeOf(o, entry, resource, organizationId, version);
   const approvedBy = approvalOf(o, entry);
   let liveMode: boolean | undefined;
   if (has(o, 'liveMode')) {
