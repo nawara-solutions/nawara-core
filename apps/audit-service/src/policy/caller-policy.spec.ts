@@ -11,7 +11,7 @@ describe('AUDIT_SERVICE_POLICY', () => {
   it('parses an explicit policy per caller: operations, categories and optional source services', () => {
     const p = parse({ 'core-drive': product, 'core-admin': admin });
     expect(p.of('core-drive')).toEqual({ operations: new Set(['read_organization']), categories: new Set(['business', 'commercial']), sourceServices: new Set(['billing-service', 'payment-service']) });
-    expect(p.of('core-admin')).toEqual({ operations: new Set(AUDIT_OPERATIONS), categories: new Set(AUDIT_CATEGORIES), sourceServices: undefined });
+    expect(p.of('core-admin')).toEqual({ operations: new Set(['read_organization', 'read_platform']), categories: new Set(AUDIT_CATEGORIES), sourceServices: undefined });
   });
 
   it('deny by default: an unknown caller and an operation not granted are refused; no policy and no caller allows nothing', () => {
@@ -56,8 +56,8 @@ describe('AUDIT_SERVICE_POLICY', () => {
     expect(() => AuditCallerPolicy.parse(raw, ['a'])).toThrow(ConfigError);
   });
 
-  it('the vocabularies are exactly the ones Stage 18.1 froze (A40 operations, A52 categories)', () => {
-    expect([...AUDIT_OPERATIONS]).toEqual(['read_organization', 'read_platform']);
+  it('the vocabularies are exactly the ones Stage 18.1 froze (A40 operations, A52 categories), plus Core V2 DO-43a\'s development diagnostics read', () => {
+    expect([...AUDIT_OPERATIONS]).toEqual(['read_organization', 'read_platform', 'read_dead_letter_diagnostics']);
     expect([...AUDIT_CATEGORIES]).toEqual(['security', 'business', 'commercial', 'administrative']);
   });
 });

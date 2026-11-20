@@ -5,8 +5,11 @@ import { AUDIT_CATEGORIES, type AuditCategory } from './categories.js';
  * The operations a caller policy can grant (Stage 18.1, A38 / A40). Nothing is granted unless listed. `read_organization`: records of
  * exactly one organization per request; `read_platform`: platform-level and cross-organization records (Stage 19's admin service, a
  * security tool). The routes that consume them arrive in Stage 18.6; ingestion is not an HTTP operation (the bus, Stage 18.5).
+ * Core V2 DO-43a: `read_dead_letter_diagnostics`: the header-only dead-letter observations and coverage facts (development diagnostics only;
+ * the route exists only with `AUDIT_DEAD_LETTER_OBSERVATION=enabled`, which production refuses). It reads no audit record, so the caller's
+ * categories and source services do not apply to it.
  */
-export const AUDIT_OPERATIONS = ['read_organization', 'read_platform'] as const;
+export const AUDIT_OPERATIONS = ['read_organization', 'read_platform', 'read_dead_letter_diagnostics'] as const;
 export type AuditOperation = (typeof AUDIT_OPERATIONS)[number];
 
 export interface CallerPolicy {

@@ -57,6 +57,12 @@ export interface AuditConfig extends BaseConfig {
    */
   ownerAccess?: { authServiceUrl: string; ratePerOwner: number; authTimeoutMs: number };
   /**
+   * Core V2 DO-43 (the Owner's D43-1, D43-4; DEVELOPMENT AND SIMULATION DIAGNOSTICS ONLY): `AUDIT_DEAD_LETTER_OBSERVATION`, `disabled` (the
+   * default) or `enabled`. Enabled, the service-token, header-only dead-letter diagnostics read is mounted (and, from DO-43c, Audit's own
+   * consumer observes its dead-letter transfers). Production refuses `enabled`: these diagnostics are never production evidence.
+   */
+  deadLetterObservation: boolean;
+  /**
    * Core V2 S2-Audit.3 (AUD-03, AUD-04; OD-14 cursor requirements): the scoped human reads, mounted ONLY when `AUDIT_CURSOR_KEYS` is set
    * (and then `AUTH_SERVICE_URL` is required: authority is always Auth's live answer). `AUDIT_CURSOR_KEYS` = `id:base64(32 bytes)[,…]`, a
    * key ring dedicated to cursor authentication (never another secret; two ids during a rotation), `AUDIT_CURSOR_ACTIVE_KEY_ID` the one
@@ -87,6 +93,7 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     provenanceEnforcement: reader.oneOf('AUDIT_PROVENANCE_ENFORCEMENT', AUDIT_ENFORCEMENT_MODES, 'compatibility'),
     queryRates: queryRates(reader),
+    deadLetterObservation: deadLetterObservation(reader, base.isProduction),
     ...(reader.get('AUTH_SERVICE_URL') === undefined ? {} : {
       ownerAccess: {
         authServiceUrl: authServiceUrl(reader),
@@ -97,6 +104,13 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
     ...scopedAccess(reader, base.isProduction),
     docs: readDocsCredentials(reader),
   };
+}
+
+/** Core V2 DO-43: development diagnostics only; production refuses them (fail closed, never echoing a value). */
+function deadLetterObservation(reader: EnvReader, isProduction: boolean): boolean {
+  const enabled = reader.oneOf('AUDIT_DEAD_LETTER_OBSERVATION', ['disabled', 'enabled'] as const, 'disabled') === 'enabled';
+  if (enabled && isProduction) throw new ConfigError('AUDIT_DEAD_LETTER_OBSERVATION=enabled is development and simulation only; production refuses it');
+  return enabled;
 }
 
 /** Core V2 S2-Audit.3: the cursor key ring and the scoped-read bounds; absent unless `AUDIT_CURSOR_KEYS` is set. Errors never echo a key. */
