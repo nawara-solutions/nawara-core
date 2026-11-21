@@ -90,7 +90,8 @@ export interface CatalogEntry {
   /**
    * Core V2 S2-Audit.1: the scope a version-2 event of this action may assert. Granted to the three `authorization_receipt.*` actions
    * (S2-Audit.2, Owner decision D3: Company, from Auth's own Owner–Company row) and, Company only, to the Billing and Payment facts of the
-   * approved G6-C matrix (`G6C_COMPANY_SCOPE`); every other action asserts none.
+   * approved G6-C matrix (`G6C_COMPANY_SCOPE`) and, optionally, to `financial_loss.recorded` (`CHECKOUT_LOSS_COMPANY_SCOPE`); every other
+   * action asserts none.
    */
   scope?: Readonly<ScopeRule>;
   /** Core V2 S2-Audit.2: whether the action records `approvedBy` (only `authorization_receipt.consumed`, D5). */
@@ -115,6 +116,15 @@ const RECEIPT_SCOPE = { company: 'required' } as const;
  * (no operator visibility); never from a seller a service caller asserted. Granted per action by the reviewed matrix only.
  */
 const G6C_COMPANY_SCOPE = { company: 'required' } as const;
+/**
+ * Core V2 G6 financial-loss provenance (the Owner's GO, 2026-11-21: D-FL-1 Option D, D-FL-2 to D-FL-5): the Company, OPTIONAL, of
+ * `financial_loss.recorded` only. Billing asserts it solely for an `over_return` or `direct_chargeback_write_off` whose whole checkout
+ * ownership chain it proves in the loss's transaction (the reserved `billing-checkout` invoice, its one product, the append-only
+ * `billing_platform` Company agreeing with the invoice seller, the product seller and the loss); every other loss (a service caller's
+ * invoice, assistance, recovery, a `recovery_write_off`) is emitted version 2 with no Company. Never a Platform. Audit cannot tell the
+ * kinds apart: the proof is Billing's (`apps/billing-service/src/reconciliation/loss-scope.ts`).
+ */
+const CHECKOUT_LOSS_COMPANY_SCOPE = { company: 'optional' } as const;
 
 
 const SPEC = {
@@ -720,6 +730,7 @@ const SPEC = {
   'financial_loss.recorded': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { user: ['owner'], system: ['reconciliation_worker'] }, organization: 'optional',
     resource: ['financial_loss'], subject: NO_SUBJECT, outcomes: OK,
+    scope: CHECKOUT_LOSS_COMPANY_SCOPE,
     changes: {
       kind: { type: 'code', shape: 'value', required: true, values: ['over_return', 'direct_chargeback_write_off', 'recovery_write_off'] },
       amount: { type: 'integer', shape: 'value', required: true, min: 1, max: 9007199254740991 },

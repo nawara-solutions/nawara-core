@@ -12,6 +12,7 @@ import { OWNER_AUTHORITY, type OwnerAuthority } from '../platforms/owner-authori
 import { RefundCommandIdempotency } from '../refunds/refund-idempotency.js';
 import type { VerifiedRefundOwner } from '../refunds/refund-owner.guard.js';
 import { LateSuccessService } from './late-success.service.js';
+import { trustedLossCompany } from './loss-scope.js';
 import { RefundEvidenceReader } from '../refunds/refund-evidence.js';
 import { PAYMENT_REFUND_CLIENT, type CaptureReadOutcome, type PaymentRefundClient } from '../refunds/payment-refund-client.js';
 import { PAYMENT_RECONCILIATION_CLIENT, type PaymentItem, type PaymentItemKind, type PaymentReconciliationClient } from './payment-reconciliation-client.js';
@@ -203,6 +204,7 @@ export class ReconciliationService {
           tally.losses++;
           await this.audit.record(q, 'financial_loss.recorded', {
             organizationId: pr.organizationId, resource: { type: 'financial_loss', id: loss.id }, changes: { kind: 'over_return', amount, evidence_id: factId },
+            companyId: await trustedLossCompany(q, loss.id), // Core V2 G6 (D-FL-2): a checkout-proven Company only; otherwise unscoped
           }, workerContext(factId));
         }
         const id = loss?.id ?? (await q.query<{ id: string }>(`SELECT id FROM financial_loss WHERE kind = 'over_return' AND "evidenceKey" = $1`, [factId])).rows[0]!.id;
@@ -688,6 +690,7 @@ export class ReconciliationService {
           await this.audit.record(q, 'financial_loss.recorded', {
             organizationId: l.organizationId, resource: { type: 'financial_loss', id: loss.id },
             changes: { kind: 'direct_chargeback_write_off', amount: Number(l.amount), evidence_id: l.chargebackFactId },
+            companyId: await trustedLossCompany(q, loss.id), // Core V2 G6 (D-FL-2): a checkout-proven Company only; otherwise unscoped
           }, workerContext(l.chargebackFactId));
         });
       } catch (e) {
@@ -908,6 +911,7 @@ export class ReconciliationService {
         await this.audit.record(q, 'recovery_obligation.written_off', {
           organizationId: o.organizationId, resource: { type: 'recovery_obligation', id: obligationId }, changes: { amount: binding.amount },
         }, ctx);
+        // Core V2 G6 (D-FL-3): a recovery write-off asserts NO Company until F7 Organization authority is verified and separately authorized
         await this.audit.record(q, 'financial_loss.recorded', {
           organizationId: o.organizationId, resource: { type: 'financial_loss', id: loss.id }, changes: { kind: 'recovery_write_off', amount: binding.amount, evidence_id: obligationId },
         }, ctx);

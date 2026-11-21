@@ -81,10 +81,15 @@ describe('audit contract version 2 (S2-Audit.1)', () => {
     'refund_case.authorization_relayed', 'refund_case.cancelled', 'refund_case.completed', 'refund_case.opened',
   ];
 
-  it('scope is granted ONLY to the receipts (D3) and the G6-C matrix, Company only: a forged companyId or platformId is refused for every other action', () => {
-    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.scope !== undefined).sort()).toEqual([...RECEIPTS, ...G6C].sort());
+  // Core V2 G6 financial-loss provenance (D-FL-1 Option D): the one OPTIONAL Company scope; `financial_loss.adjusted` stays unscoped (D-FL-3)
+  const LOSS = 'financial_loss.recorded' as AuditAction;
+
+  it('scope is granted ONLY to the receipts (D3), the G6-C matrix and (optional) financial_loss.recorded, Company only: a forged companyId or platformId is refused for every other action', () => {
+    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.scope !== undefined).sort()).toEqual([...RECEIPTS, ...G6C, LOSS].sort());
     for (const a of [...RECEIPTS, ...G6C]) expect(AUDIT_CATALOG.get(a as AuditAction)!.scope, a).toEqual({ company: 'required' });
-    for (const a of AUDIT_ACTIONS.filter((x) => !RECEIPTS.includes(x) && !G6C.includes(x))) {
+    expect(AUDIT_CATALOG.get(LOSS)!.scope).toEqual({ company: 'optional' });
+    expect(AUDIT_CATALOG.get('financial_loss.adjusted')!.scope).toBeUndefined();
+    for (const a of AUDIT_ACTIONS.filter((x) => !RECEIPTS.includes(x) && !G6C.includes(x) && x !== LOSS)) {
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), companyId: COMPANY }))), a).toBe('invalid_scope');
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), platformId: PLATFORM }))), a).toBe('invalid_scope');
     }
@@ -101,7 +106,28 @@ describe('audit contract version 2 (S2-Audit.1)', () => {
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), companyId: 'not-a-uuid' }))), a).toBe('invalid_scope');
     }
     // every unscoped action still writes its own version (1, or 2 for the receipts)
-    for (const a of AUDIT_ACTIONS.filter((x) => !G6C.includes(x))) expect(emittedVersion(a), a).toBe(AUDIT_CATALOG.get(a)!.since);
+    for (const a of AUDIT_ACTIONS.filter((x) => !G6C.includes(x) && x !== LOSS)) expect(emittedVersion(a), a).toBe(AUDIT_CATALOG.get(a)!.since);
+  });
+
+  it('G6 loss provenance: financial_loss.recorded is written as version 2 (since stays 1), with a checkout-proven Company or with NONE; never a Platform', () => {
+    expect([emittedVersion(LOSS), AUDIT_CATALOG.get(LOSS)!.since, emittedVersion('financial_loss.adjusted')]).toEqual([2, 1, 1]);
+    const { companyId: _c, ...unscoped } = base(LOSS);
+    expect(validateAuditEvent(envelope(LOSS, { ...unscoped, companyId: COMPANY })).payload.companyId).toBe(COMPANY);
+    const none = validateAuditEvent(envelope(LOSS, unscoped)); // a service caller's, assistance, recovery or write-off loss: valid, unscoped
+    expect([none.schemaVersion, none.payload.companyId, none.payload.platformId]).toEqual([2, undefined, undefined]);
+    expect(code(() => validateAuditEvent(envelope(LOSS, { ...unscoped, platformId: PLATFORM })))).toBe('invalid_scope');
+    expect(code(() => validateAuditEvent(envelope(LOSS, { ...unscoped, companyId: COMPANY, platformId: PLATFORM })))).toBe('invalid_scope');
+    for (const bad of ['not-a-uuid', '', 'ABCDEF01-2345-4678-9ABC-DEF012345678', 42, null]) expect(code(() => validateAuditEvent(envelope(LOSS, { ...unscoped, companyId: bad }))), String(bad)).toBe('invalid_scope');
+    // the adjustment gains nothing: a Company on it is refused in either version
+    expect(code(() => validateAuditEvent(envelope('financial_loss.adjusted', { ...base('financial_loss.adjusted'), companyId: COMPANY }, { version: 2 })))).toBe('invalid_scope');
+    expect(code(() => validateAuditEvent(envelope('financial_loss.adjusted', { ...base('financial_loss.adjusted'), companyId: COMPANY }, { version: 1 })))).toBe('unknown_field');
+  });
+
+  it('G6 loss provenance, version-1 compatibility: a historical financial_loss.recorded stays valid and unscoped; it can never carry a Company', () => {
+    const { companyId: _c, ...v1 } = base(LOSS);
+    const e = validateAuditEvent(envelope(LOSS, v1, { version: 1 }));
+    expect([e.schemaVersion, e.payload.companyId, e.payload.platformId]).toEqual([1, undefined, undefined]);
+    expect(code(() => validateAuditEvent(envelope(LOSS, { ...v1, companyId: COMPANY }, { version: 1 })))).toBe('unknown_field');
   });
 
   it('G6-C version-1 compatibility: an earlier version-1 event of a scoped action stays valid with NO scope; it can never carry one', () => {
