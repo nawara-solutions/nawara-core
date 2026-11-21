@@ -1,41 +1,53 @@
 {
-  "$comment": "Core V2 A1: Core CI runs the real-broker suites in these groups, each group in its own job with its own PostgreSQL and RabbitMQ, its suites in sequence (vitest.config.ts: fileParallelism false). Every *.e2e-spec.ts of this package must appear in exactly one group: scripts/real-broker-groups.mjs refuses a missing, duplicate or unknown suite (npm run check:repo, the plan job, every group job and the verify job). Balanced on the measured suite durations of Core CI run 42607924528 (seconds).",
+  "$comment": "Core V2 A1: Core CI runs the real-broker suites in these groups, each group in its own job with its own PostgreSQL and RabbitMQ, its suites in sequence (vitest.config.ts: fileParallelism false). Every *.e2e-spec.ts of this package must appear in exactly one group: scripts/real-broker-groups.mjs refuses a missing, duplicate or unknown suite (npm run check:repo, the plan job, every group job and the verify job). Rebalanced to six groups (CI acceleration phase 1) on the measured suite durations of Core CI run 44809377071 (main b1baacc, seconds): the longest suite (do73) runs alone and bounds the critical path.",
   "groups": [
     {
       "id": "g1",
-      "measuredSeconds": 1357.3,
+      "measuredSeconds": 1337.1,
       "suites": [
-        "do73-unallocated-certification.e2e-spec.ts",
-        "r3f1-visibility-certification.e2e-spec.ts"
+        "do73-unallocated-certification.e2e-spec.ts"
       ]
     },
     {
       "id": "g2",
-      "measuredSeconds": 1313.5,
+      "measuredSeconds": 1337.0,
       "suites": [
         "s-int-evidence-completeness.e2e-spec.ts",
         "s-int-late-capture-disputes.e2e-spec.ts",
-        "s6b-refund-processing.e2e-spec.ts",
-        "r3-failure-evidence-certification.e2e-spec.ts"
+        "s-int-assisted-loss-recovery.e2e-spec.ts"
       ]
     },
     {
       "id": "g3",
-      "measuredSeconds": 1352.5,
+      "measuredSeconds": 1329.2,
       "suites": [
         "s0c15b-contest-certification.e2e-spec.ts",
-        "s0c14-overlap-certification.e2e-spec.ts",
-        "o2-fact-owner-certification.e2e-spec.ts"
+        "r3f1-visibility-certification.e2e-spec.ts"
       ]
     },
     {
       "id": "g4",
-      "measuredSeconds": 816.6,
+      "measuredSeconds": 1299.7,
       "suites": [
-        "s0c15a-exposure-certification.e2e-spec.ts",
         "do74-observation-certification.e2e-spec.ts",
-        "s-int-assisted-loss-recovery.e2e-spec.ts",
-        "s6-financial-certification.e2e-spec.ts",
+        "s0c15a-exposure-certification.e2e-spec.ts"
+      ]
+    },
+    {
+      "id": "g5",
+      "measuredSeconds": 1297.8,
+      "suites": [
+        "r3-failure-evidence-certification.e2e-spec.ts",
+        "s0c14-overlap-certification.e2e-spec.ts",
+        "s6-financial-certification.e2e-spec.ts"
+      ]
+    },
+    {
+      "id": "g6",
+      "measuredSeconds": 979.5,
+      "suites": [
+        "o2-fact-owner-certification.e2e-spec.ts",
+        "s6b-refund-processing.e2e-spec.ts",
         "s-int-pre-lifecycle-real-auth.e2e-spec.ts",
         "stage21c3-certification.e2e-spec.ts",
         "stage4-real-broker-dlq-replay.e2e-spec.ts",

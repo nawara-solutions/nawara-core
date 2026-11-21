@@ -4317,7 +4317,7 @@ test('A1: the real manifest assigns every discovered real-broker suite to exactl
   const assigned = RB_MANIFEST.groups.flatMap((g) => g.suites).sort();
   assert.deepEqual(assigned, RB_DISCOVERED);
   assert.deepEqual(rbMatrixOf(RB_MANIFEST), { group: RB_MANIFEST.groups.map((g) => g.id) });
-  assert.equal(RB_MANIFEST.groups.length, 4, 'the A1 experiment: four groups');
+  assert.equal(RB_MANIFEST.groups.length, 6, 'CI acceleration phase 1: six groups (rebalanced on run 44809377071)');
 });
 
 test('A1: a suite in no group, in two groups, twice in one group, or unknown is refused; so is a malformed manifest', () => {
