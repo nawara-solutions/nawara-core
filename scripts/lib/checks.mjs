@@ -1769,6 +1769,22 @@ export function checkCiAggregate(fileName, text) {
   return problems;
 }
 
+/**
+ * Core CI's concurrency: a newer push to a pull request may cancel that pull request's older run, but a push to main is never cancelled
+ * or replaced. GitHub keeps one running and one pending run per group and cancels an older PENDING run of the group even when
+ * cancel-in-progress is false, so a main group must be unique per commit (github.sha), not per ref. Both values are held exactly.
+ */
+export const CI_CONCURRENCY_GROUP = "${{ github.event_name == 'pull_request' && format('core-ci-{0}', github.ref) || format('core-ci-main-{0}', github.sha) }}";
+export const CI_CONCURRENCY_CANCEL = "${{ github.event_name == 'pull_request' }}";
+export function checkCiConcurrency(fileName, text) {
+  const cfg = parse(text)?.concurrency;
+  if (!cfg || typeof cfg !== 'object') return [`${fileName}: needs a workflow-level concurrency (a pull request's superseded run is cancelled; main is never cancelled)`];
+  const problems = [];
+  if (cfg.group !== CI_CONCURRENCY_GROUP) problems.push(`${fileName}: concurrency group must be exactly ${CI_CONCURRENCY_GROUP} (a main group per ref lets a later push replace a pending main run)`);
+  if (cfg['cancel-in-progress'] !== CI_CONCURRENCY_CANCEL) problems.push(`${fileName}: cancel-in-progress must be exactly ${CI_CONCURRENCY_CANCEL} (only a pull request's superseded run may be cancelled; a main verification never)`);
+  return problems;
+}
+
 export function checkCiCoverage(fileName, text) {
   const problems = [];
   const doc = parse(text);

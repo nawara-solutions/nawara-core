@@ -9,7 +9,7 @@ import { parse, parseDocument } from 'yaml';
 import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
 import { ON_DEMAND_WORKFLOWS, checkOnDemandWorkflow } from './lib/checks.mjs';
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, checkCiClassify, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, checkCiClassify, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiConcurrency, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 import { checkAllReports as checkAllRbReports, checkManifest as checkRbManifest, checkRealBrokerGroups, checkRealBrokerJobs, checkVitestConfig as checkRbVitestConfig, discoverSuites as rbDiscoverSuites, loadManifest as rbLoadManifest, matrixOf as rbMatrixOf } from './real-broker-groups.mjs';
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
@@ -426,6 +426,28 @@ test('core-ci-passed: dropping any needed job, or adding a job it does not need,
   }
   const added = swap(CORE_CI, '  core-ci-passed:\n', '  new-suite:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n');
   assert.match(checkCiAggregate('core-ci.yml', added).join(), /missing: new-suite/);
+});
+
+// ------------------------------------------------------------------------------ Core CI concurrency: main verification is never cancelled
+const CI_GROUP_LINE = "  group: ${{ github.event_name == 'pull_request' && format('core-ci-{0}', github.ref) || format('core-ci-main-{0}', github.sha) }}\n";
+const CI_CANCEL_LINE = "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n";
+
+test('Core CI concurrency: a pull request run is superseded; a main run is never cancelled or replaced', () => {
+  assert.deepEqual(checkCiConcurrency('core-ci.yml', CORE_CI), []);
+  const cfg = parse(CORE_CI).concurrency;
+  assert.ok(cfg.group.includes("format('core-ci-{0}', github.ref)"), 'pull requests keep their per-pull-request group');
+  assert.ok(cfg.group.includes("format('core-ci-main-{0}', github.sha)"), 'a push to main has a group of its own commit');
+});
+
+test('Core CI concurrency: cancelling main, a per-ref main group, or no concurrency is refused', () => {
+  const refused = (from, to, re, what) => assert.match(checkCiConcurrency('core-ci.yml', swap(CORE_CI, from, to)).join(), re, what);
+  refused(CI_CANCEL_LINE, '  cancel-in-progress: true\n', /cancel-in-progress must be exactly/, 'every run cancellable (the old setting)');
+  refused(CI_CANCEL_LINE, "  cancel-in-progress: ${{ github.event_name != 'push' }}\n", /cancel-in-progress must be exactly/, 'an equivalent-looking condition');
+  refused(CI_CANCEL_LINE, '', /cancel-in-progress must be exactly/, 'cancel-in-progress left out');
+  refused(CI_GROUP_LINE, '  group: core-ci-${{ github.ref }}\n', /concurrency group must be exactly/, 'a per-ref group (a later main push replaces a pending one)');
+  refused(CI_GROUP_LINE, "  group: ${{ github.event_name == 'pull_request' && format('core-ci-{0}', github.ref) || 'core-ci-main' }}\n", /concurrency group must be exactly/, 'one shared main group');
+  const without = swap(CORE_CI, `concurrency:\n${CI_GROUP_LINE}${CI_CANCEL_LINE}`, '');
+  assert.match(checkCiConcurrency('core-ci.yml', without).join(), /needs a workflow-level concurrency/);
 });
 
 // ------------------------------------------------------------------------------ Core V2 Smart CI, Stage 1: the docs and full lanes
