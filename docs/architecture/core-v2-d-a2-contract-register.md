@@ -1746,6 +1746,28 @@ Platform). Each one's Company is authoritative in the producer's own row, writte
   `test/refund-cases.e2e-spec.ts`, `test/refund-authorizations.e2e-spec.ts`; Payment `test/refunds.e2e-spec.ts`; audit-service `test/contract-v2.e2e-spec.ts` and
   `test/scoped-query.e2e-spec.ts`.
 
+**G6 financial-loss provenance (dated note, 2026-11-21; the Owner's GO: D-FL-1 Option D, D-FL-2 to D-FL-5; DEVELOPMENT AND SIMULATION ONLY;
+non-retroactive: the G6-C note above is unchanged; DO-59, DO-60, DO-61, F7 stay OPEN).** `financial_loss.recorded` gains an OPTIONAL Company
+scope (`scope.company: optional`, `since: 1`, emitted version 2; never a Platform). Billing asserts it only for a loss whose checkout ownership
+chain it proves in the loss's own transaction (`apps/billing-service/src/reconciliation/loss-scope.ts`); every other loss is emitted version 2
+with no Company. The financial facts, amounts, cases and reads are unchanged.
+
+| Loss | Company asserted |
+|---|---|
+| `over_return`, `direct_chargeback_write_off` of a `billing-checkout` invoice (the reserved producer no service token may hold) | the product's Platform's `billing_platform.companyId`, only when it equals the invoice seller, the product seller and the loss's Company; the invoice has exactly one line and no Organization; for a write-off, the verified dispute loss names the payment request |
+| The same kinds on a service caller's invoice (the caller chooses the seller, B-029 / B-031) | none |
+| Over-returns of assistance or recovery invoices (D-FL-4; pre-F7 ownership chains) | none |
+| `recovery_write_off` (D-FL-3) | none, until F7 Organization authority is verified and separately authorized |
+
+- *Uniqueness.* The over-return path finds the payment's request by `paymentId`, which the unique index `payment_request_payment_id_unique`
+  (0006) and the set-once rule make at most one row: no Company is ever chosen among several.
+- *Unchanged.* `financial_loss.adjusted` (version 1, unscoped); BIL-34 and every other read route; historical version-1 events (valid and
+  permanently unscoped); retention; no migration. Legal holds now cover the scoped checkout losses through their trusted scope rows.
+- *Limit.* Audit cannot distinguish a proven loss from an unproven one (the rule is optional); the proof is Billing's, held by tests that
+  fail when the producer check is removed or the Company is taken from the invoice seller.
+- *Evidence.* `libs/audit-contract/test/contract-v2.spec.ts`; Billing `test/recovery.e2e-spec.ts` (the `Core V2 G6` block); audit-service
+  `test/contract-v2.e2e-spec.ts` and `test/scoped-query.e2e-spec.ts`.
+
 **Cross-references (dated note, 2026-11-12, recorded with FDR-01 v1 and FDR-09 v1; non-retroactive: the findings above are unchanged and no
 finding is duplicated).** These findings restate or extend limits already recorded elsewhere; each is one finding under one identifier.
 

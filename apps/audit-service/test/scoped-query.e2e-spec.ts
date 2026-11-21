@@ -397,4 +397,40 @@ describeWithEnv('S2-Audit.3 scoped human reads: Owner Company timeline and opera
       }
     });
   });
+
+  // Core V2 G6 financial-loss provenance (D-FL-1 Option D): checkout-proven losses on the UNCHANGED reads (their own September window).
+  describe('G6: financial_loss.recorded Company scope on the unchanged reads', () => {
+    const SEP = { from: '2026-09-01T00:00:00Z', to: '2026-09-30T00:00:00Z' };
+    const sep = (minutes: number) => new Date(Date.parse('2026-09-02T00:00:00.000Z') + minutes * 60_000);
+    const mine: string[] = [];
+    const theirs: string[] = [];
+    const lossRec = (minutes: number, companyId: string | undefined, over: Partial<NewAuditRecord> = {}): NewAuditRecord => ({
+      eventId: randomUUID(), sourceService: 'billing-service', action: 'financial_loss.recorded', category: 'commercial', schemaVersion: 2,
+      actor: { type: 'system', id: 'reconciliation_worker' }, organizationId: null, resource: { type: 'financial_loss', id: randomUUID() },
+      outcome: 'succeeded', changes: { kind: 'over_return', amount: 500, evidence_id: randomUUID() } as never, occurredAt: sep(minutes),
+      ...(companyId ? { companyId } : {}), delivery: verified, ...over,
+    });
+    beforeAll(async () => {
+      const repo = t.app.get(AuditRecordRepository);
+      const a = lossRec(0, COMPANY_A);
+      const b = lossRec(1, COMPANY_B);
+      for (const r of [a, b]) expect((await repo.insertOnce(r)).kind).toBe('inserted');
+      mine.push(a.eventId);
+      theirs.push(b.eventId);
+      // never trusted: an unproven loss (no Company asserted), an unverified delivery of Company A, and a historical version-1 loss
+      expect((await repo.insertOnce(lossRec(2, undefined))).kind).toBe('inserted');
+      expect((await repo.insertOnce(lossRec(3, COMPANY_A, { delivery: { producerIdentityVerified: false, replayed: false } }))).kind).toBe('inserted');
+      expect((await repo.insertOnce(lossRec(4, undefined, { schemaVersion: 1 }))).kind).toBe('inserted');
+    });
+
+    it('cross-Company isolation: each Owner reads exactly their Company\'s trusted losses; unproven, unverified and version-1 losses are never shown', async () => {
+      expect(ids(await company('owner-a', SEP).expect(200))).toEqual(mine);
+      expect(ids(await company('owner-b', SEP).expect(200))).toEqual(theirs);
+    });
+
+    it('no Platform visibility: an operator reads none of them', async () => {
+      const r = await platform(P1, 'op-1', SEP).expect(200);
+      expect(ids(r).filter((id) => mine.includes(id) || theirs.includes(id))).toEqual([]);
+    });
+  });
 });

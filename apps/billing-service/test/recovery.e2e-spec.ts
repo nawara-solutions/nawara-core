@@ -33,6 +33,7 @@ import type { PaymentItem, PaymentItemKind, PaymentReconciliationClient } from '
 import { ReconciliationModule } from '../src/reconciliation/reconciliation.module.js';
 import { ReconciliationService } from '../src/reconciliation/reconciliation.service.js';
 import { ReconciliationCases } from '../src/reconciliation/reconciliation-cases.js';
+import { trustedLossCompany } from '../src/reconciliation/loss-scope.js';
 import { RefundAuthorizationService } from '../src/refunds/refund-authorization.service.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { FakeAuth } from './support/fake-auth.js';
@@ -1985,6 +1986,215 @@ describeWithEnv('organization recovery (Core V2 S6f, simulation) — real Postgr
         [randomUUID(), OTHER_COMPANY, p.paymentId])).rejects.toMatchObject({ constraint: 'financial_loss_evidence' });
       await expect(admin.query(`INSERT INTO financial_loss (kind, "evidenceKey", "companyId", "obligationId", amount, currency, "recordedByUserId", "receiptId", "consumeRef")
         VALUES ('recovery_write_off', gen_random_uuid(), $1, gen_random_uuid(), 1, 'TND', gen_random_uuid(), gen_random_uuid(), gen_random_uuid())`, [COMPANY])).rejects.toThrow();
+    });
+
+    // ───────────────────────────────────────────── Core V2 G6 financial-loss provenance (the Owner's GO 2026-11-21: D-FL-1 Option D, D-FL-2 to D-FL-5)
+    describe('Core V2 G6: financial_loss.recorded asserts a trusted Company only for a checkout-proven loss', () => {
+      const PLATFORM_B = randomUUID(); // Company B's own checkout Platform
+      const PLATFORM_C = randomUUID(); // a Platform whose billing_platform row a labelled fixture removes
+      const tampered = new Set<string>(); // losses whose rows a labelled fixture re-pointed AFTER their event was written
+      beforeAll(async () => {
+        for (const [platformId, companyId] of [[PLATFORM_B, OTHER_COMPANY], [PLATFORM_C, COMPANY]]) {
+          await admin.query(`INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, $2, 'TND', $3)`, [platformId, companyId, randomUUID()]);
+        }
+      });
+      /** The one `financial_loss.recorded` intent of a loss: its envelope version and payload. */
+      const lossEvent = async (lossId: string) => {
+        const { rows } = await admin.query(`SELECT "eventVersion" AS version, payload FROM outbox WHERE name = 'audit.financial_loss.recorded' AND payload->'resource'->>'id' = $1`, [lossId]);
+        expect(rows, lossId).toHaveLength(1);
+        return rows[0] as { version: number; payload: Row };
+      };
+      const lossOf = (where: string, param: string) => one(`SELECT id, kind, amount::int AS amount, "companyId", "organizationId" FROM financial_loss WHERE ${where} = $1`, [param]);
+      /** Payment accepts the request, then reports its verified success (the S6a fixture's second half, for any invoice of a user payer). */
+      const paid = async (invoiceId: string, paymentRequestId: string, seller: string) => {
+        const inv = await one(`SELECT * FROM invoice WHERE id = $1`, [invoiceId]);
+        const paymentId = randomUUID();
+        payment.outcomes.set(paymentRequestId, { kind: 'accepted', snapshot: {
+          paymentId, paymentRequestId, status: 'pending', amount: Number(inv.total), currency: inv.currency, sourceType: 'invoice', sourceId: inv.id,
+          payer: { type: 'user', id: inv.payerId }, seller: { type: 'company', id: seller }, organizationId: null, closedAt: null,
+        } as PaymentSnapshot });
+        await dispatch();
+        const id = randomUUID();
+        await t.bus.deliver({ id, name: 'payment.succeeded', payload: {
+          paymentId, producer: 'billing-service', paymentRequestId, sourceType: 'invoice', sourceId: inv.id, payer: { type: 'user', id: inv.payerId },
+          seller: { type: 'company', id: seller }, organizationId: null, amount: Number(inv.total), currency: inv.currency, revision: 1, ...(await paymentPurposeOf(admin, inv.id)), liveMode: false,
+        }, headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
+        expect(await count(`SELECT count(*) AS n FROM subscription_purchase WHERE "invoiceId" = $1 AND purpose = 'direct_purchase'`, [inv.id])).toBe(1);
+        return { paymentId, invoiceId, amount: Number(inv.total) };
+      };
+      /** A real checkout (the reserved `billing-checkout` producer) of an Owner product of `platformId`, whose Company is `companyId`. */
+      const checkout = async (platformId = PLATFORM, companyId = COMPANY, buyer = 'b2') => {
+        const productId = (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId")
+          VALUES ('billing-owner', 'company', $1, $2, 'Personal plan', 'active', 'personal', $3) RETURNING id`, [companyId, `g6fl-${++seq}`, platformId])).rows[0].id as string;
+        const priceId = await priceOf(productId, 4900);
+        const c = await send(request(server()).post('/billing/checkout/direct'), buyer, key()).send({ platformId, productId, priceId });
+        expect(c.status, JSON.stringify(c.body)).toBe(201);
+        return paid(c.body.invoiceId, c.body.paymentRequestId, companyId);
+      };
+      /**
+       * B-029 / B-031: a SERVICE caller's own personal product and invoice, whose seller the caller chooses (here the checkout Platform's real
+       * Company, the strongest spoof: every Company value then agrees, and only provenance tells them apart). Routed `direct_purchase`.
+       */
+      const servicePurchase = async (seller = COMPANY) => {
+        const svc = (path: string, body: object) => request(server()).post(path).set('authorization', `Bearer ${producer.token}`).send(body);
+        const prod = await svc('/billing/products', { seller: { type: 'company', id: seller }, code: `g6fl-svc-${++seq}`, name: 'Service plan', subscriptionTarget: 'personal', platformId: PLATFORM });
+        expect(prod.status, JSON.stringify(prod.body)).toBe(201);
+        const price = await svc('/billing/prices', { productId: prod.body.id, clientReference: `g6fl-${++seq}`, currency: 'TND', unitAmount: 4900, interval: 'recurring',
+          intervalUnit: 'month', intervalCount: 1, effectiveFrom: new Date(Date.now() - 60_000).toISOString() });
+        expect(price.status, JSON.stringify(price.body)).toBe(201);
+        const inv = await svc('/billing/invoices', { invoiceRequestId: randomUUID(), seller: { type: 'company', id: seller }, payer: { type: 'user', id: U.b2 },
+          sourceType: 'contract', sourceId: `g6fl-${++seq}`, issuerSnapshot: { schemaVersion: 1 }, billToSnapshot: { schemaVersion: 1 }, lines: [{ priceId: price.body.id, quantity: 1 }] });
+        expect(inv.status, JSON.stringify(inv.body)).toBe(201);
+        const issued = await svc(`/billing/invoices/${inv.body.id}/issue`, {});
+        expect([issued.status, issued.body.routing?.purpose], JSON.stringify(issued.body)).toEqual([200, 'direct_purchase']);
+        const pr = await send(request(server()).post(`/billing/invoices/${inv.body.id}/payment-requests`), 'b2', null).send();
+        expect(pr.status, JSON.stringify(pr.body)).toBe(201);
+        expect((await one(`SELECT producer FROM invoice WHERE id = $1`, [inv.body.id])).producer).toBe('test-producer');
+        return paid(inv.body.id, pr.body.id, seller);
+      };
+      const overReturn = async (paymentId: string, amount = 300) => {
+        const factId = randomUUID();
+        put(asItem('over_return', { paymentId, factId, amount, currency: 'TND', detail: { factAmount: 4900 + amount, intended: 4900 } }));
+        await reconcile();
+        return { factId, loss: await lossOf(`"evidenceKey"`, factId) };
+      };
+      const chargebackWriteOff = async (p: { paymentId: string; amount: number }) => {
+        const disputeId = await loseDirect(p.paymentId, p.amount);
+        await reconcile();
+        return { disputeId, loss: await lossOf(`"disputeId"`, disputeId) };
+      };
+
+      it('checkout over-return and full chargeback write-off: version 2 with the billing_platform Company; no Platform; the losses and cases as before', async () => {
+        const a = await checkout();
+        const o = await overReturn(a.paymentId);
+        expect(o.loss).toMatchObject({ kind: 'over_return', amount: 300, companyId: COMPANY, organizationId: null });
+        expect(await caseOf('over_return', o.factId)).toMatchObject({ resolution: 'loss_recognized', amount: '300' });
+        const oe = await lossEvent(o.loss.id);
+        expect([oe.version, oe.payload.companyId, 'platformId' in oe.payload, oe.payload.organizationId, oe.payload.changes]).toEqual([2, COMPANY, false, null,
+          { kind: 'over_return', amount: 300, evidence_id: o.factId }]);
+        const b = await checkout();
+        const w = await chargebackWriteOff(b);
+        expect(w.loss).toMatchObject({ kind: 'direct_chargeback_write_off', amount: b.amount, companyId: COMPANY });
+        const we = await lossEvent(w.loss.id);
+        expect([we.version, we.payload.companyId, 'platformId' in we.payload]).toEqual([2, COMPANY, false]);
+        await reconcile(); // a later pass: no second loss, no second (or upgraded) event
+        await lossEvent(o.loss.id);
+        await lossEvent(w.loss.id);
+      });
+
+      it('Company isolation: Company B\'s checkout loss carries Company B, never A; the Owner reads (BIL-34, unchanged) stay per Company', async () => {
+        const b = await checkout(PLATFORM_B, OTHER_COMPANY);
+        const o = await overReturn(b.paymentId);
+        expect(o.loss.companyId).toBe(OTHER_COMPANY);
+        expect((await lossEvent(o.loss.id)).payload.companyId).toBe(OTHER_COMPANY);
+        const a = await overReturn((await checkout()).paymentId);
+        expect((await lossEvent(a.loss.id)).payload.companyId).toBe(COMPANY);
+        const listed = async (bearer: string) => ((await send(request(server()).get('/billing/admin/financial-losses'), bearer, null).expect(200)).body.items as Row[]).map((l) => l.id);
+        expect(await listed('owner-tok')).toContain(a.loss.id);
+        expect(await listed('owner-tok')).not.toContain(o.loss.id);
+        expect(await listed('foreign-owner-tok')).toContain(o.loss.id);
+        expect(await listed('foreign-owner-tok')).not.toContain(a.loss.id);
+      });
+
+      it('service-token seller spoofing: a service caller\'s product sold "by" the checkout Company (or another) records the same losses, but asserts NO Company', async () => {
+        const spoof = await servicePurchase(COMPANY);
+        const o = await overReturn(spoof.paymentId);
+        expect(o.loss).toMatchObject({ kind: 'over_return', amount: 300, companyId: COMPANY }); // the financial fact is unchanged
+        expect(await caseOf('over_return', o.factId)).toMatchObject({ resolution: 'loss_recognized' });
+        const oe = await lossEvent(o.loss.id);
+        expect([oe.version, 'companyId' in oe.payload, 'platformId' in oe.payload]).toEqual([2, false, false]);
+        const w = await chargebackWriteOff(await servicePurchase(COMPANY));
+        expect(w.loss).toMatchObject({ kind: 'direct_chargeback_write_off', companyId: COMPANY });
+        const we = await lossEvent(w.loss.id);
+        expect([we.version, 'companyId' in we.payload]).toEqual([2, false]);
+        // a seller naming another Company: its loss is that Company's in Billing (as before), never trusted scope of it
+        const other = await overReturn((await servicePurchase(OTHER_COMPANY)).paymentId);
+        expect(other.loss.companyId).toBe(OTHER_COMPANY);
+        expect('companyId' in (await lossEvent(other.loss.id)).payload).toBe(false);
+      });
+
+      it('missing, contradictory or ambiguous ownership derives no Company (LABELLED superuser fixtures past the immutability triggers)', async () => {
+        const derive = (lossId: string) => trustedLossCompany(admin as never, lossId);
+        const cases: Array<[string, (f: { loss: Row; paymentId: string; invoiceId: string }) => Promise<void>]> = [
+          ['loss Company differs', (f) => backdate(f.loss.id, `UPDATE financial_loss SET "companyId" = $2 WHERE id = $1`, [OTHER_COMPANY])],
+          ['invoice seller differs', (f) => backdate(f.invoiceId, `UPDATE invoice SET "sellerId" = $2 WHERE id = $1`, [OTHER_COMPANY])],
+          ['product seller differs', (f) => backdate(f.invoiceId, `UPDATE product SET "sellerId" = $2 WHERE id = (SELECT "productId" FROM invoice_line WHERE "invoiceId" = $1)`, [OTHER_COMPANY])],
+          ['invoice producer is not billing-checkout', (f) => backdate(f.invoiceId, `UPDATE invoice SET producer = 'test-producer' WHERE id = $1`)],
+          ['an Organization on the loss', (f) => backdate(f.loss.id, `UPDATE financial_loss SET "organizationId" = $2 WHERE id = $1`, [randomUUID()])],
+          ['two invoice lines (ambiguous product)', (f) => backdate(f.invoiceId, `INSERT INTO invoice_line ("invoiceId", currency, "lineNumber", "priceId", "productId", "productCode", description,
+            quantity, "unitAmount", "lineTotal", "entitlementKind", "interval", "intervalUnit", "intervalCount") SELECT "invoiceId", currency, 2, "priceId", "productId", "productCode", description,
+            quantity, "unitAmount", "lineTotal", "entitlementKind", "interval", "intervalUnit", "intervalCount" FROM invoice_line WHERE "invoiceId" = $1`)],
+        ];
+        for (const [label, tamper] of cases) {
+          const p = await checkout();
+          const { loss } = await overReturn(p.paymentId);
+          expect(await derive(loss.id), label).toBe(COMPANY); // the proven baseline
+          tampered.add(loss.id);
+          await tamper({ loss, paymentId: p.paymentId, invoiceId: p.invoiceId });
+          expect(await derive(loss.id), label).toBeUndefined();
+        }
+        // no billing_platform row for the product's Platform
+        const c = await checkout(PLATFORM_C, COMPANY);
+        const { loss } = await overReturn(c.paymentId);
+        expect(await derive(loss.id)).toBe(COMPANY);
+        tampered.add(loss.id);
+        await backdate(PLATFORM_C, `DELETE FROM billing_platform WHERE "platformId" = $1`);
+        expect(await derive(loss.id)).toBeUndefined();
+        // a chargeback write-off whose verified dispute loss names another payment request
+        const w = await chargebackWriteOff(await checkout());
+        expect(await derive(w.loss.id)).toBe(COMPANY);
+        tampered.add(w.loss.id);
+        await backdate(w.disputeId, `UPDATE payment_dispute_loss SET "paymentRequestId" = $2 WHERE "disputeId" = $1`, [randomUUID()]);
+        expect(await derive(w.loss.id)).toBeUndefined();
+        // an unknown loss
+        expect(await derive(randomUUID())).toBeUndefined();
+      });
+
+      it('ambiguity cannot arise: the database refuses a second payment request carrying the same paymentId, even past every trigger', async () => {
+        const p = await checkout();
+        const q = await checkout(); // another invoice, whose own request is paid: a `requested` row on it breaks no other rule
+        const insert = (paymentId: string) => backdate(q.invoiceId, `INSERT INTO payment_request (id, "invoiceId", amount, currency, status, "paymentId", "expiresAt", "createdByType", "createdById")
+          SELECT gen_random_uuid(), "invoiceId", amount, currency, 'requested', $2, "expiresAt", "createdByType", "createdById" FROM payment_request WHERE "invoiceId" = $1 AND status = 'paid'`, [paymentId]);
+        await expect(insert(p.paymentId)).rejects.toMatchObject({ constraint: 'payment_request_payment_id_unique' });
+        // the same row with a fresh paymentId is accepted: the refusal above is the uniqueness itself, nothing else (labelled fixture)
+        await insert(randomUUID());
+      });
+
+      it('D-FL-3 / D-FL-4: an assisted (Organization) over-return and a recovery write-off assert no Company; financial_loss.adjusted is unchanged (version 1, no Company)', async () => {
+        const r = await collected({ unit: 6100, fee: 400 });
+        const s = await started(r.id);
+        await t.bus.deliver(s.ev('payment.succeeded'));
+        const assisted = await overReturn(s.paymentId);
+        expect(assisted.loss).toMatchObject({ kind: 'over_return', companyId: COMPANY, organizationId: ORG });
+        const ae = await lossEvent(assisted.loss.id);
+        expect([ae.version, 'companyId' in ae.payload, ae.payload.organizationId]).toEqual([2, false, ORG]);
+        const o = await opened();
+        expect((await writeOff(o.obligationId, writeOffReceipt(o))).status).toBe(201);
+        const wo = await one(`SELECT id FROM financial_loss WHERE kind = 'recovery_write_off' AND "obligationId" = $1`, [o.obligationId]);
+        const we = await lossEvent(wo.id);
+        expect([we.version, 'companyId' in we.payload, we.payload.changes.kind]).toEqual([2, false, 'recovery_write_off']);
+        const c = (await settleRecovery(o.obligationId)).body;
+        await recoveryEvent(c.paymentRequestId);
+        const adj = (await admin.query(`SELECT "eventVersion" AS version, payload FROM outbox WHERE name = 'audit.financial_loss.adjusted' AND payload->'resource'->>'id' = $1`, [wo.id])).rows;
+        expect(adj.map((x) => [x.version, 'companyId' in x.payload, x.payload.changes])).toEqual([[1, false, { reason: 'recovered_after_write_off', amount: 6100 }]]);
+      });
+
+      it('suite-wide invariant: every Company-scoped loss event is a checkout-proven over-return or chargeback write-off of that very Company; none carries a Platform', async () => {
+        const { rows } = await admin.query(`
+          SELECT f.id::text AS "lossId", o.payload->>'companyId' AS asserted, f.kind, f."companyId"::text AS "lossCompany", i.producer, b."companyId"::text AS "platformCompany", o.payload ? 'platformId' AS platform
+            FROM outbox o JOIN financial_loss f ON f.id::text = o.payload->'resource'->>'id'
+            LEFT JOIN payment_request r ON r."paymentId" = f."paymentId" LEFT JOIN invoice i ON i.id = r."invoiceId"
+            LEFT JOIN invoice_line il ON il."invoiceId" = i.id LEFT JOIN product p ON p.id = il."productId" LEFT JOIN billing_platform b ON b."platformId" = p."platformId"
+           WHERE o.name = 'audit.financial_loss.recorded' AND (o.payload ? 'companyId' OR o.payload ? 'platformId')`);
+        expect(rows.length).toBeGreaterThan(0);
+        for (const x of rows.filter((r) => !tampered.has(r.lossId))) {
+          expect(x.platform, JSON.stringify(x)).toBe(false);
+          expect([x.producer, ['over_return', 'direct_chargeback_write_off'].includes(x.kind), x.asserted === x.lossCompany], JSON.stringify(x)).toEqual(['billing-checkout', true, true]);
+          expect(x.platformCompany, JSON.stringify(x)).toBe(x.asserted);
+        }
+        const versions = (await admin.query(`SELECT DISTINCT "eventVersion" AS v FROM outbox WHERE name = 'audit.financial_loss.recorded'`)).rows.map((x) => x.v);
+        expect(versions).toEqual([2]); // every loss this suite recorded is written in the new version, scoped or not
+      });
     });
 
     it('production mounts no reconciliation route, worker or late-success handler', () => {

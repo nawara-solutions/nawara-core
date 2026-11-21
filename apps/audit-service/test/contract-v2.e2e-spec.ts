@@ -408,4 +408,69 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
       }
     });
   });
+
+  // Core V2 G6 financial-loss provenance (the Owner's GO, D-FL-1 Option D): `financial_loss.recorded` carries an OPTIONAL Company, which
+  // Billing asserts only for a checkout-proven loss. Audit stores trusted scope for it only from a broker-verified delivery, as for G6-C.
+  describe('G6: financial_loss.recorded optional Company scope', () => {
+    const loss = (over: Record<string, unknown> = {}, headers: Record<string, unknown> = {}, action = 'financial_loss.recorded' as const): EventEnvelope => {
+      const id = randomUUID();
+      const { companyId: _c, ...payload } = JSON.parse(JSON.stringify(sampleAuditPayload(action, 'complete'))) as Record<string, unknown>;
+      return {
+        id, name: `audit.${action}`, payload: { ...payload, ...over },
+        headers: { eventId: id, occurredAt: '2026-11-21T10:00:00.000Z', correlationId: 'corr-g6fl-0001', source: 'billing-service', version: 2, ...headers } as EventEnvelope['headers'],
+      };
+    };
+    const verifiedAs = (e: EventEnvelope) =>
+      ({ decision: 'accept', basis: 'verified_original', origin: { from: 'verified_delivery', source: 'billing-service', eventId: e.id, name: e.name, routingKey: e.name, producerUserId: 'billing-service' } }) as never;
+    const unverified = { decision: 'compatibility', basis: 'unverified_original', verified: false } as never;
+    const reason = async (p: Promise<unknown>) => p.then(() => 'stored', (x: { reason?: string }) => x.reason);
+    const count = async () => Number((await sql<{ n: string }>(d.adminUrl, 'SELECT count(*) AS n FROM audit_record'))[0]!.n);
+    const stored = async (e: EventEnvelope, delivery: never) => {
+      expect(await ingestion.ingest(e, delivery)).toBe('persisted');
+      const row = (await repo.findBySourceAndEventId('billing-service', e.id))!;
+      return { row, scope: await scopeRows(row.id) };
+    };
+
+    it('a checkout-proven loss, verified delivery: stored version 2 with its Company and exactly one trusted scope row, Company only', async () => {
+      const e = loss({ companyId: COMPANY });
+      const { row, scope } = await stored(e, verifiedAs(e));
+      expect(row).toMatchObject({ schemaVersion: 2, category: 'commercial', companyId: COMPANY, platformId: null, producerIdentityVerified: true });
+      expect(scope).toEqual([{ basis: 'verified_producer', companyId: COMPANY, platformId: null }]);
+    });
+
+    it('an unproven loss (service-caller seller, assistance, recovery, a write-off): stored version 2 with NO Company and no scope row', async () => {
+      const e = loss();
+      const { row, scope } = await stored(e, verifiedAs(e));
+      expect([row.schemaVersion, row.companyId, row.platformId, row.producerIdentityVerified]).toEqual([2, null, null, true]);
+      expect(scope).toEqual([]);
+    });
+
+    it('an unverified broker delivery asserting a Company is stored but never becomes trusted scope', async () => {
+      const { row, scope } = await stored(loss({ companyId: COMPANY }), unverified);
+      expect([row.companyId, row.producerIdentityVerified]).toEqual([COMPANY, false]);
+      expect(scope).toEqual([]);
+    });
+
+    it('a historical version-1 loss stays stored with no Company and no scope row; a version-1 Company is refused (never upgraded)', async () => {
+      const e = loss({}, { version: 1 });
+      const { row, scope } = await stored(e, verifiedAs(e));
+      expect([row.schemaVersion, row.companyId]).toEqual([1, null]);
+      expect(scope).toEqual([]);
+      const forged = loss({ companyId: COMPANY }, { version: 1 });
+      expect(await reason(ingestion.ingest(forged, verifiedAs(forged)))).toBe('unknown_field');
+    });
+
+    it('refused before anything is stored: a Platform, a malformed Company, another source; and any Company on financial_loss.adjusted', async () => {
+      const before = await count();
+      const cases: Array<[EventEnvelope, string]> = [
+        [loss({ platformId: PLATFORM }), 'invalid_scope'],
+        [loss({ companyId: COMPANY, platformId: PLATFORM }), 'invalid_scope'],
+        [loss({ companyId: 'company-a' }), 'invalid_scope'],
+        [loss({ companyId: COMPANY }, { source: 'payment-service' }), 'producer_not_admitted'],
+        [loss({ companyId: COMPANY }, {}, 'financial_loss.adjusted' as never), 'invalid_scope'],
+      ];
+      for (const [e, expected] of cases) expect(await reason(ingestion.ingest(e, verifiedAs(e))), expected).toBe(expected);
+      expect(await count()).toBe(before);
+    });
+  });
 });
