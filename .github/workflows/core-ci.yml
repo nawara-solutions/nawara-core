@@ -13,10 +13,13 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref supersedes an older CI run. (Production DEPLOYMENT is different and is never cancelled.)
+# Pull requests: a newer push to the same pull request supersedes (cancels) its older CI run. main: every pushed commit is verified to
+# its end. Its group is unique per commit, so a later push can neither cancel an in-progress main run nor replace a PENDING one (GitHub
+# cancels a pending run of the same group even with cancel-in-progress: false). `npm run check:repo` holds both lines exactly.
+# (Production DEPLOYMENT is different and is never cancelled.)
 concurrency:
-  group: core-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('core-ci-{0}', github.ref) || format('core-ci-main-{0}', github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The Node version the SERVICES run on: it matches the production image (node:22-alpine in apps/auth-service/Dockerfile).
