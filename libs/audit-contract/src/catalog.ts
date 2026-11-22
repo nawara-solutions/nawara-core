@@ -65,6 +65,12 @@ export interface ApprovalRule {
   userKinds: readonly UserKind[];
 }
 
+/** Core V2 F-22 / G6-B: the receipt attribution an action carries (see `CatalogEntry.attribution`). */
+export interface AttributionRule {
+  /** The tuple also names the consumer's reference (`consume_ref`): only the consumption. */
+  consumeRef: boolean;
+}
+
 export interface ActorRule {
   /** Allowed user kinds when a verified user acts; absent = a user actor is not allowed. */
   user?: readonly UserKind[];
@@ -96,6 +102,12 @@ export interface CatalogEntry {
   scope?: Readonly<ScopeRule>;
   /** Core V2 S2-Audit.2: whether the action records `approvedBy` (only `authorization_receipt.consumed`, D5). */
   approval?: Readonly<ApprovalRule>;
+  /**
+   * Core V2 F-22 / G6-B (DO-62; the Owner's D-F22-2, D-F22-3): the action may carry a receipt attribution tuple in its `changes`
+   * (`operation`, `target_type`, `target_id`, and `consume_ref` when `consumeRef` is true). Absent entirely (an event written before the
+   * attribution existed) or complete and consistent with `RECEIPT_OPERATIONS`; anything partial or contradictory is `invalid_changes`.
+   */
+  attribution?: Readonly<AttributionRule>;
   /** Why the action has central accountability value (A7); shown in the catalog document. */
   purpose: string;
 }
@@ -109,6 +121,41 @@ const SUBJECT_USER = { rule: 'required', type: 'user' } as const;
 const NONE = {} as const;
 /** Core V2 S2-Audit.2 (D3): the authorization receipts' scope: their Company, always. No Platform. */
 const RECEIPT_SCOPE = { company: 'required' } as const;
+/**
+ * Core V2 F-22 / G6-B (DO-62; ADR-0070; the Owner's D-F22-1 to D-F22-4, 2026-11-22): the ten Auth receipt operations, each with the ONE
+ * service that may consume it (Auth's `receipt-binding.ts` audience, F-7) and the binding identifier that names what the Owner approved
+ * (`target_type`, `target_id`). The order is the operations' order in Auth's binding grammar. This table neither creates an operation nor
+ * grants a consumer: it states, for Audit, the matrix Auth's binding already enforces (Auth's tests prove the two equal).
+ *
+ * `target_type` is the Audit resource type of the same entity where Audit has one (`refund_case`, `payment_dispute`,
+ * `provider_transaction_fact`, `fraud_hold`, `recovery_surplus`, `assistance_late_settlement`, `recovery_obligation`); a recovery-restriction
+ * suspension has no Audit resource of its own and is named as Billing records it (`recovery_restriction_suspension`).
+ */
+export const RECEIPT_OPERATIONS = {
+  refund: { audience: 'payment-service', targetType: 'refund_case' },
+  dispute_decision: { audience: 'payment-service', targetType: 'payment_dispute' },
+  fraud_hold_place: { audience: 'billing-service', targetType: 'fraud_hold' },
+  fraud_hold_release: { audience: 'billing-service', targetType: 'fraud_hold' },
+  recovery_surplus_external: { audience: 'billing-service', targetType: 'recovery_surplus' },
+  late_settlement_apply: { audience: 'billing-service', targetType: 'assistance_late_settlement' },
+  provider_fact_associate: { audience: 'payment-service', targetType: 'provider_transaction_fact' },
+  recovery_write_off: { audience: 'billing-service', targetType: 'recovery_obligation' },
+  recovery_restriction_suspend: { audience: 'billing-service', targetType: 'recovery_restriction_suspension' },
+  recovery_restriction_revoke: { audience: 'billing-service', targetType: 'recovery_restriction_suspension' },
+} as const satisfies Record<string, { audience: CoreProducer; targetType: string }>;
+export type ReceiptOperation = keyof typeof RECEIPT_OPERATIONS;
+const RECEIPT_OPERATION_CODES = Object.keys(RECEIPT_OPERATIONS) as ReceiptOperation[];
+const RECEIPT_TARGET_TYPES = [...new Set(Object.values(RECEIPT_OPERATIONS).map((o) => o.targetType))];
+/**
+ * The attribution change facts of the three receipt actions: all optional in the catalog (D-F22-3: a version-2 event written before them
+ * stays valid), but present all together or not at all (the `attribution` rule; the validator enforces the tuple).
+ */
+const RECEIPT_ATTRIBUTION = {
+  operation: { type: 'code', shape: 'value', required: false, values: RECEIPT_OPERATION_CODES },
+  target_type: { type: 'code', shape: 'value', required: false, values: RECEIPT_TARGET_TYPES },
+  target_id: { type: 'uuid', shape: 'value', required: false },
+} as const;
+const RECEIPT_CONSUMPTION_ATTRIBUTION = { ...RECEIPT_ATTRIBUTION, consume_ref: { type: 'uuid', shape: 'value', required: false } } as const;
 /**
  * Core V2 G6-C (DO-59; the Owner's G6-C GO, 2026-11-20): the Company, required, of a Billing or Payment fact whose Company is
  * AUTHORITATIVE in the producer's own row: the Owner's Company per Auth's live answer (refund cases, fraud holds), the immutable
@@ -298,18 +345,18 @@ const SPEC = {
   // consumption has no central action (D1): it stays an Auth-local record.
   'authorization_receipt.issued': {
     producer: 'auth-service', category: 'security', since: 2, actors: { user: ['owner'] }, organization: 'none',
-    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, scope: RECEIPT_SCOPE,
-    purpose: 'An Owner, after a fresh factor-only step-up, issued a single-use authorization receipt approving one exact refund of their Company.',
+    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: RECEIPT_ATTRIBUTION, scope: RECEIPT_SCOPE, attribution: { consumeRef: false },
+    purpose: 'An Owner, after a fresh factor-only step-up, issued a single-use authorization receipt approving one exact operation of their Company (a refund or another receipt operation; the attribution names which and its target).',
   },
   'authorization_receipt.consumed': {
     producer: 'auth-service', category: 'security', since: 2, actors: { service: true }, organization: 'none',
-    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, scope: RECEIPT_SCOPE,
+    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: RECEIPT_CONSUMPTION_ATTRIBUTION, scope: RECEIPT_SCOPE, attribution: { consumeRef: true },
     approval: { required: true, userKinds: ['owner'] },
-    purpose: 'The bound service consumed an authorization receipt: the commit point of the Owner\'s refund approval (approvedBy: the issuing Owner, verified by Auth).',
+    purpose: 'The bound service consumed an authorization receipt: the commit point of the Owner\'s approval (approvedBy: the issuing Owner, verified by Auth; the attribution names the operation, its target and the consumer\'s reference).',
   },
   'authorization_receipt.voided': {
     producer: 'auth-service', category: 'security', since: 2, actors: { system: ['authorization_receipt_replay'] }, organization: 'none',
-    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, scope: RECEIPT_SCOPE,
+    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: RECEIPT_ATTRIBUTION, scope: RECEIPT_SCOPE, attribution: { consumeRef: false },
     purpose: 'A replayed issue request (its response possibly lost) voided an unconsumed receipt automatically, so a secret that may have leaked can never be used.',
   },
 

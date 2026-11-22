@@ -1,7 +1,7 @@
 // @nawara/audit-contract/testing — TEST tooling only (the kit's `./testing` precedent): a valid payload for any cataloged action, derived
 // mechanically from its catalog entry, so contract matrices and the audit-service persistence suite cover every action without a
 // hand-written fixture per action (a new action is covered the moment it is cataloged).
-import { AUDIT_CATALOG, catalogEntry, emittedVersion, type AuditAction, type ChangeSpec } from './catalog.js';
+import { AUDIT_CATALOG, RECEIPT_OPERATIONS, catalogEntry, emittedVersion, type AuditAction, type ChangeSpec, type ReceiptOperation } from './catalog.js';
 import type { AuditActor, AuditPayload, AuditReference, ChangeScalar, ChangeValue } from './contract.js';
 
 export const SAMPLE_IDS = Object.freeze({
@@ -79,11 +79,18 @@ export function sampleAuditPayload(action: AuditAction, variant: 'minimal' | 'co
     if (!s.required && variant === 'minimal') continue;
     changes[k] = s.shape === 'transition' ? { from: scalar(s, false), to: scalar(s, true) } : scalar(s, false);
   }
+  // Core V2 F-22 / G6-B: a complete sample's receipt attribution is one consistent tuple (its operation's target type and audience)
+  let actor = sampleActor(action);
+  if (e.attribution && typeof changes.operation === 'string') {
+    const op = RECEIPT_OPERATIONS[changes.operation as ReceiptOperation];
+    changes.target_type = op.targetType;
+    if (e.attribution.consumeRef && actor.type === 'service') actor = { type: 'service', id: op.audience };
+  }
   const s = e.subject;
   const subject = s.rule === 'required' || (s.rule === 'optional' && variant === 'complete') ? { type: s.type, id: SAMPLE_IDS.subject } : undefined;
   return {
     action,
-    actor: sampleActor(action),
+    actor,
     organizationId,
     resource,
     ...(subject ? { subject } : {}),
