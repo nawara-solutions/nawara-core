@@ -855,5 +855,41 @@ describeWithEnv(
       expect(await contestCount(fb!.factId)).toBe(1);
       record('O2C-7', 'mode', { mode: 'mixed_versions_old_binaries' });
     }, T);
+
+    // Core V2 F-22 / G6-B (DO-62; ADR-0070; the Owner's D-F22-4, NC-12): the receipt's central attribution, across the real Auth, Billing,
+    // Payment, RabbitMQ and audit-service: Auth's .consumed names the refund attempt Payment authorized (consume_ref = refund_attempt.id =
+    // the resource of Payment's own refund_attempt.authorized, which carries no receipt id: R6B-7 kept) and the refund case it returns
+    // (target_id). Both receipt records are trusted Company scope of the Owner's Company only.
+    it('F22-1 (receipt attribution end to end): .issued and .consumed name the refund case; consume_ref is the authorized refund attempt', async () => {
+      const p = await directPurchase();
+      const r = await relayed(p.paymentId, p.amount);
+      const byAction = async (action: string, where: string, param: string) =>
+        auditAdmin.query(`SELECT r.id, r."resourceId"::text AS "resourceId", r.changes, r."companyId"::text AS "companyId", r."producerIdentityVerified" AS verified, r."actorId"
+          FROM audit_record r WHERE r.action = $1 AND ${where} = $2`, [action, param]).then((x) => x.rows);
+      await waitFor(async () => (await byAction('authorization_receipt.consumed', `r."resourceId"::text`, r.receiptId)).length === 1
+        && (await byAction('refund_attempt.authorized', `r."resourceId"::text`, r.attemptId)).length === 1, 60_000, `the receipt and attempt audit records\n${tails()}`);
+      const [issued] = await byAction('authorization_receipt.issued', `r."resourceId"::text`, r.receiptId);
+      const [consumed] = await byAction('authorization_receipt.consumed', `r."resourceId"::text`, r.receiptId);
+      const [authorized] = await byAction('refund_attempt.authorized', `r."resourceId"::text`, r.attemptId);
+      expect(issued!.changes).toEqual({ operation: 'refund', target_type: 'refund_case', target_id: r.caseId });
+      expect(consumed!.changes).toEqual({ operation: 'refund', target_type: 'refund_case', target_id: r.caseId, consume_ref: r.attemptId });
+      expect(consumed!.actorId).toBe('payment-service');
+      // the link: Auth's consume_ref = Payment's attempt (its audit resource, its receipt row); target_id = the attempt's case
+      expect(authorized!.resourceId).toBe(consumed!.changes.consume_ref);
+      expect(authorized!.changes.refund_case_id).toBe(consumed!.changes.target_id);
+      expect(JSON.stringify(authorized!.changes)).not.toContain(r.receiptId); // R6B-7: Payment's event never names the receipt
+      expect(await one(paymentAdmin, `SELECT "receiptId"::text AS "receiptId", "refundCaseId"::text AS "caseId" FROM refund_attempt WHERE id = $1`, [r.attemptId]))
+        .toEqual({ receiptId: r.receiptId, caseId: r.caseId });
+      expect((await one(authAdmin, `SELECT "consumeRef"::text AS ref, "consumedBy" FROM authorization_receipt WHERE id = $1`, [r.receiptId]))).toEqual({ ref: r.attemptId, consumedBy: 'payment-service' });
+      // NC-6 / NC-7: the Owner's Company only; a trusted scope row exists exactly when the producer was broker-verified (this suite's broker
+      // runs Audit's compatibility phase, so an unverified delivery must carry NO trusted scope); nothing names another Company
+      for (const rec of [issued!, consumed!]) {
+        expect(rec.companyId).toBe(COMPANY);
+        expect((await auditAdmin.query(`SELECT "companyId"::text AS c FROM audit_record_scope WHERE "recordId" = $1`, [rec.id])).rows).toEqual(rec.verified ? [{ c: COMPANY }] : []);
+      }
+      expect(await n(auditAdmin, `SELECT count(*) AS n FROM audit_record r JOIN audit_record_scope s ON s."recordId" = r.id
+        WHERE r.action LIKE 'authorization_receipt.%' AND r."resourceId"::text = $1 AND s."companyId" <> $2`, [r.receiptId, COMPANY])).toBe(0);
+      record('F22-1', 'receipt_attribution', { issued: issued!.changes, consumed: consumed!.changes, authorized: authorized!.resourceId });
+    }, T);
   },
 );

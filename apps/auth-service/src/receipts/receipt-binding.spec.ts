@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import { RECEIPT_OPERATIONS } from '@nawara/audit-contract';
 import {
-  RECEIPT_AUDIENCES, RECEIPT_DOMAINS, RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, RECOVERY_RESTRICTION_REVOKE_REASONS, RECOVERY_RESTRICTION_SUSPEND_REASONS, requestHash, secretDigest, type RefundBinding,
+  RECEIPT_AUDIENCES, RECEIPT_DOMAINS, RECEIPT_PURPOSES, RECEIPT_TARGET_FIELD, bindingDigest, receiptAttribution, canonicalBinding, parseBinding, RECOVERY_RESTRICTION_REVOKE_REASONS, RECOVERY_RESTRICTION_SUSPEND_REASONS, requestHash, secretDigest, type RefundBinding,
 } from './receipt-binding.js';
 import { ReceiptError } from './receipt-errors.js';
 
@@ -295,5 +296,27 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
         w(), w({ obligationId: other }), w({ organizationId: other }), w({ amount: 6101 }), w({ currency: 'EUR' }), w({ companyId: other })];
       expect(new Set(all).size).toBe(all.length);
     });
+  });
+});
+
+/** Core V2 F-22 / G6-B (ADR-0070, D-F22-2): the attribution of a verified binding, and only of one. */
+describe('receiptAttribution', () => {
+  it('names the refund case of a refund binding; nothing else of the binding', () => {
+    const b = parseBinding(valid());
+    expect(receiptAttribution(b)).toEqual({ operation: 'refund', target_type: 'refund_case', target_id: '22222222-2222-4222-8222-222222222222' });
+    expect(receiptAttribution(parseBinding({ ...valid(), captureFactId: '44444444-4444-4444-8444-444444444444' })).target_id).toBe('22222222-2222-4222-8222-222222222222');
+  });
+
+  it('every operation\'s target field exists in its binding grammar and the audience equals the audit contract\'s', () => {
+    for (const op of Object.keys(RECEIPT_TARGET_FIELD) as Array<keyof typeof RECEIPT_TARGET_FIELD>) {
+      expect(RECEIPT_OPERATIONS[op].audience, op).toBe(RECEIPT_AUDIENCES[op]);
+    }
+    expect(Object.keys(RECEIPT_TARGET_FIELD).sort()).toEqual(Object.keys(RECEIPT_AUDIENCES).sort());
+  });
+
+  it('refuses a binding object that did not come from the parser (wrong audience or a malformed target)', () => {
+    const b = parseBinding(valid());
+    expect(() => receiptAttribution({ ...b, audience: 'billing-service' } as never)).toThrow(ReceiptError);
+    expect(() => receiptAttribution({ ...b, refundCaseId: 'X' } as never)).toThrow(ReceiptError);
   });
 });
