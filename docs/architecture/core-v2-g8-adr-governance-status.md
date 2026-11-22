@@ -38,6 +38,10 @@ Auth issues **ten** receipt operations (`apps/auth-service/src/receipts/receipt-
 The ADR's decision 1 names one audience (`payment-service`); two audiences exist. The central audit actions `authorization_receipt.*` carry no
 operation or target (DO-62; F-24 is the related approved deferral). Revising the ADR's text is the F-22 decision; it is not made here.
 
+> **Update (2026-11-22, the Owner's D-F22-1 to D-F22-6).** The F-22 decision is that ADR-0067 is **not** rewritten: the successor
+> [ADR-0070](../adr/0070-owner-authorization-receipt-attribution.md) (Proposed) governs the general mechanism's central audit attribution
+> (DO-62: an optional, validated operation / target / consumer-reference tuple). F-22 and DO-62 stay open until their acceptance conditions are met.
+
 ## 3. DO-12: replay enforcement per consumer (P-11 unchanged)
 
 ADR-0057 §13.4 is the rule; S0-C6 states how each consumer applies it. Facts on `main` (code, not configuration of any running system):
@@ -72,6 +76,7 @@ and are not recorded here as decisions.
 | 0035 | Accept limited to C1–C4; tax treatment and `accounting-service` stay outstanding | nothing to its status | **Held**, for the same rule |
 | 0057 | Keep `Proposed`, every open dependency intact | the DO-12 per-consumer enforcement note; the index row corrected | none |
 | 0067 | Amend the refund-only description to the actual operation and audience matrix; F-22 and DO-62 stay open | Amendment 1 (descriptive: ten operations, two audiences); the index row corrected; status `Proposed` | none |
+| 0070 | (2026-11-22, F-22 / G6-B) New successor ADR for receipt attribution; ADR-0067 unchanged and not superseded | new file, `Proposed`; index row | none |
 
 `Accepted` is never a production certification (README: "It does not imply that every consequence is implemented"). DO-5, F-22, DO-62,
 P-11, OD-BRK-4/5, A3M F1–F7 and the S1e-5 production certification stay open.
