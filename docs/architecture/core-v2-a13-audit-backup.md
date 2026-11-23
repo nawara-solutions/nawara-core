@@ -222,6 +222,9 @@ The Owner's restore-safety GO of 2026-11-23. Nothing here is a production restor
 - *Point in time.* The drill compares the restored database with that manifest, never with the live source: a fact recorded `absent` is
   reported apart and not compared; every other fact must be equal. Writes made at the source after the backup are the recovery gap
   (RPO = the backup's age); no replay or reconciliation mechanism exists, so no zero recovery-point loss is claimed.
+- *Limit: identity sequences.* Every control's rows are rolled back, but PostgreSQL never rolls back `nextval`: the drill database's
+  identity sequences advance (as they already did for the A13 controls N5, N6 and P1). Sequence positions are not evidence and the drill
+  database is disposable; no fact compares them.
 - *Limit: one instant (recorded, not fixed here).* The facts are read right after `pg_dump`, in their own snapshots (as for every fact since
   A13). A write committed between the dump and the facts makes the manifest later than the archive: the drill then FAILS CLOSED on that
   fact; it can never pass falsely. The exact fix is one exported snapshot shared by the facts session and `pg_dump --snapshot`; it changes

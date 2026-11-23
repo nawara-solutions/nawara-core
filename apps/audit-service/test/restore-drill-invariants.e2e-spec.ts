@@ -349,6 +349,8 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
         // two queues become ONE queue name containing a space: a space-joined serialization would not see it
         [`UPDATE audit_dead_letter_coverage SET consumers = ARRAY['audit-service.audit other.queue'] WHERE cardinality(consumers) = 2`, 'dead_letter_coverage_digest'],
         [`UPDATE audit_dead_letter_coverage SET buffered = buffered + 1`, 'dead_letter_coverage_digest'],
+        // the same elements with another array lower bound (a distinct array the 0009 guard compares with IS DISTINCT FROM)
+        [`UPDATE audit_dead_letter_coverage SET consumers = '[0:0]={audit-service.audit}'::text[] WHERE cardinality(consumers) = 1`, 'dead_letter_coverage_digest'],
       ] as const) {
         const r = await mutated(async (c) => {
           await c.query('SET LOCAL session_replication_role = replica');
