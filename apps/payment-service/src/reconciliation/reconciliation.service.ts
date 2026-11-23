@@ -29,10 +29,12 @@ export const ITEM_KINDS = [
   'refund_fact_contested', // Core V2 O-2 (PAY-12 M): the fact OWNER's view of its own contested refund fact (Owner and producer)
   'refund_safety_escalation', // Core V2 DO-76 S1 (D-76-1, D-76-4): held refund dispatches and refund facts without authorization (Owner only)
   'refund_failed_attempt_evidence', // Core V2 RLSC-1 (OD-RLSC-2, additive visibility): a failed attempt's refund evidence kept as an exception (Owner and producer)
+  'refund_failed_attempt_evidence_pending', // Core V2 D-R3 (0035): a failed attempt's refund fact whose evidence decision has not committed, so it is not allocated (Owner only)
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 /** Core V2 S0-C12 items 14(f), 15 and S0-C13 Part A: `multiple_captures`, `capture_recovery_exhausted` and `dispute_conflict` are the Owner's alone; a service read never reaches them. */
-const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict', 'refund_safety_escalation'];
+const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict', 'refund_safety_escalation',
+  'refund_failed_attempt_evidence_pending'];
 /**
  * Core V2 S0-C15B (B-D1): `dispute_conflict_presence` is the PRODUCER's alone: the redacted existence of one preserved dispute conflict of its own
  * payment (the observation's id, its payment and when it was observed). It never carries the reason, the notification, the dispute, a chargeback
@@ -190,6 +192,21 @@ const ITEM_SQL: Record<ItemKind, string> = {
     JOIN refund_attempt a ON a.id = e."refundAttemptId" AND a."paymentId" = e."paymentId" AND a."companyId" = e."companyId"
     JOIN payment p ON p.id = e."paymentId" AND p."sellerType" = 'company' AND p."sellerId" = e."companyId"::text
    WHERE e.kind = 'failed_attempt_refund_evidence'`,
+  // Core V2 D-R3 (the Owner's D-R3 GO; 0035): a verified refund fact of the Owner's own payment whose attempt is `failed`, with no allocation, no
+  // allocation block and no `failed_attempt_refund_evidence` row: its RLSC-1 evidence decision has not durably committed (the escalation transaction
+  // failed or has not run yet), so the fact is NOT allocated and stays pending. Derived from the durable fact and attempt only; it disappears when the
+  // decision commits (the escalation is then its own item, or the attempt a `refund_discrepancy`). Owner only (the least-disclosure default; Billing
+  // visibility is an Owner decision). Read-only: it allocates, resolves, releases and completes nothing. `allocationDeferrals` counts the lease's retries.
+  refund_failed_attempt_evidence_pending: `SELECT f.id, f."paymentId", f.id AS "factId", f.amount, f.currency, f."observedAt" AS at,
+      jsonb_build_object('refundAttemptId', f."refundAttemptId", 'refundCaseId', a."refundCaseId", 'attemptStatus', a.status,
+        'allocationDeferrals', COALESCE(l.attempts, 0)) AS detail
+    FROM provider_transaction_fact f
+    JOIN refund_attempt a ON a.id = f."refundAttemptId" AND a."paymentId" = f."paymentId"
+    LEFT JOIN refund_fact_allocation_lease l ON l."factId" = f.id
+   WHERE f.kind = 'refund' AND f."paymentId" IS NOT NULL AND a.status = 'failed'
+     AND NOT EXISTS (SELECT 1 FROM refund_allocation r WHERE r."factId" = f.id)
+     AND NOT EXISTS (SELECT 1 FROM refund_fact_allocation_block b WHERE b."factId" = f.id)
+     AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e WHERE e."factId" = f.id AND e.kind = 'failed_attempt_refund_evidence')`,
   // Core V2 S0-C15B (B-D1): the same rows as `dispute_conflict`, REDACTED for the producer: identity, payment and time only; no figure, no detail
   dispute_conflict_presence: `SELECT o.id, o."paymentId", NULL::uuid AS "factId", NULL::bigint AS amount, NULL::text AS currency, o."observedAt" AS at, '{}'::jsonb AS detail
     FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,

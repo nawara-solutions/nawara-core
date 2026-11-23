@@ -395,6 +395,9 @@ describeWithEnv('Core V2 RLSC-1: a failed attempt\'s refund evidence while anoth
         return (await factsOf(`guard-${attemptId}`))[0]!;
       };
       const fresh = await scenario('submitted');
+      // Core V2 D-R3: a scenario drains the refund worker, which now decides a stored failed-attempt fact itself; so the last scenario runs
+      // BEFORE this test's raw facts exist (nothing drains after them)
+      const held = await scenario('authorized');
       const guardFact = await ownFact(fresh.first);
       await refused(ins('failed_attempt_refund_evidence', fresh.first, guardFact.id, fresh.first), 'refund_safety_escalation_evidence');
       await refused(ins('failed_attempt_refund_evidence', fresh.first, guardFact.id, other.competing), 'refund_safety_escalation_evidence');
@@ -403,7 +406,6 @@ describeWithEnv('Core V2 RLSC-1: a failed attempt\'s refund evidence while anoth
       await refused(ins('failed_attempt_refund_evidence', fresh.first, fact.id, fresh.competing), 'refund_safety_escalation_evidence');
       await refused(ins('failed_attempt_refund_evidence', fresh.competing!, guardFact.id, fresh.first), 'refund_safety_escalation_evidence');
       // the competing attempt belongs to this kind only: a dispatch hold the guard accepts is still refused with one
-      const held = await scenario('authorized');
       const heldFact = await ownFact(held.first);
       await refused(ins('dispatch_held', held.competing!, heldFact.id, held.first), 'refund_safety_escalation_competing_shape');
       await ins('dispatch_held', held.competing!, heldFact.id, null); // the same hold without it: accepted (0032 unchanged)

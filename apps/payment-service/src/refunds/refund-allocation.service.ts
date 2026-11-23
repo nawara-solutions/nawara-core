@@ -28,6 +28,18 @@ export type AllocationOutcome =
 
 interface FactRow { id: string; kind: string; paymentId: string | null; refundAttemptId: string | null; amount: string; currency: string; associatedAuthorizationId: string | null }
 
+/**
+ * Core V2 D-R3 (the Owner's D-R3 GO, 2026-11-23; Payment `0035`): a DIRECT refund fact whose own attempt is `failed` and that has no
+ * `failed_attempt_refund_evidence` row yet is not allocatable: its RLSC-1 evidence decision (the escalation, or the move to `discrepancy`) has not
+ * durably committed. The allocation transaction is rolled back with nothing written and the fact stays PENDING (never blocked, discarded or
+ * resolved), retried with the lease's bounded backoff and listed as the Owner's `refund_failed_attempt_evidence_pending` item meanwhile.
+ */
+export class FailedAttemptEvidencePending extends Error {
+  constructor(readonly factId: string) {
+    super('refund_failed_attempt_evidence_pending');
+  }
+}
+
 /** The worker's bounded backoff for a technical allocation failure: 2^attempts seconds, at most one hour (R6C-6: never a tight loop). */
 export const allocationBackoffSeconds = (attempts: number) => Math.min(3600, 2 ** Math.min(attempts, 12));
 
@@ -99,6 +111,16 @@ export class RefundAllocationService {
         }
         return { kind: 'blocked' as const, reason };
       }
+      // Core V2 D-R3: under the payment lock every move to `failed` and every evidence decision also take, a failed attempt's own (direct) fact waits
+      // for its committed RLSC-1 evidence; once the row exists (or the attempt is `discrepancy`), everything below is the unchanged S6c / R6C-4 path.
+      // An associated unmatched fact (S6h) is not direct and is unchanged. The database refuses the same insert (`0035`) if this check is skipped.
+      if (!associated) {
+        const { rows: pending } = await q.query(
+          `SELECT 1 FROM refund_attempt a WHERE a.id = $1 AND a."paymentId" = $2 AND a.status = 'failed'
+              AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e WHERE e."factId" = $3 AND e.kind = 'failed_attempt_refund_evidence')`,
+          [fact.refundAttemptId, fact.paymentId, fact.id]);
+        if (pending.length > 0) throw new FailedAttemptEvidencePending(fact.id);
+      }
       // V-3: once the case or the payment is complete (through any authorization), nothing more is intended: it is all excess
       const { rows: done } = await q.query(
         `SELECT 1 FROM refund_authorization WHERE "completedAt" IS NOT NULL AND ("refundCaseId" = $1 OR "paymentId" = $2) LIMIT 1`, [z!.refundCaseId, z!.paymentId]);
@@ -154,14 +176,19 @@ export class RefundAllocationService {
       return true;
     } catch (e) {
       const code = (e as { code?: unknown }).code;
-      const failure = typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? `pg_${code.toLowerCase()}` : 'technical_failure';
+      const failure = e instanceof FailedAttemptEvidencePending ? 'failed_attempt_evidence_pending'
+        : typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? `pg_${code.toLowerCase()}` : 'technical_failure';
       await this.db.query(
         `INSERT INTO refund_fact_allocation_lease ("factId", attempts, "workAfter", "lastFailure") VALUES ($1, 1, now() + make_interval(secs => $2), $3)
          ON CONFLICT ("factId") DO UPDATE SET attempts = refund_fact_allocation_lease.attempts + 1,
            "workAfter" = now() + make_interval(secs => LEAST(3600, power(2, LEAST(refund_fact_allocation_lease.attempts + 1, 12)))), "lastFailure" = $3`,
         [factId, allocationBackoffSeconds(1), failure.slice(0, 64)],
       ).catch(() => undefined);
-      this.log.warn(`refund_fact_allocation_retry fact=${factId} failure=${failure} — the fact is kept; retried with backoff`);
+      if (e instanceof FailedAttemptEvidencePending) {
+        this.log.warn(`refund_fact_allocation_deferred fact=${factId} reason=failed_attempt_evidence_pending — a failed attempt's refund fact waits for its committed RLSC-1 evidence; kept pending, retried with backoff (D-R3)`);
+      } else {
+        this.log.warn(`refund_fact_allocation_retry fact=${factId} failure=${failure} — the fact is kept; retried with backoff`);
+      }
       return false;
     }
   }
