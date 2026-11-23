@@ -71,6 +71,10 @@ SELECT 'audit_digest|' || count(*) || '|' || coalesce(md5(string_agg(id::text ||
 SELECT 'known|' || coalesce((SELECT "sourceService" || '|' || "eventId"::text || '|'
   || to_char(date_trunc('milliseconds', "occurredAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
   FROM audit_record ORDER BY id DESC LIMIT 1), 'none');
+SELECT 'funcsrc|' || p.proname || '|' || md5(pg_get_functiondef(p.oid)) FROM pg_proc p
+  WHERE p.pronamespace = 'public'::regnamespace AND p.prokind = 'f' AND p.proname IN ('audit_record_stamp', 'audit_record_append_only', 'audit_retention_run_append_only',
+    'outbox_immutable', 'audit_record_scope_guard', 'audit_legal_hold_event_guard', 'audit_legal_hold_lock_key', 'audit_record_is_held', 'audit_record_hold_guard',
+    'audit_dead_letter_transition_guard', 'audit_dead_letter_coverage_guard', 'audit_dead_letter_append_only', 'audit_grant_retention') ORDER BY 1;
 SELECT 'migration_present|' || name FROM schema_migrations
   WHERE name IN ('0006_audit_contract_v2.sql', '0008_audit_legal_hold.sql', '0009_dead_letter_observation.sql') ORDER BY 1;
 SELECT 'scope_digest|' || CASE WHEN to_regclass('public.audit_record_scope') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$

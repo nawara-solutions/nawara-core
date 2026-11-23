@@ -434,6 +434,8 @@ compare_facts() {
         if [ "$LATER" = 0 ]; then grep -qxF -- "$line" <<<"$facts_now" || die "the migration history differs from the backup"
         else [ "$(q 'SELECT count(*) FROM schema_migrations')" -ge "$(cut -d'|' -f2 <<<"$line")" ] || die "the restored migration history is shorter than the backup's"; fi ;;
       structure\|*) [ "$LATER" != 0 ] || grep -qxF -- "$line" <<<"$facts_now" || die "the restored structure differs from the backup (${line%|*})" ;;
+      # Core V2 DO-5: a guard or trigger function's definition; a later migration may legitimately redefine one, exactly as for the structure
+      funcsrc\|*) [ "$LATER" != 0 ] || grep -qxF -- "$line" <<<"$facts_now" || die "a restored function definition differs from the backup ($(cut -d'|' -f2 <<<"$line"))" ;;
       *) grep -qxF -- "$line" <<<"$facts_now" || die "a restored fact differs from the backup ($(cut -d'|' -f1-2 <<<"$line"))" ;;
     esac
     checked=$((checked + 1))

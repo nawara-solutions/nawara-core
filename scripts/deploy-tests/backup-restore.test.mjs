@@ -937,6 +937,16 @@ for (const [label, changed] of [['a scope row', 'scope_digest|1|ffffffffffffffff
   });
 }
 
+test('DO-5 restore drill: a guard function whose definition differs from the backup fails the drill (no later migration)', () => {
+  const facts = `table|audit_record|1\nmigrations|6|0123456789abcdef0123456789abcdef\nfuncsrc|audit_record_hold_guard|0123456789abcdef0123456789abcdef\n${KNOWN_LINE}\n`;
+  const b = backupWorld({ backup: { facts } });
+  assert.equal(b.backup('audit-service').code, 0);
+  const r = recoveryWorld(b, { drill: { facts: facts.replace('funcsrc|audit_record_hold_guard|0123456789abcdef0123456789abcdef', 'funcsrc|audit_record_hold_guard|ffffffffffffffffffffffffffffffff') } }).run(AUDIT_DRILL);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /a restored function definition differs from the backup \(audit_record_hold_guard\)/);
+  assert.ok(readFileSync(SCRIPTS.backup, 'utf8').includes("SELECT 'funcsrc|' || p.proname || '|' || md5(pg_get_functiondef(p.oid))"));
+});
+
 test('A13 restore drill: the deploy\'s privilege assertion applies after the restore (audit_app able to write the history fails the drill)', () => {
   const w = recoveryWorld(backedUp('audit-service'));
   w.patch((s) => { s.audit = { forbidden: 'schema_migrations:INSERT' }; });

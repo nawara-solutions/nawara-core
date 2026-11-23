@@ -277,6 +277,15 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
       expect(r.control).toBe('nawara-control P4');
     });
 
+    it('NC3d a replaced guard body (the dead-letter insert guard now refuses every row as "append-only"): its definition fact differs', async () => {
+      const r = await mutated(async (c) => {
+        await c.query(`CREATE OR REPLACE FUNCTION audit_dead_letter_transition_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+          BEGIN RAISE EXCEPTION 'audit_dead_letter_transition is append-only (INSERT refused)' USING ERRCODE = '42501'; END $$`);
+      });
+      expect(r.diff).toContain('funcsrc');
+      expect(manifest.filter((l) => l.startsWith('funcsrc|')).length).toBeGreaterThanOrEqual(12);
+    });
+
     it('NC4 a missing role grant (the retention role loses EXECUTE on the hold check): the function ACL fact differs', async () => {
       const r = await mutated(async (c) => { await c.query(`REVOKE EXECUTE ON FUNCTION audit_record_is_held(bigint) FROM ${src.retention}`); });
       expect(r.diff).toContain('funcacl|audit_record_is_held');
