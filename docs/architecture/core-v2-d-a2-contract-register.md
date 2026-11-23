@@ -1536,6 +1536,29 @@ threshold, allocation rule, case-completion rule or financial resolution is appr
 - *Until decided.* The behaviour recorded in the RLSC-1 note above is unchanged: the exception is durable and visible, allocation is
   fact-based (S6c / R6C-4), and nothing releases, resolves, reverses or compensates anything.
 
+**D-R3 failed-attempt evidence before allocation (dated note, 2026-11-23; the Owner's D-R3 GO, a bounded technical safeguard; DEVELOPMENT AND
+SIMULATION ONLY; OD-RLSC-1, DO-76, D-R1, D-R2 and D-R4 stay OPEN).** Payment migration `0035` and `RefundAllocationService`. It closes probe P2 of the
+OD-RLSC-1 record above: a failed attempt's refund fact allocated, and its refund case completed, before (or without) its RLSC-1 escalation.
+- *Rule.* A DIRECT refund fact (its own payment and refund attempt) whose attempt is `failed` is allocated only once that fact's
+  `failed_attempt_refund_evidence` row exists. Until then the allocation transaction writes nothing and the fact stays pending (never blocked,
+  discarded or resolved), retried with the lease's bounded backoff (`lastFailure` `failed_attempt_evidence_pending`). Once the evidence decision has
+  committed (the row, or the attempt's move to `discrepancy` when nothing competes), allocation is the unchanged S6c / R6C-4 one: the same
+  authorization, intended and excess amounts, case completion and balances. An associated unmatched fact (S6h, R6H-3) is not direct and is unchanged.
+- *Boundary.* Every move to `failed` and the evidence decision take the payment row lock (`lockAttempt`); the allocation takes it before its check
+  and insert (FC-2), on every instance. The database refuses the same insert independently (`23514`, `refund_allocation_failed_attempt_evidence`).
+  The evidence decision is still made only by the stored notification's processing (the webhook and its retrier); nothing new decides it.
+- *Visibility.* A new Owner-only PAY-12 / R6H-6 item kind `refund_failed_attempt_evidence_pending`: the Owner's own verified fact, its refund case and
+  the failed attempt, and the number of allocation deferrals; derived from durable rows, it disappears when the decision commits. Billing visibility
+  is not granted (an Owner decision, like OD-RLSC-2).
+- *Unchanged.* No new status, escalation kind, audit action or category, allocation arithmetic, replacement eligibility, dispatch hold release or
+  provider-finality assumption. The over-return overlap of the record above is unchanged and still NOT approved.
+- *Limits.* A notification whose retries are exhausted leaves its fact pending and listed until the decision is made by a later redelivery; a
+  success fact allocated while its attempt was still in flight, before a contradicting failure report, is not a failed attempt's fact. A superuser
+  can bypass triggers.
+- *Evidence.* Payment `test/dr3-failed-attempt-evidence-before-allocation.e2e-spec.ts` (R1 to R13): the rolled-back escalation (P2), restart on the
+  other instance, starvation after maximal backoff, the database backstop, the P5 and P6 ledgers, duplicates, a two-instance race. Mutation
+  controls: without both layers seven cases fail; without either layer alone, the cases pinning that layer fail.
+
 **G3 Payment stalled refund dispatch (dated note, 2026-11-18; the Owner's G3 + G2 GO, package B; DEVELOPMENT AND SIMULATION ONLY;
 ESCALATION ONLY; DO-44).** Payment migration `0034` extends `refund_safety_escalation`, following `0033`'s precedent.
 - *Kind and threshold.* `dispatch_stalled`: the attempt is `dispatching` or `unknown`, has no `submittedAt`, and is at least 72 hours past
