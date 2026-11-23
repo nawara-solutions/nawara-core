@@ -25,7 +25,7 @@ export PATH
 # Pinned values. Changed only by a reviewed commit; scripts/check-repo.mjs compares them with the repository (checkScheduledBackupEntry).
 readonly INSTALL_DIR='/usr/local/libexec/nawara-core-backup'
 readonly OWNER_UID=0
-readonly BACKUP_SH_SHA256='27d77eae19c656d3ecca8ec8dd96a7533d80df343a8d1f1888f3e92ae55f8868'
+readonly BACKUP_SH_SHA256='2ea70b4e365b55f370470e7989545f509e45e9c67b4e9b9880f136e62fc7156a'
 readonly SERVICES='auth-service organization-service'
 
 log() { printf '[scheduled-backup] %s\n' "$*"; }

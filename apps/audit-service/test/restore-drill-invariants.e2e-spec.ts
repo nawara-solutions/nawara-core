@@ -88,9 +88,9 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
   const hold = (url: string, holdId: string, kind: 'placed' | 'released', company: string) => sql(url,
     `INSERT INTO audit_legal_hold_event ("holdId", kind, "companyId", "reasonCode", "actorUserId") VALUES ($1, $2, $3, 'litigation_pending', $4)`,
     [holdId, kind, company, randomUUID()]);
-  const coverage = (url: string, instance: string, kind: 'started' | 'heartbeat', seq: number) => sql(url,
+  const coverage = (url: string, instance: string, kind: 'started' | 'heartbeat', seq: number, consumers = ['audit-service.audit']) => sql(url,
     `INSERT INTO audit_dead_letter_coverage ("instanceId", kind, seq, consumers, "observedTotal", "persistedTotal", "droppedOverflow", "droppedSink", "rejectedTotal", buffered, "observedAt")
-     VALUES ($1, $2, $3, ARRAY['audit-service.audit'], $3, $3, 0, 0, 0, 0, now())`, [instance, kind, seq]);
+     VALUES ($1, $2, $3, $4::text[], $3, $3, 0, 0, 0, 0, now())`, [instance, kind, seq, consumers]);
   /** Inside a transaction on the restored database that is ALWAYS rolled back: mutate, then return the facts and the controls' outcome. */
   const mutated = async (mutate: (c: pg.Client) => Promise<void>, o: { controls?: boolean } = {}) => {
     const c = new pg.Client({ connectionString: tgt.url });
@@ -148,6 +148,7 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
     }
     await coverage(src.adminUrl, instance, 'started', 0);       // coverage facts: started and one heartbeat
     await coverage(src.adminUrl, instance, 'heartbeat', 1);
+    await coverage(src.adminUrl, randomUUID(), 'started', 0, ['audit-service.audit', 'other.queue']); // a second instance observing two queues
     // ---- the backup: the manifest (as the backup's own user) and the archive, at the same instant (nothing writes in between)
     manifest = await lines(src.migratorUrl, factsSql());
     writeFileSync(join(work, 'manifest.txt'), `${manifest.join('\n')}\n`);
@@ -193,7 +194,7 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
       expect(fact('held_records')).toMatch(/^held_records\|3\|[0-9a-f]{32}$/); // Company A's three records, not B's (released), not the unscoped one
       expect(fact('retention_run_digest')).toMatch(/^retention_run_digest\|1\|[0-9a-f]{32}$/);
       expect(fact('dead_letter_transition_digest')).toMatch(/^dead_letter_transition_digest\|2\|[0-9a-f]{32}$/);
-      expect(fact('dead_letter_coverage_digest')).toMatch(/^dead_letter_coverage_digest\|2\|[0-9a-f]{32}$/);
+      expect(fact('dead_letter_coverage_digest')).toMatch(/^dead_letter_coverage_digest\|3\|[0-9a-f]{32}$/);
       for (const f of ['audit_record_is_held', 'audit_record_hold_guard', 'audit_legal_hold_event_guard', 'audit_record_scope_guard', 'audit_dead_letter_append_only']) {
         expect(manifest.some((l) => l.startsWith(`funcacl|${f}|`)), f).toBe(true);
       }
@@ -339,6 +340,9 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
         [`UPDATE audit_dead_letter_transition SET "retryCount" = "retryCount" + 1`, 'dead_letter_transition_digest'],
         [`UPDATE audit_dead_letter_transition SET "eventName" = 'auth.changed'`, 'dead_letter_transition_digest'],
         [`UPDATE audit_dead_letter_coverage SET consumers = ARRAY['other.queue']`, 'dead_letter_coverage_digest'],
+        // two consumer lists that a space-joined serialization would confuse (one element with a space vs two elements)
+        // two queues become ONE queue name containing a space: a space-joined serialization would not see it
+        [`UPDATE audit_dead_letter_coverage SET consumers = ARRAY['audit-service.audit other.queue'] WHERE cardinality(consumers) = 2`, 'dead_letter_coverage_digest'],
         [`UPDATE audit_dead_letter_coverage SET buffered = buffered + 1`, 'dead_letter_coverage_digest'],
       ] as const) {
         const r = await mutated(async (c) => {

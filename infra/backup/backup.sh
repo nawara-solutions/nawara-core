@@ -95,7 +95,7 @@ SELECT 'dead_letter_transition_digest|' || CASE WHEN to_regclass('public.audit_d
     || '|' || redelivered || '|' || extract(epoch FROM "observedAt") || '|' || extract(epoch FROM "recordedAt"), ',' ORDER BY id)), '') AS d
   FROM audit_dead_letter_transition$q$, false, true, '')))[1]::text END;
 SELECT 'dead_letter_coverage_digest|' || CASE WHEN to_regclass('public.audit_dead_letter_coverage') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
-  SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "instanceId" || '|' || kind || '|' || seq || '|' || array_to_string(consumers, ' ') || '|'
+  SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "instanceId" || '|' || kind || '|' || seq || '|' || consumers::text || '|'
     || "observedTotal" || '|' || "persistedTotal" || '|' || "droppedOverflow" || '|' || "droppedSink" || '|' || "rejectedTotal" || '|' || buffered || '|'
     || extract(epoch FROM "observedAt") || '|' || extract(epoch FROM "recordedAt"), ',' ORDER BY "instanceId", seq)), '') AS d
   FROM audit_dead_letter_coverage$q$, false, true, '')))[1]::text END;
