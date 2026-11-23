@@ -72,6 +72,8 @@ describe('authorization receipts: central audit (S2-Audit.2)', () => {
     expect(row.payload).toEqual({
       action: 'authorization_receipt.issued', actor: { type: 'user', id: o.id, userKind: 'owner' }, organizationId: null,
       resource: { type: 'authorization_receipt', id: r.receiptId }, outcome: 'succeeded', companyId: o.companyId,
+      // Core V2 F-22 / G6-B (ADR-0070): the binding's attribution tuple
+      changes: { operation: 'refund', target_type: 'refund_case', target_id: r.binding.refundCaseId },
     });
     const env = await relayed(row.id);
     expect(env.headers).toMatchObject({ source: AUTH_SERVICE_NAME, version: 2 });
@@ -92,6 +94,7 @@ describe('authorization receipts: central audit (S2-Audit.2)', () => {
       action: 'authorization_receipt.consumed', actor: { type: 'service', id: 'payment-service' }, organizationId: null,
       resource: { type: 'authorization_receipt', id: r.receiptId }, outcome: 'succeeded', companyId: o.companyId,
       approvedBy: { type: 'user', id: o.id, userKind: 'owner' },
+      changes: { operation: 'refund', target_type: 'refund_case', target_id: r.binding.refundCaseId, consume_ref: ref },
     });
     const env = await relayed(all[1].id);
     expect(validateAuditPayload(env.payload, AUTH_SERVICE_NAME, env.headers.version as number).approvedBy).toEqual({ type: 'user', id: o.id, userKind: 'owner' });
@@ -109,6 +112,7 @@ describe('authorization receipts: central audit (S2-Audit.2)', () => {
     expect(all[1].payload).toEqual({
       action: 'authorization_receipt.voided', actor: { type: 'system', id: 'authorization_receipt_replay' }, organizationId: null,
       resource: { type: 'authorization_receipt', id: r.receiptId }, outcome: 'succeeded', companyId: o.companyId,
+      changes: { operation: 'refund', target_type: 'refund_case', target_id: r.binding.refundCaseId },
     });
     expect(JSON.stringify(all[1].payload)).not.toContain(o.id);
     const voidEnv = await relayed(all[1].id);
@@ -156,7 +160,9 @@ describe('authorization receipts: central audit (S2-Audit.2)', () => {
     expect(bus.published.filter((e) => e.id === row.id)).toHaveLength(1);
   });
 
-  it('no secret, digest, step-up proof, binding value or amount in any central intent or relayed envelope', async () => {
+  // Core V2 F-22 / G6-B (ADR-0070, D-F22-2): the one binding value that travels is the attribution's target id (the refund case); every other
+  // binding value (payment, amount, currency, reason) stays out
+  it('no secret, digest, step-up proof, binding value other than the attributed target, or amount in any central intent or relayed envelope', async () => {
     const o = await ready();
     const r = await issue(o);
     await consume({ secret: r.secret, binding: r.binding, consumeRef: randomUUID() });
@@ -168,7 +174,7 @@ describe('authorization receipts: central audit (S2-Audit.2)', () => {
     await until(() => central.length > 0 && bus.published.filter((e) => RECEIPT_ACTIONS.includes(e.name)).length >= 4, 'relayed');
     const records = [central, bus.published.filter((e) => RECEIPT_ACTIONS.includes(e.name))];
     const dump = JSON.stringify(records);
-    for (const needle of [r.secret, r2.secret, r.stepUpToken, r2.stepUpToken, r.binding.refundCaseId, r.binding.paymentId, r2.binding.paymentId, payment.token, ...digests]) {
+    for (const needle of [r.secret, r2.secret, r.stepUpToken, r2.stepUpToken, r.binding.paymentId, r2.binding.paymentId, payment.token, ...digests]) {
       expect(dump).not.toContain(needle);
     }
     // the amount (7300): never as a value or under an amount-like key anywhere, and never as text outside the records' own random identifiers and

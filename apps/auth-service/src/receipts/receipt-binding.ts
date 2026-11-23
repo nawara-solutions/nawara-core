@@ -1,3 +1,4 @@
+import { RECEIPT_OPERATIONS } from '@nawara/audit-contract';
 import { hmacHex } from '../crypto/hmac.js';
 import { canonicalJson } from '../hierarchy/snapshot.js';
 import { DISPUTE_DECIDE_PURPOSE, FRAUD_HOLD_PLACE_PURPOSE, FRAUD_HOLD_RELEASE_PURPOSE, LATE_SETTLEMENT_APPLY_PURPOSE, PROVIDER_FACT_ASSOCIATE_PURPOSE, RECOVERY_RESTRICTION_REVOKE_PURPOSE, RECOVERY_RESTRICTION_SUSPEND_PURPOSE, RECOVERY_WRITE_OFF_PURPOSE, REFUND_AUTHORIZE_PURPOSE, SURPLUS_EXTERNAL_PURPOSE,
@@ -185,6 +186,33 @@ export const RECEIPT_AUDIENCES = {
   recovery_surplus_external: 'billing-service', late_settlement_apply: 'billing-service', provider_fact_associate: 'payment-service', recovery_write_off: 'billing-service',
   recovery_restriction_suspend: 'billing-service', recovery_restriction_revoke: 'billing-service',
 } as const satisfies Record<ReceiptOperation, string>;
+
+/**
+ * Core V2 F-22 / G6-B (DO-62; ADR-0070; the Owner's D-F22-2): the receipt attribution of a central receipt event, taken ONLY from a binding
+ * Auth parsed and verified itself (never from an audit payload or any other request field): the operation, the binding identifier that
+ * names what the Owner approved (`target_id`) and its type, which is the audit contract's for the operation. Nothing else of the binding
+ * travels: no amount, currency, reason, beneficiary, Organization or payment.
+ */
+export const RECEIPT_TARGET_FIELD = {
+  refund: 'refundCaseId', dispute_decision: 'disputeId', fraud_hold_place: 'holdId', fraud_hold_release: 'holdId',
+  recovery_surplus_external: 'surplusId', late_settlement_apply: 'lateSettlementId', provider_fact_associate: 'factId',
+  recovery_write_off: 'obligationId', recovery_restriction_suspend: 'suspensionId', recovery_restriction_revoke: 'suspensionId',
+} as const satisfies { [O in ReceiptOperation]: keyof Extract<ReceiptBinding, { operation: O }> & string };
+
+export interface ReceiptAttribution {
+  operation: ReceiptOperation;
+  target_type: (typeof RECEIPT_OPERATIONS)[ReceiptOperation]['targetType'];
+  target_id: string;
+}
+
+export function receiptAttribution(b: ReceiptBinding): ReceiptAttribution {
+  const contract = RECEIPT_OPERATIONS[b.operation];
+  // the contract's audience is Auth's own (F-7): a divergence is a defect, never an event
+  if (contract.audience !== RECEIPT_AUDIENCES[b.operation] || b.audience !== contract.audience) throw receiptError('receipt_binding_invalid');
+  const targetId = (b as unknown as Record<string, string>)[RECEIPT_TARGET_FIELD[b.operation]];
+  if (typeof targetId !== 'string' || !UUID.test(targetId)) throw receiptError('receipt_binding_invalid');
+  return { operation: b.operation, target_type: contract.targetType, target_id: targetId };
+}
 
 /** The one step-up purpose each operation's issuance consumes (Auth-local purposes, `step-up.service.ts`). */
 export const RECEIPT_PURPOSES = {

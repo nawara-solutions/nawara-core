@@ -7,7 +7,7 @@ import type { AuditActor } from '@nawara/audit-contract';
 import { DbService, isUniqueViolation, pgCode, pgConstraint, provesNothingCommitted, type Queryable } from '../db/db.service.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import {
-  RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type ReceiptBinding,
+  RECEIPT_PURPOSES, bindingDigest, canonicalBinding, parseBinding, receiptAttribution, requestHash, secretDigest, type ReceiptAttribution, type ReceiptBinding,
 } from './receipt-binding.js';
 import { ReceiptError, receiptError, type ReceiptErrorCode } from './receipt-errors.js';
 
@@ -71,16 +71,23 @@ export class AuthorizationReceiptService {
    * own Owner–Company row (never the request's binding); nothing secret travels: no secret, digest, proof, binding or amount.
    */
   private recordCentrally(q: Queryable, action: 'authorization_receipt.issued' | 'authorization_receipt.consumed' | 'authorization_receipt.voided',
-    a: { receiptId: string; companyId: string; actor: AuditActor; approvedBy?: { userId: string } }) {
+    a: { receiptId: string; companyId: string; actor: AuditActor; attribution: ReceiptAttribution; approvedBy?: { userId: string }; consumeRef?: string }) {
     // explicit literals (no spread): the outbox generates every event id (outbox retention safety, check:repo)
     const resource = { type: 'authorization_receipt', id: a.receiptId } as const;
-    if (a.approvedBy) {
+    // Core V2 F-22 / G6-B (ADR-0070, D-F22-2): the complete attribution tuple, always, from the binding Auth verified; `consume_ref` on the
+    // consumption only (the consumer's own reference, recorded on the receipt row by the same statement)
+    const { operation, target_type, target_id } = a.attribution;
+    if (action === 'authorization_receipt.consumed') {
+      if (!a.approvedBy || !a.consumeRef) throw new Error('receipt consumption audit without its approver or reference');
       return this.central.write(q, {
         action, actor: a.actor, organizationId: null, resource, outcome: 'succeeded', companyId: a.companyId,
         approvedBy: { type: 'user', id: a.approvedBy.userId, userKind: 'owner' },
+        changes: { operation, target_type, target_id, consume_ref: a.consumeRef },
       });
     }
-    return this.central.write(q, { action, actor: a.actor, organizationId: null, resource, outcome: 'succeeded', companyId: a.companyId });
+    return this.central.write(q, {
+      action, actor: a.actor, organizationId: null, resource, outcome: 'succeeded', companyId: a.companyId, changes: { operation, target_type, target_id },
+    });
   }
 
   private pepper(): Buffer {
@@ -104,10 +111,11 @@ export class AuthorizationReceiptService {
     const pepper = this.pepper();
     if (typeof input.idempotencyKey !== 'string' || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) throw receiptError('validation_error');
     const binding = parseBinding(input.binding);
+    const attribution = receiptAttribution(binding);
     const canonical = canonicalBinding(binding);
     const reqHash = requestHash(pepper, canonical);
 
-    await this.answerReplay(owner, input.idempotencyKey, reqHash); // throws for a replay; returns for a new key
+    await this.answerReplay(owner, input.idempotencyKey, reqHash, attribution); // throws for a replay; returns for a new key
     const id = randomUUID();
     const secret = randomBytes(32).toString('base64url');
     try {
@@ -134,11 +142,11 @@ export class AuthorizationReceiptService {
           metadata: { companyId: binding.companyId, operation: binding.operation },
         }, q);
         // the Company from Auth's own Owner row (`o[0]`, read in this transaction), equal to the binding's by the check above
-        await this.recordCentrally(q, 'authorization_receipt.issued', { receiptId: id, companyId: o[0].companyId, actor: ownerActor(owner) });
+        await this.recordCentrally(q, 'authorization_receipt.issued', { receiptId: id, companyId: o[0].companyId, actor: ownerActor(owner), attribution });
         return { receiptId: id, secret, expiresAt: ins[0]!.expiresAt };
       });
     } catch (e) {
-      if (isUniqueViolation(e, 'authorization_receipt_idempotency_uk')) await this.answerReplay(owner, input.idempotencyKey, reqHash);
+      if (isUniqueViolation(e, 'authorization_receipt_idempotency_uk')) await this.answerReplay(owner, input.idempotencyKey, reqHash, attribution);
       throw this.classify(e);
     }
   }
@@ -148,7 +156,7 @@ export class AuthorizationReceiptService {
    * returns a secret. An `issued` unexpired receipt is voided by one conditional statement (with its audit record); if it changed
    * meanwhile, the rules are applied again to what it became.
    */
-  private async answerReplay(owner: ReceiptOwner, key: string, reqHash: string): Promise<void> {
+  private async answerReplay(owner: ReceiptOwner, key: string, reqHash: string, attribution: ReceiptAttribution): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt++) {
       const { rows } = await this.db.query<ReceiptRow>(
         `SELECT id, status, "requestHash", "expiresAt" <= clock_timestamp() AS expired
@@ -163,10 +171,12 @@ export class AuthorizationReceiptService {
       if (r.expired) throw receiptError('receipt_expired'); // Q6: deterministic, nothing restored or changed
       const voided = await this.db.tx(async (q) => {
         const { rows: v } = await q.query<{ id: string; companyId: string }>(
+          // F-22: the void's attribution is the replaying request's binding, which is the receipt's own: its request hash (an HMAC of the
+          // canonical binding, immutable on the row) is required equal by this very statement, not only by the read above
           `UPDATE authorization_receipt SET status = 'voided', "voidedAt" = clock_timestamp()
-            WHERE id = $1 AND status = 'issued' AND "expiresAt" > clock_timestamp()
+            WHERE id = $1 AND status = 'issued' AND "expiresAt" > clock_timestamp() AND "requestHash" = $2
             RETURNING id, (SELECT o."companyId"::text FROM owner o WHERE o."userId" = authorization_receipt."issuerUserId") AS "companyId"`,
-          [r.id],
+          [r.id, reqHash],
         );
         if (!v[0]) return false;
         await this.audit.record({
@@ -175,7 +185,7 @@ export class AuthorizationReceiptService {
         // D4: the void is the automatic F-5 replay rule, so its central actor is that process, never the Owner (the local record keeps who
         // sent the replaying request). The Company is the issuer's own Owner row.
         await this.recordCentrally(q, 'authorization_receipt.voided', {
-          receiptId: r.id, companyId: v[0].companyId, actor: { type: 'system', id: 'authorization_receipt_replay' },
+          receiptId: r.id, companyId: v[0].companyId, actor: { type: 'system', id: 'authorization_receipt_replay' }, attribution,
         });
         return true;
       });
@@ -200,6 +210,7 @@ export class AuthorizationReceiptService {
     if (typeof input.consumeRef !== 'string' || !UUID.test(input.consumeRef)) throw receiptError('validation_error');
     const binding = parseBinding(input.binding);
     if (binding.audience !== caller) throw receiptError('receipt_binding_invalid'); // F-7: only the bound audience
+    const attribution = receiptAttribution(binding);
     if (typeof input.secret !== 'string' || !SECRET.test(input.secret)) return this.refuse('receipt_invalid', caller);
     const sDigest = secretDigest(pepper, input.secret);
     const bDigest = bindingDigest(pepper, canonicalBinding(binding));
@@ -225,6 +236,7 @@ export class AuthorizationReceiptService {
         // D4/D5: the authenticated service is the actor; the approver is the issuer this statement just proved an active Owner of the Company
         await this.recordCentrally(q, 'authorization_receipt.consumed', {
           receiptId: row.id, companyId: row.companyId, actor: { type: 'service', id: caller }, approvedBy: { userId: row.issuerUserId },
+          attribution, consumeRef: input.consumeRef,
         });
         return this.consumption(row, input.consumeRef, binding);
       });
