@@ -291,6 +291,78 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
       expect((await repo.findBySourceAndEventId('auth-service', e.id))!.approvedByUserId).toBe(OWNER_ID);
     });
 
+    // Core V2 F-22 / G6-B (DO-62; ADR-0070; the Owner's D-F22-2, D-F22-3): the receipt attribution tuple, through the real ingestion
+    describe('F-22 receipt attribution (ingestion as the runtime role)', () => {
+      const TARGET = '0d1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f44';
+      const attributed = (action: 'issued' | 'consumed' | 'voided', operation = 'refund', targetType = 'refund_case', extra: Record<string, unknown> = {}) =>
+        receiptEnvelope(action, { changes: { operation, target_type: targetType, target_id: TARGET, ...(action === 'consumed' ? { consume_ref: randomUUID() } : {}), ...extra } });
+      const consumedBy = (service: string, operation: string, targetType: string): EventEnvelope => {
+        const e = attributed('consumed', operation, targetType);
+        return { ...e, payload: { ...(e.payload as object), actor: { type: 'service', id: service } } };
+      };
+
+      it('a verified attributed event of each action is stored with its attribution and exactly its one Company scope row', async () => {
+        for (const a of ['issued', 'consumed', 'voided'] as const) {
+          const e = attributed(a);
+          expect(await ingestion.ingest(e, verified(e))).toBe('persisted');
+          const row = (await repo.findBySourceAndEventId('auth-service', e.id))!;
+          expect(row.changes, a).toEqual((e.payload as { changes: object }).changes);
+          expect(await scopeRows(row.id), a).toEqual([{ basis: 'verified_producer', companyId: COMPANY, platformId: null }]);
+        }
+      });
+
+      it('NC-10: a historical version-2 event (no attribution) is still stored as it was, unattributed', async () => {
+        for (const a of ['issued', 'consumed', 'voided'] as const) {
+          const e = receiptEnvelope(a);
+          expect(await ingestion.ingest(e, verified(e))).toBe('persisted');
+          expect((await repo.findBySourceAndEventId('auth-service', e.id))!.changes, a).toBeNull();
+        }
+      });
+
+      it('NC-7: an unverified attributed delivery is stored but never becomes trusted scope', async () => {
+        const e = attributed('consumed');
+        expect(await ingestion.ingest(e, unverified)).toBe('persisted');
+        const row = (await repo.findBySourceAndEventId('auth-service', e.id))!;
+        expect([row.producerIdentityVerified, (row.changes as { operation?: string }).operation]).toEqual([false, 'refund']);
+        expect(await scopeRows(row.id)).toEqual([]);
+      });
+
+      it('NC-1 to NC-5, NC-8: wrong, partial or contradictory attribution is refused before anything is stored', async () => {
+        const before = Number((await sql<{ n: string }>(d.adminUrl, 'SELECT count(*) AS n FROM audit_record'))[0]!.n);
+        const other = attributed('consumed');
+        const cases: Array<[EventEnvelope, string]> = [
+          [attributed('issued', 'payment_refund'), 'invalid_changes'], // NC-1 unknown operation
+          [attributed('issued', 'refund', 'refund_attempt'), 'invalid_changes'], // NC-2 not a target type
+          [attributed('issued', 'refund', 'fraud_hold'), 'invalid_changes'], // NC-2 another operation's target type
+          [receiptEnvelope('voided', { changes: { operation: 'refund', target_id: TARGET } }), 'invalid_changes'], // NC-3 partial
+          [receiptEnvelope('consumed', { changes: { operation: 'refund', target_type: 'refund_case', target_id: TARGET } }), 'invalid_changes'], // NC-3 no consume_ref
+          [consumedBy('billing-service', 'refund', 'refund_case'), 'invalid_changes'], // NC-4 wrong audience
+          [consumedBy('payment-service', 'fraud_hold_place', 'fraud_hold'), 'invalid_changes'], // NC-4 wrong audience
+          [consumedBy('file-service', 'recovery_write_off', 'recovery_obligation'), 'invalid_changes'], // NC-5 another service
+          [attributed('issued', 'refund', 'refund_case', { consume_ref: randomUUID() }), 'invalid_changes'], // NC-8
+          [attributed('voided', 'refund', 'refund_case', { consume_ref: randomUUID() }), 'invalid_changes'], // NC-8
+          [{ ...other, headers: { ...other.headers, source: 'payment-service' } }, 'producer_not_admitted'], // only Auth produces receipts
+        ];
+        for (const [e, expected] of cases) expect(await reason(ingestion.ingest(e, verified(e))), JSON.stringify(e.payload)).toBe(expected);
+        expect(Number((await sql<{ n: string }>(d.adminUrl, 'SELECT count(*) AS n FROM audit_record'))[0]!.n)).toBe(before);
+      });
+
+      it('a consumption by its own audience is accepted for every operation', async () => {
+        const matrix: Array<[string, string, string]> = [
+          ['refund', 'refund_case', 'payment-service'], ['dispute_decision', 'payment_dispute', 'payment-service'],
+          ['provider_fact_associate', 'provider_transaction_fact', 'payment-service'], ['fraud_hold_place', 'fraud_hold', 'billing-service'],
+          ['fraud_hold_release', 'fraud_hold', 'billing-service'], ['recovery_surplus_external', 'recovery_surplus', 'billing-service'],
+          ['late_settlement_apply', 'assistance_late_settlement', 'billing-service'], ['recovery_write_off', 'recovery_obligation', 'billing-service'],
+          ['recovery_restriction_suspend', 'recovery_restriction_suspension', 'billing-service'],
+          ['recovery_restriction_revoke', 'recovery_restriction_suspension', 'billing-service'],
+        ];
+        for (const [op, type, service] of matrix) {
+          const e = consumedBy(service, op, type);
+          expect(await ingestion.ingest(e, verified(e)), op).toBe('persisted');
+        }
+      });
+    });
+
     it('the approver columns are version-2 only and paired (database CHECK)', async () => {
       const e = await failure(d.appUrl, `INSERT INTO audit_record ("eventId","sourceService",action,category,"schemaVersion","actorType","actorId","resourceType","resourceId",outcome,"occurredAt","approvedByUserId","approvedByUserKind")
         VALUES (gen_random_uuid(),'auth-service','membership.revoked','business',1,'service','x-service','membership','m1','succeeded',now(),$1,'owner')`, [OWNER_ID]);

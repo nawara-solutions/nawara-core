@@ -1,4 +1,4 @@
-import { catalogEntry, type CatalogEntry, type ChangeSpec } from './catalog.js';
+import { RECEIPT_OPERATIONS, catalogEntry, type CatalogEntry, type ChangeSpec } from './catalog.js';
 import { AUDIT_CONTRACT_V2, AUDIT_OUTCOMES, USER_KINDS, type UserActor, type AuditActor, type AuditPayload, type AuditReference, type ChangeScalar, type ChangeValue } from './contract.js';
 import { refuse } from './errors.js';
 import {
@@ -266,6 +266,28 @@ function changesOf(v: unknown, entry: Readonly<CatalogEntry>): Record<string, Ch
   return out;
 }
 
+/**
+ * Core V2 F-22 / G6-B (DO-62; ADR-0070; the Owner's D-F22-2, D-F22-3): the receipt attribution tuple of an action with an `attribution`
+ * rule. NONE of its keys (a version-2 event written before attribution existed: valid, unattributed, never upgraded) or ALL of them,
+ * consistent: a known operation, exactly that operation's target type, a target id and, on the consumption, the consumer's reference AND
+ * an actor that is exactly the operation's one audience (Auth's binding rule F-7, restated). Partial or contradictory: `invalid_changes`.
+ * A key outside the action's catalog `changes` (e.g. `consume_ref` on `.issued` / `.voided`) was refused already by `changesOf`.
+ */
+const ATTRIBUTION_KEYS = ['operation', 'target_type', 'target_id'] as const;
+function attributionOf(changes: Record<string, ChangeValue> | undefined, entry: Readonly<CatalogEntry>, actor: AuditActor): void {
+  const rule = entry.attribution;
+  if (!rule) return;
+  const keys: readonly string[] = rule.consumeRef ? [...ATTRIBUTION_KEYS, 'consume_ref'] : ATTRIBUTION_KEYS;
+  const present = keys.filter((k) => changes !== undefined && has(changes, k));
+  if (present.length === 0) return;
+  if (present.length !== keys.length) refuse('invalid_changes');
+  const c = changes as Record<string, ChangeValue>;
+  const op = typeof c.operation === 'string' && has(RECEIPT_OPERATIONS, c.operation)
+    ? RECEIPT_OPERATIONS[c.operation as keyof typeof RECEIPT_OPERATIONS] : undefined;
+  if (!op || c.target_type !== op.targetType) refuse('invalid_changes');
+  if (rule.consumeRef && (actor.type !== 'service' || actor.id !== op.audience)) refuse('invalid_changes');
+}
+
 function deepFreeze<T>(v: T): T {
   if (v && typeof v === 'object') {
     for (const x of Object.values(v)) deepFreeze(x);
@@ -327,6 +349,7 @@ export function validateAuditPayloadWith(
   }
 
   const changes = has(o, 'changes') ? changesOf(o.changes ?? null, entry) : changesOf(undefined, entry);
+  attributionOf(changes, entry, actor);
 
   let causationId: string | undefined;
   if (has(o, 'causationId')) {

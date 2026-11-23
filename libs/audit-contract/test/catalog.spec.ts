@@ -14,8 +14,10 @@ const entries = [...AUDIT_CATALOG];
 
 describe('catalog completeness (every action fully defined)', () => {
   it.each(entries)('%s has producer, category, version, actors, organization, resource, subject, outcomes, changes and purpose', (action, e) => {
-    // Core V2 S2-Audit.2: `scope` and `approval` are optional rules, present only on the authorization receipt actions (version 2)
-    const optional = ['approval', 'scope'].filter((k) => k in e);
+    // Core V2 S2-Audit.2: `scope` and `approval` are optional rules, present only on the authorization receipt actions (version 2);
+    // Core V2 F-22 / G6-B: `attribution` only on the three receipt actions
+    const optional = ['approval', 'scope', 'attribution'].filter((k) => k in e);
+    expect('attribution' in e).toBe(action.startsWith('authorization_receipt.'));
     expect(Object.keys(e).sort()).toEqual(['actors', 'category', 'changes', 'organization', 'outcomes', 'producer', 'purpose', 'resource', 'since', 'subject', ...optional].sort());
     expect(CORE_PRODUCERS).toContain(e.producer);
     expect(AUDIT_CATEGORIES).toContain(e.category);
