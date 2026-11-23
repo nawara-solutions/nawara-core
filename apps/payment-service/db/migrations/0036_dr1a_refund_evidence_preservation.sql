@@ -6,8 +6,8 @@
 --
 --   * `failure_after_refund_evidence` (Q4): a provider-confirmed refund FAILURE reported for an attempt that already has its OWN verified refund
 --     fact (`provider_transaction_fact` of kind `refund` naming this attempt and payment). Both observations are kept: the fact is unchanged, and
---     the failure's bounded code is recorded here. The attempt's status when the failure arrived is derived (in flight, `succeeded` or
---     `discrepancy`). One row per attempt. Whether an in-flight attempt should still move to `failed` on that report is NOT decided here: the
+--     the failure's bounded code is recorded here. The attempt's status when the failure arrived is derived (in flight, `succeeded`,
+--     `discrepancy`, or `failed` with a late verified success kept by RLSC-1 / D-R3). One row per attempt. Whether an in-flight attempt should still move to `failed` on that report is NOT decided here: the
 --     approved transition is unchanged (D-R1 open decision).
 --   * `idempotency_retention_unproven` (Q5): the refund worker did NOT send an attempt again with its key, because no certified provider guarantee
 --     establishes that the provider still de-duplicates that key (absent, uncertified, expired, revoked, or the retention window measured from
@@ -66,8 +66,8 @@ BEGIN
     END IF;
     NEW."factId" := NULL;
   ELSIF NEW.kind = 'failure_after_refund_evidence' THEN
-    -- Core V2 D-R1A (Q4): the attempt's OWN verified refund fact exists, and the attempt can still receive a provider outcome or already holds that evidence
-    IF a.status NOT IN ('dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy')
+    -- Core V2 D-R1A (Q4): the attempt's OWN verified refund fact exists, and the attempt was sent (any state after dispatch)
+    IF a.status NOT IN ('dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy', 'failed')
        OR NOT EXISTS (SELECT 1 FROM provider_transaction_fact f WHERE f.id = NEW."factId" AND f.kind = 'refund' AND f."refundAttemptId" = a.id
                         AND f."paymentId" = a."paymentId") THEN
       RAISE EXCEPTION 'refund_safety_escalation: fact % is not verified refund evidence of attempt % in a state a failure report can contradict', NEW."factId", a.id

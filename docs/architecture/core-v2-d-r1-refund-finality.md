@@ -86,8 +86,8 @@ authorized after an uncertified failure.
 
 **Q4 conflict preservation (migration `0036`, kind `failure_after_refund_evidence`):**
 - **When:** a provider-confirmed failure (a status read, a verified webhook, or a definitive dispatch refusal that races a
-  success) arrives for an attempt that already has its own verified refund fact. The attempt is in flight, `succeeded` or
-  `discrepancy`.
+  success) arrives for an attempt that already has its own verified refund fact. The attempt is in flight, `succeeded`,
+  `discrepancy`, or `failed` with a late verified success already kept by RLSC-1 or D-R3.
 - **What is kept:** the failure is recorded once per attempt, before any transition, with its bounded code (`observedFailureCode`),
   its derived status and its audit intent. The fact is never touched.
 - **What is unchanged:** the approved transitions.

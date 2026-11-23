@@ -1130,7 +1130,7 @@ const SPEC = {
   // A request for review, never a finding that a provider or a secret was compromised. Core V2 RLSC-1 (additive, same version): `failed_attempt_refund_evidence`,
   // a FAILED attempt's verified refund kept while another attempt of the same payment and capture is effective (`attempt_status` `failed`).
   // Core V2 D-R1A (the Owner's D-R1 Q4, Q5; additive, same version): `failure_after_refund_evidence`, a provider failure reported for an attempt that
-  // already has its own verified refund fact (both kept; `attempt_status` in flight, `succeeded` or `discrepancy`), and `idempotency_retention_unproven`,
+  // already has its own verified refund fact (both kept; `attempt_status` in flight, `succeeded`, `discrepancy` or `failed`), and `idempotency_retention_unproven`,
   // a same-key resend withheld because no certified provider guarantee covers it (no fact; `dispatching` or `unknown`).
   'refund_safety.escalated': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',

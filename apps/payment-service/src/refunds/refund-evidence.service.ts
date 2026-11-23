@@ -115,7 +115,7 @@ export class RefundEvidenceService {
       // observations are kept: the fact is never touched, and the failure is recorded once per attempt as a `failure_after_refund_evidence`
       // escalation with its audit intent, in this transaction, BEFORE any transition (so its status is the one the failure contradicted). The approved
       // transitions below are unchanged: whether an in-flight attempt should still become `failed` on such a report is an open Owner decision (D-R1).
-      if (IN_FLIGHT.has(a.status) || a.status === 'succeeded' || a.status === 'discrepancy') {
+      if (IN_FLIGHT.has(a.status) || a.status === 'succeeded' || a.status === 'discrepancy' || a.status === 'failed') {
         await this.preserveFailureAfterEvidence(q, a, failureCode(status.failureCode), ctx);
       }
       if (IN_FLIGHT.has(a.status)) {

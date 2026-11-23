@@ -16,7 +16,7 @@ import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 
 const BATCH_SIZE = 50;
 /** Core V2 D-R1A: the attempt states in which a provider failure can contradict the attempt's own verified refund fact (0036). */
-const FAILURE_CONTRADICTABLE = new Set(['dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy']);
+const FAILURE_CONTRADICTABLE = new Set(['dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy', 'failed']);
 const boundedFailureCode = (code: string): string => (/^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'provider_failure');
 /** How long one claim on an attempt lasts: no other instance (or later pass) works on it meanwhile. Technical, no business meaning. */
 export const REFUND_LEASE_MS = 5000;

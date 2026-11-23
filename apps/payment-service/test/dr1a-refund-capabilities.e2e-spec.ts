@@ -261,6 +261,21 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toEqual([]);
     });
 
+    it('C8 failed, replacement authorized, late success kept by RLSC-1, then another failure: preserved; RLSC-1 row and the attempt unchanged', async () => {
+      const x = await submittedAttempt();
+      await outcome(x.attemptId, { outcome: 'failed', failureCode: 'declined' });
+      const { res } = await requestRefund(x.paymentId, x.caseId); // the replacement (eligibility unchanged)
+      expect(res.body.status).toBe('authorized');
+      await outcome(x.attemptId, { outcome: 'succeeded' });
+      const rlsc = (await admin.query(`SELECT * FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'failed_attempt_refund_evidence'`, [x.attemptId])).rows;
+      expect(rlsc).toHaveLength(1);
+      expect((await attemptRow(x.attemptId)).status).toBe('failed');
+      await outcome(x.attemptId, { outcome: 'failed', failureCode: 'reversed' });
+      expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toMatchObject([{ attemptStatus: 'failed', observedFailureCode: 'reversed', factId: rlsc[0].factId }]);
+      expect((await admin.query(`SELECT * FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'failed_attempt_refund_evidence'`, [x.attemptId])).rows).toEqual(rlsc);
+      expect((await attemptRow(x.attemptId)).status).toBe('failed');
+    });
+
     it('C4 the escalation\'s audit intent failing rolls the failure report back whole; the redelivery records it once', async () => {
       const x = await submittedAttempt();
       await outcome(x.attemptId, { outcome: 'succeeded' });
@@ -384,13 +399,12 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       const row = (await ins('failure_after_refund_evidence', s.attemptId, own, 'declined')).rows[0];
       expect(row).toMatchObject({ attemptStatus: 'succeeded', companyId: COMPANY, paymentId: s.paymentId }); // derived, never the caller's
       await expect(ins('failure_after_refund_evidence', s.attemptId, own, 'declined')).rejects.toMatchObject({ code: '23505' }); // once per attempt
-      // a failed attempt is not a state this kind covers (RLSC-1 and D-R3 own a failed attempt's evidence): LABELLED FIXTURE, its own fact undecided
-      const f = await submittedAttempt();
-      await outcome(f.attemptId, { outcome: 'failed', failureCode: 'declined' });
+      // an attempt never sent (`authorized`) is not a state a provider failure can contradict: LABELLED FIXTURE, an own fact recorded for it
+      const h = await authorizedAttempt();
       const evidence = t.app.get(RefundEvidenceService) as unknown as { recordRefundFact: (id: string, s: Row, ctx: unknown) => Promise<{ id: string }> };
-      const fFact = await evidence.recordRefundFact(f.attemptId, { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${f.attemptId}` }, jobContext('refund_worker'));
-      expect((await attemptRow(f.attemptId)).status).toBe('failed');
-      await expect(ins('failure_after_refund_evidence', f.attemptId, fFact.id, 'declined')).rejects.toMatchObject({ constraint: 'refund_safety_escalation_evidence' });
+      const hFact = await evidence.recordRefundFact(h.attemptId, { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${h.attemptId}` }, jobContext('refund_worker'));
+      expect((await attemptRow(h.attemptId)).status).toBe('authorized');
+      await expect(ins('failure_after_refund_evidence', h.attemptId, hFact.id, 'declined')).rejects.toMatchObject({ constraint: 'refund_safety_escalation_evidence' });
 
       // idempotency_retention_unproven: only dispatching / unknown; its fact is nulled; the code shape belongs to the other kind
       await expect(ins('idempotency_retention_unproven', s.attemptId, null, null)).rejects.toMatchObject({ constraint: 'refund_safety_escalation_evidence' });
