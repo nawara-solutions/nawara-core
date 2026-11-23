@@ -9,9 +9,13 @@
 > [ADR-0067](./0067-auth-authorization-receipts-for-owner-approved-refunds.md), which remains the refund-specific decision with its
 > approved policy unchanged; this ADR governs what ADR-0067's text does not cover (F-22): the general receipt mechanism's central
 > audit attribution (DO-62). It builds on [ADR-0069](./0069-verified-audit-producers-and-audit-contract-v2.md) (contract version 2,
-> verified producers, trusted Company scope). Its implementation is pending in two changes, for Core V2 development and simulation
-> only, in this order: the audit contract (Audit accepts and validates the attribution) BEFORE the Auth producer (Auth emits it).
-> Nothing is deployed, and DO-62 stays open until its acceptance conditions are met.
+> verified producers, trusted Company scope). It is implemented for Core V2 development and simulation only, in two changes merged by
+> the owner in this order: the audit contract (Audit accepts and validates the attribution, #542) BEFORE the Auth producer (Auth emits
+> it, #543); main `1863196`, automatic full CI 45157636086 (32/32). Nothing is deployed and nothing is production-certified.
+>
+> **Closure for development and simulation (2026-11-23).** The owner closed F-22 and DO-62 for development and simulation only, on the
+> evidence recorded in [core-v2-s0-architecture-freeze.md](../architecture/core-v2-s0-architecture-freeze.md) §1.5 (DO-62). That closure
+> does not change this ADR's status (`Proposed`), ADR-0067's status, or any other open item.
 
 ## Context
 
