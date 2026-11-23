@@ -33,7 +33,14 @@ export interface PaymentConfig extends BaseConfig {
    * Core V2 S4f (PAY-14; the Owner's F-S1, F-S5, F-S7): the `simulation` provider and its harness, for non-production certification only.
    * `undefined` when disabled; the webhook signing secret is the operator's own (never a published development value).
    */
-  simulation?: { webhookSecret: string };
+  simulation?: {
+    webhookSecret: string;
+    /**
+     * Core V2 D-R1A (the Owner's D-R1 Q6): the simulation provider explicitly MODELS terminal refund failure finality (it then references the
+     * `simulation-refund-failure-finality` certificate). Off by default; refused without the simulation provider; never a real-provider guarantee.
+     */
+    refundFailureFinality: boolean;
+  };
   /**
    * Core V2 S6b (register PAY-07; ADR-0067 decisions 3 and 5; R6B-1): refund attempts, present only when `PAYMENT_SERVICE_POLICY` grants
    * `payment.refund.create` (never in production). `authServiceToken` is Payment's own service credential for Auth's receipt consumption and
@@ -70,7 +77,10 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     const secret = reader.optional('PAYMENT_SIMULATION_WEBHOOK_SECRET');
     if (secret === undefined || secret.length < 32) throw new ConfigError('PAYMENT_SIMULATION_WEBHOOK_SECRET is required (at least 32 characters) when PAYMENT_SIMULATION_PROVIDER is enabled');
     if (isPublishedDevelopmentSecret(secret)) throw new ConfigError('PAYMENT_SIMULATION_WEBHOOK_SECRET must not be a development value published in this repository');
-    simulation = { webhookSecret: secret };
+    simulation = { webhookSecret: secret, refundFailureFinality: reader.bool('PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY', false) };
+  } else if (reader.optional('PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY') !== undefined) {
+    // Core V2 D-R1A (Q6): a modelled capability exists only for the simulation provider; anywhere else it is refused, never ignored
+    throw new ConfigError('PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY requires PAYMENT_SIMULATION_PROVIDER (a modelled simulation capability, never a real-provider guarantee)');
   } else if (reader.optional('PAYMENT_SIMULATION_WEBHOOK_SECRET') !== undefined && base.isProduction) {
     throw new ConfigError('PAYMENT_SIMULATION_WEBHOOK_SECRET must not be configured when NODE_ENV=production');
   }

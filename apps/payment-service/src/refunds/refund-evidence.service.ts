@@ -111,6 +111,13 @@ export class RefundEvidenceService {
         return plain(a);
       }
       // provider-confirmed failure
+      // Core V2 D-R1A (the Owner's Q4): a failure reported for an attempt that already has its OWN verified refund fact contradicts that evidence. Both
+      // observations are kept: the fact is never touched, and the failure is recorded once per attempt as a `failure_after_refund_evidence`
+      // escalation with its audit intent, in this transaction, BEFORE any transition (so its status is the one the failure contradicted). The approved
+      // transitions below are unchanged: whether an in-flight attempt should still become `failed` on such a report is an open Owner decision (D-R1).
+      if (IN_FLIGHT.has(a.status) || a.status === 'succeeded' || a.status === 'discrepancy' || a.status === 'failed') {
+        await this.preserveFailureAfterEvidence(q, a, failureCode(status.failureCode), ctx);
+      }
       if (IN_FLIGHT.has(a.status)) {
         const { rows } = await q.query<RefundAttemptRow>(
           `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`,
@@ -125,6 +132,22 @@ export class RefundEvidenceService {
       }
       return plain(a);
     });
+  }
+
+  /**
+   * Core V2 D-R1A (Q4), in the caller's transaction under the payment and attempt locks: the attempt's earliest OWN verified refund fact, if any, and the
+   * reported failure, kept once per attempt. Returns the escalation id (new or existing), or null when the attempt has no such fact. The database
+   * re-validates the fact and the state (0036). Also used by the refund worker for a definitive dispatch refusal.
+   */
+  async preserveFailureAfterEvidence(q: Queryable, a: RefundAttemptRow, code: string, ctx: EventContext): Promise<string | null> {
+    const { rows: own } = await q.query<{ id: string }>(
+      `SELECT id FROM provider_transaction_fact WHERE kind = 'refund' AND "refundAttemptId" = $1 AND "paymentId" = $2 ORDER BY "observedAt", id LIMIT 1`, [a.id, a.paymentId]);
+    if (!own[0]) return null;
+    const created = await this.safety.escalate(q, { kind: 'failure_after_refund_evidence', refundAttemptId: a.id, factId: own[0].id, observedFailureCode: code }, ctx);
+    const id = created ?? (await this.safety.escalationOf(q, a.id, 'failure_after_refund_evidence'));
+    if (!id) throw new Error('refund_failure_after_evidence_unrecorded'); // never acknowledged without its row
+    this.log.error(`refund_failure_after_refund_evidence refundAttempt=${a.id} payment=${a.paymentId} status=${a.status} fact=${own[0].id} code=${code} escalation=${id} — a provider failure contradicts verified refund evidence of this attempt; both kept for the Owner's review (D-R1 Q4)`);
+    return id;
   }
 
   /**

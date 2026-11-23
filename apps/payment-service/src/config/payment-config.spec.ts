@@ -257,7 +257,16 @@ describe('loadPaymentConfig', () => {
 
     it('is off by default and, when enabled outside production, carries its own signing secret', () => {
       expect(loadPaymentConfig(BASE_ENV).simulation).toBeUndefined();
-      expect(loadPaymentConfig({ ...BASE_ENV, ...SIM }).simulation).toEqual({ webhookSecret: SECRET });
+      expect(loadPaymentConfig({ ...BASE_ENV, ...SIM }).simulation).toEqual({ webhookSecret: SECRET, refundFailureFinality: false });
+    });
+
+    it('Core V2 D-R1A (Q6): models refund failure finality only on explicit opt-in, and refuses the flag without the simulation provider', () => {
+      expect(loadPaymentConfig({ ...BASE_ENV, ...SIM, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true' }).simulation?.refundFailureFinality).toBe(true);
+      expect(loadPaymentConfig({ ...BASE_ENV, ...SIM, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'false' }).simulation?.refundFailureFinality).toBe(false);
+      expect(() => loadPaymentConfig({ ...BASE_ENV, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true' })).toThrow(/requires PAYMENT_SIMULATION_PROVIDER/);
+      expect(() => loadPaymentConfig({ ...BASE_ENV, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'false' })).toThrow(/requires PAYMENT_SIMULATION_PROVIDER/);
+      const prod = { ...BASE_ENV, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672' };
+      expect(() => loadPaymentConfig({ ...prod, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true' })).toThrow(/requires PAYMENT_SIMULATION_PROVIDER/);
     });
 
     it('refuses to start in production with the simulation provider, or with its secret configured', () => {

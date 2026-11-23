@@ -210,3 +210,24 @@ psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE webhook_event SET state = 'proces
   || fail "0030: a historical failed / retries_exhausted notification can no longer be redelivered"
 if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE webhook_event SET state = 'failed' WHERE \"providerEventId\" = 'evt-do22-h-conflict'" 2>/dev/null; then fail "0030: a historical conflict was rewritten"; fi
 echo "PASS: 0030 applies over history unchanged; a historical failed row is still redelivered, a historical conflict is guarded"
+
+echo "== migration: Core V2 D-R1A — 0036 applies over escalations of every existing kind and changes none of them =="
+newdb dr1amig; db="$DBNAME"
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0036_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null # leaves dispatch_held and failed_attempt_refund_evidence rows
+# LABELLED FIXTURE: the two other historical kinds, inserted raw (triggers off); the table's CHECKs still apply
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "BEGIN; SET LOCAL session_replication_role = replica;
+INSERT INTO refund_safety_escalation (kind, \"refundAttemptId\", \"factId\", \"paymentId\", \"companyId\", \"captureFactId\", \"attemptStatus\")
+  SELECT 'dispatch_stalled', a.id, NULL, a.\"paymentId\", a.\"companyId\", a.\"captureFactId\", 'unknown' FROM refund_attempt a ORDER BY id LIMIT 1;
+INSERT INTO refund_safety_escalation (kind, \"refundAttemptId\", \"factId\", \"paymentId\", \"companyId\", \"captureFactId\", \"attemptStatus\")
+  SELECT 'refund_fact_without_authorization', a.id, a.\"captureFactId\", a.\"paymentId\", a.\"companyId\", a.\"captureFactId\", a.status FROM refund_attempt a ORDER BY id OFFSET 1 LIMIT 1;
+COMMIT;"
+snapshot_dr1a() { psql -Atq -d "$db" -c "SELECT string_agg(kind || ':' || md5(row_to_json(e)::text), ',' ORDER BY id) FROM (SELECT id, kind, \"refundAttemptId\", \"factId\", \"paymentId\", \"companyId\", \"captureFactId\", \"attemptStatus\", \"escalatedAt\", \"competingAttemptId\", \"competingAttemptStatus\" FROM refund_safety_escalation) e"; }
+before="$(snapshot_dr1a)"
+kinds="$(psql -Atq -d "$db" -c "SELECT count(DISTINCT kind) FROM refund_safety_escalation")"
+[ "$kinds" -eq 4 ] || fail "0036 history fixture: want 4 existing kinds, got $kinds"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0036_dr1a_refund_evidence_preservation.sql" || fail "0036 does not apply over historical escalations"
+after="$(snapshot_dr1a)"
+[ "$before" = "$after" ] || fail "0036 changed a historical escalation"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_safety_escalation WHERE \"observedFailureCode\" IS NOT NULL")" -eq 0 ] || fail "0036 backfilled observedFailureCode"
+echo "PASS: 0036 applies over escalations of all four existing kinds; every row unchanged, nothing backfilled"

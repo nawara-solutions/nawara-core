@@ -2,7 +2,10 @@ import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnAppl
 import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { PaymentAudit } from '../audit/payment-audit.js';
 import { jobContext, type EventContext } from '../events/payment-events.js';
+import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
+import type { PaymentConfig } from '../config/payment-config.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
+import { evaluateRefundCapability, sameKeyResendAllowed } from '../providers/refund-capabilities.js';
 import type { PaymentProvider, RefundDispatchResult } from '../providers/provider.port.js';
 import { RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js';
 import { RefundAllocationService } from './refund-allocation.service.js';
@@ -12,6 +15,9 @@ import { RefundSafetyService } from './refund-safety.service.js';
 import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 
 const BATCH_SIZE = 50;
+/** Core V2 D-R1A: the attempt states in which a provider failure can contradict the attempt's own verified refund fact (0036). */
+const FAILURE_CONTRADICTABLE = new Set(['dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy', 'failed']);
+const boundedFailureCode = (code: string): string => (/^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'provider_failure');
 /** How long one claim on an attempt lasts: no other instance (or later pass) works on it meanwhile. Technical, no business meaning. */
 export const REFUND_LEASE_MS = 5000;
 /** An intent the request path may still be authorizing is left to it this long before the recovery lookup (never an expiry rule). */
@@ -32,6 +38,11 @@ const SUBMITTED_CHECK_AFTER_MS = 60_000;
  *   * `unknown`: the provider's status first; a reported outcome is applied as evidence; `pending` waits; NO RECORD is never a failure: the
  *     same attempt is sent again with the same key, which the provider de-duplicates (R6B-4). Nothing times out.
  *   * `submitted` for a while: the provider's status, applied as evidence.
+ *   * Core V2 D-R1A (the Owner's Q5): a SAME-KEY resend (`dispatching` again after a crash, or `unknown` answered "no record") happens only while
+ *     a certified provider guarantee establishes that the provider still de-duplicates the key, measured from `authorizedAt` (no later than the
+ *     first send). Absent, uncertified, expired, revoked or elapsed: nothing is sent; the attempt stays unresolved, one
+ *     `idempotency_retention_unproven` escalation is kept, and the provider's status is still read and applied as evidence. The first send
+ *     (`authorized`) is unchanged.
  */
 @Injectable()
 export class RefundWorker {
@@ -55,6 +66,7 @@ export class RefundWorker {
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
     @Inject(RefundAllocationService) private readonly allocations: RefundAllocationService,
     @Inject(RefundSafetyService) private readonly safety: RefundSafetyService,
+    @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -118,12 +130,53 @@ export class RefundWorker {
       this.logger.warn(`refund_worker_provider_unavailable refundAttempt=${a.id} provider=${a.provider} — left unresolved`);
       return false;
     }
-    if (a.status === 'authorized' || a.status === 'dispatching') return this.dispatch(a, provider, ctx);
+    if (a.status === 'authorized') return this.dispatch(a, provider, ctx);
+    if (a.status === 'dispatching') {
+      // the key may already be at the provider: resent only under a certified retention guarantee (Q5), otherwise its status is only read
+      const resend = await this.sameKeyResend(a, provider, ctx);
+      if (resend.allowed) return this.dispatch(a, provider, ctx);
+      return (await this.readStatusOnly(a, provider, ctx)) || resend.escalated;
+    }
     const status = await provider.fetchRefundStatus(a.id);
-    if (status.kind === 'notFound' && a.status === 'unknown') return this.dispatch(a, provider, ctx); // the same key again (R6B-4)
+    if (status.kind === 'notFound' && a.status === 'unknown') {
+      const resend = await this.sameKeyResend(a, provider, ctx);
+      if (resend.allowed) return this.dispatch(a, provider, ctx); // the same key again (R6B-4), within the certified retention (Q5)
+      return resend.escalated;
+    }
     if (status.kind === 'pending' || status.kind === 'notFound') return false;
     await this.evidence.apply(a.id, status, ctx);
     return true;
+  }
+
+  /** The provider's status of an attempt that may not be resent: a definitive answer is applied as evidence; `pending` and no record change nothing. */
+  private async readStatusOnly(a: RefundAttemptRow, provider: PaymentProvider, ctx: EventContext): Promise<boolean> {
+    const status = await provider.fetchRefundStatus!(a.id);
+    if (status.kind === 'pending' || status.kind === 'notFound') return false;
+    await this.evidence.apply(a.id, status, ctx);
+    return true;
+  }
+
+  /**
+   * Core V2 D-R1A (the Owner's Q5): whether the attempt's key may be sent AGAIN now. The provider's certified `idempotencyKeyRetention` (the reviewed
+   * registry, database time) must cover the time since `authorizedAt`. When it does not, one `idempotency_retention_unproven` escalation is kept (with
+   * its audit intent, under the attempt lock, only while the attempt still awaits that resend) and nothing is sent. Never a new key, never a failure.
+   */
+  private async sameKeyResend(a: RefundAttemptRow, provider: PaymentProvider, ctx: EventContext): Promise<{ allowed: boolean; escalated: boolean }> {
+    const { rows } = await this.db.query<{ now: Date; elapsedMs: number | null }>(
+      `SELECT now() AS now, (extract(epoch FROM now() - "authorizedAt") * 1000)::float8 AS "elapsedMs" FROM refund_attempt WHERE id = $1`, [a.id]);
+    const now = rows[0]?.now ?? new Date(Number.NaN);
+    const evaluation = evaluateRefundCapability(provider, 'idempotencyKeyRetention', { now, simulationEnvironment: this.config.simulation !== undefined && !this.config.isProduction });
+    const decision = sameKeyResendAllowed(evaluation, rows[0]?.elapsedMs ?? null);
+    if (decision.allowed) return { allowed: true, escalated: false };
+    const escalation = await this.db.tx(async (q) => {
+      const current = await this.attempts.lockAttempt(q, a.id);
+      if (current.status !== 'dispatching' && current.status !== 'unknown') return null; // it moved on: nothing awaits a resend
+      return this.safety.escalate(q, { kind: 'idempotency_retention_unproven', refundAttemptId: a.id, factId: null }, ctx);
+    });
+    if (escalation) {
+      this.logger.error(`refund_resend_withheld refundAttempt=${a.id} payment=${a.paymentId} provider=${a.provider} status=${a.status} reason=${decision.reason} escalation=${escalation} — no certified idempotency guarantee covers a same-key resend; nothing is sent, the attempt stays unresolved for the Owner's review (D-R1 Q5)`);
+    }
+    return { allowed: false, escalated: escalation !== null };
   }
 
   /** One statement: another instance that claimed the attempt within the lease, or an attempt that moved on since the scan, is skipped. */
@@ -163,8 +216,30 @@ export class RefundWorker {
       this.logger.warn(`refund_dispatch_ambiguous refundAttempt=${a.id} ${describeFailure(e)} — the outcome is unknown; resent only with the same key`);
       result = { kind: 'ambiguous' };
     }
+    try {
+      await this.decideDispatch(a, result, ctx);
+    } catch (e) {
+      // Core V2 D-R1A limit (OD-DR1-6): a provider's dispatch answer is held only in memory until this decision commits. An `accepted` or
+      // ambiguous answer is recovered by the next status read; a definitive refusal for an attempt a concurrent success already moved on is not.
+      // It is logged here, with its bounded code, as the only evidence left; durable dispatch responses are an open Owner decision
+      if (result.kind === 'rejected') {
+        this.logger.error(`refund_dispatch_refusal_unrecorded refundAttempt=${a.id} payment=${a.paymentId} code=${boundedFailureCode(result.failureCode)} ${describeFailure(e)} — the provider's definitive refusal could not be committed; if the attempt has moved on it is not observed again (D-R1 OD-DR1-6)`);
+      }
+      throw e;
+    }
+    this.logger.log(`refund_dispatched refundAttempt=${a.id} answer=${result.kind}`);
+    return true;
+  }
+
+  /** The provider's dispatch answer, applied under the attempt lock in one transaction. */
+  private async decideDispatch(a: RefundAttemptRow, result: RefundDispatchResult, ctx: EventContext): Promise<void> {
     await this.db.tx(async (q) => {
       const current = await this.attempts.lockAttempt(q, a.id);
+      // Core V2 D-R1A (Q4): a definitive refusal is a provider failure too; when the attempt already has its own verified refund fact (a success
+      // that arrived while this call was in flight), both observations are kept before anything else, exactly as for a reported failure
+      if (result.kind === 'rejected' && FAILURE_CONTRADICTABLE.has(current.status)) {
+        await this.evidence.preserveFailureAfterEvidence(q, current, boundedFailureCode(result.failureCode), ctx);
+      }
       if (current.status !== 'dispatching' && current.status !== 'unknown') return; // evidence got there first: it wins
       if (result.kind === 'accepted') {
         await q.query(
@@ -172,7 +247,7 @@ export class RefundWorker {
           [a.id, result.providerRefundId],
         );
       } else if (result.kind === 'rejected') {
-        const code = /^[a-z][a-z0-9_]{0,63}$/.test(result.failureCode) ? result.failureCode : 'provider_failure';
+        const code = boundedFailureCode(result.failureCode);
         const { rows } = await q.query<RefundAttemptRow>(
           `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`, [a.id, code]);
         await this.audit.recordRefund(q, 'refund_attempt.failed', rows[0]!, await this.attempts.organizationOf(q, a.paymentId), ctx);
@@ -180,8 +255,6 @@ export class RefundWorker {
         await q.query(`UPDATE refund_attempt SET status = 'unknown' WHERE id = $1`, [a.id]);
       }
     });
-    this.logger.log(`refund_dispatched refundAttempt=${a.id} answer=${result.kind}`);
-    return true;
   }
 
   /**
