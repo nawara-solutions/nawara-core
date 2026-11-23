@@ -320,6 +320,11 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
         await c.query(`UPDATE audit_retention_run SET deleted = deleted + 1`);
       });
       expect(r.diff).toContain('retention_run_digest');
+      const actor = await mutated(async (c) => {
+        await c.query('SET LOCAL session_replication_role = replica');
+        await c.query(`UPDATE audit_retention_run SET "ranBy" = "ranBy" || '|0|x'`); // free text the JSON-array encoding keeps unambiguous
+      });
+      expect(actor.diff).toContain('retention_run_digest');
     });
 
     it('NC10 an altered dead-letter transition or coverage fact: its digest differs', async () => {
