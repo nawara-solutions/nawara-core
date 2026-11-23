@@ -85,8 +85,9 @@ authorized after an uncertified failure.
   `PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY=true`, which is refused without the simulation provider. Nothing reads it in D-R1A.
 
 **Q4 conflict preservation (migration `0036`, kind `failure_after_refund_evidence`):**
-- **When:** a provider-confirmed failure arrives for an attempt that already has its own verified refund fact. The attempt is in
-  flight, `succeeded` or `discrepancy`.
+- **When:** a provider-confirmed failure (a status read, a verified webhook, or a definitive dispatch refusal that races a
+  success) arrives for an attempt that already has its own verified refund fact. The attempt is in flight, `succeeded` or
+  `discrepancy`.
 - **What is kept:** the failure is recorded once per attempt, before any transition, with its bounded code (`observedFailureCode`),
   its derived status and its audit intent. The fact is never touched.
 - **What is unchanged:** the approved transitions.

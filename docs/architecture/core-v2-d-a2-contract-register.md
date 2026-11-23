@@ -1606,8 +1606,8 @@ SIMULATION ONLY; DO-76 and OD-RLSC-1 stay OPEN).** Full record: [`core-v2-d-r1-r
   - No real provider is certified.
   - `PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY` (opt-in, refused without the simulation provider) adds the modelled finality reference.
 - *Migration `0036`* extends `refund_safety_escalation`, following `0033` and `0034`.
-  - Kind `failure_after_refund_evidence` (Q4): a provider failure for an attempt with its own verified refund fact. Both observations are
-    kept, with `observedFailureCode`, once per attempt.
+  - Kind `failure_after_refund_evidence` (Q4): a provider failure (status, webhook, or a definitive dispatch refusal) for an attempt with
+    its own verified refund fact. Both observations are kept, with `observedFailureCode`, once per attempt.
   - Kind `idempotency_retention_unproven` (Q5): a same-key resend withheld without a certified retention guarantee. No fact, once per attempt.
   - The insert guard gains two branches; its four existing branches are textually unchanged. The fact shape check is widened by one kind.
 - *Not changed.* Replacement eligibility, allocation, case completion, held dispatches, the first send and every approved transition.
@@ -1616,8 +1616,10 @@ SIMULATION ONLY; DO-76 and OD-RLSC-1 stay OPEN).** Full record: [`core-v2-d-r1-r
 - *Audit.* `refund_safety.escalated` is extended additively, in the same version: the two kinds, and attempt statuses `submitted`,
   `succeeded` and `discrepancy`. There is no new action and the topic grants are unchanged.
 - *Evidence.*
-  - Payment `test/dr1a-refund-capabilities.e2e-spec.ts` (C1-C4, R1-R6, E1, G1, V1) and `src/providers/refund-capabilities.spec.ts`.
-  - Mutation controls: without the preservation call five cases fail; without the resend guard four fail.
+  - Payment `test/dr1a-refund-capabilities.e2e-spec.ts` (C1-C7, R1-R6, E1, G1, V1), `src/providers/refund-capabilities.spec.ts`, and the
+    `db/tests/run.sh` check that `0036` applies over escalations of all four existing kinds unchanged.
+  - Mutation controls: without the evidence-service preservation five cases fail; without the dispatch-refusal preservation two fail;
+    without the resend guard four fail.
 - *D-R1B* (the replacement guard) is a design awaiting the Owner's approval of its database contract.
 
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION

@@ -15,6 +15,9 @@ import { RefundSafetyService } from './refund-safety.service.js';
 import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 
 const BATCH_SIZE = 50;
+/** Core V2 D-R1A: the attempt states in which a provider failure can contradict the attempt's own verified refund fact (0036). */
+const FAILURE_CONTRADICTABLE = new Set(['dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy']);
+const boundedFailureCode = (code: string): string => (/^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'provider_failure');
 /** How long one claim on an attempt lasts: no other instance (or later pass) works on it meanwhile. Technical, no business meaning. */
 export const REFUND_LEASE_MS = 5000;
 /** An intent the request path may still be authorizing is left to it this long before the recovery lookup (never an expiry rule). */
@@ -215,6 +218,11 @@ export class RefundWorker {
     }
     await this.db.tx(async (q) => {
       const current = await this.attempts.lockAttempt(q, a.id);
+      // Core V2 D-R1A (Q4): a definitive refusal is a provider failure too; when the attempt already has its own verified refund fact (a success
+      // that arrived while this call was in flight), both observations are kept before anything else, exactly as for a reported failure
+      if (result.kind === 'rejected' && FAILURE_CONTRADICTABLE.has(current.status)) {
+        await this.evidence.preserveFailureAfterEvidence(q, current, boundedFailureCode(result.failureCode), ctx);
+      }
       if (current.status !== 'dispatching' && current.status !== 'unknown') return; // evidence got there first: it wins
       if (result.kind === 'accepted') {
         await q.query(
@@ -222,7 +230,7 @@ export class RefundWorker {
           [a.id, result.providerRefundId],
         );
       } else if (result.kind === 'rejected') {
-        const code = /^[a-z][a-z0-9_]{0,63}$/.test(result.failureCode) ? result.failureCode : 'provider_failure';
+        const code = boundedFailureCode(result.failureCode);
         const { rows } = await q.query<RefundAttemptRow>(
           `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`, [a.id, code]);
         await this.audit.recordRefund(q, 'refund_attempt.failed', rows[0]!, await this.attempts.organizationOf(q, a.paymentId), ctx);

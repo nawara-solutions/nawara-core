@@ -211,6 +211,56 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       expect(await auditsOf(n.attemptId)).toEqual([]);
     });
 
+    /** LABELLED FIXTURE: while the worker's dispatch call is in flight, `during` runs (a success arriving concurrently); then the provider answers. */
+    const duringDispatch = async (during: () => Promise<void>, fn: () => Promise<void>) => {
+      const s = t.app.get(SimulationPaymentProvider);
+      const original = s.refund.bind(s);
+      Object.defineProperty(s, 'refund', { value: async (d: Parameters<typeof original>[0]) => { const r = await original(d); await during(); return r; }, configurable: true, writable: true });
+      try {
+        await fn();
+      } finally {
+        delete (s as unknown as Record<string, unknown>).refund;
+      }
+    };
+    const evidenceSteps = () => t.app.get(RefundEvidenceService) as unknown as {
+      recordRefundFact: (id: string, s: Row, ctx: unknown) => Promise<{ id: string }>;
+      apply: (id: string, s: Row, ctx: unknown) => Promise<Row>;
+    };
+
+    it('C5 a definitive dispatch refusal racing a verified success: both kept; the success stands', async () => {
+      const x = await authorizedAttempt();
+      await sim(`payments/${x.paymentId}/refund-dispatch-plan`, { commandId: cmd(), mode: 'rejected', failureCode: 'declined' }).expect(201);
+      const success = { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${x.attemptId}` };
+      await duringDispatch(async () => { await evidenceSteps().apply(x.attemptId, success, jobContext('refund_worker')); }, () => drain(x.attemptId));
+      const attempt = await attemptRow(x.attemptId);
+      expect(attempt.status).toBe('succeeded');
+      const rows = await escalationsOf(x.attemptId, 'failure_after_refund_evidence');
+      expect(rows).toMatchObject([{ attemptStatus: 'succeeded', observedFailureCode: 'declined', factId: attempt.succeededFactId }]);
+      expect(await auditsOf(x.attemptId)).toHaveLength(1);
+      expect((await auditsOf(x.attemptId))[0].payload.actor).toEqual({ type: 'system', id: 'payment_refund_worker' });
+    });
+
+    it('C6 a definitive dispatch refusal after only the own fact committed: kept before the approved move to failed', async () => {
+      const x = await authorizedAttempt();
+      await sim(`payments/${x.paymentId}/refund-dispatch-plan`, { commandId: cmd(), mode: 'rejected', failureCode: 'declined' }).expect(201);
+      let factId = '';
+      await duringDispatch(async () => {
+        factId = (await evidenceSteps().recordRefundFact(x.attemptId, { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${x.attemptId}` }, jobContext('refund_worker'))).id;
+      }, () => drain(x.attemptId));
+      expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toMatchObject([{ attemptStatus: 'dispatching', observedFailureCode: 'declined', factId }]);
+      // the approved transitions, unchanged (OD-DR1-1): failed (audited), then, in the same pass, D-R3 decides the undecided fact (no competitor: discrepancy)
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.refund_attempt.failed' AND payload->'resource'->>'id' = $1`, [x.attemptId])).rows[0].n).toBe(1);
+      expect((await attemptRow(x.attemptId)).status).toBe('discrepancy');
+    });
+
+    it('C7 a definitive dispatch refusal with no fact records nothing (negative control)', async () => {
+      const x = await authorizedAttempt();
+      await sim(`payments/${x.paymentId}/refund-dispatch-plan`, { commandId: cmd(), mode: 'rejected', failureCode: 'declined' }).expect(201);
+      await drain(x.attemptId);
+      expect((await attemptRow(x.attemptId)).status).toBe('failed');
+      expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toEqual([]);
+    });
+
     it('C4 the escalation\'s audit intent failing rolls the failure report back whole; the redelivery records it once', async () => {
       const x = await submittedAttempt();
       await outcome(x.attemptId, { outcome: 'succeeded' });

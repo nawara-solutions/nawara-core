@@ -137,9 +137,9 @@ export class RefundEvidenceService {
   /**
    * Core V2 D-R1A (Q4), in the caller's transaction under the payment and attempt locks: the attempt's earliest OWN verified refund fact, if any, and the
    * reported failure, kept once per attempt. Returns the escalation id (new or existing), or null when the attempt has no such fact. The database
-   * re-validates the fact and the state (0036).
+   * re-validates the fact and the state (0036). Also used by the refund worker for a definitive dispatch refusal.
    */
-  private async preserveFailureAfterEvidence(q: Queryable, a: RefundAttemptRow, code: string, ctx: EventContext): Promise<string | null> {
+  async preserveFailureAfterEvidence(q: Queryable, a: RefundAttemptRow, code: string, ctx: EventContext): Promise<string | null> {
     const { rows: own } = await q.query<{ id: string }>(
       `SELECT id FROM provider_transaction_fact WHERE kind = 'refund' AND "refundAttemptId" = $1 AND "paymentId" = $2 ORDER BY "observedAt", id LIMIT 1`, [a.id, a.paymentId]);
     if (!own[0]) return null;
