@@ -282,6 +282,24 @@ DO $c$
 DECLARE
   r text := (SELECT max(id)::text FROM audit_record);
   run_row text := $s$INSERT INTO audit_retention_run (category, "retainDays", cutoff, deleted) VALUES ('security', 1, now(), 1)$s$;
+  dl_row text := $s$INSERT INTO audit_dead_letter_transition ("attemptId", transition, "instanceId", consumer, "eventId", "eventName", source, failure, "errorClass",
+    "retryCount", "replayCount", redelivered, "observedAt") VALUES ('00000000-0000-4000-8000-0000000d4e01', 'attempted', '00000000-0000-4000-8000-0000000d4e02',
+    'audit-service.audit', '', '', '', 'malformed', 'DrillControl', 0, 0, false, now())$s$;
+  cov_row text := $s$INSERT INTO audit_dead_letter_coverage ("instanceId", kind, seq, consumers, "observedTotal", "persistedTotal", "droppedOverflow", "droppedSink",
+    "rejectedTotal", buffered, "observedAt") VALUES ('00000000-0000-4000-8000-0000000d4e03', 'started', 0, ARRAY['audit-service.audit'], 0, 0, 0, 0, 0, 0, now())$s$;
+  hold_row text := $s$INSERT INTO audit_legal_hold_event ("holdId", kind, "companyId", "reasonCode", "actorUserId") VALUES
+    ('00000000-0000-4000-8000-0000000d4d01', 'placed', '00000000-0000-4000-8000-0000000d4c01', 'drill_control', '00000000-0000-4000-8000-0000000d4a01')$s$;
+  scoped_row text := $s$WITH ins AS (INSERT INTO audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind",
+      "resourceType", "resourceId", outcome, "occurredAt", "companyId", "producerIdentityVerified", replayed)
+    VALUES ('00000000-0000-4000-8000-0000000d4c03', 'auth-service', 'authorization_receipt.issued', 'security', 2, 'user', '00000000-0000-4000-8000-0000000d4a01',
+      'owner', 'authorization_receipt', 'drill-scope', 'succeeded', now(), '00000000-0000-4000-8000-0000000d4c01', true, false) RETURNING id, "companyId")
+    INSERT INTO audit_record_scope ("recordId", basis, "companyId") SELECT id, 'verified_producer', "companyId" FROM ins$s$;
+  scope_off text := 'ALTER TABLE audit_record_scope DISABLE TRIGGER audit_record_scope_guard';
+  scope_on text := 'ALTER TABLE audit_record_scope ENABLE TRIGGER audit_record_scope_guard';
+  held bigint;
+  a_id bigint;
+  b_id bigint;
+  n_deleted bigint;
   stamped timestamptz;
 BEGIN
   PERFORM pg_temp.refused('N1', 'audit_app', ARRAY['UPDATE audit_record SET outcome = outcome WHERE id = ' || r], 'permission denied%');
@@ -298,6 +316,88 @@ BEGIN
   PERFORM pg_temp.refused('N9b', 'audit_app', ARRAY['UPDATE schema_migrations SET name = name'], 'permission denied%');
   PERFORM pg_temp.refused('N9c', 'audit_app', ARRAY['DELETE FROM schema_migrations'], 'permission denied%');
   PERFORM pg_temp.refused('N10', 'audit_app', ARRAY[$s$SELECT audit_grant_retention('audit_app')$s$], 'permission denied%');
+  -- Core V2 DO-5 / DO-65 (0006, 0008, 0009): the evidence tables stay append-only after a restore; each control first writes one valid row
+  -- (rolled back with the control), so an empty table cannot pass by having nothing to refuse. A control runs in a subtransaction, where the
+  -- 0006 scope guard's insert rule (the record inserted by the top-level transaction) can never hold: its synthetic scope row is written with
+  -- that guard disabled, which is enabled again before the statement the guard must refuse
+  IF to_regclass('public.audit_dead_letter_transition') IS NOT NULL THEN
+    PERFORM pg_temp.refused('N11a', 'audit_migrator', ARRAY[dl_row, 'UPDATE audit_dead_letter_transition SET consumer = consumer'], '%append-only%');
+    PERFORM pg_temp.refused('N11b', 'audit_migrator', ARRAY[dl_row, 'DELETE FROM audit_dead_letter_transition'], '%append-only%');
+    PERFORM pg_temp.refused('N11c', 'audit_migrator', ARRAY['TRUNCATE audit_dead_letter_transition'], '%append-only%');
+    PERFORM pg_temp.refused('N11d', 'audit_migrator', ARRAY[cov_row, 'UPDATE audit_dead_letter_coverage SET buffered = buffered'], '%append-only%');
+    PERFORM pg_temp.refused('N11e', 'audit_migrator', ARRAY[cov_row, 'DELETE FROM audit_dead_letter_coverage'], '%append-only%');
+    PERFORM pg_temp.refused('N11f', 'audit_migrator', ARRAY['TRUNCATE audit_dead_letter_coverage'], '%append-only%');
+  END IF;
+  IF to_regclass('public.audit_legal_hold_event') IS NOT NULL THEN
+    PERFORM pg_temp.refused('N12a', 'audit_migrator', ARRAY[hold_row, $s$UPDATE audit_legal_hold_event SET "reasonCode" = 'drill_rewritten'$s$], '%append-only%');
+    PERFORM pg_temp.refused('N12b', 'audit_migrator', ARRAY[hold_row, 'DELETE FROM audit_legal_hold_event'], '%append-only%');
+    PERFORM pg_temp.refused('N12c', 'audit_migrator', ARRAY['TRUNCATE audit_legal_hold_event'], '%append-only%');
+  END IF;
+  IF to_regclass('public.audit_record_scope') IS NOT NULL THEN
+    PERFORM pg_temp.refused('N13a', 'audit_migrator', ARRAY[scope_off, scoped_row, scope_on, $s$UPDATE audit_record_scope SET "companyId" = '00000000-0000-4000-8000-0000000d4c02'$s$], '%append-only%');
+    PERFORM pg_temp.refused('N13b', 'audit_migrator', ARRAY[scope_off, scoped_row, scope_on, 'DELETE FROM audit_record_scope'], '%append-only%');
+    PERFORM pg_temp.refused('N13c', 'audit_migrator', ARRAY['TRUNCATE audit_record_scope'], '%append-only%');
+  END IF;
+  -- Hold enforcement through a retention role (a drill-only role, created and dropped with the rollback; a 1-day policy on every category,
+  -- rolled back too: nothing is purged). N14: every RESTORED record a hold covers, past that horizon, is refused. Then a synthetic pair of
+  -- backdated trusted records of two Companies: P3 the active hold covers Company A's record only; P4 Company B's record, whose hold was
+  -- released, is not covered (no Company acquires another's hold); N15 deleting A's record is refused; P5 deleting B's succeeds
+  -- (released holds follow the approved behaviour). The whole block is rolled back.
+  IF to_regprocedure('public.audit_record_is_held(bigint)') IS NOT NULL THEN
+    BEGIN
+      CREATE ROLE nawara_drill_retention NOLOGIN;
+      GRANT USAGE ON SCHEMA public TO nawara_drill_retention; -- as infra/postgres/init grants the retention role
+      PERFORM audit_grant_retention('nawara_drill_retention');
+      INSERT INTO audit_retention_policy (category, "retainDays") VALUES ('security', 1), ('business', 1), ('commercial', 1), ('administrative', 1)
+        ON CONFLICT (category) DO UPDATE SET "retainDays" = 1;
+      FOR held IN SELECT s."recordId" FROM audit_record_scope s JOIN audit_record x ON x.id = s."recordId"
+                   WHERE audit_record_is_held(s."recordId") AND x."recordedAt" < now() - interval '2 days' ORDER BY 1 LOOP
+        BEGIN
+          SET LOCAL ROLE nawara_drill_retention;
+          EXECUTE 'DELETE FROM audit_record WHERE id = $1' USING held;
+          RAISE EXCEPTION 'nawara-control N14 failed (a restored held record was deleted)';
+        EXCEPTION WHEN insufficient_privilege THEN
+          IF SQLERRM NOT LIKE '%legal hold%' THEN RAISE EXCEPTION 'nawara-control N14 failed (refused for another reason)'; END IF;
+        END;
+        RESET ROLE;
+      END LOOP;
+      ALTER TABLE audit_record DISABLE TRIGGER audit_record_stamp;
+      ALTER TABLE audit_record_scope DISABLE TRIGGER audit_record_scope_guard; -- a subtransaction (see N13); enabled again below
+      WITH ins AS (
+        INSERT INTO audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "resourceType",
+            "resourceId", outcome, "occurredAt", "recordedAt", "companyId", "producerIdentityVerified", replayed)
+        VALUES ('00000000-0000-4000-8000-0000000d4a01', 'auth-service', 'authorization_receipt.issued', 'security', 2, 'user', '00000000-0000-4000-8000-0000000d4a0a',
+                'owner', 'authorization_receipt', 'drill-a', 'succeeded', now() - interval '10 days', now() - interval '10 days', '00000000-0000-4000-8000-0000000d4c0a', true, false),
+               ('00000000-0000-4000-8000-0000000d4b01', 'auth-service', 'authorization_receipt.issued', 'security', 2, 'user', '00000000-0000-4000-8000-0000000d4b0b',
+                'owner', 'authorization_receipt', 'drill-b', 'succeeded', now() - interval '10 days', now() - interval '10 days', '00000000-0000-4000-8000-0000000d4c0b', true, false)
+        RETURNING id, "companyId")
+      INSERT INTO audit_record_scope ("recordId", basis, "companyId") SELECT id, 'verified_producer', "companyId" FROM ins;
+      ALTER TABLE audit_record ENABLE TRIGGER audit_record_stamp;
+      ALTER TABLE audit_record_scope ENABLE TRIGGER audit_record_scope_guard;
+      a_id := (SELECT id FROM audit_record WHERE "eventId" = '00000000-0000-4000-8000-0000000d4a01');
+      b_id := (SELECT id FROM audit_record WHERE "eventId" = '00000000-0000-4000-8000-0000000d4b01');
+      INSERT INTO audit_legal_hold_event ("holdId", kind, "companyId", "reasonCode", "actorUserId") VALUES
+        ('00000000-0000-4000-8000-0000000d4d0a', 'placed', '00000000-0000-4000-8000-0000000d4c0a', 'drill_control', '00000000-0000-4000-8000-0000000d4a0a'),
+        ('00000000-0000-4000-8000-0000000d4d0b', 'placed', '00000000-0000-4000-8000-0000000d4c0b', 'drill_control', '00000000-0000-4000-8000-0000000d4b0b');
+      INSERT INTO audit_legal_hold_event ("holdId", kind, "companyId", "reasonCode", "actorUserId") VALUES
+        ('00000000-0000-4000-8000-0000000d4d0b', 'released', '00000000-0000-4000-8000-0000000d4c0b', 'drill_control', '00000000-0000-4000-8000-0000000d4b0b');
+      IF NOT audit_record_is_held(a_id) THEN RAISE EXCEPTION 'nawara-control P3 failed (an active hold does not cover its Company''s record)'; END IF;
+      IF audit_record_is_held(b_id) THEN RAISE EXCEPTION 'nawara-control P4 failed (a released or another Company''s hold covers a record)'; END IF;
+      SET LOCAL ROLE nawara_drill_retention;
+      BEGIN
+        DELETE FROM audit_record WHERE id = a_id;
+        RAISE EXCEPTION 'nawara-control N15 failed (not refused)';
+      EXCEPTION WHEN insufficient_privilege THEN
+        IF SQLERRM NOT LIKE '%legal hold%' THEN RAISE EXCEPTION 'nawara-control N15 failed (refused for another reason)'; END IF;
+      END;
+      DELETE FROM audit_record WHERE id = b_id;
+      GET DIAGNOSTICS n_deleted = ROW_COUNT;
+      IF n_deleted <> 1 THEN RAISE EXCEPTION 'nawara-control P5 failed (an unheld record past its horizon was not deletable)'; END IF;
+      RESET ROLE;
+      RAISE EXCEPTION USING ERRCODE = 'NWRA2', MESSAGE = 'rolled back';
+    EXCEPTION WHEN SQLSTATE 'NWRA2' THEN NULL;
+    END;
+  END IF;
   -- P1: the database clock: a supplied recordedAt is replaced by the transaction timestamp (a copy of the newest record, new eventId).
   BEGIN
     SET LOCAL ROLE audit_app;
@@ -325,20 +425,25 @@ compare_facts() {
   AUTHORITY_FACT=$(grep -m1 '^authority|' "$WORK/facts.expected" || true)
   KNOWN_FACT=$(grep -m1 '^known|' "$WORK/facts.expected" || true)
   facts_now=$(docker exec -i "$DDB" psql -X -q -At -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$DB_NAME" -f - <"$WORK/facts.sql" 2>/dev/null) || die "the restore facts could not be read"
-  checked=0
+  checked=0; absent=0
   while IFS= read -r line; do
     case "$line" in
+      # Core V2 DO-5 / DO-65: evidence whose table did not exist at the backup source; nothing of it was backed up, so nothing is compared
+      *\|absent) absent=$((absent + 1)); continue ;;
       migrations\|*)
         if [ "$LATER" = 0 ]; then grep -qxF -- "$line" <<<"$facts_now" || die "the migration history differs from the backup"
         else [ "$(q 'SELECT count(*) FROM schema_migrations')" -ge "$(cut -d'|' -f2 <<<"$line")" ] || die "the restored migration history is shorter than the backup's"; fi ;;
       structure\|*) [ "$LATER" != 0 ] || grep -qxF -- "$line" <<<"$facts_now" || die "the restored structure differs from the backup (${line%|*})" ;;
+      # Core V2 DO-5: a guard or trigger function's definition; a later migration may legitimately redefine one, exactly as for the structure
+      funcsrc\|*) [ "$LATER" != 0 ] || grep -qxF -- "$line" <<<"$facts_now" || die "a restored function definition differs from the backup ($(cut -d'|' -f2 <<<"$line"))" ;;
       *) grep -qxF -- "$line" <<<"$facts_now" || die "a restored fact differs from the backup ($(cut -d'|' -f1-2 <<<"$line"))" ;;
     esac
     checked=$((checked + 1))
   done <"$WORK/facts.expected"
   rm -f "$WORK/facts.txt" "$WORK/facts.expected" "$WORK/facts.sql"
   if [ "$SERVICE" = audit-service ]; then
-    ok "$checked restore facts equal the backup's (row counts, structure, migration history, owners, ACLs, append-only triggers, function and default ACLs, record digest)"
+    ok "$checked restore facts equal the backup's (row counts, structure, migration history, owners, ACLs, append-only triggers, function and default ACLs, record digest; trusted scope, legal holds and held records, purge ledger, dead-letter observations)"
+    [ "$absent" = 0 ] || log "  NOTE  $absent evidence fact(s) were absent at the backup source (their tables did not exist there): nothing of them to compare"
   else
     ok "$checked restore facts equal the backup's (row counts, structure, migration history, owners, ACLs, authority state)"
   fi
@@ -419,6 +524,12 @@ else
     || die "an append-only or privilege control was not refused as expected ($(grep -m1 -oE 'nawara-control [NP][0-9]+[a-z]?' <<<"$controls_err" || echo 'unidentified control'))"
   unset controls_err
   ok "append-only and privilege controls: 12 refusals (N1-N10) and the database clock (P1), all rolled back; triggers present and enabled (P2)"
+  evidence=$(q "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('audit_record_scope', 'audit_legal_hold_event', 'audit_dead_letter_transition', 'audit_dead_letter_coverage')")
+  if [ "$evidence" = 4 ]; then
+    ok "evidence controls (0006, 0008, 0009): scope, hold-event and dead-letter rows append-only (N11-N13), restored held records and an active hold refuse the retention role (N14, N15), a hold covers only its own Company's records and a released hold covers none (P3-P5), all rolled back"
+  else
+    log "  NOTE  the evidence tables of 0006, 0008 and 0009 are not all present in this image's schema: their controls did not apply"
+  fi
 fi
 
 # ---------------------------------------------------------------- 6. the application, in the drill namespace only

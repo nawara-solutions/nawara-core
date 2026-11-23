@@ -49,13 +49,20 @@ conf() { sed -n "s/^$1=//p" "$DEST_ENV" | tail -n 1; }
 # restore that re-stamped `recordedAt` or lost a row cannot pass), and the newest record as the known record a drill reads back through
 # the API (its instant truncated to the millisecond the API's from/to accept). Identifiers only (service names, UUIDs, instants); this file
 # is encrypted like every facts file.
+# Core V2 DO-5 / DO-65 (the Owner's restore-safety GO, 2026-11-23): the same point-in-time facts for the evidence of migrations 0006, 0008 and
+# 0009, each `absent` when its table did not exist at the source (a drill then has nothing of it to compare): the trusted scope rows with the
+# identity of the record each belongs to (an orphan kept after its record's purge included), every legal-hold event and the hold state, the records a hold covered at backup time, the purge
+# ledger, the dead-letter transitions and coverage facts, and which of those migrations were applied. Digests and counts only; every digested
+# row is a JSON array (an unambiguous encoding whatever its values contain).
 audit_facts_sql() {
   cat <<'SQL'
 SELECT 'trigger|' || c.relname || '|' || t.tgname || '|' || t.tgenabled::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
   WHERE c.relnamespace = 'public'::regnamespace AND NOT t.tgisinternal ORDER BY 1;
 SELECT 'funcacl|' || p.proname || '|' || pg_get_userbyid(p.proowner) || '|' || coalesce(array_to_string(p.proacl, ' '), '') FROM pg_proc p
   WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('audit_grant_retention', 'audit_restrict_to_append_only', 'audit_record_stamp',
-    'audit_record_append_only', 'audit_retention_run_append_only', 'outbox_immutable') ORDER BY 1;
+    'audit_record_append_only', 'audit_retention_run_append_only', 'outbox_immutable',
+    'audit_record_scope_guard', 'audit_legal_hold_event_guard', 'audit_legal_hold_lock_key', 'audit_record_is_held', 'audit_record_hold_guard',
+    'audit_dead_letter_transition_guard', 'audit_dead_letter_coverage_guard', 'audit_dead_letter_append_only') ORDER BY 1;
 SELECT 'defacl|' || pg_get_userbyid(defaclrole) || '|' || defaclobjtype::text || '|' || array_to_string(defaclacl, ' ') FROM pg_default_acl
   WHERE defaclnamespace = 'public'::regnamespace ORDER BY 1;
 SELECT 'nspacl|public|' || pg_get_userbyid(nspowner) || '|' || coalesce(array_to_string(nspacl, ' '), '') FROM pg_namespace WHERE nspname = 'public';
@@ -64,6 +71,37 @@ SELECT 'audit_digest|' || count(*) || '|' || coalesce(md5(string_agg(id::text ||
 SELECT 'known|' || coalesce((SELECT "sourceService" || '|' || "eventId"::text || '|'
   || to_char(date_trunc('milliseconds', "occurredAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
   FROM audit_record ORDER BY id DESC LIMIT 1), 'none');
+SELECT 'funcsrc|' || p.proname || '|' || md5(pg_get_functiondef(p.oid)) FROM pg_proc p
+  WHERE p.pronamespace = 'public'::regnamespace AND p.prokind = 'f' AND p.proname IN ('audit_record_stamp', 'audit_record_append_only', 'audit_retention_run_append_only',
+    'outbox_immutable', 'audit_record_scope_guard', 'audit_legal_hold_event_guard', 'audit_legal_hold_lock_key', 'audit_record_is_held', 'audit_record_hold_guard',
+    'audit_dead_letter_transition_guard', 'audit_dead_letter_coverage_guard', 'audit_dead_letter_append_only', 'audit_grant_retention') ORDER BY 1;
+SELECT 'migration_present|' || name FROM schema_migrations
+  WHERE name IN ('0006_audit_contract_v2.sql', '0008_audit_legal_hold.sql', '0009_dead_letter_observation.sql') ORDER BY 1;
+SELECT 'scope_digest|' || CASE WHEN to_regclass('public.audit_record_scope') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
+  SELECT count(*) || '|' || coalesce(md5(string_agg(json_build_array(s.id, s."recordId", coalesce(r."eventId"::text, 'orphan'), s.basis, s."companyId", s."platformId",
+    extract(epoch FROM s."createdAt"))::text, ',' ORDER BY s.id)), '') AS d
+  FROM audit_record_scope s LEFT JOIN audit_record r ON r.id = s."recordId"$q$, false, true, '')))[1]::text END;
+SELECT 'hold_digest|' || CASE WHEN to_regclass('public.audit_legal_hold_event') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
+  SELECT count(*) || '|' || coalesce(md5(string_agg(json_build_array(id, "holdId", kind, "companyId", extract(epoch FROM "windowFrom"), extract(epoch FROM "windowTo"),
+    "reasonCode", "actorUserId", extract(epoch FROM "createdAt"))::text, ',' ORDER BY id)), '') AS d
+  FROM audit_legal_hold_event$q$, false, true, '')))[1]::text END;
+SELECT 'hold_state|' || CASE WHEN to_regclass('public.audit_legal_hold_event') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
+  SELECT count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM audit_legal_hold_event x WHERE x."holdId" = p."holdId" AND x.kind = 'released')) || '|'
+    || count(*) FILTER (WHERE EXISTS (SELECT 1 FROM audit_legal_hold_event x WHERE x."holdId" = p."holdId" AND x.kind = 'released')) AS d
+  FROM audit_legal_hold_event p WHERE p.kind = 'placed'$q$, false, true, '')))[1]::text END;
+SELECT 'held_records|' || CASE WHEN to_regprocedure('public.audit_record_is_held(bigint)') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
+  SELECT count(*) || '|' || coalesce(md5(string_agg(s."recordId"::text, ',' ORDER BY s."recordId")), '') AS d
+  FROM audit_record_scope s WHERE s.basis = 'verified_producer' AND audit_record_is_held(s."recordId")$q$, false, true, '')))[1]::text END;
+SELECT 'retention_run_digest|' || count(*) || '|' || coalesce(md5(string_agg(json_build_array(id, category, "retainDays", extract(epoch FROM cutoff), deleted,
+  extract(epoch FROM "ranAt"), "ranBy")::text, ',' ORDER BY id)), '') FROM audit_retention_run;
+SELECT 'dead_letter_transition_digest|' || CASE WHEN to_regclass('public.audit_dead_letter_transition') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
+  SELECT count(*) || '|' || coalesce(md5(string_agg(json_build_array(id, "attemptId", transition, "instanceId", consumer, "eventId", "eventName", source, failure, reason,
+    "errorClass", "retryCount", "replayCount", redelivered, extract(epoch FROM "observedAt"), extract(epoch FROM "recordedAt"))::text, ',' ORDER BY id)), '') AS d
+  FROM audit_dead_letter_transition$q$, false, true, '')))[1]::text END;
+SELECT 'dead_letter_coverage_digest|' || CASE WHEN to_regclass('public.audit_dead_letter_coverage') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
+  SELECT count(*) || '|' || coalesce(md5(string_agg(json_build_array(id, "instanceId", kind, seq, consumers::text, "observedTotal", "persistedTotal", "droppedOverflow",
+    "droppedSink", "rejectedTotal", buffered, extract(epoch FROM "observedAt"), extract(epoch FROM "recordedAt"))::text, ',' ORDER BY "instanceId", seq)), '') AS d
+  FROM audit_dead_letter_coverage$q$, false, true, '')))[1]::text END;
 SQL
 }
 
@@ -74,11 +112,13 @@ target_for() {
       DB=nawara-core-organization-db; DB_NAME=organization; DB_USER=organization_migrator; REQUIRED_MIGRATION=
       STATE="$STATE_ROOT/organization-service"; CONFIG_FILES="db.env roles.env .env callers"; REQUIRED_CONFIG="db.env roles.env .env"
       REQUIRED_DATA="schema_migrations ownership_state ownership_event hierarchy_id_ledger company platform organization outbox"
+      REQUIRED_DATA_IF_DEFINED=
       AUTHORITY_SQL="SELECT 'authority|' || phase || '|' || coalesce(environment_class, '') || '|' || authoritative FROM ownership_state;" ;;
     auth-service)
       DB=nawara-core-auth-db; DB_NAME=auth; DB_USER=auth_app; REQUIRED_MIGRATION=
       STATE="$STATE_ROOT/auth-service"; CONFIG_FILES="db.env .env"; REQUIRED_CONFIG="db.env .env"
       REQUIRED_DATA="schema_migrations hierarchy_authority company platform organization outbox"
+      REQUIRED_DATA_IF_DEFINED=
       AUTHORITY_SQL="SELECT 'authority|' || mode FROM hierarchy_authority;" ;;
     audit-service)
       # V2 A13: the append-only evidence store. Dumped as its owner (audit_app cannot read the retention tables). Every table below has a
@@ -88,6 +128,9 @@ target_for() {
       REQUIRED_MIGRATION=0004_changes_validation_search_path.sql
       STATE="$STATE_ROOT/audit-service"; CONFIG_FILES="db.env roles.env .env"; REQUIRED_CONFIG="db.env roles.env .env"
       REQUIRED_DATA="schema_migrations audit_record audit_retention_policy audit_retention_run outbox inbox"
+      # Core V2 DO-5 / DO-65: the evidence tables of 0006, 0008 and 0009, required to have their data in the archive whenever the archive
+      # defines them (an older source without them is still backed up exactly as before)
+      REQUIRED_DATA_IF_DEFINED="audit_record_scope audit_legal_hold_event audit_dead_letter_transition audit_dead_letter_coverage"
       AUTHORITY_SQL=$(audit_facts_sql) ;;
     *) return 1 ;;
   esac
@@ -225,6 +268,11 @@ backup_one() {
   toc=$(grep -cE '^[0-9]+;' "$WORK/db.toc" || true)
   for f in $REQUIRED_DATA; do
     grep -qE "^[0-9]+; [0-9]+ [0-9]+ TABLE DATA public $f " "$WORK/db.toc" || { fail verify "the archive holds no data for table $f; nothing was uploaded"; return 1; }
+  done
+  for f in ${REQUIRED_DATA_IF_DEFINED:-}; do
+    if grep -qE "^[0-9]+; [0-9]+ [0-9]+ TABLE public $f " "$WORK/db.toc"; then
+      grep -qE "^[0-9]+; [0-9]+ [0-9]+ TABLE DATA public $f " "$WORK/db.toc" || { fail verify "the archive defines table $f but holds no data for it; nothing was uploaded"; return 1; }
+    fi
   done
   # The facts file carries its own query, so a drill recomputes exactly the same facts after the restore.
   facts_sql >"$WORK/facts.sql"
