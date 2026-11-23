@@ -51,7 +51,7 @@ conf() { sed -n "s/^$1=//p" "$DEST_ENV" | tail -n 1; }
 # is encrypted like every facts file.
 # Core V2 DO-5 / DO-65 (the Owner's restore-safety GO, 2026-11-23): the same point-in-time facts for the evidence of migrations 0006, 0008 and
 # 0009, each `absent` when its table did not exist at the source (a drill then has nothing of it to compare): the trusted scope rows with the
-# identity of the record each belongs to, every legal-hold event and the hold state, the records a hold covered at backup time, the purge
+# identity of the record each belongs to (an orphan kept after its record's purge included), every legal-hold event and the hold state, the records a hold covered at backup time, the purge
 # ledger, the dead-letter transitions and coverage facts, and which of those migrations were applied. Digests and counts only.
 audit_facts_sql() {
   cat <<'SQL'
@@ -73,9 +73,9 @@ SELECT 'known|' || coalesce((SELECT "sourceService" || '|' || "eventId"::text ||
 SELECT 'migration_present|' || name FROM schema_migrations
   WHERE name IN ('0006_audit_contract_v2.sql', '0008_audit_legal_hold.sql', '0009_dead_letter_observation.sql') ORDER BY 1;
 SELECT 'scope_digest|' || CASE WHEN to_regclass('public.audit_record_scope') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
-  SELECT count(*) || '|' || coalesce(md5(string_agg(s.id || '|' || s."recordId" || '|' || r."eventId" || '|' || s.basis || '|' || coalesce(s."companyId"::text, '')
-    || '|' || coalesce(s."platformId"::text, '') || '|' || extract(epoch FROM s."createdAt"), ',' ORDER BY s.id)), '') AS d
-  FROM audit_record_scope s JOIN audit_record r ON r.id = s."recordId"$q$, false, true, '')))[1]::text END;
+  SELECT count(*) || '|' || coalesce(md5(string_agg(s.id || '|' || s."recordId" || '|' || coalesce(r."eventId"::text, 'orphan') || '|' || s.basis || '|'
+    || coalesce(s."companyId"::text, '') || '|' || coalesce(s."platformId"::text, '') || '|' || extract(epoch FROM s."createdAt"), ',' ORDER BY s.id)), '') AS d
+  FROM audit_record_scope s LEFT JOIN audit_record r ON r.id = s."recordId"$q$, false, true, '')))[1]::text END;
 SELECT 'hold_digest|' || CASE WHEN to_regclass('public.audit_legal_hold_event') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
   SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "holdId" || '|' || kind || '|' || "companyId" || '|' || coalesce(extract(epoch FROM "windowFrom")::text, '')
     || '|' || coalesce(extract(epoch FROM "windowTo")::text, '') || '|' || "reasonCode" || '|' || "actorUserId" || '|' || extract(epoch FROM "createdAt"), ',' ORDER BY id)), '') AS d
@@ -90,11 +90,15 @@ SELECT 'held_records|' || CASE WHEN to_regprocedure('public.audit_record_is_held
 SELECT 'retention_run_digest|' || count(*) || '|' || coalesce(md5(string_agg(id || '|' || category || '|' || "retainDays" || '|' || extract(epoch FROM cutoff)
   || '|' || deleted || '|' || extract(epoch FROM "ranAt") || '|' || "ranBy", ',' ORDER BY id)), '') FROM audit_retention_run;
 SELECT 'dead_letter_transition_digest|' || CASE WHEN to_regclass('public.audit_dead_letter_transition') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
-  SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "attemptId" || '|' || transition || '|' || "instanceId" || '|' || consumer || '|' || failure
-    || '|' || extract(epoch FROM "recordedAt"), ',' ORDER BY id)), '') AS d FROM audit_dead_letter_transition$q$, false, true, '')))[1]::text END;
+  SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "attemptId" || '|' || transition || '|' || "instanceId" || '|' || consumer || '|' || "eventId"
+    || '|' || "eventName" || '|' || source || '|' || failure || '|' || coalesce(reason, '') || '|' || "errorClass" || '|' || "retryCount" || '|' || "replayCount"
+    || '|' || redelivered || '|' || extract(epoch FROM "observedAt") || '|' || extract(epoch FROM "recordedAt"), ',' ORDER BY id)), '') AS d
+  FROM audit_dead_letter_transition$q$, false, true, '')))[1]::text END;
 SELECT 'dead_letter_coverage_digest|' || CASE WHEN to_regclass('public.audit_dead_letter_coverage') IS NULL THEN 'absent' ELSE (xpath('/row/d/text()', query_to_xml($q$
-  SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "instanceId" || '|' || kind || '|' || seq || '|' || "persistedTotal" || '|' || "droppedSink"
-    || '|' || extract(epoch FROM "recordedAt"), ',' ORDER BY "instanceId", seq)), '') AS d FROM audit_dead_letter_coverage$q$, false, true, '')))[1]::text END;
+  SELECT count(*) || '|' || coalesce(md5(string_agg(id || '|' || "instanceId" || '|' || kind || '|' || seq || '|' || array_to_string(consumers, ' ') || '|'
+    || "observedTotal" || '|' || "persistedTotal" || '|' || "droppedOverflow" || '|' || "droppedSink" || '|' || "rejectedTotal" || '|' || buffered || '|'
+    || extract(epoch FROM "observedAt") || '|' || extract(epoch FROM "recordedAt"), ',' ORDER BY "instanceId", seq)), '') AS d
+  FROM audit_dead_letter_coverage$q$, false, true, '')))[1]::text END;
 SQL
 }
 

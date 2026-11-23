@@ -129,6 +129,10 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
     await seed(src.adminUrl, 3, COMPANY_A);                      // broker-verified records with trusted Company scope (Company A)
     await seed(src.adminUrl, 2, COMPANY_B);                      // and Company B
     await seed(src.adminUrl, 1, null, false);                    // an unverified record: no scope, never holdable
+    // an ORPHANED scope row (0006 keeps scope rows after their record's purge): one more Company B record, then the record alone removed
+    await seed(src.adminUrl, 1, COMPANY_B);
+    await sql(src.adminUrl, `BEGIN; SET LOCAL session_replication_role = replica;
+      DELETE FROM audit_record WHERE id = (SELECT max("recordId") FROM audit_record_scope WHERE "companyId" = '${COMPANY_B}'); COMMIT;`);
     const active = randomUUID();
     const released = randomUUID();
     await hold(src.adminUrl, active, 'placed', COMPANY_A);      // an active legal hold and its event
@@ -183,7 +187,7 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
       const fact = (k: string) => manifest.find((l) => l.startsWith(`${k}|`));
       expect(manifest.filter((l) => l.startsWith('migration_present|'))).toEqual(
         ['migration_present|0006_audit_contract_v2.sql', 'migration_present|0008_audit_legal_hold.sql', 'migration_present|0009_dead_letter_observation.sql']);
-      expect(fact('scope_digest')).toMatch(/^scope_digest\|5\|[0-9a-f]{32}$/);
+      expect(fact('scope_digest')).toMatch(/^scope_digest\|6\|[0-9a-f]{32}$/); // five records' scope rows and one orphan
       expect(fact('hold_digest')).toMatch(/^hold_digest\|3\|[0-9a-f]{32}$/);
       expect(fact('hold_state')).toBe('hold_state|1|1'); // one active, one released
       expect(fact('held_records')).toMatch(/^held_records\|3\|[0-9a-f]{32}$/); // Company A's three records, not B's (released), not the unscoped one
@@ -328,6 +332,34 @@ describeWithEnv('Core V2 DO-5 / DO-65: the Audit restore drill keeps the evidenc
         await c.query(`UPDATE audit_dead_letter_coverage SET "droppedSink" = 1 WHERE kind = 'heartbeat'`);
       });
       expect(v.diff).toContain('dead_letter_coverage_digest');
+    });
+
+    it('NC10b an altered dead-letter field outside identity and outcome (a reason, a retry count, a consumer list, a buffered count): the digests differ', async () => {
+      for (const [stmt, fact] of [
+        [`UPDATE audit_dead_letter_transition SET "retryCount" = "retryCount" + 1`, 'dead_letter_transition_digest'],
+        [`UPDATE audit_dead_letter_transition SET "eventName" = 'auth.changed'`, 'dead_letter_transition_digest'],
+        [`UPDATE audit_dead_letter_coverage SET consumers = ARRAY['other.queue']`, 'dead_letter_coverage_digest'],
+        [`UPDATE audit_dead_letter_coverage SET buffered = buffered + 1`, 'dead_letter_coverage_digest'],
+      ] as const) {
+        const r = await mutated(async (c) => {
+          await c.query('SET LOCAL session_replication_role = replica');
+          await c.query(stmt);
+        });
+        expect(r.diff, stmt).toContain(fact);
+      }
+    });
+
+    it('NC6b an orphaned scope row (its record purged) moved to another Company or another record: the scope digest differs', async () => {
+      const orphan = `(SELECT s.id FROM audit_record_scope s WHERE NOT EXISTS (SELECT 1 FROM audit_record r WHERE r.id = s."recordId"))`;
+      expect((await sql<{ n: number }>(tgt.url, `SELECT count(*)::int AS n FROM ${orphan} o`))[0]!.n).toBe(1); // the orphan was restored
+      for (const stmt of [`UPDATE audit_record_scope SET "companyId" = '${COMPANY_A}' WHERE id = ${orphan}`,
+        `UPDATE audit_record_scope SET "recordId" = "recordId" + 1000 WHERE id = ${orphan}`]) {
+        const r = await mutated(async (c) => {
+          await c.query('SET LOCAL session_replication_role = replica');
+          await c.query(stmt);
+        });
+        expect(r.diff, stmt).toContain('scope_digest');
+      }
     });
 
     it('NC11 a migration missing from the restored history: its migration_present fact differs', async () => {

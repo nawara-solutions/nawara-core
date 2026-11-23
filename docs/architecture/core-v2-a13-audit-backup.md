@@ -209,11 +209,11 @@ The Owner's restore-safety GO of 2026-11-23. Nothing here is a production restor
 
 - *Backup-time manifest.* `infra/backup/backup.sh` records, in the encrypted facts file and at the backup instant, the evidence of 0006, 0008 and 0009:
   - `migration_present|<name>` for each of the three that is applied;
-  - `scope_digest` (every trusted scope row bound to its record's id AND `eventId`, its basis and its Company or Platform);
+  - `scope_digest` (every trusted scope row bound to its record's id AND `eventId`, its basis and its Company or Platform; an orphan kept after its record's purge is included);
   - `hold_digest` (every legal-hold event, its meaning: hold, kind, Company, window, reason, actor, time) and `hold_state` (active and released holds);
   - `held_records` (exactly the records an active hold covered at backup time, through `audit_record_is_held`);
   - `retention_run_digest` (the purge ledger);
-  - `dead_letter_transition_digest` and `dead_letter_coverage_digest` (the 0009 observations);
+  - `dead_letter_transition_digest` and `dead_letter_coverage_digest` (the 0009 observations, every column);
   - the function ACLs of the scope, hold and dead-letter guards and of the hold checks (a lost grant fails the drill).
 
   Each evidence fact is `absent` when its table did not exist at the source, so an older Audit database is backed up exactly as before. An
@@ -222,6 +222,10 @@ The Owner's restore-safety GO of 2026-11-23. Nothing here is a production restor
 - *Point in time.* The drill compares the restored database with that manifest, never with the live source: a fact recorded `absent` is
   reported apart and not compared; every other fact must be equal. Writes made at the source after the backup are the recovery gap
   (RPO = the backup's age); no replay or reconciliation mechanism exists, so no zero recovery-point loss is claimed.
+- *Limit: one instant (recorded, not fixed here).* The facts are read right after `pg_dump`, in their own snapshots (as for every fact since
+  A13). A write committed between the dump and the facts makes the manifest later than the archive: the drill then FAILS CLOSED on that
+  fact; it can never pass falsely. The exact fix is one exported snapshot shared by the facts session and `pg_dump --snapshot`; it changes
+  the production backup's process model and needs its own GO.
 - *Controls.* All of them run inside the drill's rolled-back block, against the drill's own database:
   - N11a-f: dead-letter transitions and coverage facts cannot be updated, deleted or truncated;
   - N12a-c: a legal-hold event cannot be rewritten, deleted or truncated;
