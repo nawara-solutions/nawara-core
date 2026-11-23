@@ -216,6 +216,23 @@ export class RefundWorker {
       this.logger.warn(`refund_dispatch_ambiguous refundAttempt=${a.id} ${describeFailure(e)} — the outcome is unknown; resent only with the same key`);
       result = { kind: 'ambiguous' };
     }
+    try {
+      await this.decideDispatch(a, result, ctx);
+    } catch (e) {
+      // Core V2 D-R1A limit (OD-DR1-6): a provider's dispatch answer is held only in memory until this decision commits. An `accepted` or
+      // ambiguous answer is recovered by the next status read; a definitive refusal for an attempt a concurrent success already moved on is not.
+      // It is logged here, with its bounded code, as the only evidence left; durable dispatch responses are an open Owner decision
+      if (result.kind === 'rejected') {
+        this.logger.error(`refund_dispatch_refusal_unrecorded refundAttempt=${a.id} payment=${a.paymentId} code=${boundedFailureCode(result.failureCode)} ${describeFailure(e)} — the provider's definitive refusal could not be committed; if the attempt has moved on it is not observed again (D-R1 OD-DR1-6)`);
+      }
+      throw e;
+    }
+    this.logger.log(`refund_dispatched refundAttempt=${a.id} answer=${result.kind}`);
+    return true;
+  }
+
+  /** The provider's dispatch answer, applied under the attempt lock in one transaction. */
+  private async decideDispatch(a: RefundAttemptRow, result: RefundDispatchResult, ctx: EventContext): Promise<void> {
     await this.db.tx(async (q) => {
       const current = await this.attempts.lockAttempt(q, a.id);
       // Core V2 D-R1A (Q4): a definitive refusal is a provider failure too; when the attempt already has its own verified refund fact (a success
@@ -238,8 +255,6 @@ export class RefundWorker {
         await q.query(`UPDATE refund_attempt SET status = 'unknown' WHERE id = $1`, [a.id]);
       }
     });
-    this.logger.log(`refund_dispatched refundAttempt=${a.id} answer=${result.kind}`);
-    return true;
   }
 
   /**

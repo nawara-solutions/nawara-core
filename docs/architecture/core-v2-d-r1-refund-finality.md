@@ -104,6 +104,8 @@ authorized after an uncertified failure.
   `unknown`), and the provider's status is still read and applied.
 - **What it is not:** never a new key, a failure, a hold or a release. The first send from `authorized` is unchanged.
 
+**Limit:** a definitive dispatch refusal whose decision transaction fails after a concurrent success is only logged (OD-DR1-6).
+
 **Visibility:** both kinds appear in the Owner-only PAY-12 `refund_safety_escalation`. The detail carries `observedFailureCode` or
 `authorizedAt`.
 
@@ -184,3 +186,7 @@ None exists. Simulation behaviour is never evidence for a real provider.
   retroactive.
 - **OD-DR1-4:** approve the D-R1B database contract (§4), including the permanent blocking of historical `failed` rows.
 - **OD-DR1-5:** whether any audited exception path for a blocked replacement should exist, and who may use it.
+- **OD-DR1-6:** durable dispatch responses. A provider's dispatch answer is held in memory until its decision transaction commits, as
+  in S6b. If that transaction fails after a concurrent success has moved the attempt on, a definitive refusal is not observed again:
+  only the `refund_dispatch_refusal_unrecorded` error log remains (pinned by C9). Closing this needs an append-only dispatch-response
+  record written before the decision and a recovery pass, which is a new table and a migration. It is not built in D-R1A.
