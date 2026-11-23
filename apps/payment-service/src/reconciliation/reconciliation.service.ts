@@ -176,9 +176,12 @@ const ITEM_SQL: Record<ItemKind, string> = {
         'competingAttemptId', e."competingAttemptId", 'competingAttemptStatus', e."competingAttemptStatus") -- Core V2 RLSC-1: null for the 0032 kinds
         || CASE WHEN e.kind = 'dispatch_stalled' THEN jsonb_build_object('authorizedAt', a."authorizedAt",
              'exit', CASE WHEN x."escalationId" IS NULL THEN NULL ELSE jsonb_build_object('status', x."exitedStatus", 'observedAt', x."observedAt") END)
+           -- Core V2 D-R1A (0036): the reported failure kept beside the verified fact; a withheld same-key resend's authorization time
+           WHEN e.kind = 'failure_after_refund_evidence' THEN jsonb_build_object('observedFailureCode', e."observedFailureCode")
+           WHEN e.kind = 'idempotency_retention_unproven' THEN jsonb_build_object('authorizedAt', a."authorizedAt")
            ELSE '{}'::jsonb END AS detail
     FROM refund_safety_escalation e LEFT JOIN provider_transaction_fact f ON f.id = e."factId" JOIN payment p ON p.id = e."paymentId"
-    LEFT JOIN refund_attempt a ON a.id = e."refundAttemptId" AND e.kind = 'dispatch_stalled'
+    LEFT JOIN refund_attempt a ON a.id = e."refundAttemptId" AND e.kind IN ('dispatch_stalled', 'idempotency_retention_unproven')
     LEFT JOIN refund_safety_escalation_exit x ON x."escalationId" = e.id`,
   // Core V2 RLSC-1 (0033; the Owner's OD-RLSC-2: additive visibility only): verified refund evidence of a FAILED attempt kept as an exception because
   // another attempt of the same payment and capture was effective; the failed attempt stays `failed` (never a `refund_discrepancy`). One row per fact,

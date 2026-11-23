@@ -1129,19 +1129,24 @@ const SPEC = {
   // a verified refund fact names an attempt with no refund authorization. Identifiers and codes only: never an amount, a currency or a provider reference.
   // A request for review, never a finding that a provider or a secret was compromised. Core V2 RLSC-1 (additive, same version): `failed_attempt_refund_evidence`,
   // a FAILED attempt's verified refund kept while another attempt of the same payment and capture is effective (`attempt_status` `failed`).
+  // Core V2 D-R1A (the Owner's D-R1 Q4, Q5; additive, same version): `failure_after_refund_evidence`, a provider failure reported for an attempt that
+  // already has its own verified refund fact (both kept; `attempt_status` in flight, `succeeded` or `discrepancy`), and `idempotency_retention_unproven`,
+  // a same-key resend withheld because no certified provider guarantee covers it (no fact; `dispatching` or `unknown`).
   'refund_safety.escalated': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_webhook', 'payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       escalation_id: { type: 'uuid', shape: 'value', required: true },
       kind: { type: 'code', shape: 'value', required: true, values: ['dispatch_held', 'refund_fact_without_authorization', 'failed_attempt_refund_evidence',
-        'dispatch_stalled'] }, // Core V2 G3 (DO-44): dispatching / unknown, never submitted, 72 hours after the authorization
+        'dispatch_stalled', // Core V2 G3 (DO-44): dispatching / unknown, never submitted, 72 hours after the authorization
+        'failure_after_refund_evidence', 'idempotency_retention_unproven'] }, // Core V2 D-R1A (Q4, Q5)
       payment_id: { type: 'uuid', shape: 'value', required: true },
-      fact_id: { type: 'uuid', shape: 'value', required: false }, // Core V2 G3: absent only for dispatch_stalled (no evidence fact); present for the other kinds
+      fact_id: { type: 'uuid', shape: 'value', required: false }, // Core V2 G3: absent only for dispatch_stalled and (D-R1A) idempotency_retention_unproven
       attempt_status: { type: 'code', shape: 'value', required: true, values: ['authorization_pending', 'authorized', 'authorization_expired', 'authorization_refused', 'failed',
-        'dispatching', 'unknown'] }, // Core V2 G3 (DO-44)
+        'dispatching', 'unknown', // Core V2 G3 (DO-44)
+        'submitted', 'succeeded', 'discrepancy'] }, // Core V2 D-R1A (Q4)
     },
-    purpose: 'A refund attempt is held from dispatch, a verified refund fact names an unauthorized attempt, a failed attempt\'s verified refund is kept while another attempt is effective, or a dispatch outcome stays unknown past its threshold: an escalation for review, with no commercial effect.',
+    purpose: 'A refund attempt is held from dispatch, a verified refund fact names an unauthorized attempt, a failed attempt\'s verified refund is kept while another attempt is effective, a dispatch outcome stays unknown past its threshold, a provider failure contradicts the attempt\'s verified refund evidence, or a same-key resend is withheld without a certified idempotency guarantee: an escalation for review, with no commercial effect.',
   },
   // Core V2 G3 (DO-44; the Owner's G3 rule 1): the attempt of a dispatch_stalled escalation left the stuck state (submitted, or any status other than
   // dispatching / unknown). Once per escalation, in its exit row's transaction. An observation only: the escalation stays; nothing else changes.

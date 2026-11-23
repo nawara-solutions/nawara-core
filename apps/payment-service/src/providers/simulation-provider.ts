@@ -1,4 +1,5 @@
 import { rawEvidenceOf } from '../webhooks/observation-quarantine.js';
+import { SIMULATION_REFUND_CONTRACT_CERTIFICATE, SIMULATION_REFUND_FAILURE_FINALITY_CERTIFICATE } from './refund-capabilities.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService } from '@nawara/service-kit';
@@ -91,7 +92,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 @Injectable()
 export class SimulationPaymentProvider implements PaymentProvider {
   readonly id = SIMULATION_PROVIDER_ID;
-  readonly capabilities: ProviderCapabilities = {
+  readonly capabilities: ProviderCapabilities;
+  private readonly baseCapabilities: ProviderCapabilities = {
     refunds: true, // Core V2 S6b (R6B-6): full refunds only
     partialRefunds: false,
     notFoundIsAuthoritative: true,
@@ -106,7 +108,19 @@ export class SimulationPaymentProvider implements PaymentProvider {
   constructor(
     @Inject(DbService) private readonly db: DbService,
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
-  ) {}
+  ) {
+    // Core V2 D-R1A (the Owner's D-R1 Q6): explicit, simulation-only certificate REFERENCES (the registry decides what they certify). The base
+    // contract (key de-duplication, authenticated channels) always; modelled terminal failure finality only when the environment opts in
+    this.capabilities = Object.freeze({
+      ...this.baseCapabilities,
+      refundCapabilityCertificates: Object.freeze([
+        { id: SIMULATION_REFUND_CONTRACT_CERTIFICATE.id, version: SIMULATION_REFUND_CONTRACT_CERTIFICATE.version },
+        ...(config.simulation?.refundFailureFinality
+          ? [{ id: SIMULATION_REFUND_FAILURE_FINALITY_CERTIFICATE.id, version: SIMULATION_REFUND_FAILURE_FINALITY_CERTIFICATE.version }]
+          : []),
+      ]),
+    });
+  }
 
   /** The latest initiation plan the harness set for this payment answers every new attempt; none means the provider accepts it. */
   async initiate(payment: PaymentRow, attempt: { id: string; merchantReference: string }): Promise<InitiateResult> {

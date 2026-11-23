@@ -229,6 +229,9 @@ The Owner's restore-safety GO of 2026-11-23. Nothing here is a production restor
   A13). A write committed between the dump and the facts makes the manifest later than the archive: the drill then FAILS CLOSED on that
   fact; it can never pass falsely. The exact fix is one exported snapshot shared by the facts session and `pg_dump --snapshot`; it changes
   the production backup's process model and needs its own GO.
+  - *Deferred DO-5 operational item (recorded 2026-11-23, the Owner's D-R1 direction, Part D):* shared-snapshot consistency between the
+    manifest facts and the archive. It stays open as part of DO-5. `backup.sh`, the scheduled-backup installation and production
+    scheduling are unchanged until a separate GO.
 - *Controls.* All of them run inside the drill's rolled-back block, against the drill's own database:
   - N11a-f: dead-letter transitions and coverage facts cannot be updated, deleted or truncated;
   - N12a-c: a legal-hold event cannot be rewritten, deleted or truncated;

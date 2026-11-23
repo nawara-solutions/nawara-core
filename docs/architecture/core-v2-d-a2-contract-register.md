@@ -1598,6 +1598,28 @@ ESCALATION ONLY; DO-44).** Payment migration `0034` extends `refund_safety_escal
   - the guards: not due, a forged fact, fact required for the existing kinds, an early exit, append-only;
   - a failed audit intent writing nothing;
   - Owner and producer isolation.
+**D-R1A Payment refund capability foundation (dated note, 2026-11-23; the Owner's D-R1 direction, Q1 to Q6, Part B GO; DEVELOPMENT AND
+SIMULATION ONLY; DO-76 and OD-RLSC-1 stay OPEN).** Full record: [`core-v2-d-r1-refund-finality.md`](./core-v2-d-r1-refund-finality.md).
+- *Capabilities.* `src/providers/refund-capabilities.ts` is the one registry of versioned, attributable certificates. Adapters only reference
+  them, and every absent, unknown, unverified, expired, revoked or ambiguous capability is uncertified.
+  - Two simulation-scope certificates exist, honoured only for the `simulation` provider in a non-production simulation environment.
+  - No real provider is certified.
+  - `PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY` (opt-in, refused without the simulation provider) adds the modelled finality reference.
+- *Migration `0036`* extends `refund_safety_escalation`, following `0033` and `0034`.
+  - Kind `failure_after_refund_evidence` (Q4): a provider failure for an attempt with its own verified refund fact. Both observations are
+    kept, with `observedFailureCode`, once per attempt.
+  - Kind `idempotency_retention_unproven` (Q5): a same-key resend withheld without a certified retention guarantee. No fact, once per attempt.
+  - The insert guard gains two branches; its four existing branches are textually unchanged. The fact shape check is widened by one kind.
+- *Not changed.* Replacement eligibility, allocation, case completion, held dispatches, the first send and every approved transition.
+  - An in-flight attempt still becomes `failed` on such a report (OD-DR1-1 open).
+  - The certified simulation contract keeps R6B-4's same-key resend.
+- *Audit.* `refund_safety.escalated` is extended additively, in the same version: the two kinds, and attempt statuses `submitted`,
+  `succeeded` and `discrepancy`. There is no new action and the topic grants are unchanged.
+- *Evidence.*
+  - Payment `test/dr1a-refund-capabilities.e2e-spec.ts` (C1-C4, R1-R6, E1, G1, V1) and `src/providers/refund-capabilities.spec.ts`.
+  - Mutation controls: without the preservation call five cases fail; without the resend guard four fail.
+- *D-R1B* (the replacement guard) is a design awaiting the Owner's approval of its database contract.
+
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
 ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
 `authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.

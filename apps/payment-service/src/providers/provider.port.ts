@@ -1,4 +1,5 @@
 import type { PaymentRow } from '../payments/payment.types.js';
+import type { RefundCapabilityCertificateRef } from './refund-capabilities.js';
 
 export type FailureClass = 'retryable' | 'terminal' | 'ambiguous';
 
@@ -66,6 +67,12 @@ export interface ProviderCapabilities {
    * adapter declares it; a real adapter never acquires it implicitly (its contract is open decision O-1).
    */
   refundReferenceScope?: 'provider';
+  /**
+   * Core V2 D-R1A (the Owner's D-R1 Q1, Q3, Q6): the refund capability certificates this adapter REFERENCES. A reference certifies nothing by
+   * itself: only a matching, valid, unrevoked entry of the reviewed registry (`refund-capabilities.ts`) does, evaluated by
+   * `evaluateRefundCapability`. Absent: every refund capability is uncertified (fail-closed).
+   */
+  refundCapabilityCertificates?: readonly RefundCapabilityCertificateRef[];
 }
 
 /** Options for one attempt, opaque to payment-service and validated by the adapter (SDD section 9.1, endpoint 3). */
