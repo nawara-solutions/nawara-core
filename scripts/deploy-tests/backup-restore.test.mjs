@@ -847,6 +847,96 @@ for (const [label, drill, reason] of [
   });
 }
 
+// ---------------------------------------------------------------- Core V2 DO-5 / DO-65: the evidence of Audit migrations 0006, 0008 and 0009
+const KNOWN_LINE = `known|${AUDIT_KNOWN.join('|')}`;
+test('DO-5 backup: the Audit facts record trusted scope, legal holds, held records, the purge ledger and dead-letter observations, each absent-safe', () => {
+  const w = backupWorld();
+  assert.equal(w.backup('audit-service').code, 0);
+  const [sql] = factsOf(w, 'audit-service').split('-- nawara-backup-facts-results\n');
+  for (const f of ["'migration_present|'", "'scope_digest|'", "'hold_digest|'", "'hold_state|'", "'held_records|'", "'retention_run_digest|'",
+    "'dead_letter_transition_digest|'", "'dead_letter_coverage_digest|'"]) assert.ok(sql.includes(f), `evidence fact ${f}`);
+  for (const t of ['audit_record_scope', 'audit_legal_hold_event', 'audit_dead_letter_transition', 'audit_dead_letter_coverage']) {
+    assert.ok(sql.includes(`to_regclass('public.${t}') IS NULL THEN 'absent'`), `${t}: absent when the source predates it (an older source is still backed up)`);
+  }
+  assert.ok(sql.includes("to_regprocedure('public.audit_record_is_held(bigint)') IS NULL THEN 'absent'"));
+  assert.match(sql, /r\."eventId"/, 'a scope row is bound to the identity of its record, not only its id');
+  for (const fn of ['audit_record_is_held', 'audit_record_hold_guard', 'audit_legal_hold_event_guard', 'audit_record_scope_guard', 'audit_dead_letter_append_only']) {
+    assert.ok(sql.includes(`'${fn}'`), `function ACL fact: ${fn}`);
+  }
+});
+
+test('DO-5 backup: an archive that DEFINES an evidence table must hold its data (fail closed); an older archive without the table is unaffected', () => {
+  const tables = ['audit_record_scope', 'audit_legal_hold_event', 'audit_dead_letter_transition', 'audit_dead_letter_coverage'];
+  assert.equal(backupWorld({ backup: { tocDefined: tables } }).backup('audit-service').code, 0);
+  for (const t of tables) {
+    const w = backupWorld({ backup: { tocDefined: tables, tocMissing: t } });
+    const r = w.backup('audit-service');
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, new RegExp(`the archive defines table ${t} but holds no data for it; nothing was uploaded`));
+    assert.deepEqual(puts(w), []); assert.deepEqual(workLeft(w), []);
+  }
+  assert.equal(backupWorld().backup('audit-service').code, 0, 'no evidence table defined (a source before 0006): backed up as before');
+  assert.equal(backupWorld({ backup: { tocMissing: 'audit_record_scope' } }).backup('audit-service').code, 0);
+});
+
+test('DO-5 restore drill: the evidence controls run inside the rolled-back control block, through a drill-only retention role', () => {
+  const w = recoveryWorld(backedUp('audit-service'));
+  const r = w.run(AUDIT_DRILL);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /PASS  evidence controls \(0006, 0008, 0009\): scope, hold-event and dead-letter rows append-only \(N11-N13\), restored held records and an active hold refuse the retention role \(N14, N15\), a hold covers only its own Company's records and a released hold covers none \(P3-P5\), all rolled back/);
+  const ctl = w.state().stdin.find((x) => x.text.includes('-- nawara-drill-controls')).text;
+  for (const c of ['N11a', 'N11b', 'N11c', 'N11d', 'N11e', 'N11f', 'N12a', 'N12b', 'N12c', 'N13a', 'N13b', 'N13c', 'N14', 'N15', 'P3', 'P4', 'P5']) {
+    assert.ok(ctl.includes(`nawara-control ${c} failed`) || ctl.includes(`'${c}'`), `control ${c}`);
+  }
+  assert.match(ctl, /CREATE ROLE nawara_drill_retention NOLOGIN;[\s\S]*audit_grant_retention\('nawara_drill_retention'\)[\s\S]*ERRCODE = 'NWRA2'/, 'the role, its grant and every fixture are rolled back');
+  assert.doesNotMatch(ctl, /COMMIT/, 'nothing in the controls commits');
+});
+
+test('DO-5 restore drill: an image without the evidence tables says so (NOTE) and claims no evidence control', () => {
+  const r = recoveryWorld(backedUp('audit-service'), { drill: { evidenceTables: 3 } }).run(AUDIT_DRILL);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /NOTE  the evidence tables of 0006, 0008 and 0009 are not all present in this image's schema: their controls did not apply/);
+  assert.doesNotMatch(r.out, /PASS  evidence controls/);
+});
+
+for (const control of ['N11b', 'N12a', 'N13a', 'N14', 'N15', 'P3', 'P4', 'P5']) {
+  test(`DO-5 restore drill: fail closed when evidence control ${control} does not hold; every drill container and its volume is removed`, () => {
+    const w = recoveryWorld(backedUp('audit-service'), { drill: { controlFail: control } });
+    const r = w.run(AUDIT_DRILL);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, new RegExp(`an append-only or privilege control was not refused as expected \\(nawara-control ${control}\\)`));
+    assertDrillGone(w);
+  });
+}
+
+test('DO-5 restore drill: facts absent at the backup source are reported apart and not compared; every other fact still is', () => {
+  const backupFacts = `${'table|audit_record|1\nmigrations|6|0123456789abcdef0123456789abcdef\n'}scope_digest|absent\nhold_digest|absent\n${KNOWN_LINE}\n`;
+  const b = backupWorld({ backup: { facts: backupFacts } });
+  assert.equal(b.backup('audit-service').code, 0);
+  const ok = recoveryWorld(b, { drill: { facts: `table|audit_record|1\nmigrations|6|0123456789abcdef0123456789abcdef\nscope_digest|0|\nhold_digest|0|\n${KNOWN_LINE}\n` } }).run(AUDIT_DRILL);
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /NOTE  2 evidence fact\(s\) were absent at the backup source/);
+  const bad = recoveryWorld(b, { drill: { facts: `table|audit_record|2\nmigrations|6|0123456789abcdef0123456789abcdef\n${KNOWN_LINE}\n` } }).run(AUDIT_DRILL);
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.out, /a restored fact differs from the backup \(table\|audit_record\)/);
+});
+
+for (const [label, changed] of [['a scope row', 'scope_digest|1|ffffffffffffffffffffffffffffffff'], ['a legal-hold event', 'hold_digest|2|ffffffffffffffffffffffffffffffff'],
+  ['the held records', 'held_records|0|'], ['the purge ledger', 'retention_run_digest|1|ffffffffffffffffffffffffffffffff'],
+  ['a dead-letter transition', 'dead_letter_transition_digest|1|ffffffffffffffffffffffffffffffff'], ['a dead-letter coverage fact', 'dead_letter_coverage_digest|1|ffffffffffffffffffffffffffffffff'],
+  ['a hold function grant', 'funcacl|audit_record_is_held|audit_migrator|audit_migrator=X/audit_migrator'], ['an applied evidence migration', 'migration_present|0008_audit_legal_hold.sql']]) {
+  test(`DO-5 restore drill: fail closed when ${label} differs from the backup-time manifest`, () => {
+    const key = changed.split('|')[0];
+    const expected = `table|audit_record|1\nmigrations|6|0123456789abcdef0123456789abcdef\n${key}|${key === 'funcacl' ? 'audit_record_is_held|audit_migrator|audit_migrator=X/audit_migrator nawara_retention=X/audit_migrator' : key === 'migration_present' ? '0008_audit_legal_hold.sql' : '1|0123456789abcdef0123456789abcdef'}\n${KNOWN_LINE}\n`;
+    const b = backupWorld({ backup: { facts: expected } });
+    assert.equal(b.backup('audit-service').code, 0);
+    const restored = key === 'migration_present' ? expected.replace('migration_present|0008_audit_legal_hold.sql\n', '') : expected.replace(new RegExp(`^${key}\\|.*$`, 'm'), changed);
+    const r = recoveryWorld(b, { drill: { facts: restored } }).run(AUDIT_DRILL);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, new RegExp(`a restored fact differs from the backup \\(${key}\\|`));
+  });
+}
+
 test('A13 restore drill: the deploy\'s privilege assertion applies after the restore (audit_app able to write the history fails the drill)', () => {
   const w = recoveryWorld(backedUp('audit-service'));
   w.patch((s) => { s.audit = { forbidden: 'schema_migrations:INSERT' }; });

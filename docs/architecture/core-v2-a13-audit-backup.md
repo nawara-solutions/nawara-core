@@ -202,3 +202,54 @@ and full Audit E2E proofs are local evidence, not CI; L3, the analysed B15 and R
 | an operational 24 h RPO | G6-gated scheduling; the RPO stays a target |
 
 A3.6 and A3.7 stay deferred; A3.8 is not certified; G6 is deferred; G7, F6 and F7 stay locked; Final Core Validation is the absolute last.
+
+## 10. Core V2 DO-5 / DO-65: the evidence of migrations 0006, 0008 and 0009 (2026-11-23; development only; DO-5 and DO-65 stay OPEN)
+
+The Owner's restore-safety GO of 2026-11-23. Nothing here is a production restore, a production backup run or a certification.
+
+- *Backup-time manifest.* `infra/backup/backup.sh` records, in the encrypted facts file and at the backup instant, the evidence of 0006, 0008 and 0009:
+  - `migration_present|<name>` for each of the three that is applied;
+  - `scope_digest` (every trusted scope row bound to its record's id AND `eventId`, its basis and its Company or Platform);
+  - `hold_digest` (every legal-hold event, its meaning: hold, kind, Company, window, reason, actor, time) and `hold_state` (active and released holds);
+  - `held_records` (exactly the records an active hold covered at backup time, through `audit_record_is_held`);
+  - `retention_run_digest` (the purge ledger);
+  - `dead_letter_transition_digest` and `dead_letter_coverage_digest` (the 0009 observations);
+  - the function ACLs of the scope, hold and dead-letter guards and of the hold checks (a lost grant fails the drill).
+
+  Each evidence fact is `absent` when its table did not exist at the source, so an older Audit database is backed up exactly as before. An
+  archive that DEFINES one of the four evidence tables must hold its data (`REQUIRED_DATA_IF_DEFINED`); one that does not define them is
+  unaffected.
+- *Point in time.* The drill compares the restored database with that manifest, never with the live source: a fact recorded `absent` is
+  reported apart and not compared; every other fact must be equal. Writes made at the source after the backup are the recovery gap
+  (RPO = the backup's age); no replay or reconciliation mechanism exists, so no zero recovery-point loss is claimed.
+- *Controls.* All of them run inside the drill's rolled-back block, against the drill's own database:
+  - N11a-f: dead-letter transitions and coverage facts cannot be updated, deleted or truncated;
+  - N12a-c: a legal-hold event cannot be rewritten, deleted or truncated;
+  - N13a-c: a trusted scope row cannot be moved to another Company, deleted or truncated;
+  - N14: every restored record an active hold covers, past a one-day horizon, is refused to a drill-only retention role. The role, its grants and the one-day policies are rolled back, so nothing is purged;
+  - P3, P4, N15, P5: a synthetic pair of backdated trusted records of two Companies:
+    - P3: the active hold covers its own Company's record;
+    - P4: the other Company's record, whose hold was released, is not covered;
+    - N15: deleting the held record is refused;
+    - P5: deleting the other one succeeds (released holds follow the approved behaviour).
+
+  The synthetic scope rows are written with the 0006 scope guard disabled inside the subtransaction, because its insert rule (the record inserted by the top-level transaction) cannot hold there. The guard is enabled again before the statements it must refuse.
+- *Evidence.* `apps/audit-service/test/restore-drill-invariants.e2e-spec.ts` uses real PostgreSQL, a real `pg_dump` and `pg_restore` of the server's own release, real roles, and the scripts' own SQL. Its cases:
+  - M1: the required fixtures are in the manifest;
+  - R1: every manifest fact holds after the restore;
+  - R2: the recovery gap is reported apart;
+  - R3: every control passes and is rolled back;
+  - R4: holds cover exactly their Company's restored records;
+  - NC1 to NC11: each defect fails the drill:
+    - a dropped hold or dead-letter guard;
+    - lost hold-aware delete protection;
+    - a hold check that covers nothing or everything;
+    - a revoked grant;
+    - a deleted or moved scope row;
+    - a rewritten hold event or a lost release;
+    - an altered ledger or dead-letter row;
+    - a missing migration;
+  - O1: an older source records the evidence as `absent`.
+
+  Fake-CLI tests are in `scripts/deploy-tests/backup-restore.test.mjs` (the DO-5 cases). The pin of `backup.sh` in `infra/backup/scheduled-backup.sh` is updated with it. An installed scheduled backup keeps its reviewed pair until an authorized reinstall.
+

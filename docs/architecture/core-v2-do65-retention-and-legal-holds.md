@@ -116,7 +116,7 @@ Automatic retention deletion stays disabled until restore correctness is proven.
 | Step | Change | Depends on |
 |---|---|---|
 | 1 | This record | — |
-| 2 | Restore-drill extension: prove scope rows, hold events, the hold-aware delete trigger and the `0009` tables after an Audit restore, with negative controls (development) | DO-5 drill tooling; GO |
+| 2 | Restore-drill extension: prove scope rows, hold events, the hold-aware delete trigger and the `0009` tables after an Audit restore, with negative controls (development). **Implemented for development, 2026-11-23** ([A13 record](./core-v2-a13-audit-backup.md) §10); no production restore drill yet | DO-5 drill tooling; GO |
 | 3 | Read-only retention preview: per category, what a horizon would select and how much of it is holdable; no policy row, no deletion | GO |
 | 4 | File evidence holds for financial cases (§5) | Ownership and release decisions, O2, recovery (§7) |
 | 5 | Dead-letter observation retention mechanism, still without a duration | A change to decision D |

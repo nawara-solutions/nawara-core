@@ -224,7 +224,10 @@ function execIn(args) {
   if (prog === 'pg_restore' && progArgs.includes('--list')) {
     readStdin();
     if (B.tocFail) { process.stderr.write('pg_restore: error: input file does not appear to be a valid archive\n'); exit(1); }
-    out(TOC_TABLES.filter((t) => t !== B.tocMissing).map((t, k) => `${3600 + k}; 0 ${16400 + k} TABLE DATA public ${t} owner\n`).join('')); exit(0);
+    // Core V2 DO-5 / DO-65: `tocDefined` lists tables the archive DEFINES (a `TABLE` entry), with their data unless named in `tocMissing`
+    const defined = (B.tocDefined ?? []).map((t, k) => `${3500 + k}; 2615 ${16300 + k} TABLE public ${t} owner\n`).join('');
+    const data = [...TOC_TABLES, ...(B.tocDefined ?? [])].filter((t) => t !== B.tocMissing).map((t, k) => `${3600 + k}; 0 ${16400 + k} TABLE DATA public ${t} owner\n`).join('');
+    out(defined + data); exit(0);
   }
   if (prog === 'pg_restore') {
     const data = readStdin();
@@ -267,6 +270,8 @@ function execIn(args) {
     // the Audit drill (V2 A13): the source's schema_migrations writes (O3-B notice) and the append-only triggers' state
     if (sql.includes('source-history')) { out(`${D.sourceWrites ?? ''}\n`); exit(0); }
     if (sql.includes("t.tgenabled = 'O'")) { out(`${D.triggersEnabled ?? 6}\n`); exit(0); }
+    // Core V2 DO-5 / DO-65: how many of the 0006 / 0008 / 0009 evidence tables the restored schema has (4 = all, so their controls applied)
+    if (sql.includes("'audit_dead_letter_coverage')") && sql.includes('pg_class')) { out(`${D.evidenceTables ?? 4}\n`); exit(0); }
     if (sql.includes('relowner') && sql.includes('schema_migrations')) { out(`${D.smOwner ?? (name.includes('organization') ? 'organization_migrator' : name.includes('audit') ? 'audit_migrator' : 'auth')}\n`); exit(0); }
     if (sql.includes("'public.schema_migrations','SELECT'")) { out(`${D.smPrivileges ?? 't|f|f|f|f'}\n`); exit(0); }
     // infra/backup (V2 A13.4a): a required migration applied at the backup source? (backup.missingMigration: no; historyUnreadable: error)
