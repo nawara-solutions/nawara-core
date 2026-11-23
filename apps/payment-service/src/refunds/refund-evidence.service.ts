@@ -104,32 +104,7 @@ export class RefundEvidenceService {
           this.log.log(`refund_attempt_succeeded refundAttempt=${a.id} payment=${a.paymentId} fact=${fact.id}`);
           return plain(rows[0]!);
         }
-        if (IN_FLIGHT.has(a.status) || a.status === 'failed') {
-          // Core V2 RLSC-1: decided under the payment row lock (`lockAttempt`), the lock every refund attempt insert takes first
-          if (a.status === 'failed') {
-            const kept = await this.keepFailedAttemptEvidence(q, a, fact.id, ctx);
-            if (kept) return { attempt: a, failedAttemptEvidenceId: kept };
-            await q.query('SAVEPOINT rlsc1_failed_to_discrepancy');
-          }
-          let rows: RefundAttemptRow[];
-          try {
-            ({ rows } = await q.query<RefundAttemptRow>(
-              `UPDATE refund_attempt SET status = 'discrepancy', "providerRefundId" = COALESCE("providerRefundId", $2), "completedAt" = COALESCE("completedAt", now()), "workAfter" = NULL
-                WHERE id = $1 RETURNING *`,
-              [a.id, status.providerRefundId],
-            ));
-          } catch (e) {
-            // Core V2 RLSC-1 backstop: only the two named indexes, only for `failed` -> `discrepancy`; the savepoint undoes the failed UPDATE alone
-            if (a.status !== 'failed' || !isOneEffectiveCollision(e)) throw e;
-            await q.query('ROLLBACK TO SAVEPOINT rlsc1_failed_to_discrepancy');
-            const kept = await this.keepFailedAttemptEvidence(q, a, fact.id, ctx);
-            if (!kept) throw e; // not this attempt's own fact, or no competing attempt the database accepts: the original failure, unchanged
-            return { attempt: a, failedAttemptEvidenceId: kept };
-          }
-          if (a.status === 'failed') await q.query('RELEASE SAVEPOINT rlsc1_failed_to_discrepancy');
-          this.log.warn(`refund_attempt_discrepancy refundAttempt=${a.id} payment=${a.paymentId} fact=${fact.id} from=${a.status} — verified refund evidence that is not exactly this full refund; kept for reconciliation (S6h)`);
-          return plain(rows[0]!);
-        }
+        if (IN_FLIGHT.has(a.status) || a.status === 'failed') return this.decideUnexactOrFailed(q, a, fact.id, status.providerRefundId, ctx);
         if (a.status !== 'succeeded' || !exact) {
           this.log.warn(`refund_evidence_unapplied refundAttempt=${a.id} status=${a.status} fact=${fact.id} — recorded as evidence only`);
         }
@@ -150,6 +125,66 @@ export class RefundEvidenceService {
       }
       return plain(a);
     });
+  }
+
+  /**
+   * The S6b / RLSC-1 decision for verified refund evidence that is not an in-flight attempt's exact success, in the caller's transaction under the
+   * payment lock: a `failed` attempt's own fact is kept as a `failed_attempt_refund_evidence` escalation while another attempt is effective
+   * (RLSC-1), otherwise the attempt becomes `discrepancy` (S6b). Shared, unchanged, by the provider's report (`applyStatus`) and, since Core V2
+   * D-R3, by the refund worker for a stored fact whose decision never committed (`decideUndecidedFailedAttemptFact`).
+   */
+  private async decideUnexactOrFailed(q: Queryable, a: RefundAttemptRow, factId: string, providerRefundId: string, ctx: EventContext): Promise<RefundEvidenceOutcome> {
+    // Core V2 RLSC-1: decided under the payment row lock (`lockAttempt`), the lock every refund attempt insert takes first
+    if (a.status === 'failed') {
+      const kept = await this.keepFailedAttemptEvidence(q, a, factId, ctx);
+      if (kept) return { attempt: a, failedAttemptEvidenceId: kept };
+      await q.query('SAVEPOINT rlsc1_failed_to_discrepancy');
+    }
+    let rows: RefundAttemptRow[];
+    try {
+      ({ rows } = await q.query<RefundAttemptRow>(
+        `UPDATE refund_attempt SET status = 'discrepancy', "providerRefundId" = COALESCE("providerRefundId", $2), "completedAt" = COALESCE("completedAt", now()), "workAfter" = NULL
+          WHERE id = $1 RETURNING *`,
+        [a.id, providerRefundId],
+      ));
+    } catch (e) {
+      // Core V2 RLSC-1 backstop: only the two named indexes, only for `failed` -> `discrepancy`; the savepoint undoes the failed UPDATE alone
+      if (a.status !== 'failed' || !isOneEffectiveCollision(e)) throw e;
+      await q.query('ROLLBACK TO SAVEPOINT rlsc1_failed_to_discrepancy');
+      const kept = await this.keepFailedAttemptEvidence(q, a, factId, ctx);
+      if (!kept) throw e; // not this attempt's own fact, or no competing attempt the database accepts: the original failure, unchanged
+      return { attempt: a, failedAttemptEvidenceId: kept };
+    }
+    if (a.status === 'failed') await q.query('RELEASE SAVEPOINT rlsc1_failed_to_discrepancy');
+    this.log.warn(`refund_attempt_discrepancy refundAttempt=${a.id} payment=${a.paymentId} fact=${factId} from=${a.status} — verified refund evidence that is not exactly this full refund; kept for reconciliation (S6h)`);
+    return { attempt: rows[0]!, failedAttemptEvidenceId: null };
+  }
+
+  /**
+   * Core V2 D-R3: the refund worker's recovery for a stored, verified, DIRECT refund fact of a `failed` attempt whose evidence decision never
+   * committed (its notification's processing failed, possibly until its retries were exhausted). The SAME decision as the provider's report, from
+   * the stored fact (its `providerTxnId` is the provider refund reference the report carried), under the same payment lock; then the unchanged
+   * allocation. Returns whether a decision was made here. Nothing is decided when the attempt is not `failed` or the evidence already exists; a
+   * failure leaves the fact pending (its lease already backed off) and is retried on a later pass.
+   */
+  async decideUndecidedFailedAttemptFact(factId: string, ctx: EventContext): Promise<boolean> {
+    const { rows: facts } = await this.db.query<{ id: string; refundAttemptId: string; paymentId: string; providerTxnId: string }>(
+      `SELECT id, "refundAttemptId", "paymentId", "providerTxnId" FROM provider_transaction_fact
+        WHERE id = $1 AND kind = 'refund' AND "paymentId" IS NOT NULL AND "refundAttemptId" IS NOT NULL`, [factId]);
+    const f = facts[0];
+    if (!f) return false;
+    const decided = await this.db.tx(async (q) => {
+      const a = await this.attempts.lockAttempt(q, f.refundAttemptId);
+      if (a.status !== 'failed' || a.paymentId !== f.paymentId) return false;
+      if (await this.safety.failedAttemptEvidenceOf(q, f.id)) return false;
+      await this.decideUnexactOrFailed(q, a, f.id, f.providerTxnId, ctx);
+      return true;
+    });
+    if (decided) {
+      this.log.warn(`refund_failed_attempt_evidence_recovered fact=${f.id} refundAttempt=${f.refundAttemptId} — the stored fact's evidence decision committed by the refund worker (D-R3)`);
+      await this.allocations.allocateWithRetry(f.id, ctx);
+    }
+    return decided;
   }
 
   /**

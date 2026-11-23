@@ -93,7 +93,16 @@ export class RefundWorker {
       }
       // Core V2 S6c (R6C-6): every verified refund fact still pending allocation (a crash, a technical failure), each with its own backoff
       for (const factId of await this.allocations.pendingFacts(BATCH_SIZE)) {
-        if (await this.allocations.allocateWithRetry(factId, ctx)) worked++;
+        if (await this.allocations.allocateWithRetry(factId, ctx)) {
+          worked++;
+          continue;
+        }
+        // Core V2 D-R3: a failed attempt's fact whose evidence decision never committed is decided here, exactly as its report would be, then allocated
+        try {
+          if (await this.evidence.decideUndecidedFailedAttemptFact(factId, ctx)) worked++;
+        } catch (e) {
+          this.logger.warn(`refund_failed_attempt_evidence_recovery_failure fact=${factId} ${describeFailure(e)} — the fact is kept pending; retried on a later pass`);
+        }
       }
       return { worked };
     } finally {

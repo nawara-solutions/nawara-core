@@ -14,11 +14,17 @@
 --
 -- Concurrency: every move to `failed` and the evidence decision take the payment row lock (`lockAttempt`), and the allocation takes the same lock
 -- before it inserts (FC-2 lock order), so the status and the escalation this trigger reads are those of a committed decision, on every instance.
--- The application checks the same condition first and defers the fact (bounded backoff on its lease, the fact kept pending); this trigger is the
--- backstop (`23514`, `refund_allocation_failed_attempt_evidence`). A superuser can bypass triggers.
+-- The trigger takes that payment lock itself, so an insert that skipped the application's check is serialized the same way. An escalation and an
+-- allocation in ONE transaction commit together (never one without the other). The application checks the same condition first and defers the
+-- fact (bounded backoff on its lease, the fact kept pending); the refund worker then makes the stored fact's evidence decision itself (the same
+-- code as the report's) when the report's processing never committed it. This trigger is the backstop (`23514`,
+-- `refund_allocation_failed_attempt_evidence`). A superuser can bypass triggers.
 
 CREATE FUNCTION refund_allocation_failed_attempt_evidence_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  -- the payment row lock every move to `failed` and every evidence decision take (the allocation already holds it): the reads below, each a new
+  -- statement, then see only committed decisions, even for an insert that skipped the application's own check
+  PERFORM 1 FROM payment WHERE id = NEW."paymentId" FOR UPDATE;
   IF EXISTS (SELECT 1 FROM provider_transaction_fact f JOIN refund_attempt a ON a.id = f."refundAttemptId" AND a."paymentId" = f."paymentId"
               WHERE f.id = NEW."factId" AND f.kind = 'refund' AND f."paymentId" IS NOT NULL AND a.status = 'failed')
      AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e WHERE e."factId" = NEW."factId" AND e.kind = 'failed_attempt_refund_evidence') THEN

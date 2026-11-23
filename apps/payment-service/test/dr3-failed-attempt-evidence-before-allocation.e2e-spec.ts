@@ -2,7 +2,7 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import type { OwnerCompanyAuthority, VerifiedOwner } from '../src/disputes/owner-company.authority.js';
@@ -180,6 +180,8 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
   const escalationOf = async (factId: string) => (await q(
     `SELECT id, "escalatedAt", xmin::text::bigint AS xid FROM refund_safety_escalation WHERE "factId" = $1 AND kind = 'failed_attempt_refund_evidence'`, [factId]))[0];
   const leaseOf = async (factId: string) => (await q(`SELECT attempts, "lastFailure", "workAfter" FROM refund_fact_allocation_lease WHERE "factId" = $1`, [factId]))[0];
+  const auditsOfFact = async (attemptId: string) => (await q(
+    `SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.refund_safety.escalated' AND payload->'resource'->>'id' = $1`, [attemptId]))[0]!.n as number;
   const pendingItems = async (who: 'owner-jwt' | 'owner2-jwt', paymentId: string) =>
     (await itemsFor(who, 'refund_failed_attempt_evidence_pending')).filter((i) => i.paymentId === paymentId);
   const injectEscalationFailure = async () => {
@@ -192,7 +194,7 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
     await admin.query(`DROP FUNCTION IF EXISTS dr3_fail_escalation()`);
   };
   /** The late success of the failed first attempt, its escalation made to fail: the webhook answers 500 and the fact is durable, undecided. */
-  const undecided = async (second: 'submitted' | 'succeeded' = 'submitted') => {
+  const undecided = async (second: 'submitted' | 'succeeded' = 'submitted', o: { keepFailing?: boolean } = {}) => {
     const s = await scenario(second);
     if (second === 'succeeded') await drain();
     const ev = `t_${randomUUID()}`;
@@ -200,25 +202,27 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
     try {
       await deliver(s.first, s.txn, { eventId: ev }).expect(500);
     } finally {
-      await removeEscalationFailure();
+      if (!o.keepFailing) await removeEscalationFailure();
     }
     const fact = (await factsOf(s.txn))[0]!.id as string;
     return { ...s, ev, fact };
   };
 
+  afterEach(removeEscalationFailure); // a test that keeps the injected failure active never leaks it
+
   describe('the prerequisite: no allocation before the committed evidence', () => {
-    it('R1 (P2) the escalation transaction rolls back: the fact is kept pending, the worker defers it (no allocation, no completion), the Owner sees it', async () => {
-      const s = await undecided();
+    it('R1 (P2) the escalation keeps failing: the fact stays pending, every sweep defers it (no allocation, no completion), the Owner sees it', async () => {
+      const s = await undecided('submitted', { keepFailing: true });
       expect(await escalationOf(s.fact)).toBeUndefined();
       expect(await status(s.first)).toBe('failed');
-      for (let i = 0; i < 3; i++) await drain(); // two-instance-safe sweeps of the pending set, again and again
+      for (let i = 0; i < 3; i++) await drain(); // sweeps of both layers: the allocation defers, the worker's own decision fails too
       await t2.app.get(RefundWorker).drainOnce();
+      expect(await escalationOf(s.fact)).toBeUndefined();
       expect(await allocationsOf(s.p)).toEqual([]);
       expect((await outboxOf(s.p))['refund.case_completed']).toBeUndefined();
       expect(await authorizationsOf(s.p)).toEqual([
         { refundAttemptId: s.first, allocated: 0, completed: false }, { refundAttemptId: s.competing, allocated: 0, completed: false }]);
-      expect(await leaseOf(s.fact)).toMatchObject({ lastFailure: 'failed_attempt_evidence_pending' });
-      expect((await leaseOf(s.fact))!.attempts).toBe(3); // one per sweep whose backoff had passed
+      expect(await leaseOf(s.fact)).toMatchObject({ lastFailure: 'failed_attempt_evidence_pending', attempts: 3 });
       // never blocked, discarded or resolved: the fact is unchanged and still pending; its money is in the balance as before
       expect(await q(`SELECT 1 FROM refund_fact_allocation_block WHERE "factId" = $1`, [s.fact])).toEqual([]);
       expect(await factsOf(s.txn)).toHaveLength(1);
@@ -227,66 +231,85 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       const items = await pendingItems('owner-jwt', s.p);
       expect(items).toHaveLength(1);
       expect(items[0]).toMatchObject({ kind: 'refund_failed_attempt_evidence_pending', factId: s.fact, amount: 9000, currency: 'TND',
-        detail: { refundAttemptId: s.first, refundCaseId: s.caseId, attemptStatus: 'failed' } });
-      expect(items[0]!.detail.allocationDeferrals).toBe(3);
+        detail: { refundAttemptId: s.first, refundCaseId: s.caseId, attemptStatus: 'failed', allocationDeferrals: 3 } });
       expect(await pendingItems('owner2-jwt', s.p)).toEqual([]);
       const producer = await request(server()).get('/payment/reconciliation/items?kind=refund_failed_attempt_evidence_pending&limit=200')
         .set('authorization', `Bearer ${billing.token}`);
       expect(producer.status).toBe(400); // an Owner-only kind is no producer kind (the same answer as a kind that does not exist)
     });
 
-    it('R2 the evidence then commits (the retrier): the unchanged allocation follows in that request, strictly after the evidence; the item disappears', async () => {
+    it('R2 the database recovers: the worker makes the stored fact\'s decision itself, then the unchanged allocation, strictly after the evidence', async () => {
       const s = await undecided();
       await drain();
-      expect(await allocationsOf(s.p)).toEqual([]);
-      expect((await retryPass(s.ev)).retried).toBe(1);
-      expect(await webhookOf(s.ev)).toMatchObject({ state: 'processed', outcome: `failed_attempt_refund_evidence:${(await escalationOf(s.fact))!.id}` });
       const es = (await escalationOf(s.fact))!;
+      expect(es).toBeDefined();
+      expect(await status(s.first)).toBe('failed');
       const al = await allocationsOf(s.p);
       expect(al).toHaveLength(1);
       expect(al[0]).toMatchObject({ factId: s.fact, refundAttemptId: s.first, intended: 9000, excess: 0 });
       expect(Number(al[0]!.xid)).toBeGreaterThan(Number(es.xid));
       expect(new Date(al[0]!.allocatedAt).getTime()).toBeGreaterThanOrEqual(new Date(es.escalatedAt).getTime());
       expect((await outboxOf(s.p))['refund.case_completed']).toBe(1);
+      expect(await auditsOfFact(s.first)).toBe(1); // one audit intent for the one escalation
       expect(await pendingItems('owner-jwt', s.p)).toEqual([]);
       expect((await itemsFor('owner-jwt', 'refund_failed_attempt_evidence')).filter((i) => i.paymentId === s.p)).toHaveLength(1);
+      // the stored notification's own retry then finds the same evidence and changes nothing
+      expect((await retryPass(s.ev)).retried).toBe(1);
+      expect(await webhookOf(s.ev)).toMatchObject({ state: 'processed', outcome: `failed_attempt_refund_evidence:${es.id}` });
+      expect(await exceptionsOf(s.first)).toHaveLength(1);
+      expect(await allocationsOf(s.p)).toHaveLength(1);
+      expect((await outboxOf(s.p))['refund.case_completed']).toBe(1);
+      expect(await auditsOfFact(s.first)).toBe(1);
     });
 
-    it('R3 restart: a new process (the other instance) never allocates the undecided fact on its own; the evidence still has to commit first', async () => {
+    it('R3 the notification\'s retrier decides first: the unchanged allocation follows in that request; the worker then finds nothing to do', async () => {
       const s = await undecided();
+      expect((await retryPass(s.ev)).retried).toBe(1);
+      const es = (await escalationOf(s.fact))!;
+      const al = await allocationsOf(s.p);
+      expect(al).toHaveLength(1);
+      expect(Number(al[0]!.xid)).toBeGreaterThan(Number(es.xid));
+      await drain();
+      expect(await exceptionsOf(s.first)).toHaveLength(1);
+      expect(await allocationsOf(s.p)).toHaveLength(1);
+      expect((await outboxOf(s.p))['refund.case_completed']).toBe(1);
+    });
+
+    it('R4 restart: the other instance never allocates the undecided fact while its decision fails, and recovers it once the database does', async () => {
+      const s = await undecided('submitted', { keepFailing: true });
       const w2 = t2.app.get(RefundWorker);
       w2.recoveryAfterMs = 0;
       await reset();
       await w2.drainOnce();
       expect(await allocationsOf(s.p)).toEqual([]);
       expect(await escalationOf(s.fact)).toBeUndefined();
-      // the stored notification is the durable record of the decision still to make: the other instance's retrier completes it
-      await q(`UPDATE refund_fact_allocation_lease SET "workAfter" = NULL WHERE "factId" = $1`, [s.fact]);
-      const c = await admin.connect();
-      try {
-        await c.query('BEGIN');
-        await c.query('SET LOCAL session_replication_role = replica');
-        await c.query(`UPDATE webhook_event SET "receivedAt" = now() - interval '30 days' WHERE "providerEventId" = $1`, [s.ev]);
-        await c.query('COMMIT');
-      } finally {
-        c.release();
-      }
-      expect((await t2.app.get(WebhookRetriever).drainOnce()).retried).toBe(1);
+      await removeEscalationFailure();
+      await reset();
+      await w2.drainOnce();
       expect(await escalationOf(s.fact)).toBeDefined();
       expect(await allocationsOf(s.p)).toHaveLength(1);
       expect((await outboxOf(s.p))['refund.case_completed']).toBe(1);
     });
 
-    it('R4 no permanent starvation: after many deferrals (the lease at its one-hour backoff) the committed evidence is allocated at once', async () => {
-      const s = await undecided();
+    it('R5 no permanent starvation: retries exhausted and the lease at its one-hour backoff; once that backoff passes, the worker recovers it', async () => {
+      const s = await undecided('submitted', { keepFailing: true });
+      await drain();
+      await removeEscalationFailure();
+      await q(`UPDATE webhook_event SET state = 'failed', outcome = 'retries_exhausted' WHERE "providerEventId" = $1`, [s.ev]);
       await q(`UPDATE refund_fact_allocation_lease SET attempts = 40, "workAfter" = now() + interval '1 hour' WHERE "factId" = $1`, [s.fact]);
-      expect((await retryPass(s.ev)).retried).toBe(1);
+      await worker.drainOnce(); // within the backoff: not picked up
+      expect(await allocationsOf(s.p)).toEqual([]);
+      expect(await pendingItems('owner-jwt', s.p)).toHaveLength(1);
+      await q(`UPDATE refund_fact_allocation_lease SET "workAfter" = now() - interval '1 second' WHERE "factId" = $1`, [s.fact]); // the hour has passed
+      await worker.drainOnce();
+      expect(await escalationOf(s.fact)).toBeDefined();
       expect(await allocationsOf(s.p)).toHaveLength(1);
       expect((await outboxOf(s.p))['refund.case_completed']).toBe(1);
       expect(await pendingItems('owner-jwt', s.p)).toEqual([]);
+      expect(await webhookOf(s.ev)).toMatchObject({ state: 'failed', outcome: 'retries_exhausted' }); // the notification's own record is untouched
     });
 
-    it('R5 the database backstop (0035): an allocation insert that skips the application check is refused (23514) until the evidence exists', async () => {
+    it('R6 the database backstop (0035): an allocation insert that skips the application check is refused (23514) until the evidence exists', async () => {
       const s = await undecided();
       const z = (await q(`SELECT id FROM refund_authorization WHERE "refundAttemptId" = $1`, [s.first]))[0]!.id;
       const insert = () => admin.query(
@@ -298,8 +321,37 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       expect(await allocationsOf(s.p)).toHaveLength(1);
     });
 
-    it('R6 NEGATIVE CONTROL, the application check alone: with the 0035 trigger dropped, the worker still defers the undecided fact', async () => {
-      const s = await undecided();
+    it('R7 the backstop takes the payment lock: an insert racing an uncommitted move to failed waits for it, then is refused', async () => {
+      const p = await captured();
+      const attempt = await authorizedAttempt(p, randomUUID());
+      await drain();
+      expect(await status(attempt)).toBe('submitted');
+      // a verified fact of the in-flight attempt, recorded as the report's first transaction would (its decision not yet made)
+      const z = (await q(`SELECT id FROM refund_authorization WHERE "refundAttemptId" = $1`, [attempt]))[0]!.id;
+      const fact = (await q(
+        `INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
+         SELECT provider, $2, 'refund', "paymentId", "capturedAttemptId", id, 9000, 'TND', false, 'status_check' FROM refund_attempt WHERE id = $1 RETURNING id`,
+        [attempt, `race-${attempt}`]))[0]!.id; // committed first, as the report's own first transaction commits it
+      const failer = await admin.connect();
+      try {
+        await failer.query('BEGIN');
+        await failer.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [p]);
+        await failer.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'card_closed', "completedAt" = now(), "workAfter" = NULL WHERE id = $1`, [attempt]);
+        const racing = admin.query(
+          `INSERT INTO refund_allocation ("factId", "refundAuthorizationId", "paymentId", "refundAttemptId", amount, currency, intended, excess)
+           VALUES ($1, $2, $3, $4, 9000, 'TND', 9000, 0)`, [fact, z, p, attempt]).then(() => 'inserted', (e) => e.constraint as string);
+        await new Promise((r) => setTimeout(r, 200));
+        await failer.query('COMMIT');
+        expect(await racing).toBe('refund_allocation_failed_attempt_evidence');
+      } finally {
+        await failer.query('ROLLBACK').catch(() => undefined);
+        failer.release();
+      }
+      expect(await allocationsOf(p)).toEqual([]);
+    });
+
+    it('R8 NEGATIVE CONTROL, the application check alone: with the 0035 trigger dropped, a failing decision still leaves the fact unallocated', async () => {
+      const s = await undecided('submitted', { keepFailing: true });
       await admin.query(`DROP TRIGGER refund_allocation_06_failed_attempt_evidence ON refund_allocation`);
       try {
         await drain();
@@ -309,13 +361,33 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
         await admin.query(`CREATE TRIGGER refund_allocation_06_failed_attempt_evidence BEFORE INSERT ON refund_allocation
           FOR EACH ROW EXECUTE FUNCTION refund_allocation_failed_attempt_evidence_guard()`);
       }
-      expect((await retryPass(s.ev)).retried).toBe(1);
-      expect(await allocationsOf(s.p)).toHaveLength(1);
+    });
+
+    it('R9 no competing attempt, its discrepancy move failing: deferred too; once recovered, the worker makes the unchanged S6b move and allocates', async () => {
+      const s = await scenario('none');
+      await admin.query(`CREATE OR REPLACE FUNCTION dr3_fail_discrepancy() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.status = 'discrepancy' THEN RAISE EXCEPTION 'injected discrepancy failure'; END IF; RETURN NEW; END $$`);
+      await admin.query(`CREATE TRIGGER zz_dr3_fail_discrepancy BEFORE UPDATE ON refund_attempt FOR EACH ROW EXECUTE FUNCTION dr3_fail_discrepancy()`);
+      try {
+        await deliver(s.first, s.txn).expect(500);
+        await drain();
+        expect(await status(s.first)).toBe('failed');
+        expect(await allocationsOf(s.p)).toEqual([]);
+        expect(await pendingItems('owner-jwt', s.p)).toHaveLength(1);
+      } finally {
+        await admin.query(`DROP TRIGGER zz_dr3_fail_discrepancy ON refund_attempt`);
+        await admin.query(`DROP FUNCTION dr3_fail_discrepancy()`);
+      }
+      await drain();
+      expect(await status(s.first)).toBe('discrepancy');
+      expect(await escalationOf((await factsOf(s.txn))[0]!.id)).toBeUndefined();
+      expect(await allocationsOf(s.p)).toMatchObject([{ refundAttemptId: s.first, intended: 9000, excess: 0 }]);
+      expect(await pendingItems('owner-jwt', s.p)).toEqual([]);
     });
   });
 
   describe('unchanged once the evidence is committed: ledgers, excess, balances (OD-RLSC-1, D-R2 open: NOT approved behaviour)', () => {
-    it('R7 (P5) competitor in flight: the late fact is allocated to the failed attempt\'s authorization after its evidence; the competitor\'s success is excess', async () => {
+    it('R10 (P5) competitor in flight: the late fact is allocated to the failed attempt\'s authorization after its evidence; the competitor\'s success is excess', async () => {
       const s = await scenario('submitted');
       await deliver(s.first, s.txn).expect(200);
       await drain();
@@ -335,10 +407,11 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       expect([await dispatches(s.first), await dispatches(s.competing!)]).toEqual([1, 1]);
     });
 
-    it('R8 (P6) competitor already succeeded: the late fact waits for its evidence, then is all excess on the failed attempt\'s authorization', async () => {
-      const s = await undecided('succeeded');
+    it('R11 (P6) competitor already succeeded: the late fact waits for its evidence, then is all excess on the failed attempt\'s authorization', async () => {
+      const s = await undecided('succeeded', { keepFailing: true });
       await drain();
       expect((await allocationsOf(s.p)).map((r) => r.refundAttemptId)).toEqual([s.competing]); // only the competitor's own fact
+      await removeEscalationFailure();
       expect((await retryPass(s.ev)).retried).toBe(1);
       expect((await allocationsOf(s.p)).map((r) => ({ to: r.refundAttemptId === s.first ? 'first' : 'competing', intended: r.intended, excess: r.excess })))
         .toEqual([{ to: 'competing', intended: 9000, excess: 0 }, { to: 'first', intended: 0, excess: 9000 }]);
@@ -347,7 +420,7 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       expect((await balanceOf(s.p)).currencies).toEqual([{ currency: 'TND', captured: 9000, refundedNet: 18000, chargebackNet: 0, netRetained: -9000 }]);
     });
 
-    it('R9 NEGATIVE CONTROL, no competing attempt: the unchanged S6b path (discrepancy) allocates as before; nothing is pending', async () => {
+    it('R12 NEGATIVE CONTROL, no competing attempt: the unchanged S6b path (discrepancy) allocates as before; nothing is pending', async () => {
       const s = await scenario('none');
       await deliver(s.first, s.txn).expect(200);
       expect(await status(s.first)).toBe('discrepancy');
@@ -355,7 +428,7 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       expect(await pendingItems('owner-jwt', s.p)).toEqual([]);
     });
 
-    it('R10 an in-flight attempt\'s own success is unchanged (not a failed attempt): allocated and completed at once', async () => {
+    it('R13 an in-flight attempt\'s own success is unchanged (not a failed attempt): allocated and completed at once', async () => {
       const p = await captured();
       const attempt = await authorizedAttempt(p, randomUUID());
       await drain();
@@ -368,17 +441,13 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
   });
 
   describe('duplicates and interleavings', () => {
-    it('R11 duplicate deliveries (the same event, a new event for the same fact, two instances) while undecided, then decided: one fact, one escalation, one allocation', async () => {
-      const s = await undecided();
-      await injectEscalationFailure();
-      try {
-        await deliver(s.first, s.txn, { eventId: s.ev }).expect(500);
-        await deliver(s.first, s.txn, { app: t2 }).expect(500);
-      } finally {
-        await removeEscalationFailure();
-      }
+    it('R14 duplicate deliveries (the same event, a new event for the same fact, two instances) while undecided, then decided: one fact, one escalation, one allocation', async () => {
+      const s = await undecided('submitted', { keepFailing: true });
+      await deliver(s.first, s.txn, { eventId: s.ev }).expect(500);
+      await deliver(s.first, s.txn, { app: t2 }).expect(500);
       await drain();
       expect(await allocationsOf(s.p)).toEqual([]);
+      await removeEscalationFailure();
       const results = await Promise.all([deliver(s.first, s.txn), deliver(s.first, s.txn, { app: t2 }), deliver(s.first, s.txn, { eventId: s.ev })]);
       expect(results.map((r) => r.status)).toEqual([200, 200, 200]);
       await drain();
@@ -388,7 +457,7 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       expect((await outboxOf(s.p))['refund.case_completed']).toBe(1);
     });
 
-    it('R12 race: deliveries on two instances against both instances\' worker sweeps, 8 rounds: never an allocation before the evidence, one of each', async () => {
+    it('R15 race: deliveries on two instances against both instances\' worker sweeps, 8 rounds: never an allocation before the evidence, one of each', async () => {
       const w2 = t2.app.get(RefundWorker);
       w2.recoveryAfterMs = 0;
       for (let i = 0; i < 8; i++) {
@@ -409,8 +478,8 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       }
     });
 
-    it('R13 replacement eligibility is unchanged: while the fact is undecided the failed attempt stays failed, the in-flight competitor is untouched', async () => {
-      const s = await undecided('submitted');
+    it('R16 replacement eligibility is unchanged: while the fact is undecided the failed attempt stays failed, the in-flight competitor is untouched', async () => {
+      const s = await undecided('submitted', { keepFailing: true });
       await drain();
       expect(await status(s.first)).toBe('failed');
       expect(await status(s.competing!)).toBe('submitted');
