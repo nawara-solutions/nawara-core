@@ -113,7 +113,8 @@ value. Operators, members, services and other owners have no hold authority. Mou
 | `POST /audit/owner/company/legal-holds/{holdId}/release` | `{stepUpToken, reasonCode}` | `200 {holdId, releasedAt}`; an unknown, another Company's or an already-released hold is the same `404` (checked before the proof is spent) |
 
 **Coverage (decision H7), read this:** a hold covers ONLY records with a **trusted Company scope row** for that Company (written for
-broker-verified producers that may assert a Company: today the `authorization_receipt.*` actions), within the optional `[from, to)` on
+broker-verified producers that may assert a Company: today the three `authorization_receipt.*` actions, the 18 actions of the G6-C
+matrix (`G6C_COMPANY_SCOPE` in `libs/audit-contract`) and, when it names one, `financial_loss.recorded`), within the optional `[from, to)` on
 occurrence time. **Unverified, unscoped and historical records without trusted Company scope are NOT covered** and stay under the retention
 policy; ownership is never inferred and no global retention suspension exists. A hold has **no expiry**: it lasts until released.
 

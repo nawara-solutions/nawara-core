@@ -41,6 +41,9 @@ operation or target (DO-62; F-24 is the related approved deferral). Revising the
 > **Update (2026-11-22, the Owner's D-F22-1 to D-F22-6).** The F-22 decision is that ADR-0067 is **not** rewritten: the successor
 > [ADR-0070](../adr/0070-owner-authorization-receipt-attribution.md) (Proposed) governs the general mechanism's central audit attribution
 > (DO-62: an optional, validated operation / target / consumer-reference tuple). F-22 and DO-62 stay open until their acceptance conditions are met.
+>
+> **Update (2026-11-23).** Implemented (#542, then #543; main `1863196`) and closed by the Owner **for development and simulation only**
+> (S0 §1.5, DO-62). ADR-0067 and ADR-0070 keep their status (`Proposed`); nothing is deployed or production-certified.
 
 ## 3. DO-12: replay enforcement per consumer (P-11 unchanged)
 
