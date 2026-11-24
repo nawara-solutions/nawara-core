@@ -7,6 +7,7 @@ import { HttpReceiptAuthority, RECEIPT_AUTHORITY, type ReceiptAuthority } from '
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
+import { RefundFinalityService } from './refund-finality.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
 import { RefundStalledDispatchSweep, RefundStalledDispatchSweepService } from './refund-stalled-dispatch.sweep.js';
 import { RefundWorker, RefundWorkerService } from './refund-worker.js';
@@ -29,7 +30,7 @@ export class RefundsModule {
       imports: [AuthModule, PaymentsModule],
       controllers: [RefundsController, RefundCapturesController, SettlingCaptureController],
       providers: [
-        RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundSafetyService, RefundWorker, IdempotencyService,
+        RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundSafetyService, RefundFinalityService, RefundWorker, IdempotencyService,
         RefundStalledDispatchSweep, // Core V2 G3 (DO-44): escalation-only review of dispatches whose outcome stays unknown
         ...(opts.worker === false ? [] : [RefundWorkerService, RefundStalledDispatchSweepService]),
         {

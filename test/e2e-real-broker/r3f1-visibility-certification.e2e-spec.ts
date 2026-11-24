@@ -289,6 +289,8 @@ describeWithEnv(
         NODE_ENV: 'test', PORT: String(PORT.payment), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: AUTH_URL, AUTH_SERVICE_TOKEN: paymentToAuthToken.token,
         RABBITMQ_URL: paymentIdentity!.url(env.TEST_RABBITMQ_URL), PAYMENT_SUPPORTED_CURRENCIES: 'TND', PAYMENT_SIMULATION_PROVIDER: 'true',
         PAYMENT_SIMULATION_WEBHOOK_SECRET: WEBHOOK_SECRET,
+        // Core V2 D-R1B: some scenarios replace a FAILED attempt: the simulation explicitly models certified failure finality (never a real provider)
+        PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true',
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest},simulation-harness:${harnessToken.digest}`,
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.assisted_settlement', 'payment.create.recovery_settlement',
@@ -676,14 +678,16 @@ describeWithEnv(
     };
     const NOT_ACK = { reviewed_no_financial_effect: [409, 'reconciliation_case_not_acknowledgeable'], duplicate_evidence_reviewed: [409, 'reconciliation_case_not_acknowledgeable'],
       provider_statement_reviewed: [409, 'reconciliation_case_not_acknowledgeable'] };
+    const completes = async (second: { attemptId: string }, r: { caseId: string }) => {
+      await refundOutcome(second.attemptId, 'succeeded');
+      await mirrored(second.attemptId, 'succeeded');
+      await completedCase(r.caseId);
+      return second.attemptId;
+    };
     const secondSucceeds = async (r: { caseId: string }, p: { paymentId: string; amount: number }) => {
       const second = await relayAgain(r.caseId, p.paymentId, p.amount);
       expect('attemptId' in second, JSON.stringify(second)).toBe(true);
-      const a2 = (second as { attemptId: string }).attemptId;
-      await refundOutcome(a2, 'succeeded');
-      await mirrored(a2, 'succeeded');
-      await completedCase(r.caseId);
-      return a2;
+      return completes(second as { attemptId: string }, r);
     };
     const overlapFor = (disputeId: string) => waitFor(async () => !!(await caseIdOf('chargeback_refund_overlap', disputeId)), 90_000, `the overlap case\n${tails()}`);
     const kindOf = async (type: string, disputeId: string) => (await one(billingAdmin, `SELECT r.kind FROM reconciliation_case c JOIN reconciliation_case_resolution r ON r."caseId" = c.id
@@ -694,9 +698,12 @@ describeWithEnv(
       it(`F1V-1 (${kind}): evidence BEFORE the refund completes; the overlap case states it (both processes, list); nothing else changes; acknowledgements unchanged`, async () => {
         const { p } = await buy(kind);
         const r = await failedAttempt(p);
+        // Core V2 D-R1B: the second refund is created and sent BEFORE the evidence (a replacement after it is refused: ambiguous evidence is never final)
+        const second = await relayAgain(r.caseId, p.paymentId, p.amount);
+        expect('attemptId' in second, JSON.stringify(second)).toBe(true);
         const u = await unmatched(r.txn, p.amount);
         await waitFor(async () => !!(await markerOf(r.attemptId)), 60_000, `the marker\n${tails()}`);
-        await secondSucceeds(r, p);
+        await completes(second as { attemptId: string }, r);
         const disputeId = await dispute(p.paymentId, p.amount);
         await overlapFor(disputeId);
         await settle();

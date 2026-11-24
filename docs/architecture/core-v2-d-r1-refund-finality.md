@@ -1,8 +1,8 @@
 # Core V2 D-R1: fail-closed refund finality
 
-Status: **D-R1A implemented for development and simulation only (pending the Owner's merge review). D-R1B is a design awaiting the
-Owner's approval of its database and migration contract; nothing in it is implemented.** DO-76 and OD-RLSC-1 stay OPEN. No real provider
-is certified; no provider is activated; nothing here is a production change.
+Status: **D-R1A merged (#548) and D-R1B implemented (migration `0037`, the Owner's GO of 2026-11-24, pending the Owner's merge review);
+both for development and simulation only.** DO-76 and OD-RLSC-1 stay OPEN. No real provider is certified; no provider is activated;
+nothing here is a production change.
 
 Source: the Owner's D-R1 direction of 2026-11-23 (Q1 to Q6). Related: S6b (PAY-07, R6B-3, R6B-4), RLSC-1 (`0033`), DO-76 S1 (`0032`),
 G3 (`0034`), D-R3 (`0035`), FDR-10 (provider evidence, V3).
@@ -31,17 +31,17 @@ provider guarantee can establish that, and none is certified.
    `REFUND_CAPABILITY_REVOCATIONS` lists revoked id and version pairs. A revocation is permanent, and a malformed revocation still
    revokes.
 3. **Historical attempts.** A finality decision must name the certificate, version and fingerprint it was made under
-   (`RefundFailureFinalityRecord`, D-R1B). Every existing `failed` row has no such record, so it is never final
+   (`refund_attempt_failure_finality`, D-R1B). Every `failed` row from before `0037` has no such record, so it is never final
    (`failureFinalityOf(null)` gives `no_finality_record`). Certification is never applied retroactively to history.
-4. **Failed-attempt transitions** (unchanged in D-R1A):
+4. **Failed-attempt transitions** (unchanged in D-R1A; D-R1B refuses the second one for an attempt with its own refund fact, OD-DR1-1):
    - a definitive dispatch refusal (`RefundWorker.dispatch`, `rejected`) gives `failed`;
    - a provider-confirmed failure of an in-flight attempt (`RefundEvidenceService.applyStatus`) gives `failed`;
    - a verified success of a `failed` attempt gives `discrepancy`, or the RLSC-1 escalation while another attempt is effective.
 5. **Effective-attempt unique indexes** (`0017`, `0022`) count every status except `authorization_expired`, `authorization_refused` and
-   `failed`. D-R1B must make an uncertified `failed` attempt count as potentially effective for new attempts (§4). The indexes
+   `failed`. D-R1B makes an uncertified `failed` attempt count as potentially effective for new attempts (§4). The indexes
    themselves cannot do that, because a `failed` attempt that later becomes `discrepancy` must stay representable.
 6. **Capture-level evidence guard.** `refund_capture_has_evidence` (`0022`) refuses a new attempt or dispatch once the capture has refund
-   evidence. It does not see an attempt that may still pay but has no evidence yet. D-R1B closes exactly that gap.
+   evidence. It does not see an attempt that may still pay but has no evidence yet. D-R1B closes that gap.
 7. **Concurrency and transactions.** Every attempt insert takes the payment row lock first (`0017`). The dispatch transition holds the
    payment's refund-dispatch advisory lock exclusively, and refund-fact writers hold it shared (`0032`). D-R1B's guard runs inside the
    insert trigger under the same payment row lock, so two workers or requests cannot both pass it.
@@ -64,15 +64,16 @@ provider guarantee can establish that, and none is certified.
 
 ## 3. D-R1A: the foundation (implemented, development and simulation only)
 
-**Not changed:** replacement eligibility, allocation, case completion, held dispatches, the first send, and every approved state
-transition. D-R1A does **not** solve double refunds: `test/dr1a-refund-capabilities.e2e-spec.ts` E1 pins that a replacement is still
-authorized after an uncertified failure.
+*As merged in #548. D-R1B (§4) has since changed replacement eligibility and, under OD-DR1-1, the last transition of Q4.*
+
+**Not changed by D-R1A:** replacement eligibility, allocation, case completion, held dispatches, the first send, and every approved state
+transition. D-R1A did **not** solve double refunds; E1 of `test/dr1a-refund-capabilities.e2e-spec.ts` is now the negative control.
 
 **Capability model (Q1, Q3)** in `refund-capabilities.ts`:
 
 | Capability | Grant | Used in D-R1A |
 | --- | --- | --- |
-| `terminalFailureFinality` | `observations` (`dispatch_rejected`, `provider_failed`) | No (D-R1B) |
+| `terminalFailureFinality` | `observations` (`dispatch_rejected`, `provider_failed`) | No; D-R1B uses it |
 | `authoritativeNotFound` | `granted` | No: refunds never act on "no record" (Rule 3) |
 | `idempotencyKeyRetention` | `lifetimeMs`, or `unbounded` (simulation scope only) | Yes: same-key resend (Q5) |
 | `cancellation` | `granted` | No |
@@ -115,56 +116,101 @@ authorized after an uncertified failure.
   exactly for `dispatch_stalled` and `idempotency_retention_unproven`.
 - The escalation table stays append-only. No row is rewritten and nothing is backfilled.
 
-## 4. D-R1B: the replacement guard (design only; needs the Owner's approval of this database contract)
+## 4. D-R1B: the replacement guard (implemented, development and simulation only)
 
-**Invariant.** A new refund attempt for a capture must not be inserted, and a new dispatch must not start, while any earlier attempt
-for that capture could still move provider funds enough to cause an unauthorized excess.
+**Invariant.** No replacement attempt is created or sent while another attempt of the same payment or capture could still move funds
+enough to cause an unauthorized excess.
 
-**Schema (proposed migration `0037`):**
-1. Table `refund_attempt_failure_finality`, append-only, at most one row per attempt. It holds `refundAttemptId` (PK, FK), `certificateId`,
-   `certificateVersion`, `fingerprint`, `observation` (`dispatch_rejected`, `provider_failed`), `failureCode` and `recordedAt` (database
-   time). It is written in the same transaction as the move to `failed`, and only when `evaluateRefundCapability(...,
-   'terminalFailureFinality')` certifies that observation. Its guard requires the attempt to be `failed` in that transaction.
-2. Table `refund_capability_revocation`, append-only (`certificateId`, `certificateVersion`, `revokedAt`, `reason`). It mirrors the code
-   revocations so that the database guard can apply them without the application. Rows are written by a migration or an Owner-run
-   operation, never by the runtime role.
-3. Function `refund_attempt_may_still_pay(a refund_attempt)`. It returns true unless the status is `authorization_expired` or
-   `authorization_refused`, or the attempt is `failed` with a finality row whose certificate is not revoked. Evaluating expiry in the
-   database needs the certificate's `expiresAt` in the row (an added column). OD-DR1-3 decides whether expiry is retroactive.
-4. An extension of the existing insert guard on `refund_attempt` (`0022` and `0017`), under the payment row lock that every insert
-   already takes. Insertion is refused (`23514`, `refund_attempt_prior_may_still_pay`) when another attempt of the same capture, or of
-   the same payment for an ordinary refund, satisfies `refund_attempt_may_still_pay`. The one-effective indexes are unchanged and remain
-   the uniqueness backstop.
-5. The 0032 dispatch rule gains the same check at `authorized` to `dispatching`, under the refund-dispatch lock. This covers an attempt
-   inserted before `0037`.
+**Database contract (migration `0037`).** It is additive. No existing guard, index, row or allocation rule is edited, and nothing is
+backfilled.
+
+1. **`refund_capability_certificate`: the mirror of the code registry.**
+   - Each row stores the certificate's canonical content. The fingerprint is re-computed from that content by a CHECK, and the id,
+     version, provider, scope, window and covered observations are bound to it.
+   - A CHECK allows the `simulation` provider and scope only. A real provider needs another reviewed migration that changes it.
+   - Two certificates are seeded, exactly the code registry. A test compares them both ways (T1).
+2. **`refund_capability_revocation`:** one permanent row per certificate version. A row ends that version at once.
+3. **`refund_attempt_failure_finality`: at most one row per attempt.**
+   - It names the attempt, its key (the attempt id), the observation and its source (`dispatch_response`, `status_check`, or `webhook`
+     with the stored notification), the failure code and the exact certificate (id, version, fingerprint and provider, by foreign key).
+   - Accepted only while the attempt is in flight. A deferred check then requires the same transaction to commit it as `failed` with that
+     code, so an attempt that already failed (all history) can never be given one.
+   - Refused when the certificate is not in force for that provider and observation, or the capture has refund evidence. Payment, capture,
+     provider, key and time are derived, never taken from the caller.
+   - When a claim is not admissible, the application records the failure without finality. A failure observation is never lost over it.
+4. **`refund_attempt_may_still_pay`.** Everything may still pay except `authorization_expired`, `authorization_refused`, and a `failed`
+   attempt for which all of these hold at this instant:
+   - its finality row's certificate is registered, inside its window and not revoked;
+   - it has no refund fact of its own;
+   - no refund fact exists under its exact provider reference, whoever that fact is bound to. Such a fact is ambiguous and therefore not
+     final. It is read only and attributes nothing (F-29 stays locked).
+5. **The guard** (`refund_attempt_22_...` after insert, `refund_attempt_09b_...` at `authorized` to `dispatching`). It refuses
+   (`23514`, `refund_attempt_prior_may_still_pay`) while any other attempt of the same capture may still pay, or, for an ordinary attempt,
+   any other ordinary attempt of the payment. The two one-effective indexes still answer first for an effective attempt, unchanged.
+6. **The last capture.** R6H-5 lets a second capture of the settling attempt be refunded only while another stays unrefunded. It used to
+   count a capture whose refund attempt had failed as unrefunded. A failed attempt that may still pay no longer counts
+   (`refund_attempt_last_capture_may_still_pay`).
+7. **OD-DR1-1.** An attempt with its own verified refund fact never moves to `failed` (`refund_attempt_failed_after_refund_fact`).
+
+**Application layer** (`RefundFinalityService`). It decides the same question a second time against the code registry and the adapter's
+declaration (`failureFinalityOf`). An attempt is out of the way only if both layers say so.
+- It also treats R3's `notification_pending` and `unknown` evidence states as not final.
+- It runs at admission (refused as the existing `refund_in_progress`), at the dispatch, and before every same-key resend.
+- A blocked `authorized` attempt stays `authorized`. Nothing is sent, released or reassigned, and it is re-evaluated later.
+- The R6H-5 capture read reports such money as `in_progress`, so Billing does not open a case Payment would refuse.
+
+**Lock order (always this order, all transaction-scoped):**
+1. the payment's refund-dispatch advisory lock (dispatch only, `0032`);
+2. the payment row;
+3. the attempt row;
+4. the capability advisory lock, last: shared for finality inserts, attempt inserts and dispatches; exclusive for writers of the two
+   mirror tables.
+
+A mirror writer takes no payment or attempt lock, so there is no cycle. A revocation transaction must do nothing else. Each guard reads
+after its locks, in a new READ COMMITTED snapshot, and judges validity at `clock_timestamp()`. Any other isolation level is refused
+(`refund_finality_isolation`).
+
+| Race | Outcome |
+| --- | --- |
+| Revocation first, then a replacement insert or a dispatch | It waits, then is refused. |
+| Replacement insert first, then a revocation | The revocation waits. The attempt is then refused at its dispatch. |
+| Dispatch first, then a revocation | The revocation waits for `dispatching` to commit. The send is not recalled, and any resend is withheld. |
+| Revocation first, then a failure being recorded | The failure is kept without finality. |
+| Failure report and success report | The fact's foreign key takes KEY SHARE on the attempt row; the move to `failed` takes FOR UPDATE, so it sees the fact. |
+
+**Boundary.** The database decides before `dispatching` commits, and the provider is called after that. A revocation that commits later
+cannot recall the call. Money that the provider has not reported to Payment is visible to no rule.
+
+**Supersession (explicit).** None is implied. Evidence belongs to the exact version it was recorded under and is never re-read under
+another. A newer version neither ends nor rescues nor widens it. Ending it takes a revocation of that version, in the database and in
+code. The adapter must still declare the same certificate id, so withdrawing the declaration also refuses.
+
+**Privileges.** The migrator owns the tables and functions. The runtime role has SELECT on the two mirror tables, and SELECT and INSERT on
+the finality table; every other privilege is revoked. All functions are SECURITY INVOKER with `search_path = pg_catalog, public, pg_temp`.
+The runtime role is trusted for what the provider answered, as for every provider fact, but never for what a certificate says. An owner
+or superuser who can disable a trigger can bypass these rules.
 
 **Case coverage:**
 
 | Case | Behaviour |
 | --- | --- |
-| Uncertified `failed` (every historical row; any real provider) | Blocks replacement for ever. No cooling window, elapsed time, receipt or status read releases it (Q2). |
-| `unknown`, in flight, `dispatching` | Already blocks today. Unchanged. |
-| Late success on any attempt | Unchanged: discrepancy, RLSC-1 or D-R3 evidence. Nothing is reallocated. |
-| Status and webhook conflict | Preserved (D-R1A Q4). Never resolves finality. |
-| Two-worker or two-request race | The guard runs inside the insert trigger under the payment row lock, so one wins and the other is refused. |
-| Restart | The finality row commits with the `failed` transition, or not at all. |
-| Historical `failed` rows | No finality row, so they block. Old payments can no longer be replaced: a deliberate fail-closed effect. |
-| Capability removal or revocation | A revocation row makes every finality row of that certificate non-final, so it blocks again. A removed declaration only stops new rows. |
-| Capture-level and payment-level uniqueness | Guarded on capture (`captureFactId`) and on payment for ordinary refunds, mirroring the two indexes. |
-| Idempotency boundary | The key is the attempt id; a replacement always has a new key. It is allowed only after certified finality of the previous key. |
-| Explicit exception path | None automatic. An Owner-reviewed exception would be a separate, audited, receipt-bound operation (a later decision; not designed here). |
+| Uncertified `failed` (every historical row; any real provider) | Blocks for ever. No elapsed time, receipt or status read releases it (Q2). |
+| Certified simulation failure, declared and in force | The existing, separately authorized replacement is permitted (a fresh Owner receipt is still needed). |
+| Expired, revoked, changed or withdrawn certificate | Blocks again at the next insert, dispatch or resend. The evidence row stays. |
+| Success, then failure | Success and fact stand. The failure is kept (Q4). Never `failed`, and its key is not sent again. |
+| Failure, then late success | Both are kept (S6b, RLSC-1, D-R3, unchanged). The late fact makes the attempt not final. |
+| Exception path | None (OD-DR1-5 NO-GO). |
 
-**Tests D-R1B must carry:**
-- **Non-certified:** the old P5 and P6 reproductions become negative controls. The replacement is refused, no second dispatch
-  happens, and the late success is still recorded.
-- **Simulation-certified** (`PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY=true`), explicitly labelled: the replacement is allowed after a
-  certified dispatch refusal. A later simulated success is a modelled provider-contract violation, preserved as evidence and never
-  reallocated.
-- **Further cases:** revocation, a changed fingerprint, a two-instance insert race, a restart between the failure and its finality row,
-  historical rows applied over migration, and mutation controls for each layer.
+**Limits, recorded:**
+- OD-DR1-6: the dispatch answer is still held in memory until its decision commits.
+- An `authorized` replacement blocked at its dispatch is visible in the logs (`refund_dispatch_blocked`) and as an `authorized` attempt.
+  It has no escalation kind of its own.
+- An in-flight attempt with its own fact whose success report never arrives again stays in flight, escalated and blocking.
+- Billing's own reading of a `failed` attempt as dead (S0-C14, R3) is unchanged; R3-F2 stays OPEN.
 
-**Approved behaviour D-R1B keeps:** every verified provider fact, the allocation arithmetic and the receipt requirements (a replacement
-still needs a fresh Owner receipt in addition to certified finality).
+**Tests:** `test/dr1b-replacement-guard.e2e-spec.ts` (two instances as the runtime role), `refund-capabilities.spec.ts`,
+`db/tests/invariants.sql`, and the `0037` history section of `db/tests/run.sh`. Suites whose scenarios replace a failed attempt declare
+the simulation's modelled finality explicitly.
 
 ## 5. Provider certification requirements (Q3)
 
@@ -176,17 +222,13 @@ A `provider`-scope certificate is added only by a reviewed PR that the Owner mer
 
 None exists. Simulation behaviour is never evidence for a real provider.
 
-## 6. Open Owner decisions
+## 6. Owner decisions (2026-11-24)
 
-- **OD-DR1-1:** a provider failure for an in-flight attempt that already has its own verified refund fact. Should the move to `failed`
-  be refused, with the attempt left in flight and escalated? D-R1A only preserves the evidence.
-- **OD-DR1-2:** ratify the simulation's `simulation-refund-contract` certificate (unbounded key retention), which keeps R6B-4 unchanged
-  in simulation.
-- **OD-DR1-3:** is certificate expiry retroactive for recorded finality? It is fail-closed (yes) until decided. Revocation is
-  retroactive.
-- **OD-DR1-4:** approve the D-R1B database contract (§4), including the permanent blocking of historical `failed` rows.
-- **OD-DR1-5:** whether any audited exception path for a blocked replacement should exist, and who may use it.
-- **OD-DR1-6:** durable dispatch responses. A provider's dispatch answer is held in memory until its decision transaction commits, as
-  in S6b. If that transaction fails after a concurrent success has moved the attempt on, a definitive refusal is not observed again:
-  only the `refund_dispatch_refusal_unrecorded` error log remains (pinned by C9). Closing this needs an append-only dispatch-response
-  record written before the decision and a recovery pass, which is a new table and a migration. It is not built in D-R1A.
+- **OD-DR1-1:** GO, implemented in D-R1B. An attempt with its own verified refund fact never becomes `failed`.
+- **OD-DR1-2:** approved. The simulation contract certificate models unbounded key retention, in simulation only.
+- **OD-DR1-3:** approved direction, implemented. Expiry and revocation end what evidence permits; the evidence itself is never changed.
+- **OD-DR1-4:** approved for a bounded development-only D-R1B, including the permanent blocking of historical `failed` rows.
+- **OD-DR1-5:** NO-GO. No exception path exists and none is designed.
+- **OD-DR1-6:** OPEN. Durable dispatch responses are a read-only design only: an append-only response record written before the
+  decision, and a recovery pass. Its migration and worker need a separate GO. Until then only the
+  `refund_dispatch_refusal_unrecorded` error log remains of a refusal whose decision transaction failed (pinned by C9).

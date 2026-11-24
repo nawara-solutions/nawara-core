@@ -161,8 +161,19 @@ describe('failureFinalityOf (D-R1 Part A: historical and revoked failures are ne
     expect(failureFinalityOf(record(), synthetic(), ctx)).toMatchObject({ final: true });
     expect(failureFinalityOf(record({ observation: 'provider_failed' }), synthetic(), ctx)).toEqual({ final: false, reason: 'observation_not_covered' });
     expect(failureFinalityOf(record({ fingerprint: '0'.repeat(64) }), synthetic(), ctx)).toEqual({ final: false, reason: 'certificate_changed' });
-    expect(failureFinalityOf(record({ certificateVersion: 2 }), synthetic(), ctx)).toEqual({ final: false, reason: 'certificate_changed' });
+    expect(failureFinalityOf(record({ certificateVersion: 2 }), synthetic(), ctx)).toEqual({ final: false, reason: 'version_mismatch' }); // its own version is not registered
     expect(failureFinalityOf(record({ failureCode: 'Not A Code' }), synthetic(), ctx)).toEqual({ final: false, reason: 'malformed_record' });
+  });
+  it('supersession is explicit (D-R1B): a newer declared version neither ends, rescues nor widens evidence recorded under an older one', () => {
+    const v4: RefundCapabilityCertificate = { ...SYNTHETIC, version: 4, grants: { terminalFailureFinality: { observations: ['dispatch_rejected', 'provider_failed'] } } };
+    const both = withRegistry([SYNTHETIC, v4]);
+    expect(failureFinalityOf(record(), synthetic(v4), both)).toMatchObject({ final: true, certificate: { version: 3 } }); // judged under its own version
+    expect(failureFinalityOf(record({ observation: 'provider_failed' }), synthetic(v4), both)).toEqual({ final: false, reason: 'observation_not_covered' }); // not widened
+    expect(failureFinalityOf(record(), synthetic(v4), { ...both, revocations: [{ id: SYNTHETIC.id, version: 3, revokedAt: '2027-01-02T00:00:00.000Z', reason: 'SYNTHETIC' }] }))
+      .toEqual({ final: false, reason: 'revoked' }); // ended explicitly; version 4 does not stand in for it
+    expect(failureFinalityOf(record(), synthetic(v4), withRegistry([v4]))).toEqual({ final: false, reason: 'version_mismatch' }); // removed from the registry
+    expect(failureFinalityOf(record(), synthetic({ ...v4, id: 'synthetic-other-certificate' }), withRegistry([SYNTHETIC, { ...v4, id: 'synthetic-other-certificate' }])))
+      .toEqual({ final: false, reason: 'certificate_changed' }); // another certificate id is never the same guarantee
   });
   it('revocation, expiry and provider configuration changes apply to existing records (fail closed)', () => {
     expect(failureFinalityOf(record(), synthetic(), { ...ctx, revocations: [{ id: SYNTHETIC.id, version: 3, revokedAt: '2027-01-02T00:00:00.000Z', reason: 'SYNTHETIC' }] }))

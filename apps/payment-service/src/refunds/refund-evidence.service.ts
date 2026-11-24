@@ -6,6 +6,7 @@ import { notFound } from '../errors.js';
 import type { RefundStatusResult } from '../providers/provider.port.js';
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
+import { RefundFinalityService } from './refund-finality.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
 import type { RefundAttemptRow } from './refund.types.js';
 
@@ -38,8 +39,9 @@ export interface RefundEvidenceOutcome {
  *   * Then, under the payment and attempt locks: an attempt in flight succeeds ONLY on a fact of exactly its amount and currency, under its own
  *     provider refund reference, with no contradiction; any other verified refund becomes `discrepancy` (never a silent full refund); a
  *     verified refund contradicting a provider-confirmed failure moves that failure to `discrepancy` too.
- *   * A provider-confirmed failure of an attempt in flight is `failed` (definitive; a new attempt needs a new authorization). `pending` and a
- *     missing record change nothing (R6B-4).
+ *   * A provider-confirmed failure of an attempt in flight is `failed` (a new attempt needs a new authorization, and, since Core V2 D-R1B, certified
+ *     finality of this failure). Never for an attempt with its own verified refund fact (OD-DR1-1): both observations are kept and it stays in
+ *     flight. `pending` and a missing record change nothing (R6B-4).
  *   * Core V2 RLSC-1 (0033): a `failed` attempt's own verified refund fact while ANOTHER attempt of the same payment and capture is effective
  *     cannot make it `discrepancy` (`refund_attempt_one_effective`, `refund_attempt_one_effective_capture`, both unchanged). It stays `failed` and
  *     the observation is kept once per fact as a `failed_attempt_refund_evidence` escalation with its audit intent, in this same transaction, so the
@@ -57,6 +59,7 @@ export class RefundEvidenceService {
     @Inject(RefundAttemptService) private readonly attempts: RefundAttemptService,
     @Inject(RefundAllocationService) private readonly allocations: RefundAllocationService,
     @Inject(RefundSafetyService) private readonly safety: RefundSafetyService,
+    @Inject(RefundFinalityService) private readonly finality: RefundFinalityService,
   ) {}
 
   /** The refund attempt a provider message names (its idempotency key or its provider refund reference), of THAT provider only. */
@@ -113,12 +116,15 @@ export class RefundEvidenceService {
       // provider-confirmed failure
       // Core V2 D-R1A (the Owner's Q4): a failure reported for an attempt that already has its OWN verified refund fact contradicts that evidence. Both
       // observations are kept: the fact is never touched, and the failure is recorded once per attempt as a `failure_after_refund_evidence`
-      // escalation with its audit intent, in this transaction, BEFORE any transition (so its status is the one the failure contradicted). The approved
-      // transitions below are unchanged: whether an in-flight attempt should still become `failed` on such a report is an open Owner decision (D-R1).
+      // escalation with its audit intent, in this transaction. Core V2 D-R1B (OD-DR1-1): an attempt with its own verified fact never becomes
+      // `failed`: it stays as it is (in flight, so it blocks a replacement), and the provider's success report still decides it.
+      let preserved: string | null = null;
       if (IN_FLIGHT.has(a.status) || a.status === 'succeeded' || a.status === 'discrepancy' || a.status === 'failed') {
-        await this.preserveFailureAfterEvidence(q, a, failureCode(status.failureCode), ctx);
+        preserved = await this.preserveFailureAfterEvidence(q, a, failureCode(status.failureCode), ctx);
       }
       if (IN_FLIGHT.has(a.status)) {
+        if (preserved) return plain(a);
+        await this.finality.recordIfCertified(q, a, 'provider_failed', failureCode(status.failureCode), ctx);
         const { rows } = await q.query<RefundAttemptRow>(
           `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`,
           [a.id, failureCode(status.failureCode)],
@@ -146,7 +152,7 @@ export class RefundEvidenceService {
     const created = await this.safety.escalate(q, { kind: 'failure_after_refund_evidence', refundAttemptId: a.id, factId: own[0].id, observedFailureCode: code }, ctx);
     const id = created ?? (await this.safety.escalationOf(q, a.id, 'failure_after_refund_evidence'));
     if (!id) throw new Error('refund_failure_after_evidence_unrecorded'); // never acknowledged without its row
-    this.log.error(`refund_failure_after_refund_evidence refundAttempt=${a.id} payment=${a.paymentId} status=${a.status} fact=${own[0].id} code=${code} escalation=${id} — a provider failure contradicts verified refund evidence of this attempt; both kept for the Owner's review (D-R1 Q4)`);
+    if (created) this.log.error(`refund_failure_after_refund_evidence refundAttempt=${a.id} payment=${a.paymentId} status=${a.status} fact=${own[0].id} code=${code} escalation=${id} — a provider failure contradicts verified refund evidence of this attempt; both kept for the Owner's review (D-R1 Q4)`);
     return id;
   }
 

@@ -14,8 +14,14 @@ import { createHash } from 'node:crypto';
  *   * `scope: 'provider'` (a real provider) needs documentary provider guarantees, a verified adapter mapping, the Owner's explicit
  *     authorization and an expiry (Q3). NONE exists: this registry certifies no real provider.
  *
- * D-R1A uses only `idempotencyKeyRetention` (the refund worker's same-key resend, Q5). Nothing here changes replacement eligibility: no code path
- * reads `terminalFailureFinality` yet (D-R1B, whose database contract awaits the Owner's approval).
+ * D-R1A uses `idempotencyKeyRetention` (the refund worker's same-key resend, Q5). D-R1B (migration 0037) uses `terminalFailureFinality`: a failure
+ * of a certified observation is recorded final with the move to `failed`, and only such a failure, still valid NOW, lets a replacement be
+ * created or sent. The database holds its own mirror of these certificates (`refund_capability_certificate`, seeded by reviewed migrations only)
+ * and decides independently; both layers must agree. A changed certificate needs a new version HERE and a migration that mirrors it.
+ *
+ * Supersession (D-R1B, explicit): a newer version never ends an older one. Evidence belongs to the exact version it was recorded under, is never
+ * re-read under another version, and stays usable while that version is registered, in force and unrevoked and the adapter still declares the
+ * same certificate id. Ending it takes an explicit revocation of that version, here and in the database.
  */
 
 export type RefundCapabilityName = 'terminalFailureFinality' | 'authoritativeNotFound' | 'idempotencyKeyRetention' | 'cancellation' | 'statusAuthority';
@@ -98,7 +104,7 @@ export const SIMULATION_REFUND_CONTRACT_CERTIFICATE: RefundCapabilityCertificate
 /**
  * The `simulation` provider's MODELLED terminal failure finality (Q6), declared by the adapter only when the simulation environment opts in
  * (`PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY=true`). A harness that later reports a success for such an attempt models a provider contract
- * violation. Simulation only; no code path reads it in D-R1A.
+ * violation. Simulation only; D-R1B reads it.
  */
 export const SIMULATION_REFUND_FAILURE_FINALITY_CERTIFICATE: RefundCapabilityCertificate = Object.freeze({
   id: 'simulation-refund-failure-finality',
@@ -223,7 +229,12 @@ function canonical(v: unknown): string {
 
 /** The certificate's content fingerprint: what a durable record of an evaluation must name, so a changed certificate is never mistaken for it. */
 export function certificateFingerprint(c: RefundCapabilityCertificate): string {
-  return createHash('sha256').update(canonical(c)).digest('hex');
+  return createHash('sha256').update(certificateContent(c)).digest('hex');
+}
+
+/** The canonical content the fingerprint covers; the database mirror stores exactly this text and re-computes the fingerprint from it (0037). */
+export function certificateContent(c: RefundCapabilityCertificate): string {
+  return canonical(c);
 }
 
 /**
@@ -308,9 +319,7 @@ export function sameKeyResendAllowed(evaluation: RefundCapabilityEvaluation<'ide
   return elapsedMs < evaluation.grant.lifetimeMs ? { allowed: true } : { allowed: false, reason: 'retention_elapsed' };
 }
 
-/**
- * What a durable record of a certified failure would name (D-R1B; no such record is written in D-R1A). Historical attempts have none.
- */
+/** What a durable record of a certified failure names (D-R1B, `refund_attempt_failure_finality`). Historical attempts have none. */
 export interface RefundFailureFinalityRecord {
   certificateId: string;
   certificateVersion: number;
@@ -324,12 +333,12 @@ export type RefundFailureFinality =
   | { final: false; reason: 'no_finality_record' | 'malformed_record' | 'certificate_changed' | 'observation_not_covered' | RefundCapabilityRefusal };
 
 /**
- * D-R1 Part A: whether one FAILED attempt's failure is certified final, evaluated NOW. Fails closed in every case it cannot prove:
- *   * no record (every historical failed row, and every row D-R1A writes): never final; an existing `failed` status is never proof;
- *   * a record whose certificate is no longer certified now (revoked, expired, provider configuration changed, no longer declared): not final
- *     (whether expiry should be retroactive is an open Owner decision; until then it is, fail closed);
- *   * a record whose certificate content changed (fingerprint), or whose observation the grant does not cover: not final.
- * Nothing calls this for eligibility in D-R1A.
+ * D-R1 Part A, D-R1B: whether one FAILED attempt's failure is certified final, evaluated NOW. Fails closed in every case it cannot prove:
+ *   * no record (every failed row before 0037, every uncertified failure): never final; a `failed` status is never proof;
+ *   * the adapter no longer declares, unambiguously and validly, the record's certificate id (provider configuration changed): not final;
+ *   * the record's OWN version is not registered, not in force (expired, not yet valid) or revoked: not final, though the record stays;
+ *   * that version's content changed (fingerprint), or its grant does not cover the recorded observation: not final.
+ * A newer version of the same certificate, by itself, neither ends nor widens evidence recorded under an older one (explicit supersession: revoke it).
  */
 export function failureFinalityOf(record: RefundFailureFinalityRecord | null, subject: RefundCapabilitySubject | undefined, ctx: RefundCapabilityContext): RefundFailureFinality {
   if (record === null) return { final: false, reason: 'no_finality_record' };
@@ -339,9 +348,10 @@ export function failureFinalityOf(record: RefundFailureFinalityRecord | null, su
   }
   const e = evaluateRefundCapability(subject, 'terminalFailureFinality', ctx);
   if (!e.certified) return { final: false, reason: e.reason };
-  if (e.certificate.id !== record.certificateId || e.certificate.version !== record.certificateVersion || e.fingerprint !== record.fingerprint) {
-    return { final: false, reason: 'certificate_changed' };
-  }
-  if (!e.grant.observations.includes(record.observation)) return { final: false, reason: 'observation_not_covered' };
-  return { final: true, certificate: e.certificate };
+  if (e.certificate.id !== record.certificateId) return { final: false, reason: 'certificate_changed' };
+  const own = resolve(subject!, { id: record.certificateId, version: record.certificateVersion }, ctx);
+  if (!own.ok) return { final: false, reason: own.reason };
+  if (certificateFingerprint(own.certificate) !== record.fingerprint) return { final: false, reason: 'certificate_changed' };
+  if (!own.certificate.grants.terminalFailureFinality?.observations.includes(record.observation)) return { final: false, reason: 'observation_not_covered' };
+  return { final: true, certificate: own.certificate };
 }

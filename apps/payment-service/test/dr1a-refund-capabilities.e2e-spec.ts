@@ -31,7 +31,7 @@ type Row = Record<string, any>;
  *     `failure_after_refund_evidence` escalation, audited, Owner-visible); the fact, the attempt's approved transition and allocation are unchanged.
  *   * Q5: a same-key resend happens only under a certified idempotency-retention guarantee; without one nothing is sent, the attempt stays
  *     unresolved and one `idempotency_retention_unproven` escalation is kept. The simulation's certified contract keeps R6B-4 unchanged.
- *   * Replacement eligibility is NOT changed: the non-certified double-refund path is still open (D-R1B).
+ *   * Since D-R1B (0037): an uncertified failure permits no replacement, and an attempt with its own verified refund fact never becomes `failed` (OD-DR1-1).
  * Real application (two instances), PostgreSQL 16, the simulation provider and the fake Auth receipt server. LABELLED FIXTURES: the crash window
  * between a fact's commit and its decision is reproduced by calling the evidence service's own fact step; an uncertified provider is the simulation
  * adapter with its certificate references removed on the running instances (the registry is untouched).
@@ -128,6 +128,9 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
     }
   };
 
+  /** LABELLED FIXTURE: the simulation adapter on both instances declaring its modelled failure finality (the opt-in), for `fn` only. */
+  const certifiedFinality = <T>(fn: () => Promise<T>): Promise<T> => uncertified(fn, [{ id: 'simulation-refund-contract', version: 1 }, { id: 'simulation-refund-failure-finality', version: 1 }]);
+
   beforeAll(async () => {
     db = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'paymentdr1a');
     await runMigrations(db.url, [kitMigrationsDir, paymentMigrationsDir]);
@@ -179,7 +182,7 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       expect(audits[0].payload.actor).toEqual({ type: 'system', id: 'payment_webhook' });
     });
 
-    it('C2 crash window: the own fact committed, its decision not; the failure is preserved BEFORE the approved transition to failed', async () => {
+    it('C2 crash window: the own fact committed, its decision not; OD-DR1-1: the failure is preserved and the attempt never becomes failed', async () => {
       const x = await submittedAttempt();
       // LABELLED FIXTURE: only the evidence service's FC-1 fact step runs (a crash before its decision)
       const evidence = t.app.get(RefundEvidenceService) as unknown as { recordRefundFact: (id: string, s: Row, ctx: unknown) => Promise<{ id: string }> };
@@ -189,11 +192,12 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       const rows = await escalationsOf(x.attemptId, 'failure_after_refund_evidence');
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ factId: fact.id, attemptStatus: 'submitted', observedFailureCode: 'declined' });
-      // the APPROVED transition is unchanged in D-R1A (an open Owner decision): the attempt is failed, and D-R3 then decides its own fact
-      expect((await attemptRow(x.attemptId)).status).toBe('failed');
+      expect((await attemptRow(x.attemptId)).status).toBe('submitted'); // OD-DR1-1 (D-R1B): in flight, so it still blocks a replacement
+      await outcome(x.attemptId, { outcome: 'failed', failureCode: 'declined' }); // reported again
       await drain(x.attemptId);
-      expect((await attemptRow(x.attemptId)).status).toBe('discrepancy'); // S6b: no competing attempt; unchanged behaviour
+      expect((await attemptRow(x.attemptId)).status).toBe('submitted');
       expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toHaveLength(1);
+      expect((await requestRefund(x.paymentId, x.caseId)).res.status).toBe(409);
       expect((await factsOf(x.attemptId)).map((f) => f.id)).toEqual([fact.id]);
     });
 
@@ -241,7 +245,7 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       expect((await auditsOf(x.attemptId))[0].payload.actor).toEqual({ type: 'system', id: 'payment_refund_worker' });
     });
 
-    it('C6 a definitive dispatch refusal after only the own fact committed: kept before the approved move to failed', async () => {
+    it('C6 a definitive dispatch refusal after only the own fact committed: kept, never failed (OD-DR1-1), its key never sent again', async () => {
       const x = await authorizedAttempt();
       await sim(`payments/${x.paymentId}/refund-dispatch-plan`, { commandId: cmd(), mode: 'rejected', failureCode: 'declined' }).expect(201);
       let factId = '';
@@ -249,9 +253,13 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
         factId = (await evidenceSteps().recordRefundFact(x.attemptId, { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${x.attemptId}` }, jobContext('refund_worker'))).id;
       }, () => drain(x.attemptId));
       expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toMatchObject([{ attemptStatus: 'dispatching', observedFailureCode: 'declined', factId }]);
-      // the approved transitions, unchanged (OD-DR1-1): failed (audited), then, in the same pass, D-R3 decides the undecided fact (no competitor: discrepancy)
-      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.refund_attempt.failed' AND payload->'resource'->>'id' = $1`, [x.attemptId])).rows[0].n).toBe(1);
-      expect((await attemptRow(x.attemptId)).status).toBe('discrepancy');
+      expect((await admin.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'audit.refund_attempt.failed' AND payload->'resource'->>'id' = $1`, [x.attemptId])).rows[0].n).toBe(0);
+      expect((await attemptRow(x.attemptId)).status).toBe('dispatching');
+      await drain(x.attemptId);
+      await drain(x.attemptId, worker2);
+      expect(await received(x.attemptId)).toBe(1); // it was refunded: its key is not sent again, its status is only read
+      await evidenceSteps().apply(x.attemptId, { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${x.attemptId}` }, jobContext('refund_worker'));
+      expect(await attemptRow(x.attemptId)).toMatchObject({ status: 'succeeded', succeededFactId: factId }); // the success report still decides it
     });
 
     it('C7 a definitive dispatch refusal with no fact records nothing (negative control)', async () => {
@@ -287,9 +295,11 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
 
     it('C8 failed, replacement authorized, late success kept by RLSC-1, then another failure: preserved; RLSC-1 row and the attempt unchanged', async () => {
       const x = await submittedAttempt();
-      await outcome(x.attemptId, { outcome: 'failed', failureCode: 'declined' });
-      const { res } = await requestRefund(x.paymentId, x.caseId); // the replacement (eligibility unchanged)
-      expect(res.body.status).toBe('authorized');
+      await certifiedFinality(async () => {
+        await outcome(x.attemptId, { outcome: 'failed', failureCode: 'declined' });
+        const { res } = await requestRefund(x.paymentId, x.caseId); // the replacement: simulation-certified finality only (D-R1B)
+        expect(res.body.status).toBe('authorized');
+      });
       await outcome(x.attemptId, { outcome: 'succeeded' });
       const rlsc = (await admin.query(`SELECT * FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'failed_attempt_refund_evidence'`, [x.attemptId])).rows;
       expect(rlsc).toHaveLength(1);
@@ -394,14 +404,13 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
     });
   });
 
-  describe('replacement eligibility is unchanged (D-R1B is not implemented)', () => {
-    it('E1 CHARACTERIZATION: after an uncertified provider failure a new receipt still authorizes a replacement attempt (the open double-refund path)', async () => {
+  describe('replacement eligibility (D-R1B; the whole matrix is in dr1b-replacement-guard)', () => {
+    it('E1 NEGATIVE CONTROL: after an uncertified provider failure a new receipt authorizes no replacement', async () => {
       const x = await submittedAttempt();
       await outcome(x.attemptId, { outcome: 'failed', failureCode: 'declined' });
       expect((await attemptRow(x.attemptId)).status).toBe('failed');
       const { res } = await requestRefund(x.paymentId, x.caseId);
-      expect(res.status).toBe(201);
-      expect(res.body.status).toBe('authorized'); // D-R1B will refuse this for an uncertified failure; D-R1A does not
+      expect([res.status, res.body.code]).toEqual([409, 'refund_in_progress']);
     });
   });
 

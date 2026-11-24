@@ -213,7 +213,7 @@ echo "PASS: 0030 applies over history unchanged; a historical failed row is stil
 
 echo "== migration: Core V2 D-R1A — 0036 applies over escalations of every existing kind and changes none of them =="
 newdb dr1amig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0036_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0036_*|0037_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null # leaves dispatch_held and failed_attempt_refund_evidence rows
 # LABELLED FIXTURE: the two other historical kinds, inserted raw (triggers off); the table's CHECKs still apply
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "BEGIN; SET LOCAL session_replication_role = replica;
@@ -231,3 +231,23 @@ after="$(snapshot_dr1a)"
 [ "$before" = "$after" ] || fail "0036 changed a historical escalation"
 [ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_safety_escalation WHERE \"observedFailureCode\" IS NOT NULL")" -eq 0 ] || fail "0036 backfilled observedFailureCode"
 echo "PASS: 0036 applies over escalations of all four existing kinds; every row unchanged, nothing backfilled"
+
+echo "== migration: Core V2 D-R1B — 0037 applies over history, changes no row, backfills no finality; a historical failure blocks =="
+newdb dr1bmig; db="$DBNAME"
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0037_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null # leaves 7c01 (failed, its late fact) and 7c02 (its replacement, created before 0037)
+snapshot_dr1b() { psql -Atq -d "$db" -c "SELECT md5(string_agg(row_to_json(a)::text, ',' ORDER BY id)) FROM refund_attempt a UNION ALL SELECT md5(string_agg(row_to_json(e)::text, ',' ORDER BY id)) FROM refund_safety_escalation e UNION ALL SELECT md5(string_agg(row_to_json(f)::text, ',' ORDER BY id)) FROM provider_transaction_fact f"; }
+before="$(snapshot_dr1b)"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_attempt WHERE status = 'failed'")" -ge 1 ] || fail "0037 history fixture: no failed attempt"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0037_dr1b_replacement_finality_guard.sql" || fail "0037 does not apply over history"
+[ "$before" = "$(snapshot_dr1b)" ] || fail "0037 changed a historical row"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_attempt_failure_finality")" -eq 0 ] || fail "0037 backfilled finality"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_attempt a WHERE a.status = 'failed' AND NOT refund_attempt_may_still_pay(a.id, clock_timestamp())")" -eq 0 ] || fail "0037: a historical failure is treated as final"
+out="$(psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO refund_attempt (id, \"paymentId\", producer, \"refundCaseId\", \"companyId\", amount, currency, reason, \"legalOverride\", \"captureFactId\", \"capturedAttemptId\", provider, \"liveMode\", \"receiptDigest\")
+  SELECT gen_random_uuid(), \"paymentId\", producer, gen_random_uuid(), \"companyId\", amount, currency, reason, \"legalOverride\", \"captureFactId\", \"capturedAttemptId\", provider, \"liveMode\", repeat('d', 64) FROM refund_attempt WHERE id = '00000000-0000-4000-8000-000000007c02'" 2>&1)" && fail "0037: a replacement over history was accepted"
+# LABELLED FIXTURE: the historical replacement reached authorized (triggers off); its dispatch is refused by the database
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "BEGIN; SET LOCAL session_replication_role = replica; DELETE FROM provider_transaction_fact WHERE \"providerTxnId\" = 'rtx-rlsc1-late';
+UPDATE refund_attempt SET status = 'authorized', \"receiptId\" = gen_random_uuid(), \"approvedByUserId\" = gen_random_uuid(), \"consumedAt\" = now(), \"authorizedAt\" = now() WHERE id = '00000000-0000-4000-8000-000000007c02'; COMMIT;"
+out="$(psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-000000007c02'" 2>&1)" && fail "0037: a historical replacement was dispatched"
+grep -q "refund_attempt_prior_may_still_pay" <<<"$out" || fail "0037: the historical replacement was refused for another reason: $out"
+echo "PASS: 0037 applies over history; every row unchanged, no finality backfilled; a historical failure blocks a replacement and its dispatch"
