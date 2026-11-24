@@ -115,6 +115,8 @@ BEGIN
          WHEN NEW."blockingCause" IN ('prior_may_still_pay', 'last_capture_may_still_pay') THEN
            refund_attempt_replacement_refusal(a.id, a."paymentId", a."captureFactId", a."captureSpecific", clock_timestamp()) = 'refund_attempt_' || NEW."blockingCause"
            AND refund_attempt_may_still_pay(c.id, clock_timestamp())
+           -- 0037's last-capture refusal is caused by a FAILED sibling refund (an effective one is not what it counts): the named blocker must be one
+           AND (NEW."blockingCause" <> 'last_capture_may_still_pay' OR c.status = 'failed')
          ELSE c.status = 'failed' END, false) THEN
       RAISE EXCEPTION 'refund_safety_escalation: attempt % is not blocked at dispatch by attempt % (%)', a.id, NEW."competingAttemptId", NEW."blockingCause"
         USING ERRCODE = '23514', CONSTRAINT = 'refund_safety_escalation_dispatch_blocked';

@@ -463,6 +463,24 @@ describeWithEnv('Core V2 D-R1C: the dispatch-blocked escalation — real Postgre
     });
   });
 
+  describe('the last-capture database cause names the failed blocker (Codex round 1)', () => {
+    it('G4 an EFFECTIVE refund on the sibling capture is never accepted as the last-capture blocker; the failed one is', async () => {
+      const y = await lastCaptureReady();
+      await revoke(); // the first capture's failed refund may still pay: 0037 refuses y.replacement as LAST CAPTURE
+      const S = randomUUID(); // LABELLED FIXTURE (superuser, triggers off): a submitted refund of the same sibling capture
+      await fixture(
+        `INSERT INTO refund_attempt (id, "paymentId", producer, "refundCaseId", "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId", provider, "liveMode",
+           "receiptDigest", "captureSpecific", status, "receiptId", "approvedByUserId", "consumedAt", "authorizedAt", "providerRefundId", "submittedAt")
+         SELECT $2::uuid, "paymentId", producer, gen_random_uuid(), "companyId", amount, currency, reason, "legalOverride", "captureFactId", "capturedAttemptId", provider, "liveMode", repeat('f', 64), true,
+           'submitted', gen_random_uuid(), $3::uuid, now(), now(), 'sim-fixture-' || $2::text, now() FROM refund_attempt WHERE id = $1`, [y.first, S, OWNER]);
+      expect(await mayStillPay(S)).toBe(true);
+      expect((await one(`SELECT refund_attempt_replacement_refusal($1, "paymentId", "captureFactId", "captureSpecific", clock_timestamp()) AS r FROM refund_attempt WHERE id = $1`, [y.replacement])).r)
+        .toBe('refund_attempt_last_capture_may_still_pay');
+      await expect(forge(y.replacement, S, 'last_capture_may_still_pay')).rejects.toMatchObject(BLOCKED);
+      expect((await forge(y.replacement, y.first, 'last_capture_may_still_pay')).rows[0]).toMatchObject({ causeBasis: 'database_verified', competingAttemptStatus: 'failed' });
+    });
+  });
+
   describe('Owner visibility and the exit', () => {
     it('V1 the seller Company\'s Owner sees the item with its cause, basis, reason and blocker; another Company\'s Owner never does; no resolution is claimed', async () => {
       const x = await replacementReady();
