@@ -158,14 +158,14 @@ export class PaymentAudit {
     );
   }
 
-  /** Core V2 G3 (DO-44; the Owner's G3 rule 1): the exit of a stalled-dispatch escalation, once per exit row, in its transaction. */
-  async recordSafetyExit(q: Queryable, e: { escalationId: string; refundAttemptId: string; paymentId: string; exitedStatus: string },
+  /** Core V2 G3 (DO-44; the Owner's G3 rule 1): the exit of a stalled-dispatch escalation (and, Core V2 D-R1C, of a dispatch-blocked one), once per exit row, in its transaction. */
+  async recordSafetyExit(q: Queryable, e: { escalationId: string; refundAttemptId: string; paymentId: string; kind: string; exitedStatus: string },
     organizationId: string | null, ctx: EventContext): Promise<void> {
     await this.writer.write(
       q,
       { action: 'refund_safety.state_exited' satisfies SafetyEscalationAuditAction, actor: auditActor(ctx), organizationId,
         resource: { type: 'refund_attempt', id: e.refundAttemptId }, outcome: 'succeeded',
-        changes: { escalation_id: e.escalationId, kind: 'dispatch_stalled', payment_id: e.paymentId, exited_status: e.exitedStatus } } as never,
+        changes: { escalation_id: e.escalationId, kind: e.kind, payment_id: e.paymentId, exited_status: e.exitedStatus } } as never,
       { eventId: deterministicEventId(e.escalationId, 'audit.refund_safety.state_exited'), ...(ctx.correlationId && CORRELATION.test(ctx.correlationId) ? { correlationId: ctx.correlationId } : {}) },
     );
   }

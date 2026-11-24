@@ -12,9 +12,9 @@ const DUE = `SELECT a.id FROM refund_attempt a
     AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e WHERE e."refundAttemptId" = a.id AND e.kind = 'dispatch_stalled')
   ORDER BY a."authorizedAt", a.id LIMIT $1`;
 
-/** Escalations whose attempt has left the stuck state and that have no exit observation yet. */
+/** Escalations whose attempt has left the escalated state and that have no exit observation yet (Core V2 D-R1C: also `dispatch_blocked`, once not `authorized`). */
 const EXITED = `SELECT e.id FROM refund_safety_escalation e JOIN refund_attempt a ON a.id = e."refundAttemptId"
-  WHERE e.kind = 'dispatch_stalled' AND NOT refund_attempt_dispatch_stuck(a.status, a."submittedAt")
+  WHERE ((e.kind = 'dispatch_stalled' AND NOT refund_attempt_dispatch_stuck(a.status, a."submittedAt")) OR (e.kind = 'dispatch_blocked' AND a.status <> 'authorized'))
     AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation_exit x WHERE x."escalationId" = e.id)
   ORDER BY e.id LIMIT $1`;
 

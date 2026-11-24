@@ -5,7 +5,8 @@ import type { EventContext } from '../events/payment-events.js';
 
 /** Core V2 DO-76 S1: the two escalation kinds (migration 0032); Core V2 RLSC-1: `failed_attempt_refund_evidence` (migration 0033). */
 export type RefundSafetyEscalationKind = 'dispatch_held' | 'refund_fact_without_authorization' | 'failed_attempt_refund_evidence' | 'dispatch_stalled' // + Core V2 G3 (DO-44, 0034)
-  | 'failure_after_refund_evidence' | 'idempotency_retention_unproven'; // + Core V2 D-R1A (Q4, Q5; 0036)
+  | 'failure_after_refund_evidence' | 'idempotency_retention_unproven' // + Core V2 D-R1A (Q4, Q5; 0036)
+  | 'dispatch_blocked'; // + Core V2 D-R1C (0038)
 
 /** A `refund_safety_escalation` row (migration 0032): append-only; payment, Company, capture and status are derived by the database. */
 export interface RefundSafetyEscalationRow {
@@ -23,6 +24,10 @@ export interface RefundSafetyEscalationRow {
   competingAttemptStatus: string | null;
   /** Core V2 D-R1A (0036): the reported failure's bounded code, for `failure_after_refund_evidence` only. */
   observedFailureCode: string | null;
+  /** Core V2 D-R1C (0038): `dispatch_blocked` only: the cause, whether the database verified it, and the producer's bounded reason. */
+  blockingCause: string | null;
+  causeBasis: string | null;
+  blockingReason: string | null;
 }
 
 const CONFLICT_TARGET: Record<RefundSafetyEscalationKind, string> = {
@@ -32,6 +37,7 @@ const CONFLICT_TARGET: Record<RefundSafetyEscalationKind, string> = {
   dispatch_stalled: `("refundAttemptId") WHERE kind = 'dispatch_stalled'`,
   failure_after_refund_evidence: `("refundAttemptId") WHERE kind = 'failure_after_refund_evidence'`,
   idempotency_retention_unproven: `("refundAttemptId") WHERE kind = 'idempotency_retention_unproven'`,
+  dispatch_blocked: `("refundAttemptId", "blockingCause") WHERE kind = 'dispatch_blocked'`,
 };
 
 /**
@@ -45,13 +51,15 @@ const CONFLICT_TARGET: Record<RefundSafetyEscalationKind, string> = {
 export class RefundSafetyService {
   constructor(@Inject(PaymentAudit) private readonly audit: PaymentAudit) {}
 
-  async escalate(q: Queryable, e: { kind: RefundSafetyEscalationKind; refundAttemptId: string; factId: string | null; competingAttemptId?: string; observedFailureCode?: string },
+  async escalate(q: Queryable, e: { kind: RefundSafetyEscalationKind; refundAttemptId: string; factId: string | null; competingAttemptId?: string; observedFailureCode?: string;
+    blockingCause?: string; blockingReason?: string },
     ctx: EventContext): Promise<string | null> {
     const { rows } = await q.query<RefundSafetyEscalationRow>(
-      `INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId", "observedFailureCode")
-       SELECT $1, a.id, $3, a."paymentId", a."companyId", a."captureFactId", a.status, $4::uuid, $5::text FROM refund_attempt a WHERE a.id = $2
+      `INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId", "observedFailureCode",
+         "blockingCause", "blockingReason")
+       SELECT $1, a.id, $3, a."paymentId", a."companyId", a."captureFactId", a.status, $4::uuid, $5::text, $6::text, $7::text FROM refund_attempt a WHERE a.id = $2
        ON CONFLICT ${CONFLICT_TARGET[e.kind]} DO NOTHING RETURNING *`,
-      [e.kind, e.refundAttemptId, e.factId, e.competingAttemptId ?? null, e.observedFailureCode ?? null],
+      [e.kind, e.refundAttemptId, e.factId, e.competingAttemptId ?? null, e.observedFailureCode ?? null, e.blockingCause ?? null, e.blockingReason ?? null],
     );
     const row = rows[0];
     if (!row) return null;
@@ -69,9 +77,9 @@ export class RefundSafetyService {
     const { rows } = await q.query<{ exitedStatus: string }>(
       `INSERT INTO refund_safety_escalation_exit ("escalationId", "exitedStatus") VALUES ($1, '') ON CONFLICT ("escalationId") DO NOTHING RETURNING "exitedStatus"`, [escalationId]);
     if (!rows[0]) return false;
-    const { rows: e } = await q.query<{ refundAttemptId: string; paymentId: string; organizationId: string | null }>(
-      `SELECT e."refundAttemptId", e."paymentId", p."organizationId" FROM refund_safety_escalation e JOIN payment p ON p.id = e."paymentId" WHERE e.id = $1`, [escalationId]);
-    await this.audit.recordSafetyExit(q, { escalationId, refundAttemptId: e[0]!.refundAttemptId, paymentId: e[0]!.paymentId, exitedStatus: rows[0].exitedStatus },
+    const { rows: e } = await q.query<{ refundAttemptId: string; paymentId: string; kind: string; organizationId: string | null }>(
+      `SELECT e."refundAttemptId", e."paymentId", e.kind, p."organizationId" FROM refund_safety_escalation e JOIN payment p ON p.id = e."paymentId" WHERE e.id = $1`, [escalationId]);
+    await this.audit.recordSafetyExit(q, { escalationId, refundAttemptId: e[0]!.refundAttemptId, paymentId: e[0]!.paymentId, kind: e[0]!.kind, exitedStatus: rows[0].exitedStatus },
       e[0]!.organizationId, ctx);
     return true;
   }

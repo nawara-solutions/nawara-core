@@ -11,7 +11,7 @@ import { RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
-import { RefundFinalityService } from './refund-finality.service.js';
+import { RefundFinalityService, describeRefusal } from './refund-finality.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
 import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 
@@ -195,7 +195,8 @@ export class RefundWorker {
     const reason = await this.db.tx(async (q) => {
       const current = await this.attempts.lockAttempt(q, a.id);
       if (await this.safety.escalationOf(q, a.id, 'failure_after_refund_evidence')) return 'own_refund_fact';
-      return this.finality.dispatchRefusal(q, current);
+      const refusal = await this.finality.dispatchRefusal(q, current);
+      return refusal ? describeRefusal(refusal) : null;
     });
     if (reason) this.logger.error(`refund_resend_blocked refundAttempt=${a.id} payment=${a.paymentId} ${reason} — its key is not sent again; its status is still read (D-R1B)`);
     return reason !== null;
@@ -305,7 +306,11 @@ export class RefundWorker {
         const refusal = await this.finality.dispatchRefusal(q, current);
         if (refusal) {
           await q.query(`UPDATE refund_attempt SET "workAfter" = now() + make_interval(secs => $2) WHERE id = $1`, [a.id, BLOCKED_RECHECK_MS / 1000]);
-          return { dispatch: false as const, refusal };
+          // Core V2 D-R1C (0038): one Owner-visible escalation per attempt and cause, with its audit intent, in THIS transaction. If it cannot be written
+          // the whole transaction rolls back: the attempt stays authorized (never sent: the refusal stands) and the next pass decides and escalates again
+          const escalation = await this.safety.escalate(q, { kind: 'dispatch_blocked', refundAttemptId: current.id, factId: null, competingAttemptId: refusal.blockerId,
+            blockingCause: refusal.cause, blockingReason: refusal.reason }, ctx);
+          return { dispatch: false as const, refusal: describeRefusal(refusal), escalation };
         }
         await q.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1 AND status = 'authorized'`, [a.id]);
         return { dispatch: true as const };
@@ -318,7 +323,7 @@ export class RefundWorker {
       this.logger.error(`refund_dispatch_held refundAttempt=${a.id} payment=${a.paymentId} evidenceFact=${held.factId} escalation=${held.escalation} — refund evidence of this capture exists before dispatch; nothing is sent, the attempt stays authorized for the Owner's review (DO-76)`);
     }
     if ('refusal' in held && held.refusal) {
-      this.logger.error(`refund_dispatch_blocked refundAttempt=${a.id} payment=${a.paymentId} ${held.refusal} — nothing is sent; the attempt stays authorized (D-R1B)`);
+      this.logger.error(`refund_dispatch_blocked refundAttempt=${a.id} payment=${a.paymentId} ${held.refusal}${held.escalation ? ` escalation=${held.escalation}` : ''} — nothing is sent; the attempt stays authorized (D-R1B, D-R1C)`);
     }
     return held.dispatch;
   }
