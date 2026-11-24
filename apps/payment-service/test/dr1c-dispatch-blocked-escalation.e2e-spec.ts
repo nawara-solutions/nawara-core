@@ -2,7 +2,8 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { Logger } from '@nestjs/common';
 import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import type { ProviderCapabilities } from '../src/providers/provider.port.js';
 import { SimulationPaymentProvider } from '../src/providers/simulation-provider.js';
@@ -288,7 +289,15 @@ describeWithEnv('Core V2 D-R1C: the dispatch-blocked escalation — real Postgre
     it('C2 prior_registry_not_final (producer_derived): the adapter no longer declares the finality the database still holds', async () => {
       const x = await replacementReady();
       expect(await mayStillPay(x.attemptId)).toBe(false); // the database alone would allow it
-      await blockedPass(x.replacement); // default: the modelled finality is not declared
+      const errors = vi.spyOn(Logger.prototype, 'error');
+      try {
+        await blockedPass(x.replacement); // default: the modelled finality is not declared
+        const lines = errors.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(x.replacement));
+        expect(lines.some((m) => m.startsWith('refund_dispatch_blocked ') && m.includes('basis=producer_derived'))).toBe(true);
+        expect(lines.some((m) => m.startsWith('refund_dispatch_held '))).toBe(false); // Codex round 2: never reported as a DO-76 hold
+      } finally {
+        errors.mockRestore();
+      }
       await expectEscalation(x.replacement, { blockingCause: 'prior_registry_not_final', causeBasis: 'producer_derived', blockingReason: 'not_granted',
         competingAttemptId: x.attemptId, competingAttemptStatus: 'failed' });
     });

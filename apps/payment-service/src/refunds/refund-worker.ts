@@ -319,7 +319,7 @@ export class RefundWorker {
       const escalation = await this.safety.escalate(q, { kind: 'dispatch_held', refundAttemptId: current.id, factId: evidence[0].factId }, ctx);
       return { dispatch: false as const, escalation, factId: evidence[0].factId };
     });
-    if ('escalation' in held && held.escalation) {
+    if ('factId' in held && held.escalation) { // a DO-76 hold only (a D-R1C refusal carries no fact; it is logged below)
       this.logger.error(`refund_dispatch_held refundAttempt=${a.id} payment=${a.paymentId} evidenceFact=${held.factId} escalation=${held.escalation} — refund evidence of this capture exists before dispatch; nothing is sent, the attempt stays authorized for the Owner's review (DO-76)`);
     }
     if ('refusal' in held && held.refusal) {
