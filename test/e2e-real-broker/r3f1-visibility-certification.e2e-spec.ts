@@ -694,6 +694,30 @@ describeWithEnv(
       WHERE c."caseType" = $1 AND c."evidenceKey" = $2`, [type, disputeId]))?.kind as string | undefined;
     const historical: { disputeId?: string; plainDisputeId?: string; needles: string[] } = { needles: [] };
 
+    // Core V2 D-R1B NEGATIVE CONTROL (the Owner's #549 acceptance, Part A): F1V-1's ORIGINAL order, kept as its own case. Evidence under the failed attempt's exact
+    // provider reference first, then a replacement through Billing's real route: refused by Payment, nothing more reaches the provider, the evidence untouched.
+    it('F1V-1N (original order, negative control): evidence under the failed attempt\'s own reference, THEN a replacement: refused, no second dispatch, evidence immutable', async () => {
+      const { p } = await buy('direct');
+      const r = await failedAttempt(p);
+      const u = await unmatched(r.txn, p.amount);
+      await waitFor(async () => !!(await markerOf(r.attemptId)), 60_000, `the marker\n${tails()}`);
+      const factBefore = await one(paymentAdmin, `SELECT * FROM provider_transaction_fact WHERE id = $1`, [u.factId]);
+      const dispatchesBefore = await n(paymentAdmin, `SELECT count(*) AS n FROM simulation_refund_dispatch d JOIN refund_attempt a ON a.id = d."idempotencyKey" WHERE a."paymentId" = $1`, [p.paymentId]);
+      expect(dispatchesBefore).toBe(1);
+      const second = await relayAgain(r.caseId, p.paymentId, p.amount);
+      expect(second).toEqual({ refused: [409, 'refund_rejected_by_payment'] });
+      const relay = (await one(billingAdmin, `SELECT id, "attemptStatus", refusal FROM refund_authorization_relay WHERE "refundCaseId" = $1 ORDER BY "requestedAt" DESC LIMIT 1`, [r.caseId]))!;
+      expect([relay.attemptStatus, relay.refusal]).toEqual(['rejected', 'refund_in_progress']);
+      expect(await one(paymentAdmin, `SELECT code FROM refund_attempt_refusal WHERE id = $1`, [relay.id])).toEqual({ code: 'refund_in_progress' });
+      expect(await one(paymentAdmin, `SELECT id FROM refund_attempt WHERE id = $1`, [relay.id])).toBeUndefined(); // never created, so never sendable
+      await settle();
+      expect(await n(paymentAdmin, `SELECT count(*) AS n FROM simulation_refund_dispatch d JOIN refund_attempt a ON a.id = d."idempotencyKey" WHERE a."paymentId" = $1`, [p.paymentId])).toBe(1);
+      expect(await one(paymentAdmin, `SELECT * FROM provider_transaction_fact WHERE id = $1`, [u.factId])).toEqual(factBefore); // unchanged and still attributed to nothing
+      expect(factBefore!.paymentId).toBeNull();
+      await expect(paymentAdmin.query(`UPDATE provider_transaction_fact SET amount = 1 WHERE id = $1`, [u.factId])).rejects.toMatchObject({ code: '23514' });
+      record('F1V-1N', 'refused', { relay: second, dispatches: 1 });
+    }, T);
+
     for (const kind of ['direct', 'assisted'] as const) {
       it(`F1V-1 (${kind}): evidence BEFORE the refund completes; the overlap case states it (both processes, list); nothing else changes; acknowledgements unchanged`, async () => {
         const { p } = await buy(kind);

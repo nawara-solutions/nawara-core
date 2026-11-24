@@ -610,6 +610,41 @@ describeWithEnv('Core V2 D-R1B: no replacement while an earlier refund attempt m
     });
   });
 
+  describe('ORIGINAL ORDER negative control (the Owner\'s #549 acceptance, Part A: R3-F1 F1V-1 and the DO-74 two-attempt case were reordered)', () => {
+    it('N1 a certified failure, THEN a refund fact under its exact provider reference, THEN replacements on both instances: refused; one provider refund; the evidence immutable', async () => {
+      const x = await certifiedFailure();
+      const reference = (await row(x.attemptId)).providerRefundId as string;
+      const body = { eventId: `n1_${randomUUID()}`, type: 'refund.succeeded', reference: `unknown-${randomUUID()}`, providerTransactionId: reference, amount: 9000, currency: 'TND' };
+      await signed(body).expect(200);
+      await fixture(`UPDATE webhook_event SET "receivedAt" = now() - interval '301 seconds' WHERE "providerEventId" = $1`, [body.eventId]); // LABELLED FIXTURE: its age (the grace window)
+      await signed(body).expect(200);
+      const fact = await one(`SELECT * FROM provider_transaction_fact WHERE provider = 'simulation' AND "providerTxnId" = $1 AND kind = 'refund'`, [reference]);
+      expect(fact).toMatchObject({ paymentId: null, refundAttemptId: null, amount: '9000' }); // recorded, attributed to nothing (F-29)
+      expect(await finalityOf(x.attemptId)).toHaveLength(1); // its certified finality exists and is in force: only the evidence refuses
+      const before = { fact, finality: await finalityOf(x.attemptId), attempt: await row(x.attemptId) };
+      await certified(async () => {
+        const rs = await Promise.all([requestRefund(x.paymentId, x.caseId, { x: t }), requestRefund(x.paymentId, randomUUID(), { x: t2 })]);
+        expect(rs.map(refusedIn)).toEqual([REFUSED, REFUSED]);
+        for (const r of rs) expect(await row(r.attemptId)).toBeUndefined();
+        await Promise.all([worker.drainOnce(), worker2.drainOnce()]);
+      });
+      await expect(insertAttempt(app, x.attemptId)).rejects.toMatchObject(PRIOR); // the database alone, as the runtime role
+      expect(await providerRefunds(x.paymentId)).toBe(1);
+      expect(await received(x.attemptId)).toBe(1);
+      expect({ fact: await one(`SELECT * FROM provider_transaction_fact WHERE id = $1`, [fact.id]), finality: await finalityOf(x.attemptId), attempt: await row(x.attemptId) }).toEqual(before);
+      for (const q of [app, mig]) await expect(q.query(`UPDATE provider_transaction_fact SET amount = 1 WHERE id = $1`, [fact.id])).rejects.toMatchObject({ code: expect.stringMatching(/^(23514|42501)$/) });
+    });
+
+    it('N2 the reordered order still works as the positive control: a replacement created BEFORE that evidence is admitted and sent once', async () => {
+      const x = await certifiedFailure();
+      const r = await certified(() => requestRefund(x.paymentId, x.caseId));
+      expect([r.res.status, r.res.body.status]).toEqual([201, 'authorized']);
+      await certified(() => drain(r.attemptId));
+      expect(await received(r.attemptId)).toBe(1);
+      expect(await providerRefunds(x.paymentId)).toBe(2);
+    });
+  });
+
   describe('revocation races (lock order: payment, attempt, capability last)', () => {
     it('R1 a revocation in progress, then a replacement: the replacement waits and is refused; the evidence is unchanged', async () => {
       const x = await certifiedFailure();
