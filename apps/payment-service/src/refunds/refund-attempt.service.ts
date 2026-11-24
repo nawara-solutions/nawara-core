@@ -10,6 +10,7 @@ import { PAYMENT_MESSAGES } from '../messages.js';
 import type { PaymentRow } from '../payments/payment.types.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import { disputeExposure } from '../disputes/dispute.types.js';
+import { RefundFinalityService } from './refund-finality.service.js';
 import { RECEIPT_AUTHORITY, type ReceiptAuthority, type ReceiptConsumption } from './receipt-authority.js';
 import { bindingOf, receiptDigest, type RefundAttemptRow, type RefundReason } from './refund.types.js';
 
@@ -112,6 +113,7 @@ export class RefundAttemptService {
     @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
     @Inject(RECEIPT_AUTHORITY) private readonly receipts: ReceiptAuthority,
+    @Inject(RefundFinalityService) private readonly finality: RefundFinalityService,
   ) {}
 
   assertEnabled(): void {
@@ -239,10 +241,12 @@ export class RefundAttemptService {
     // Core V2 R6H-5: scoped to THIS captured money: evidence of an ordinary attempt (always on this capture) or of any attempt on this capture;
     // a capture-specific refund of ANOTHER capture of the payment returns other money and never blocks the sale's ordinary refund
     if (await this.captureRefunded(q, capture.id, 'evidence')) return { refusal: 'refund_already_recorded' };
-    const { rows: live } = await q.query(
-      `SELECT 1 FROM refund_attempt WHERE (("paymentId" = $1 AND NOT "captureSpecific") OR "captureFactId" = $2)
-          AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed') LIMIT 1`, [p.id, capture.id]);
-    if (live.length > 0) return { refusal: 'refund_in_progress' };
+    // Core V2 D-R1B: any earlier attempt that may still pay, a FAILED one without certified finality in force included (0037 refuses the insert too)
+    const prior = await this.finality.blocker(q, { attemptId: null, paymentId: p.id, captureFactId: capture.id, captureSpecific: false });
+    if (prior) {
+      this.log.warn(`refund_prior_may_still_pay payment=${p.id} refundAttempt=${input.refundAttemptId} prior=${prior.attemptId} status=${prior.status} reason=${prior.reason} — no replacement (D-R1B)`);
+      return { refusal: 'refund_in_progress' };
+    }
     return { captureFactId: capture.id, provider: capture.provider, capturedAttemptId: p.succeededAttemptId };
   }
 
@@ -267,7 +271,7 @@ export class RefundAttemptService {
     if (c.basis === 'associated_capture') return { refusal: 'refund_capture_unverified' };
     // Core V2 S0-C12 item 14(d): a different reference does not prove different money: a new refund of an ambiguous attempt needs the provider's permission
     if (c.attemptCaptures > 1 && !c.refundPermitted) return { refusal: 'refund_capture_not_eligible' };
-    if (c.basis === 'duplicate_capture' && !(await this.anotherCaptureRemains(q, p, factId))) return { refusal: 'refund_capture_not_eligible' };
+    if (c.basis === 'duplicate_capture' && !(await this.finality.anotherCaptureRemains(q, p, factId))) return { refusal: 'refund_capture_not_eligible' };
     const exposure = await disputeExposure(q, p.id);
     if (exposure.state === 'unresolved') throw paymentError(503, 'refund_dispute_unavailable', PAYMENT_MESSAGES.refundDisputeUnavailable);
     if (exposure.state === 'exposed') return { refusal: 'refund_dispute_open' };
@@ -277,16 +281,6 @@ export class RefundAttemptService {
     if (c.refund === 'refunded') return { refusal: 'refund_already_recorded' };
     if (c.refund === 'in_progress') return { refusal: 'refund_in_progress' };
     return { captureFactId: c.factId, provider: c.provider, capturedAttemptId: c.capturedAttemptId };
-  }
-
-  /** R6H-5: another capture of the settling attempt stays unrefunded (no attempt that may refund it, no refund evidence of it). */
-  private async anotherCaptureRemains(q: Queryable, p: PaymentRow, factId: string): Promise<boolean> {
-    const { rows } = await q.query(
-      `SELECT 1 FROM provider_transaction_fact g
-        WHERE g."paymentId" = $1 AND g."attemptId" = $2 AND g.kind = 'capture' AND g.id <> $3
-          AND NOT EXISTS (SELECT 1 FROM refund_attempt a WHERE a."captureFactId" = g.id AND a.status NOT IN ('authorization_expired', 'authorization_refused', 'failed'))
-          AND NOT refund_capture_has_evidence(g.id) LIMIT 1`, [p.id, p.succeededAttemptId, factId]);
-    return rows.length > 0;
   }
 
   /** R6H-5: whether THIS captured money was refunded (`completed`: a completed authorization on it) or has refund evidence (`evidence`). */
@@ -322,20 +316,18 @@ export class RefundAttemptService {
     } else if (p.status !== 'succeeded') basis = 'late_capture';
     else if (f.attemptId !== p.succeededAttemptId) basis = 'other_attempt_capture';
     else basis = f.siblings > 1 ? 'duplicate_capture' : 'settling_capture';
-    const { rows: live } = await q.query(
-      `SELECT 1 FROM refund_attempt WHERE "captureFactId" = $1 AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed') LIMIT 1`, [f.id]);
+    // Core V2 D-R1B: an attempt that may still pay, a FAILED one without certified finality in force included
+    const live = await this.finality.blocker(q, { attemptId: null, paymentId: p.id, captureFactId: f.id, captureSpecific: basis !== 'settling_capture' });
     const refunded = (await this.captureRefunded(q, f.id, 'completed')) || (await this.captureRefunded(q, f.id, 'evidence'));
     // the settling capture of a succeeded payment is also returned by an ORDINARY refund of the payment
-    const ordinary = basis === 'settling_capture' ? (await q.query<{ live: boolean; done: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM refund_attempt WHERE "paymentId" = $1 AND NOT "captureSpecific" AND status NOT IN ('authorization_expired', 'authorization_refused', 'failed')) AS live,
-              EXISTS (SELECT 1 FROM refund_authorization WHERE "paymentId" = $1 AND NOT "captureSpecific" AND "completedAt" IS NOT NULL) AS done`, [p.id])).rows[0]!
-      : { live: false, done: false };
+    const ordinaryDone = basis === 'settling_capture' && (await q.query<{ done: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM refund_authorization WHERE "paymentId" = $1 AND NOT "captureSpecific" AND "completedAt" IS NOT NULL) AS done`, [p.id])).rows[0]!.done;
     const refundableOnItsOwn = basis !== 'associated_capture' && (f.siblings <= 1 || f.refundPermitted) // S0-C12 item 14(d)
-      && (basis !== 'duplicate_capture' || (await this.anotherCaptureRemains(q, p, f.id)));
+      && (basis !== 'duplicate_capture' || (await this.finality.anotherCaptureRemains(q, p, f.id)));
     return {
       factId: f.id, paymentId: p.id, provider: f.provider, providerTxnId: f.providerTxnId, amount: Number(f.amount), currency: f.currency, paymentStatus: p.status,
       basis, capturedAttemptId, conflicted: f.conflicted, observedAt: f.observedAt, refundableOnItsOwn, attemptCaptures: f.siblings, refundPermitted: f.refundPermitted,
-      refund: refunded || ordinary.done ? 'refunded' : live.length > 0 || ordinary.live ? 'in_progress' : 'none',
+      refund: refunded || ordinaryDone ? 'refunded' : live ? 'in_progress' : 'none',
     };
   }
 
@@ -536,27 +528,9 @@ export class RefundAttemptService {
     const out: { refundAttemptId: string; state: FailedAttemptEvidenceState }[] = [];
     for (const a of attempts) {
       if (a.status !== 'failed') continue;
-      out.push({ refundAttemptId: a.id, state: await this.evidenceAfterFailure(a) });
+      out.push({ refundAttemptId: a.id, state: await this.finality.evidenceAfterFailure(this.db, a) });
     }
     return out;
-  }
-
-  private async evidenceAfterFailure(a: RefundAttemptRow): Promise<FailedAttemptEvidenceState> {
-    if (a.providerRefundId === null) return 'none';
-    if (this.providers.tryGet(a.provider)?.capabilities.refundReferenceScope !== 'provider') return 'unknown';
-    const r = (await this.db.query<{ fact: { unmatched: boolean } | null; indexPending: boolean; malformed: boolean; notified: boolean }>(
-      `SELECT (SELECT json_build_object('unmatched', f."paymentId" IS NULL AND f."refundAttemptId" IS NULL
-                 AND NOT EXISTS (SELECT 1 FROM provider_fact_association s WHERE s."factId" = f.id))
-                 FROM provider_transaction_fact f WHERE f.provider = $1 AND f."providerTxnId" = $2 AND f.kind = 'refund') AS fact,
-              EXISTS (SELECT 1 FROM webhook_event w WHERE w.provider = $1 AND w."eventType" = 'refund.succeeded' AND w."evidenceIndex" = 'pending') AS "indexPending",
-              EXISTS (SELECT 1 FROM webhook_event w WHERE w.provider = $1 AND w."eventType" = 'refund.succeeded' AND w."providerTransactionId" = $2
-                       AND w."evidenceIndex" = 'reference_malformed') AS malformed,
-              EXISTS (SELECT 1 FROM webhook_event w WHERE w.provider = $1 AND w."eventType" = 'refund.succeeded' AND w."providerTransactionId" = $2
-                       AND w."evidenceIndex" = 'reference' AND w.outcome IS DISTINCT FROM 'refund_attempt:' || $3::text) AS notified`,
-      [a.provider, a.providerRefundId, a.id])).rows[0]!;
-    if (r.fact) return r.fact.unmatched ? 'unmatched_fact' : 'unknown';
-    if (r.indexPending || r.malformed) return 'unknown';
-    return r.notified ? 'notification_pending' : 'none';
   }
 }
 

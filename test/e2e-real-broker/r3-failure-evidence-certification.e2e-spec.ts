@@ -299,6 +299,8 @@ describeWithEnv(
         NODE_ENV: 'test', PORT: String(PORT.payment), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: AUTH_URL, AUTH_SERVICE_TOKEN: paymentToAuthToken.token,
         RABBITMQ_URL: paymentIdentity!.url(env.TEST_RABBITMQ_URL), PAYMENT_SUPPORTED_CURRENCIES: 'TND', PAYMENT_SIMULATION_PROVIDER: 'true',
         PAYMENT_SIMULATION_WEBHOOK_SECRET: WEBHOOK_SECRET,
+        // Core V2 D-R1B: some scenarios replace a FAILED attempt: the simulation explicitly models certified failure finality (never a real provider)
+        PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true',
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest},simulation-harness:${harnessToken.digest}`,
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.create.assisted_settlement', 'payment.create.recovery_settlement',

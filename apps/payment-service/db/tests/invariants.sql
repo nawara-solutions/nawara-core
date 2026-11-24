@@ -1185,7 +1185,27 @@ INSERT INTO refund_authorization ("refundAttemptId", "paymentId", "refundCaseId"
 COMMIT;
 SELECT pg_temp.expect_ok('RLSC-1', 'fixture: dispatched', $$UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-000000007c01'$$);
 SELECT pg_temp.expect_ok('RLSC-1', 'fixture: provider-confirmed failure', $$UPDATE refund_attempt SET status = 'failed', "failureCode" = 'card_closed', "completedAt" = now() WHERE id = '00000000-0000-4000-8000-000000007c01'$$);
-SELECT pg_temp.expect_ok('RLSC-1', 'fixture: a second attempt of the payment, effective', pg_temp.s6b('00000000-0000-4000-8000-000000007c02', :'l1p'));
+-- Core V2 D-R1B (0037): the uncertified failure now refuses that second attempt; LABELLED FIXTURE: one created before 0037, inserted with triggers off.
+SELECT (to_regclass('refund_attempt_failure_finality') IS NOT NULL) AS dr1b \gset
+\if :dr1b
+SELECT pg_temp.expect_constraint('D-R1B', 'a failed attempt without finality evidence refuses a replacement', pg_temp.s6b('00000000-0000-4000-8000-000000007c02', :'l1p'), 'refund_attempt_prior_may_still_pay');
+SELECT pg_temp.expect_constraint('D-R1B', 'a recorded failure is never given finality evidence', $$INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey",
+  observation, "observationSource", "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt")
+  SELECT '00000000-0000-4000-8000-000000007c01', gen_random_uuid(), gen_random_uuid(), 'x', 'x', 'provider_failed', 'status_check', 'card_closed', id, version, fingerprint, now()
+    FROM refund_capability_certificate WHERE id = 'simulation-refund-failure-finality'$$, 'refund_failure_finality_state');
+SELECT pg_temp.expect_error('D-R1B', 'certificates are never changed', $$UPDATE refund_capability_certificate SET "expiresAt" = now()$$, '23514');
+SELECT pg_temp.expect_error('D-R1B', 'certificates are never deleted', $$DELETE FROM refund_capability_certificate$$, '23514');
+SELECT pg_temp.expect_constraint('D-R1B', 'no real provider in the mirror', $$INSERT INTO refund_capability_certificate (id, version, fingerprint, "providerId", scope, "issuedAt", "failureObservations", content, "approvalRef")
+  SELECT id, 2, encode(sha256(convert_to(c, 'UTF8')), 'hex'), 'flouci', 'provider', "issuedAt", "failureObservations", c, 'x'
+    FROM (SELECT *, replace(replace(replace(content, '"version":1', '"version":2'), '"providerId":"simulation"', '"providerId":"flouci"'), '"scope":"simulation"', '"scope":"provider"') AS c
+            FROM refund_capability_certificate WHERE id = 'simulation-refund-contract') x$$, 'refund_capability_certificate_simulation_only');
+SELECT pg_temp.expect_constraint('D-R1B', 'the fingerprint is the content''s', $$INSERT INTO refund_capability_certificate (id, version, fingerprint, "providerId", scope, "issuedAt", "failureObservations", content, "approvalRef")
+  SELECT id, 2, repeat('f', 64), "providerId", scope, "issuedAt", "failureObservations", replace(content, '"version":1', '"version":2'), 'x' FROM refund_capability_certificate WHERE id = 'simulation-refund-contract'$$, 'refund_capability_certificate_fingerprint');
+\endif
+BEGIN;
+SET LOCAL session_replication_role = replica;
+SELECT pg_temp.s6b('00000000-0000-4000-8000-000000007c02', :'l1p') \gexec
+COMMIT;
 INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", "refundAttemptId", amount, currency, "liveMode", source)
   VALUES ('test', 'rtx-rlsc1-late', 'refund', :'l1p', :'l1a', '00000000-0000-4000-8000-000000007c01', 1000, 'TND', false, 'status_check') RETURNING id AS l1f \gset
 SELECT pg_temp.expect_error('RLSC-1', 'the one-effective index is unchanged: failed -> discrepancy is still refused while 7c02 is effective', $$UPDATE refund_attempt SET status = 'discrepancy' WHERE id = '00000000-0000-4000-8000-000000007c01'$$, '23505'); -- refund_attempt_one_effective (a unique index: its name is in the detail)

@@ -1624,6 +1624,16 @@ SIMULATION ONLY; DO-76 and OD-RLSC-1 stay OPEN).** Full record: [`core-v2-d-r1-r
   (`refund_dispatch_refusal_unrecorded`); durable dispatch responses need a new table and the Owner's decision.
 - *D-R1B* (the replacement guard) is a design awaiting the Owner's approval of its database contract.
 
+**D-R1B Payment replacement guard (dated note, 2026-11-24; the Owner's GO, OD-DR1-1 GO, OD-DR1-3, OD-DR1-4, OD-DR1-5 NO-GO; DEVELOPMENT AND
+SIMULATION ONLY; pending the Owner's merge review).** Payment migration `0037`; no route, event, audit action or error code is added.
+- PAY-07: a new refund attempt is refused with the existing `409 refund_in_progress` (a permanent refusal of that attempt id) while an earlier
+  attempt of the same money may still pay. That now includes a `failed` attempt without certified finality evidence in force. For a second
+  capture of the settling attempt the existing `409 refund_capture_not_eligible` applies when the other capture is in doubt for that reason.
+- The R6H-5 capture read: `refund` is `in_progress` for a capture whose failed attempt may still pay, and `refundableOnItsOwn` follows.
+- An `authorized` attempt is re-evaluated at its dispatch and before every resend; a blocked one is not sent.
+- An attempt with its own verified refund fact never becomes `failed` (OD-DR1-1). `failure_after_refund_evidence` keeps the failure as before.
+- Details, lock order, privileges and limits: `core-v2-d-r1-refund-finality.md` §4. DO-76 and OD-RLSC-1 stay OPEN; OD-DR1-6 stays OPEN.
+
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
 ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
 `authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.

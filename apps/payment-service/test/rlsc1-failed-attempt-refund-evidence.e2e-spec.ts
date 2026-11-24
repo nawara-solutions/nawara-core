@@ -152,7 +152,8 @@ describeWithEnv('Core V2 RLSC-1: a failed attempt\'s refund evidence while anoth
       databaseUrl: db.url, authClient, ownerAuthority, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], refundWorker: false,
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
-        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
+        // Core V2 D-R1B: these scenarios replace a FAILED attempt, so the simulation explicitly models certified failure finality (never a real provider)
+        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true',
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create', 'payment.reconciliation.read'], allowedPlatforms: [TEST_PLATFORM] },
           'simulation-harness': { operations: ['payment.simulation.resolve'], allowedPlatforms: [] },

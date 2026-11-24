@@ -144,7 +144,7 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       unmatchedFactAuthority: { authorizes: () => true },
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'other-producer', digest: other.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
-        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SUPPORTED_CURRENCIES: 'TND,EUR', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
+        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SUPPORTED_CURRENCIES: 'TND,EUR', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true',
         PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000', // DO-74 adds attempts for one buyer; the file asserts no rate limit (as disputes/wrong-amount suites)
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create', 'payment.reconciliation.read'], allowedPlatforms: [TEST_PLATFORM] },
@@ -725,8 +725,8 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
     it('two attempts of one payment, each with its own observation: one entry per attempt, in a stable order, each with only its own ids', async () => {
       const r1 = await refundOf({ fail: true });
       const t1 = await ownRef(r1.attemptId);
-      await unmatched({ type: 'refund.succeeded', amount: 9000, txn: t1 });
-      // a second authorized attempt of the same payment, admitted after the first failed (S6b), before the first one's observation
+      // a second authorized attempt of the same payment, admitted after the first failed (S6b), before the first one's observation. Core V2 D-R1B: only under
+      // the simulation's declared failure finality, and before any evidence under the first one's reference (ambiguous evidence is never final)
       const caseId = randomUUID();
       const sec = auth.issue(refundBinding(r1.payment.id, caseId), OWNER);
       const res = await request(server()).post(`/payment/payments/${r1.payment.id}/refunds`).set('authorization', `Bearer ${billing.token}`).set('idempotency-key', key())
@@ -734,6 +734,7 @@ describeWithEnv('payment reconciliation (Core V2 S6h-P) — real PostgreSQL', ['
       expect(res.status, JSON.stringify(res.body)).toBe(201); // the first attempt FAILED at the provider before its observation: a new authorized attempt is admitted
       const a2 = res.body.refundAttemptId as string;
       await drainRefunds();
+      await unmatched({ type: 'refund.succeeded', amount: 9000, txn: t1 });
       const t2 = await ownRef(a2);
       await unmatched({ type: 'refund.succeeded', amount: 9000, txn: t2 });
       // PRE-EXISTING, REPORTED (not DO-74's, unchanged here): a report on the FAILED first attempt while the second is live cannot move it to `discrepancy`

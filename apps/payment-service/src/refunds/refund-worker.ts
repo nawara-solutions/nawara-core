@@ -11,6 +11,7 @@ import { RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
+import { RefundFinalityService } from './refund-finality.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
 import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 
@@ -22,6 +23,8 @@ const boundedFailureCode = (code: string): string => (/^[a-z][a-z0-9_]{0,63}$/.t
 export const REFUND_LEASE_MS = 5000;
 /** An intent the request path may still be authorizing is left to it this long before the recovery lookup (never an expiry rule). */
 export const AUTHORIZATION_RECOVERY_AFTER_MS = 30_000;
+/** Core V2 D-R1B: how long a blocked `authorized` attempt leaves the scan before it is re-evaluated. Technical (no batch starvation); permits nothing. */
+const BLOCKED_RECHECK_MS = 60_000;
 /** A submitted refund is asked about once it has been with the provider this long. */
 const SUBMITTED_CHECK_AFTER_MS = 60_000;
 
@@ -43,6 +46,9 @@ const SUBMITTED_CHECK_AFTER_MS = 60_000;
  *     first send). Absent, uncertified, expired, revoked or elapsed: nothing is sent; the attempt stays unresolved, one
  *     `idempotency_retention_unproven` escalation is kept, and the provider's status is still read and applied as evidence. The first send
  *     (`authorized`) is unchanged.
+ *   * Core V2 D-R1B (0037): nothing is sent, first time or again, while an earlier attempt of the same money may still pay
+ *     (`RefundFinalityService.dispatchRefusal`, re-evaluated here; the database refuses the first send independently), nor again once this attempt has
+ *     its own verified refund fact contradicted by a failure (OD-DR1-1). Its status is still read; nothing is released, retried or reassigned.
  */
 @Injectable()
 export class RefundWorker {
@@ -67,6 +73,7 @@ export class RefundWorker {
     @Inject(RefundAllocationService) private readonly allocations: RefundAllocationService,
     @Inject(RefundSafetyService) private readonly safety: RefundSafetyService,
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
+    @Inject(RefundFinalityService) private readonly finality: RefundFinalityService,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -162,6 +169,7 @@ export class RefundWorker {
    * its audit intent, under the attempt lock, only while the attempt still awaits that resend) and nothing is sent. Never a new key, never a failure.
    */
   private async sameKeyResend(a: RefundAttemptRow, provider: PaymentProvider, ctx: EventContext): Promise<{ allowed: boolean; escalated: boolean }> {
+    if (await this.resendWithheld(a)) return { allowed: false, escalated: false };
     const { rows } = await this.db.query<{ now: Date; elapsedMs: number | null }>(
       `SELECT now() AS now, (extract(epoch FROM now() - "authorizedAt") * 1000)::float8 AS "elapsedMs" FROM refund_attempt WHERE id = $1`, [a.id]);
     const now = rows[0]?.now ?? new Date(Number.NaN);
@@ -177,6 +185,20 @@ export class RefundWorker {
       this.logger.error(`refund_resend_withheld refundAttempt=${a.id} payment=${a.paymentId} provider=${a.provider} status=${a.status} reason=${decision.reason} escalation=${escalation} — no certified idempotency guarantee covers a same-key resend; nothing is sent, the attempt stays unresolved for the Owner's review (D-R1 Q5)`);
     }
     return { allowed: false, escalated: escalation !== null };
+  }
+
+  /**
+   * Core V2 D-R1B: a resend is a dispatch too. Withheld while an earlier attempt may still pay (its certificate may have been revoked since the first
+   * send), or once a failure contradicted this attempt's own verified refund fact (OD-DR1-1: it was refunded; its key is not sent again).
+   */
+  private async resendWithheld(a: RefundAttemptRow): Promise<boolean> {
+    const reason = await this.db.tx(async (q) => {
+      const current = await this.attempts.lockAttempt(q, a.id);
+      if (await this.safety.escalationOf(q, a.id, 'failure_after_refund_evidence')) return 'own_refund_fact';
+      return this.finality.dispatchRefusal(q, current);
+    });
+    if (reason) this.logger.error(`refund_resend_blocked refundAttempt=${a.id} payment=${a.paymentId} ${reason} — its key is not sent again; its status is still read (D-R1B)`);
+    return reason !== null;
   }
 
   /** One statement: another instance that claimed the attempt within the lease, or an attempt that moved on since the scan, is skipped. */
@@ -237,8 +259,9 @@ export class RefundWorker {
       const current = await this.attempts.lockAttempt(q, a.id);
       // Core V2 D-R1A (Q4): a definitive refusal is a provider failure too; when the attempt already has its own verified refund fact (a success
       // that arrived while this call was in flight), both observations are kept before anything else, exactly as for a reported failure
+      let preserved: string | null = null;
       if (result.kind === 'rejected' && FAILURE_CONTRADICTABLE.has(current.status)) {
-        await this.evidence.preserveFailureAfterEvidence(q, current, boundedFailureCode(result.failureCode), ctx);
+        preserved = await this.evidence.preserveFailureAfterEvidence(q, current, boundedFailureCode(result.failureCode), ctx);
       }
       if (current.status !== 'dispatching' && current.status !== 'unknown') return; // evidence got there first: it wins
       if (result.kind === 'accepted') {
@@ -247,7 +270,9 @@ export class RefundWorker {
           [a.id, result.providerRefundId],
         );
       } else if (result.kind === 'rejected') {
+        if (preserved) return; // OD-DR1-1 (D-R1B): its own verified refund fact stands; it is never `failed`
         const code = boundedFailureCode(result.failureCode);
+        await this.finality.recordIfCertified(q, current, 'dispatch_rejected', code, ctx);
         const { rows } = await q.query<RefundAttemptRow>(
           `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`, [a.id, code]);
         await this.audit.recordRefund(q, 'refund_attempt.failed', rows[0]!, await this.attempts.organizationOf(q, a.paymentId), ctx);
@@ -276,6 +301,12 @@ export class RefundWorker {
       const { rows: hold } = await q.query<{ id: string }>(
         `SELECT id FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'dispatch_held'`, [current.id]);
       if (!evidence[0] && !hold[0]) {
+        // Core V2 D-R1B: re-evaluated at the dispatch, not only at creation. The attempt stays `authorized`: nothing is sent, released or reassigned
+        const refusal = await this.finality.dispatchRefusal(q, current);
+        if (refusal) {
+          await q.query(`UPDATE refund_attempt SET "workAfter" = now() + make_interval(secs => $2) WHERE id = $1`, [a.id, BLOCKED_RECHECK_MS / 1000]);
+          return { dispatch: false as const, refusal };
+        }
         await q.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1 AND status = 'authorized'`, [a.id]);
         return { dispatch: true as const };
       }
@@ -285,6 +316,9 @@ export class RefundWorker {
     });
     if ('escalation' in held && held.escalation) {
       this.logger.error(`refund_dispatch_held refundAttempt=${a.id} payment=${a.paymentId} evidenceFact=${held.factId} escalation=${held.escalation} — refund evidence of this capture exists before dispatch; nothing is sent, the attempt stays authorized for the Owner's review (DO-76)`);
+    }
+    if ('refusal' in held && held.refusal) {
+      this.logger.error(`refund_dispatch_blocked refundAttempt=${a.id} payment=${a.paymentId} ${held.refusal} — nothing is sent; the attempt stays authorized (D-R1B)`);
     }
     return held.dispatch;
   }

@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RefundAttemptService } from './refund-attempt.service.js';
+import { RefundFinalityService } from './refund-finality.service.js';
 import type { ProviderCapabilities } from '../providers/provider.port.js';
 
 /** Core V2 R3 (PAY-08 I): matching authority comes ONLY from an adapter's explicit declaration; without it a failed attempt is `unknown`, never `none`. */
 describe('failedAttemptEvidence: adapter matching authority (Core V2 R3)', () => {
   const service = (capabilities: Partial<ProviderCapabilities> | null, row?: Record<string, unknown>) => {
     const query = vi.fn(async () => ({ rows: [row ?? { fact: null, indexPending: false, malformed: false, notified: false }] }));
-    const s = Object.create(RefundAttemptService.prototype) as Record<string, unknown>;
-    s['db'] = { query };
+    const s = Object.create(RefundFinalityService.prototype) as Record<string, unknown>;
     s['providers'] = { tryGet: () => (capabilities === null ? undefined : { capabilities }) };
-    return { s: s as unknown as { evidenceAfterFailure(a: Record<string, unknown>): Promise<string> }, query };
+    const real = s as unknown as { evidenceAfterFailure(q: unknown, a: Record<string, unknown>): Promise<string> };
+    return { s: { evidenceAfterFailure: (a: Record<string, unknown>) => real.evidenceAfterFailure({ query }, a) }, query };
   };
   const failed = { id: 'a', status: 'failed', provider: 'p', providerRefundId: 'ref' };
 

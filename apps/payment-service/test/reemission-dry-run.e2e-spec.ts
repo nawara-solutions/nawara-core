@@ -82,6 +82,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0034_g3_refund_dispatch_stalled.sql', // Core V2 G3 (DO-44): a dispatch_stalled escalation kind (review only) and its exit observation
       '0035_failed_attempt_evidence_before_allocation.sql', // Core V2 D-R3: a failed attempt's refund fact is allocated only after its RLSC-1 evidence
       '0036_dr1a_refund_evidence_preservation.sql', // Core V2 D-R1A: failure-after-evidence and withheld-resend escalations
+      '0037_dr1b_replacement_finality_guard.sql', // Core V2 D-R1B: capability mirror, failure finality and the replacement guard
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

@@ -150,7 +150,8 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       databaseUrl: db.url, authClient, ownerAuthority, migrationsDirs: [kitMigrationsDir, paymentMigrationsDir], refundWorker: false,
       tokens: [{ caller: 'billing-service', digest: billing.digest }, { caller: 'simulation-harness', digest: harness.digest }],
       env: {
-        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET,
+        // Core V2 D-R1B: these scenarios replace a FAILED attempt, so the simulation explicitly models certified failure finality (never a real provider)
+        AUTH_SERVICE_URL: auth.url, AUTH_SERVICE_TOKEN: auth.token, PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET, PAYMENT_SIMULATION_REFUND_FAILURE_FINALITY: 'true',
         PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: {
           'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel', 'payment.refund.create', 'payment.reconciliation.read'], allowedPlatforms: [TEST_PLATFORM] },
           'simulation-harness': { operations: ['payment.simulation.resolve'], allowedPlatforms: [] },
@@ -336,6 +337,8 @@ describeWithEnv('Core V2 D-R3: a failed attempt\'s refund fact is allocated only
       try {
         await failer.query('BEGIN');
         await failer.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [p]);
+        // Core V2 D-R1B (OD-DR1-1): an attempt with its own fact no longer moves to `failed`; LABELLED FIXTURE, triggers off, as it could before 0037
+        await failer.query('SET LOCAL session_replication_role = replica');
         await failer.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'card_closed', "completedAt" = now(), "workAfter" = NULL WHERE id = $1`, [attempt]);
         const racing = admin.query(
           `INSERT INTO refund_allocation ("factId", "refundAuthorizationId", "paymentId", "refundAttemptId", amount, currency, intended, excess)
