@@ -255,10 +255,11 @@ CREATE TRIGGER refund_attempt_09b_prior_may_still_pay BEFORE UPDATE OF status ON
   FOR EACH ROW WHEN (OLD.status = 'authorized' AND NEW.status = 'dispatching') EXECUTE FUNCTION refund_attempt_replacement_guard();
 
 -- OD-DR1-1. A refund fact takes KEY SHARE on its attempt row (its foreign key): FOR UPDATE waits for a fact being written, so it is always seen.
+-- The attempt row is enough: the payment row is deliberately NOT locked here (this UPDATE already holds the attempt row; taking the payment after it
+-- would invert the lock order for a writer that did not lock the payment first, as the application always does).
 CREATE FUNCTION refund_attempt_failed_after_fact_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   PERFORM refund_require_read_committed();
-  PERFORM 1 FROM payment WHERE id = NEW."paymentId" FOR UPDATE;
   PERFORM 1 FROM refund_attempt WHERE id = NEW.id FOR UPDATE;
   IF EXISTS (SELECT 1 FROM provider_transaction_fact f WHERE f.kind = 'refund' AND f."refundAttemptId" = NEW.id) THEN
     RAISE EXCEPTION 'refund_attempt %: it has its own verified refund fact and cannot become failed', NEW.id

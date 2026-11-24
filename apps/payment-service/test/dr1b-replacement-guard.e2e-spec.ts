@@ -788,6 +788,33 @@ describeWithEnv('Core V2 D-R1B: no replacement while an earlier refund attempt m
   });
 
   describe('atomicity, restart and the rest of the guard', () => {
+    it('A0 no lock inversion: a direct move to failed never waits for the payment row, so it cannot deadlock with a holder of payment then attempt', async () => {
+      const x = await submitted();
+      const holder = await open(app, (c) => c.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [x.paymentId])); // `lockAttempt`, its first lock
+      const direct = await open(app, (c) => c.query(`SET LOCAL lock_timeout = '3s'`));
+      await failSql(direct.c, x.attemptId); // returns at once: it needs only the attempt row
+      const then = holder.c.query('SELECT 1 FROM refund_attempt WHERE id = $1 FOR UPDATE', [x.attemptId]); // `lockAttempt`, its second lock
+      await direct.end();
+      await then;
+      await holder.end();
+      expect((await row(x.attemptId)).status).toBe('failed');
+      await expect(insertAttempt(app, x.attemptId)).rejects.toMatchObject(PRIOR);
+    });
+
+    it('A0b a replacement racing an uncommitted move to failed waits for it, then is refused (uncertified) or admitted (certified in the same transaction)', async () => {
+      for (const cert of [false, true]) {
+        const x = await submitted();
+        const moving = await open(app, async (c) => {
+          if (cert) await insertFinality(c, x.attemptId);
+          await failSql(c, x.attemptId);
+        });
+        const racing = insertAttempt(app, x.attemptId).then((r) => r.rowCount, (e: Row) => e.constraint);
+        await new Promise((r) => setTimeout(r, 150));
+        await moving.end();
+        expect(await racing).toBe(cert ? 1 : PRIOR.constraint);
+      }
+    });
+
     it('A1 the failure and its finality commit together or not at all; the redelivery records both', async () => {
       const x = await submitted();
       await admin.query(`CREATE FUNCTION dr1b_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
