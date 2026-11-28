@@ -440,8 +440,9 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
 
     it('K4 crash after the answer is stored, before its application: nothing else happens to the attempt; recovery applies it once, no provider call', async () => {
       const x = await storedUnapplied('accepted');
-      const inWindow = await providerCalls(async () => { await drain(x.attemptId); await drain(x.attemptId, worker2); });
+      const inWindow = await providerCalls(async () => { await drain(x.attemptId); await drain(x.attemptId, worker2); await recovery.recoverOnce(); });
       expect([inWindow.refunds, inWindow.statusReads]).toEqual([0, 0]); // excluded: no resend, no status read over a stored answer
+      expect(await applicationsOf(x.attemptId)).toEqual([]); // recovery inside its (default, 30 s) window applies nothing
       expect((await row(x.attemptId)).status).toBe('dispatching');
       const recovered = await providerCalls(() => recoveryWindow(1, () => recovery.recoverOnce()));
       expect([recovered.refunds, recovered.statusReads]).toEqual([0, 0]); // recovery never calls the provider
@@ -750,13 +751,20 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await refused(appRole)).toBe('42501'); // the runtime role can record finality
       expect(await refused(migRole)).toBe('42501'); // the schema owner
       const member = `dr1d_mem_${randomBytes(3).toString('hex')}`;
-      await admin.query(`CREATE ROLE ${member} NOLOGIN`);
+      await admin.query(`CREATE ROLE ${member} NOLOGIN NOINHERIT`); // NOINHERIT: no privilege of its own, but it can SET ROLE to the runtime role
       try {
         await admin.query(`GRANT ${appRole} TO ${member}`);
         expect(await refused(member)).toBe('42501'); // it could become the runtime role
       } finally {
         await admin.query(`DROP OWNED BY ${member}`);
         await admin.query(`DROP ROLE ${member}`);
+      }
+      // the schema owner is refused even after revoking its own write rights on the three tables (it can grant them back to itself)
+      await mig.query('REVOKE INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation FROM CURRENT_USER');
+      try {
+        expect(await refused(migRole)).toBe('42501');
+      } finally {
+        await mig.query('GRANT INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation TO CURRENT_USER');
       }
       const asRuntime = new DbService({ url: urlAs(appRole, appPw), max: 1 });
       try {
