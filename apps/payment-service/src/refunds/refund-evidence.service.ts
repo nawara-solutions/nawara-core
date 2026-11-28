@@ -7,6 +7,7 @@ import type { RefundStatusResult } from '../providers/provider.port.js';
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
 import { RefundFinalityService } from './refund-finality.service.js';
+import { preserveFailureAfterEvidence } from './refund-dispatch-decision.js';
 import { RefundSafetyService } from './refund-safety.service.js';
 import type { RefundAttemptRow } from './refund.types.js';
 
@@ -146,14 +147,7 @@ export class RefundEvidenceService {
    * re-validates the fact and the state (0036). Also used by the refund worker for a definitive dispatch refusal.
    */
   async preserveFailureAfterEvidence(q: Queryable, a: RefundAttemptRow, code: string, ctx: EventContext): Promise<string | null> {
-    const { rows: own } = await q.query<{ id: string }>(
-      `SELECT id FROM provider_transaction_fact WHERE kind = 'refund' AND "refundAttemptId" = $1 AND "paymentId" = $2 ORDER BY "observedAt", id LIMIT 1`, [a.id, a.paymentId]);
-    if (!own[0]) return null;
-    const created = await this.safety.escalate(q, { kind: 'failure_after_refund_evidence', refundAttemptId: a.id, factId: own[0].id, observedFailureCode: code }, ctx);
-    const id = created ?? (await this.safety.escalationOf(q, a.id, 'failure_after_refund_evidence'));
-    if (!id) throw new Error('refund_failure_after_evidence_unrecorded'); // never acknowledged without its row
-    if (created) this.log.error(`refund_failure_after_refund_evidence refundAttempt=${a.id} payment=${a.paymentId} status=${a.status} fact=${own[0].id} code=${code} escalation=${id} — a provider failure contradicts verified refund evidence of this attempt; both kept for the Owner's review (D-R1 Q4)`);
-    return id;
+    return preserveFailureAfterEvidence(q, this.safety, this.log, a, code, ctx); // Core V2 D-R1E: shared with the recovery process, unchanged
   }
 
   /**

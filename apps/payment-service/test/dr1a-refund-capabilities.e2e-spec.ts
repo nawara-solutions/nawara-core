@@ -3,13 +3,14 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
+import { DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import type { OwnerCompanyAuthority, VerifiedOwner } from '../src/disputes/owner-company.authority.js';
 import { jobContext } from '../src/events/payment-events.js';
 import type { ProviderCapabilities } from '../src/providers/provider.port.js';
 import { SimulationPaymentProvider } from '../src/providers/simulation-provider.js';
 import { RefundEvidenceService } from '../src/refunds/refund-evidence.service.js';
+import { RefundResponseRecovery } from '../src/refunds/refund-dispatch-decision.js';
 import { RefundWorker } from '../src/refunds/refund-worker.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
@@ -290,14 +291,27 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       expect((await admin.query(`SELECT * FROM refund_dispatch_application WHERE "observationId" = $1`, [obs[0].id])).rows).toEqual([]);
       await worker.drainOnce(); // inside the recovery window: not applied yet
       expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toEqual([]);
-      const saved = worker.responseRecoveryAfterMs;
-      worker.responseRecoveryAfterMs = 1;
+      // Core V2 D-R1E (0040): recovery is a separate process as the separate recovery role (no finality authority), here two of them
+      const role = `dr1a_rec_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+      const pw = randomUUID().replace(/-/g, '');
+      const dbName = new URL(db.url).pathname.slice(1);
+      await admin.query(`CREATE ROLE ${role} LOGIN PASSWORD '${pw}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`);
+      const recDbs: DbService[] = [];
       try {
+        await admin.query(`GRANT CONNECT ON DATABASE ${dbName} TO ${role}`);
+        await admin.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
+        await admin.query('SELECT payment_grant_refund_recovery($1::regrole)', [role]);
+        const u = new URL(db.url);
+        u.username = role;
+        u.password = pw;
+        recDbs.push(new DbService({ url: u.toString(), max: 2 }), new DbService({ url: u.toString(), max: 2 }));
         await new Promise((r) => setTimeout(r, 20));
-        await worker.drainOnce();
-        await worker2.drainOnce();
+        await new RefundResponseRecovery(recDbs[0]!, 1).recoverOnce();
+        await new RefundResponseRecovery(recDbs[1]!, 1).recoverOnce();
       } finally {
-        worker.responseRecoveryAfterMs = saved;
+        for (const d of recDbs) await d.onApplicationShutdown();
+        await admin.query(`DROP OWNED BY ${role}`);
+        await admin.query(`DROP ROLE ${role}`);
       }
       expect((await attemptRow(x.attemptId)).status).toBe('succeeded'); // the success stands
       expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toMatchObject([{ attemptStatus: 'succeeded', observedFailureCode: 'declined' }]);

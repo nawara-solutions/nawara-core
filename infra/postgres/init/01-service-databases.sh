@@ -53,6 +53,20 @@ SQL
   echo "init: retention role created for audit"
 fi
 
+# Core V2 D-R1E (the A1 correction of D-R1D): payment-service's THIRD role, the refund-recovery role. It applies stored refund dispatch answers in a
+# separate process (`npm run refund-recovery`) and can NEVER record refund failure finality, a send or an answer: CONNECT and schema USAGE here;
+# its table grants come from payment-service migration 0040 (`payment_grant_refund_recovery`, which refuses any role with that authority). Created
+# only when a password is given; without it there is no recovery role (stored answers then stay Owner-visible, unapplied). Never a production role.
+if [ -n "${PAYMENT_REFUND_RECOVERY_PASSWORD:-}" ]; then
+  valid "$PAYMENT_REFUND_RECOVERY_PASSWORD" || { echo "init: PAYMENT_REFUND_RECOVERY_PASSWORD must be 8+ characters of [A-Za-z0-9_.-]" >&2; exit 1; }
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<SQL
+CREATE ROLE payment_refund_recovery LOGIN PASSWORD '${PAYMENT_REFUND_RECOVERY_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+GRANT CONNECT ON DATABASE payment TO payment_refund_recovery;
+SQL
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname payment -c "GRANT USAGE ON SCHEMA public TO payment_refund_recovery;"
+  echo "init: refund-recovery role created for payment"
+fi
+
 # V2 A12.5.3: the LOCAL observability monitoring role, for postgres_exporter. Created only when MONITORING_PASSWORD is given, which only the
 # opt-in docker-compose.observability.yml passes. It observes and never acts: LOGIN plus the built-in pg_monitor (pg_read_all_stats,
 # pg_read_all_settings, pg_stat_scan_tables), no CONNECT on any service database, no table, schema or role rights. It connects to the
