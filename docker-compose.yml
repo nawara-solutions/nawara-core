@@ -157,6 +157,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # Core V2 D-R1E (development and simulation only; opt-in: `docker compose --profile db --profile refund-recovery up -d payment-refund-recovery`): the separate
+  # refund-recovery process. It holds ONLY the recovery role's connection (never payment-service's DATABASE_URL), calls no provider and no broker,
+  # and refuses to run as any role with finality, send or answer authority. Needs PAYMENT_REFUND_RECOVERY_PASSWORD on a fresh volume (the role)
+  # and payment-service's migrations applied (the grant). See docs/runbooks/refund-response-recovery.md.
+  payment-refund-recovery:
+    profiles: [refund-recovery]
+    stop_grace_period: 15s
+    restart: on-failure:5 # bounded: a configuration (2), connection (3) or authority (4) refusal stops after five tries, visibly
+    build:
+      context: .
+      dockerfile: apps/payment-service/Dockerfile
+    command: ['node', 'dist/cli/refund-response-recovery.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      REFUND_RECOVERY_DATABASE_URL: postgres://payment_refund_recovery:${PAYMENT_REFUND_RECOVERY_PASSWORD:-unset}@postgres:5432/payment
+      PAYMENT_REFUND_RESPONSE_RECOVERY_AFTER_MS: ${PAYMENT_REFUND_RESPONSE_RECOVERY_AFTER_MS:-30000}
+
   payment-service:
     profiles: [db]
     # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded at about 40 s.

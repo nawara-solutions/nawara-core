@@ -281,7 +281,18 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
   `payment_grant_refund_recovery(role)` refuses any role with that authority (column-level grants included), the schema owner, a superuser and any
   member of another role, and REGISTERS the role (`refund_recovery_role`, owner-written, append-only). A registered recovery role, as the current or
   the session role, is refused every insert into the finality (any source), send and answer tables and is always `recovery`, whatever it is granted
-  later: its identity decides, not its privileges (Codex round 1, P1 and P2). No SECURITY DEFINER function exists. The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
+  later: its identity decides, not its privileges (Codex round 1, P1 and P2). No SECURITY DEFINER function exists.
+  What a recovery session may write is bound to stored evidence (the Owner's F1-F4 GO of 2026-11-28):
+  - **F2:** an attempt changes only by a status transition, with that transition's own columns at database time, matched at commit by its own
+    recovery application of a stored answer of that attempt, provider and key (failure code and provider reference included).
+  - **F3, both roles:** an application's effect must be the one the approved decision gives. A false `no_effect` cannot hide an applicable
+    answer, and `preserved_contradiction` needs the attempt's own verified refund fact and its D-R1A row.
+  - **F1:** its outbox rows are only the two audit intents of its decision (`audit.refund_attempt.failed`, `audit.refund_safety.escalated`). Each is
+    byte-exact to the payload the database derives from the stored rows, unpublished, at database time, one per resource per transaction, and its
+    decision must commit with it. No other event is accepted, never `payment.succeeded` or `refund.case_completed`. The deterministic event id is
+    not recomputed: core PostgreSQL has no SHA-1.
+  - **F4:** it never updates a payment and never writes `workAfter`.
+  - Operations: [`docs/runbooks/refund-response-recovery.md`](../runbooks/refund-response-recovery.md). The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
   Remaining trust: the runtime role (the service that made the provider call) keeps the authority D-R1B gave it.
 
 | Crash point | Durable state | Result |

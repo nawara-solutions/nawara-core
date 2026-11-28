@@ -20,6 +20,10 @@
 --     and is always `recovery`, WHATEVER privileges or memberships it is given later (Codex round 1, P1): its identity, not its privileges, decides.
 --     All privilege checks count column-level grants too (`has_any_column_privilege`; Codex round 1, P2).
 --   * No SECURITY DEFINER function exists in this schema (a test pins it), so the recovery role cannot borrow another role's rights.
+-- What a recovery session may write is bound to stored evidence (F1-F4 of the Owner's 2026-11-28 GO): an attempt changes only by a status
+-- transition matched at commit by its own recovery application of a stored answer of that attempt, provider and key (F2); an application's effect is
+-- the one the approved decision gives (F3, both roles); its outbox rows are only its own two audit intents, byte-exact (F1); it never updates a payment
+-- nor schedules work (no "workAfter", F4).
 -- Remaining trust (recorded): the runtime role itself (the Payment service, which made the provider call) keeps the authority D-R1B gave it.
 
 -- ─────────────────────────────────────────────────────────────────────────────────────────────── the recovery-role registry
@@ -52,7 +56,7 @@ CREATE TRIGGER refund_dispatch_send_00_not_recovery BEFORE INSERT ON refund_disp
 CREATE TRIGGER refund_dispatch_observation_00_not_recovery BEFORE INSERT ON refund_dispatch_observation FOR EACH ROW EXECUTE FUNCTION refund_refuse_recovery_role();
 
 CREATE OR REPLACE FUNCTION refund_dispatch_application_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE a refund_attempt%ROWTYPE; pay uuid; o refund_dispatch_observation%ROWTYPE; authority text;
+DECLARE a refund_attempt%ROWTYPE; pay uuid; o refund_dispatch_observation%ROWTYPE; authority text; own_fact boolean; expected text;
 BEGIN
   PERFORM refund_require_read_committed();
   -- 0040 (D-R1E): who applies an answer is the connected role's own authority, never the caller's claim
@@ -77,9 +81,161 @@ BEGIN
     RAISE EXCEPTION 'refund_dispatch_application: observation % does not leave attempt % in status %', NEW."observationId", NEW."refundAttemptId", NEW."attemptStatusAfter"
       USING ERRCODE = '23514', CONSTRAINT = 'refund_dispatch_application_state';
   END IF;
+  -- 0040 F3 (both roles): the effect is the one the approved decision gives this answer from this status, never the caller's choice. A false
+  -- `no_effect` cannot hide an applicable answer, and `preserved_contradiction` needs the attempt's own verified refund fact and its D-R1A row
+  own_fact := EXISTS (SELECT 1 FROM provider_transaction_fact f WHERE f.kind = 'refund' AND f."refundAttemptId" = a.id AND f."paymentId" = a."paymentId");
+  expected := CASE
+    WHEN o.classification = 'rejected' AND own_fact
+         AND NEW."attemptStatusBefore" IN ('dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy', 'failed') THEN 'preserved_contradiction'
+    WHEN NEW."attemptStatusBefore" IN ('dispatching', 'unknown') THEN
+      CASE WHEN o.classification IN ('accepted', 'rejected') OR NEW."attemptStatusBefore" = 'dispatching' THEN 'transitioned' ELSE 'no_effect' END
+    ELSE 'no_effect' END;
+  IF NEW.effect IS DISTINCT FROM expected
+     OR (expected = 'preserved_contradiction' AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e
+           WHERE e."refundAttemptId" = a.id AND e.kind = 'failure_after_refund_evidence')) THEN
+    RAISE EXCEPTION 'refund_dispatch_application: observation % of attempt % has effect %, not %', NEW."observationId", a.id, expected, NEW.effect
+      USING ERRCODE = '23514', CONSTRAINT = 'refund_dispatch_application_effect';
+  END IF;
   NEW."appliedAt" := clock_timestamp();
   RETURN NEW;
 END $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────────────────────── what a recovery session may write (F1, F2)
+-- A recovery session writes only what applying ONE stored answer produces, in that answer's own transaction, and the database checks each write
+-- against the stored rows. `applied_here`: the recovery application of this attempt committed in THIS transaction (appliedAt is database time).
+
+CREATE FUNCTION refund_recovery_applied_here(p_attempt uuid, p_effect text, p_before text, p_after text) RETURNS boolean
+LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM refund_dispatch_application p
+                   JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
+                   JOIN refund_dispatch_send s ON s.id = o."sendId" AND s."refundAttemptId" = o."refundAttemptId"
+                   JOIN refund_attempt a ON a.id = p."refundAttemptId" AND a."paymentId" = s."paymentId" AND a.provider = s.provider AND s."idempotencyKey" = a.id::text
+                  WHERE p."refundAttemptId" = p_attempt AND p."appliedBy" = 'recovery' AND p."appliedAt" >= transaction_timestamp()
+                    AND p.effect = p_effect AND (p_before IS NULL OR p."attemptStatusBefore" = p_before) AND (p_after IS NULL OR p."attemptStatusAfter" = p_after))
+$$;
+
+-- F2: an attempt row changes under a recovery session only as a status transition, with the columns that transition writes, at database time
+CREATE FUNCTION refund_recovery_attempt_update_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF NOT refund_is_recovery_session() THEN RETURN NEW; END IF;
+  IF NEW.status IS NOT DISTINCT FROM OLD.status
+     OR NEW."workAfter" IS DISTINCT FROM OLD."workAfter"
+     OR (NEW.status = 'failed' AND NEW."completedAt" IS DISTINCT FROM now())
+     OR (NEW.status <> 'failed' AND (NEW."failureCode", NEW."completedAt") IS DISTINCT FROM (OLD."failureCode", OLD."completedAt"))
+     OR (NEW.status = 'submitted' AND NEW."submittedAt" IS DISTINCT FROM now())
+     OR (NEW.status <> 'submitted' AND (NEW."providerRefundId", NEW."submittedAt") IS DISTINCT FROM (OLD."providerRefundId", OLD."submittedAt")) THEN
+    RAISE EXCEPTION 'refund recovery: attempt % may change only by a status transition with its own columns', OLD.id
+      USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_attempt_update';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- F2, at commit: that transition is the recovery application of a stored answer of THIS attempt, its provider and key, with the answer's own values
+CREATE FUNCTION refund_recovery_attempt_commit_check() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF NOT refund_is_recovery_session() THEN RETURN NULL; END IF;
+  IF NOT EXISTS (SELECT 1 FROM refund_dispatch_application p JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
+                   JOIN refund_dispatch_send s ON s.id = o."sendId" AND s."refundAttemptId" = o."refundAttemptId"
+                  WHERE p."refundAttemptId" = NEW.id AND p."appliedBy" = 'recovery' AND p."appliedAt" >= transaction_timestamp() AND p.effect = 'transitioned'
+                    AND p."attemptStatusBefore" = OLD.status AND p."attemptStatusAfter" = NEW.status
+                    AND s.provider = NEW.provider AND s."idempotencyKey" = NEW.id::text AND s."paymentId" = NEW."paymentId"
+                    AND (NEW.status <> 'failed' OR o."providerCode" = NEW."failureCode")
+                    AND (NEW.status <> 'submitted' OR NEW."providerRefundId" IS NOT DISTINCT FROM COALESCE(OLD."providerRefundId", o."providerRefundId"))) THEN
+    RAISE EXCEPTION 'refund recovery: attempt % moved % -> % without the recovery application of its own stored answer', NEW.id, OLD.status, NEW.status
+      USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_transition_evidence';
+  END IF;
+  RETURN NULL;
+END $$;
+
+-- a recovery session never updates a payment (it locks the row only)
+CREATE FUNCTION refund_recovery_payment_update_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF refund_is_recovery_session() THEN
+    RAISE EXCEPTION 'refund recovery: payment % is never updated by recovery', OLD.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_payment_update';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- F1: a recovery session writes only the D-R1A escalation of a preserved contradiction, and only in that application's transaction
+CREATE FUNCTION refund_recovery_escalation_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF refund_is_recovery_session() AND NEW.kind IS DISTINCT FROM 'failure_after_refund_evidence' THEN
+    RAISE EXCEPTION 'refund recovery: escalation kind % is not recovery''s', NEW.kind USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_escalation';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE FUNCTION refund_recovery_escalation_commit_check() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF refund_is_recovery_session() AND NOT refund_recovery_applied_here(NEW."refundAttemptId", 'preserved_contradiction', NULL, NULL) THEN
+    RAISE EXCEPTION 'refund recovery: escalation % without the preserved contradiction it records', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_escalation';
+  END IF;
+  RETURN NULL;
+END $$;
+
+-- F1: a recovery session's outbox rows are exactly the audit intents of its own decision, byte for byte the payload the database derives from the
+-- stored rows (attempt, payment, escalation), unpublished, at database time, at most one per action and resource in the transaction. No other
+-- event (never a Payment domain event such as payment.succeeded or refund.case_completed). The event id is the writer's deterministic id; it is
+-- not recomputed here (no SHA-1 in core PostgreSQL), so its uniqueness per transaction is checked instead.
+CREATE FUNCTION refund_recovery_outbox_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE a refund_attempt%ROWTYPE; e refund_safety_escalation%ROWTYPE; org uuid; expected jsonb;
+BEGIN
+  IF NOT refund_is_recovery_session() THEN RETURN NEW; END IF;
+  IF NEW.name NOT IN ('audit.refund_attempt.failed', 'audit.refund_safety.escalated')
+     OR NEW."publishedAt" IS NOT NULL OR NEW.attempts <> 0 OR NEW."lastError" IS NOT NULL
+     OR NEW."occurredAt" IS DISTINCT FROM now() OR NEW."availableAt" IS DISTINCT FROM now()
+     OR (NEW."correlationId" IS NOT NULL AND NEW."correlationId" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+     OR NEW.payload->'resource'->>'type' IS DISTINCT FROM 'refund_attempt'
+     OR COALESCE(NEW.payload->'resource'->>'id', '') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'refund recovery: outbox event % is not one of its own audit intents', NEW.name USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox';
+  END IF;
+  SELECT * INTO a FROM refund_attempt WHERE id = (NEW.payload->'resource'->>'id')::uuid;
+  SELECT "organizationId" INTO org FROM payment WHERE id = a."paymentId";
+  IF NEW.name = 'audit.refund_attempt.failed' THEN
+    expected := jsonb_build_object('actor', jsonb_build_object('id', 'payment_refund_worker', 'type', 'system'), 'action', 'refund_attempt.failed',
+      'changes', jsonb_build_object('payment_id', a."paymentId", 'refund_case_id', a."refundCaseId"), 'outcome', 'succeeded',
+      'resource', jsonb_build_object('id', a.id, 'type', 'refund_attempt'), 'companyId', a."companyId", 'organizationId', org);
+    IF a.id IS NULL OR a.status <> 'failed' OR a."receiptId" IS NULL OR NEW."eventVersion" <> 2 OR NEW.payload IS DISTINCT FROM expected THEN
+      RAISE EXCEPTION 'refund recovery: audit intent for attempt % does not match its stored failure', a.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox';
+    END IF;
+  ELSE
+    SELECT * INTO e FROM refund_safety_escalation
+     WHERE id::text = NEW.payload->'changes'->>'escalation_id' AND "refundAttemptId" = a.id AND kind = 'failure_after_refund_evidence';
+    expected := jsonb_build_object('actor', jsonb_build_object('id', 'payment_refund_worker', 'type', 'system'), 'action', 'refund_safety.escalated',
+      'changes', jsonb_build_object('escalation_id', e.id, 'kind', e.kind, 'payment_id', e."paymentId", 'attempt_status', e."attemptStatus")
+                 || CASE WHEN e."factId" IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('fact_id', e."factId") END,
+      'outcome', 'succeeded', 'resource', jsonb_build_object('id', a.id, 'type', 'refund_attempt'), 'organizationId', org);
+    IF a.id IS NULL OR e.id IS NULL OR e."escalatedAt" < transaction_timestamp() OR NEW."eventVersion" <> 1 OR NEW.payload IS DISTINCT FROM expected THEN
+      RAISE EXCEPTION 'refund recovery: audit intent for attempt % does not match an escalation of this transaction', a.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+-- F1, at commit: the intent's own decision committed with it, and it is the only one of its kind for that resource in this transaction
+CREATE FUNCTION refund_recovery_outbox_commit_check() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE attempt uuid;
+BEGIN
+  IF NOT refund_is_recovery_session() THEN RETURN NULL; END IF;
+  attempt := (NEW.payload->'resource'->>'id')::uuid;
+  IF NOT (CASE NEW.name WHEN 'audit.refund_attempt.failed' THEN refund_recovery_applied_here(attempt, 'transitioned', NULL, 'failed')
+                        ELSE refund_recovery_applied_here(attempt, 'preserved_contradiction', NULL, NULL) END)
+     OR (SELECT count(*) FROM outbox x WHERE x.name = NEW.name AND x.payload->'resource'->>'id' = NEW.payload->'resource'->>'id'
+           AND x."occurredAt" = NEW."occurredAt" AND x."publishedAt" IS NULL) > 1 THEN
+    RAISE EXCEPTION 'refund recovery: audit intent % for attempt % without its own decision in this transaction', NEW.name, attempt
+      USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox_evidence';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER refund_attempt_00_recovery_update BEFORE UPDATE ON refund_attempt FOR EACH ROW EXECUTE FUNCTION refund_recovery_attempt_update_guard();
+CREATE CONSTRAINT TRIGGER refund_attempt_30_recovery_commit AFTER UPDATE ON refund_attempt DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION refund_recovery_attempt_commit_check();
+CREATE TRIGGER payment_00_recovery_update BEFORE UPDATE ON payment FOR EACH ROW EXECUTE FUNCTION refund_recovery_payment_update_guard();
+CREATE TRIGGER refund_safety_escalation_00_recovery BEFORE INSERT ON refund_safety_escalation FOR EACH ROW EXECUTE FUNCTION refund_recovery_escalation_guard();
+CREATE CONSTRAINT TRIGGER refund_safety_escalation_30_recovery_commit AFTER INSERT ON refund_safety_escalation DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION refund_recovery_escalation_commit_check();
+CREATE TRIGGER outbox_00_refund_recovery BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION refund_recovery_outbox_guard();
+CREATE CONSTRAINT TRIGGER outbox_30_refund_recovery_commit AFTER INSERT ON outbox DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION refund_recovery_outbox_commit_check();
 
 -- ─────────────────────────────────────────────────────────────────────────────────────────────── the recovery role's grant (audit 0003's precedent)
 
@@ -101,7 +257,7 @@ BEGIN
   END LOOP;
   -- the row locks of 0037's order (FOR UPDATE needs an UPDATE privilege): the payment's bookkeeping column only; the attempt's decision columns
   EXECUTE format('GRANT UPDATE ("updatedAt") ON payment TO %s', r);
-  EXECUTE format('GRANT UPDATE (status, "failureCode", "completedAt", "workAfter", "providerRefundId", "submittedAt") ON refund_attempt TO %s', r);
+  EXECUTE format('GRANT UPDATE (status, "failureCode", "completedAt", "providerRefundId", "submittedAt") ON refund_attempt TO %s', r); -- never "workAfter" (F4)
   -- what the decision writes: its application, a D-R1A preserved contradiction, and their audit intents
   EXECUTE format('GRANT INSERT ON refund_dispatch_application, refund_safety_escalation, outbox TO %s', r);
   -- registered: from now on its identity refuses it finality, sends and answers, whatever it is granted later

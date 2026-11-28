@@ -381,7 +381,8 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
 
       const y = await authorized();
       const s = t.app.get(SimulationPaymentProvider);
-      const throwing = vi.spyOn(s, 'refund').mockRejectedValueOnce(new Error('socket hang up'));
+      const plain = s.refund.bind(s); // only THIS attempt's call throws: a pass works every eligible attempt of the shared database
+      const throwing = vi.spyOn(s, 'refund').mockImplementation(async (d) => { if (d.refundAttemptId === y.attemptId) throw new Error('socket hang up'); return plain(d); });
       try {
         await drain(y.attemptId);
       } finally {
@@ -520,9 +521,9 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       await plan(x.paymentId, 'rejected', 'declined');
       const s = t.app.get(SimulationPaymentProvider);
       const original = s.refund.bind(s);
-      const race = vi.spyOn(s, 'refund').mockImplementationOnce(async (d) => {
+      const race = vi.spyOn(s, 'refund').mockImplementation(async (d) => {
         const r = await original(d);
-        await outcome(x.attemptId, { outcome: 'succeeded' });
+        if (d.refundAttemptId === x.attemptId) await outcome(x.attemptId, { outcome: 'succeeded' }); // only this attempt's call races
         return r;
       });
       try {
@@ -583,7 +584,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await apply(oz.id, x.attemptId, 'no_effect', 'submitted', 'submitted')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_state' });
       expect(await apply(oz.id, z.attemptId, 'no_effect', 'submitted', 'submitted')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_state' });
       expect(await apply(oz.id, z.attemptId, 'transitioned', 'unknown', 'dispatching')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_state' });
-      expect(await apply(oz.id, z.attemptId, 'no_effect', 'unknown', 'dispatching')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_shape' });
+      expect(await apply(oz.id, z.attemptId, 'no_effect', 'submitted', 'dispatching')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_shape' });
     });
 
     it('G3 finality from a dispatch response: refused for no, an accepted, another attempt\'s or a code-mismatched observation, or a recovery application', async () => {
@@ -885,19 +886,215 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect((await one(`SELECT count(*)::int AS n FROM refund_recovery_role WHERE role = $1::regrole::oid`, [recRole])).n).toBe(1);
     });
 
-    it('X6 the recovery CLI: refuses the runtime role (exit 2), runs one pass as the recovery role', async () => {
+    it('X6 the recovery CLI (F5): documented exits with fixed text; never the runtime role, never a fallback to DATABASE_URL', async () => {
       const { execFile } = await import('node:child_process');
       const cli = fileURLToPath(new URL('../dist/cli/refund-response-recovery.js', import.meta.url));
-      const run = (url: string, args: string[]) => new Promise<{ code: number; out: string; err: string }>((resolve) => {
-        execFile(process.execPath, [cli, ...args], { env: { PATH: process.env.PATH ?? '', REFUND_RECOVERY_DATABASE_URL: url } }, (e, out, err) =>
+      const runEnv = (env: Record<string, string>, args: string[]) => new Promise<{ code: number; out: string; err: string }>((resolve) => {
+        execFile(process.execPath, [cli, ...args], { env: { PATH: process.env.PATH ?? '', ...env } }, (e, out, err) =>
           resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out, err }));
       });
+      const run = (url: string, args: string[]) => runEnv({ REFUND_RECOVERY_DATABASE_URL: url }, args);
       const bad = await run(urlAs(appRole, appPw), ['--once']);
-      expect([bad.code, bad.err]).toEqual([2, expect.stringContaining('refund_recovery_refused: the role can record refund failure finality')]);
+      expect([bad.code, bad.err]).toEqual([4, expect.stringContaining('refund_recovery_refused: the role can record refund failure finality')]); // authority
       expect(bad.err).not.toContain(appPw);
+      // configuration (2): missing, only the service's DATABASE_URL (no fallback), malformed, production
+      expect((await runEnv({}, ['--once'])).code).toBe(2);
+      expect((await runEnv({ DATABASE_URL: urlAs(appRole, appPw) }, ['--once'])).code).toBe(2);
+      expect((await runEnv({ REFUND_RECOVERY_DATABASE_URL: 'mysql://x' }, ['--once'])).code).toBe(2);
+      expect((await runEnv({ NODE_ENV: 'production', REFUND_RECOVERY_DATABASE_URL: urlAs(recRole, recPw) }, ['--once'])).code).toBe(2);
+      // authentication (3): a wrong password, sanitized (no role, database or password in the message)
+      const auth = await run(urlAs(recRole, 'not-the-password'), ['--once']);
+      expect([auth.code, auth.err.trim()]).toEqual([3, 'refund recovery failed: the recovery database cannot be reached or refused the credentials']);
+      for (const secret of [recRole, dbName, recPw, 'not-the-password']) expect(auth.err).not.toContain(secret);
       const ok = await run(urlAs(recRole, recPw), ['--once']);
       expect([ok.code, JSON.parse(ok.out)]).toEqual([0, { pass: 'refund_response_recovery', applied: expect.any(Number) }]);
       expect((await run(urlAs(recRole, recPw), ['--apply'])).code).toBe(2);
+    });
+  });
+
+  describe('Y: what a recovery session may write is bound to stored evidence (D-R1E F1-F4), as the real recovery role', () => {
+    /** A transaction as the recovery role: `fn` runs inside it; committed (deferred checks run) unless it throws. */
+    const recTx = async (fn: (q: pg.PoolClient) => Promise<void>) => {
+      const c = await rec.connect();
+      try {
+        await c.query('BEGIN');
+        await fn(c);
+        await c.query('COMMIT');
+        return { code: 'accepted' } as Row;
+      } catch (e) {
+        await c.query('ROLLBACK').catch(() => undefined);
+        return sqlState(e);
+      } finally {
+        c.release();
+      }
+    };
+    const recSql = (sql: string, params: unknown[] = []) => refusedWith(rec.query(sql, params));
+    /** The audit intent the database derives for a failed attempt (exactly what the writer emits). */
+    const failedIntent = async (attemptId: string, over: Row = {}) => {
+      const a = await one(`SELECT a.id, a."paymentId", a."refundCaseId", a."companyId", p."organizationId" FROM refund_attempt a JOIN payment p ON p.id = a."paymentId" WHERE a.id = $1`, [attemptId]);
+      return { actor: { id: 'payment_refund_worker', type: 'system' }, action: 'refund_attempt.failed', changes: { payment_id: a.paymentId, refund_case_id: a.refundCaseId },
+        outcome: 'succeeded', resource: { id: a.id, type: 'refund_attempt' }, companyId: a.companyId, organizationId: a.organizationId, ...over };
+    };
+    const outboxInsert = (q: pg.PoolClient, name: string, payload: Row, version: number) =>
+      q.query(`INSERT INTO outbox (id, name, payload, "correlationId", "eventVersion") VALUES ($1, $2, $3::jsonb, $4, $5)`, [randomUUID(), name, JSON.stringify(payload), randomUUID(), version]);
+    /** The decision's own writes for a stored rejection, by hand as the recovery role: the transition, its audit intent, its application. */
+    const manualRecovery = async (attemptId: string, o: Row, opts: { payload?: Row; code?: string; skipApplication?: boolean; extra?: (q: pg.PoolClient) => Promise<void> } = {}) => recTx(async (q) => {
+      await q.query(`SELECT 1 FROM payment WHERE id = (SELECT "paymentId" FROM refund_attempt WHERE id = $1) FOR UPDATE`, [attemptId]);
+      await q.query(`SELECT 1 FROM refund_attempt WHERE id = $1 FOR UPDATE`, [attemptId]);
+      await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now() WHERE id = $1`, [attemptId, opts.code ?? 'declined']);
+      await outboxInsert(q, 'audit.refund_attempt.failed', opts.payload ?? await failedIntent(attemptId), 2);
+      if (!opts.skipApplication) {
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'recovery', now())`, [o.id, attemptId]);
+      }
+      if (opts.extra) await opts.extra(q);
+    });
+
+    it('Y1-Y2 forged Payment domain events are refused: payment.succeeded, refund.case_completed (and any other name)', async () => {
+      const x = await submitted();
+      for (const name of ['payment.succeeded', 'refund.case_completed', 'payment.dispute.lost', 'audit.refund_attempt.succeeded']) {
+        expect(await recTx((q) => outboxInsert(q, name, { forged: true, resource: { id: x.attemptId, type: 'refund_attempt' } }, 1).then(() => undefined)))
+          .toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+      }
+      expect((await one(`SELECT count(*)::int AS n FROM outbox WHERE payload->>'forged' = 'true'`)).n).toBe(0);
+    });
+
+    it('Y3-Y4 an allowed audit intent is refused unless it is byte-exact AND its own decision commits with it; the exact one commits (positive control)', async () => {
+      const notFailed = await submitted();
+      expect(await recTx(async (q) => { await outboxInsert(q, 'audit.refund_attempt.failed', await failedIntent(notFailed.attemptId), 2); }))
+        .toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' }); // the attempt is not failed
+      const failedEarlier = await authorized();
+      await plan(failedEarlier.paymentId, 'rejected', 'declined');
+      await drain(failedEarlier.attemptId);
+      expect(await recTx(async (q) => { await outboxInsert(q, 'audit.refund_attempt.failed', await failedIntent(failedEarlier.attemptId), 2); }))
+        .toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox_evidence' }); // exact, but no decision of this transaction
+      const x = await storedUnapplied('rejected');
+      const [o] = await observationsOf(x.attemptId);
+      const other = await submitted();
+      expect(await manualRecovery(x.attemptId, o, { payload: await failedIntent(x.attemptId, { companyId: COMPANY2 }) })).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+      expect(await manualRecovery(x.attemptId, o, { payload: await failedIntent(x.attemptId, { resource: { id: other.attemptId, type: 'refund_attempt' } }) })).toMatchObject({ code: '42501' });
+      expect(await manualRecovery(x.attemptId, o, { payload: await failedIntent(x.attemptId, { changes: { payment_id: other.paymentId, refund_case_id: other.caseId } }) })).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+      expect(await manualRecovery(x.attemptId, o, { payload: await failedIntent(x.attemptId, { actor: { id: 'billing-service', type: 'service' } }) })).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+      expect(await manualRecovery(x.attemptId, o, { extra: async (q) => { await outboxInsert(q, 'audit.refund_attempt.failed', await failedIntent(x.attemptId), 2); } }))
+        .toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox_evidence' }); // a second copy in the same transaction
+      expect((await row(x.attemptId)).status).toBe('dispatching');
+      expect(await manualRecovery(x.attemptId, o)).toEqual({ code: 'accepted' }); // POSITIVE CONTROL: the exact decision commits
+      expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length, await failedAudits(x.attemptId)]).toEqual(['failed', 0, 1]);
+    });
+
+    it('Y5, Y8 a state change without its own stored answer is refused at commit: none, another attempt\'s, a mismatched code', async () => {
+      const x = await storedUnapplied('rejected');
+      const [o] = await observationsOf(x.attemptId);
+      expect(await recTx(async (q) => { await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]); }))
+        .toMatchObject({ code: '42501', constraint: 'refund_recovery_transition_evidence' });
+      const y = await storedUnapplied('rejected');
+      const [oy] = await observationsOf(y.attemptId);
+      expect(await recTx(async (q) => { // x moves, the application is y's
+        await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+        await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [y.attemptId]);
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'recovery', now())`, [oy.id, y.attemptId]);
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_transition_evidence' });
+      expect(await manualRecovery(x.attemptId, o, { code: 'expired', payload: undefined })).toMatchObject({ code: '42501', constraint: 'refund_recovery_transition_evidence' }); // the answer said declined
+      expect(await recTx(async (q) => { await q.query(`UPDATE refund_attempt SET status = 'submitted', "submittedAt" = now() WHERE id = $1`, [x.attemptId]); }))
+        .toMatchObject({ code: '23514' }); // unsupported for a rejection: refused already by 0017's shape (no provider reference)
+      expect([(await row(x.attemptId)).status, (await row(y.attemptId)).status]).toEqual(['dispatching', 'dispatching']);
+    });
+
+    it('Y6-Y7 a false no_effect or a fabricated preserved_contradiction cannot conceal a stored answer; nor a foreign escalation kind', async () => {
+      const x = await storedUnapplied('rejected');
+      const [o] = await observationsOf(x.attemptId);
+      const app = (effect: string, before: string, after: string) => recSql(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+        VALUES ($1, $2, $3, $4, $5, 'recovery', now())`, [o.id, x.attemptId, effect, before, after]);
+      expect(await app('no_effect', 'dispatching', 'dispatching')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
+      expect(await app('preserved_contradiction', 'dispatching', 'dispatching')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' }); // no own fact
+      expect(await applicationsOf(x.attemptId)).toEqual([]); // still unapplied, still recoverable and Owner-visible
+      const b = await replacementReady();
+      await revoke();
+      expect(await recSql(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId", "blockingCause", "blockingReason")
+        SELECT 'dispatch_blocked', a.id, NULL, a."paymentId", a."companyId", a."captureFactId", a.status, $2, 'prior_may_still_pay', 'database_refused' FROM refund_attempt a WHERE a.id = $1`,
+        [b.replacement, b.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation' });
+      // the runtime role's own false no_effect is refused too (F3 protects the dispatch as well)
+      expect(await refusedWith(rt(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+        VALUES ($1, $2, 'no_effect', 'dispatching', 'dispatching', 'dispatch', now())`, [o.id, x.attemptId]))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
+      await recoveryWindow(1, () => recovery.recoverOnce());
+      expect([(await row(x.attemptId)).status, (await applicationsOf(x.attemptId)).map((p) => p.effect)]).toEqual(['failed', ['transitioned']]);
+    });
+
+    it('Y9, Y13 no scheduling, no payment update, no rewrite or erasure of evidence', async () => {
+      const x = await storedUnapplied('accepted');
+      expect((await recSql(`UPDATE refund_attempt SET "workAfter" = now() + interval '10 years' WHERE id = $1`, [x.attemptId])).code).toBe('42501');
+      expect((await recSql(`UPDATE refund_attempt SET "workAfter" = NULL WHERE id = $1`, [x.attemptId])).code).toBe('42501');
+      expect(await recSql(`UPDATE payment SET "updatedAt" = now() WHERE id = $1`, [x.paymentId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_payment_update' });
+      expect(await recTx(async (q) => { await q.query(`UPDATE refund_attempt SET "submittedAt" = now() WHERE id = $1`, [x.attemptId]); }))
+        .toMatchObject({ code: '42501', constraint: 'refund_recovery_attempt_update' }); // a column change without a transition
+      for (const sql of [`DELETE FROM refund_safety_escalation`, `DELETE FROM refund_dispatch_observation`, `DELETE FROM refund_dispatch_application`, `DELETE FROM refund_dispatch_send`,
+        `UPDATE provider_transaction_fact SET amount = amount`, `DELETE FROM outbox`, `UPDATE outbox SET "publishedAt" = now()`, `DELETE FROM refund_attempt_failure_finality`,
+        `UPDATE refund_capability_certificate SET version = version`, `DELETE FROM refund_capability_revocation`, `TRUNCATE refund_dispatch_observation`]) {
+        expect((await recSql(sql)).code, sql).toBe('42501');
+      }
+      expect((await recSql(`SET session_replication_role = replica`)).code).toBe('42501'); // triggers cannot be switched off
+      expect([(await row(x.attemptId)).status, (await row(x.attemptId)).workAfter === null ? 'null' : 'set']).toEqual(['dispatching', (await row(x.attemptId)).workAfter === null ? 'null' : 'set']);
+    });
+
+    it('Y10 later grants, inherited membership and a switched session never open the outbox, attempt or payment guards', async () => {
+      const x = await storedUnapplied('rejected');
+      await admin.query(`GRANT INSERT, UPDATE ON outbox TO ${recRole}`);
+      await admin.query(`GRANT UPDATE ON refund_attempt, payment TO ${recRole}`);
+      await admin.query(`GRANT ${appRole} TO ${recRole}`);
+      try {
+        expect(await recTx(async (q) => { await outboxInsert(q, 'payment.succeeded', { forged: true }, 1); })).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recTx(async (q) => { await q.query(`UPDATE refund_attempt SET "workAfter" = now() + interval '1 year' WHERE id = $1`, [x.attemptId]); }))
+          .toMatchObject({ code: '42501', constraint: 'refund_recovery_attempt_update' });
+        expect(await recTx(async (q) => { await q.query(`SET LOCAL ROLE ${appRole}`); await outboxInsert(q, 'refund.case_completed', { forged: true }, 1); }))
+          .toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recTx(async (q) => { await q.query(`SET LOCAL ROLE ${appRole}`);
+          await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]); }))
+          .toMatchObject({ code: '42501', constraint: 'refund_recovery_transition_evidence' });
+      } finally {
+        await admin.query(`REVOKE ${appRole} FROM ${recRole}`);
+        await admin.query(`REVOKE UPDATE ON refund_attempt, payment FROM ${recRole}`);
+        await admin.query(`REVOKE UPDATE ON outbox FROM ${recRole}`);
+        await mig.query('SELECT payment_grant_refund_recovery($1::regrole)', [recRole]).catch(() => undefined); // its own grant back (INSERT on outbox kept)
+      }
+      expect([(await row(x.attemptId)).status, (await one(`SELECT count(*)::int AS n FROM outbox WHERE payload->>'forged' = 'true'`)).n]).toEqual(['dispatching', 0]);
+    });
+
+    it('Y15-Y16 legitimate recovery is unchanged: ambiguous and transport-error answers, and its audit intents are emitted exactly', async () => {
+      const amb = await storedUnapplied('ambiguous');
+      const tr = await authorized();
+      const sp = t.app.get(SimulationPaymentProvider);
+      const plain = sp.refund.bind(sp);
+      const throwing = vi.spyOn(sp, 'refund').mockImplementation(async (d) => { if (d.refundAttemptId === tr.attemptId) throw new Error('socket hang up'); return plain(d); });
+      try {
+        await injected('refund_dispatch_application', () => drain(tr.attemptId));
+      } finally {
+        throwing.mockRestore();
+      }
+      const rej = await storedUnapplied('rejected');
+      await recoveryWindow(1, () => recovery.recoverOnce());
+      expect((await row(amb.attemptId)).status).toBe('unknown');
+      expect((await row(tr.attemptId)).status).toBe('unknown');
+      expect(await observationsOf(tr.attemptId)).toMatchObject([{ classification: 'transport_error' }]);
+      expect((await applicationsOf(tr.attemptId))).toMatchObject([{ effect: 'transitioned', attemptStatusBefore: 'dispatching', attemptStatusAfter: 'unknown', appliedBy: 'recovery' }]);
+      const intent = (await admin.query(`SELECT payload, "eventVersion" FROM outbox WHERE name = 'audit.refund_attempt.failed' AND payload->'resource'->>'id' = $1`, [rej.attemptId])).rows;
+      expect(intent).toEqual([{ payload: await failedIntent(rej.attemptId), eventVersion: 2 }]);
+      // a preserved contradiction recovered: its D-R1A escalation and audit intent
+      const y = await authorized();
+      await plan(y.paymentId, 'rejected', 'declined');
+      const orig = sp.refund.bind(sp);
+      const race = vi.spyOn(sp, 'refund').mockImplementation(async (d) => { const r = await orig(d); if (d.refundAttemptId === y.attemptId) await outcome(y.attemptId, { outcome: 'succeeded' }); return r; });
+      try {
+        await injected('refund_dispatch_application', () => drain(y.attemptId));
+      } finally {
+        race.mockRestore();
+      }
+      await recoveryWindow(1, () => recovery.recoverOnce());
+      expect(await applicationsOf(y.attemptId)).toMatchObject([{ effect: 'preserved_contradiction', appliedBy: 'recovery' }]);
+      const esc = (await admin.query(`SELECT id FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'failure_after_refund_evidence'`, [y.attemptId])).rows;
+      expect(esc).toHaveLength(1);
+      expect((await admin.query(`SELECT payload FROM outbox WHERE name = 'audit.refund_safety.escalated' AND payload->'changes'->>'escalation_id' = $1`, [esc[0].id])).rows)
+        .toMatchObject([{ payload: { actor: { id: 'payment_refund_worker', type: 'system' }, resource: { id: y.attemptId } } }]);
     });
   });
 });
