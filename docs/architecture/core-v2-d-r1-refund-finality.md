@@ -281,7 +281,28 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
   `payment_grant_refund_recovery(role)` refuses any role with that authority (column-level grants included), the schema owner, a superuser and any
   member of another role, and REGISTERS the role (`refund_recovery_role`, owner-written, append-only). A registered recovery role, as the current or
   the session role, is refused every insert into the finality (any source), send and answer tables and is always `recovery`, whatever it is granted
-  later: its identity decides, not its privileges (Codex round 1, P1 and P2). No SECURITY DEFINER function exists. The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
+  later: its identity decides, not its privileges (Codex round 1, P1 and P2). No SECURITY DEFINER function exists.
+  What a recovery session may write is bound to stored evidence (migration `0041`; the Owner's F1-F6 GO of 2026-11-28, after PR #553 merged `0040`):
+  - **F2:** an attempt changes only by a status transition, with that transition's own columns at database time, matched at commit by its own
+    recovery application of a stored answer of that attempt, provider and key (failure code and provider reference included).
+  - **F3, both roles:** an application's effect must be the one the approved decision gives. A false `no_effect` cannot hide an applicable
+    answer, and `preserved_contradiction` needs the attempt's own verified refund fact and its D-R1A row.
+  - **F1:** its outbox rows are only the two audit intents of its decision (`audit.refund_attempt.failed`, `audit.refund_safety.escalated`). Each is
+    byte-exact to the payload the database derives from the stored rows, unpublished, at database time, one per resource per transaction, and its
+    decision must commit with it. No other event is accepted, never `payment.succeeded` or `refund.case_completed`. The deterministic event id is
+    not recomputed: core PostgreSQL has no SHA-1.
+  - **F4:** it never updates a payment and never writes `workAfter`.
+  - **Ownership and both directions (Codex round 3):**
+    - "This transaction" is proven by the row's own `xmin`, never by a time comparison.
+    - A recovered failure must write its audit intent, and a new D-R1A escalation must write its own, with the stored answer's code.
+    - A `transitioned` application needs the attempt row updated by the same transaction; this holds for both roles.
+    - Whatever a recovery session is granted later, it never updates, deletes or truncates an outbox row.
+  - **Codex review of b954a3e (PR #554):**
+    - Every row a recovery session writes must belong to the top-level transaction, so a savepoint cannot hide a duplicate.
+    - A login that switched INTO a recovery role writes nothing; the refusal is at write time, so `RESET ROLE` before commit gains nothing.
+    - A `transitioned` application must name a real status change of the same transaction, with the same from and to. The change is recorded by
+      trigger in the append-only `refund_attempt_status_change`, which nothing else may write. This holds for both roles.
+  - Operations: [`docs/runbooks/refund-response-recovery.md`](../runbooks/refund-response-recovery.md). The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
   Remaining trust: the runtime role (the service that made the provider call) keeps the authority D-R1B gave it.
 
 | Crash point | Durable state | Result |
@@ -316,4 +337,4 @@ None exists. Simulation behaviour is never evidence for a real provider.
 - **OD-DR1-4:** approved for a bounded development-only D-R1B, including the permanent blocking of historical `failed` rows.
 - **OD-DR1-5:** NO-GO. No exception path exists and none is designed.
 - **OD-DR1-6:** conditional GO of 2026-11-28 for one development-only PR, implemented as D-R1D (migration `0039`, §4b), merged as e03295e. Its
-  acceptance stays PENDING until the A1 correction (D-R1E, `0040`, separate recovery role) is reviewed and integrated. Recovery never records finality (Q1); the 30 s and 15 min windows are configurable technical defaults that authorize nothing (Q2).
+  acceptance stays PENDING until the A1 correction (D-R1E: `0040` merged in #553; `0041`, F1-F6) is reviewed and integrated. Recovery never records finality (Q1); the 30 s and 15 min windows are configurable technical defaults that authorize nothing (Q2).

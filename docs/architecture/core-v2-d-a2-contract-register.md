@@ -1652,6 +1652,8 @@ ONLY; EVIDENCE ONLY; pending the Owner's merge review).** Payment migration `003
 ONLY; pending the Owner's merge review).** Payment migration `0040`. No route, event, audit action, error code or financial rule changes.
 - Recovery of stored dispatch answers runs only as the separate `payment_refund_recovery` database role in a separate process (`npm run
   refund-recovery`); that role cannot record refund failure finality, sends or answers. `appliedBy` is derived by the database from the role.
+- Migration `0041` (F1-F6, pending the Owner's merge review): a recovery session's writes are bound to stored evidence; its outbox rows are only `audit.refund_attempt.failed` and `audit.refund_safety.escalated`, byte-exact
+  (no event contract change). Runbook: `docs/runbooks/refund-response-recovery.md`.
 - New local variables: `PAYMENT_REFUND_RECOVERY_PASSWORD` (infra), `REFUND_RECOVERY_DATABASE_URL` (the recovery process). Details:
   `core-v2-d-r1-refund-finality.md` §4b. OD-DR1-6 acceptance, DO-76, OD-RLSC-1 and R3-F2 stay OPEN.
 
