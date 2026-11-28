@@ -231,6 +231,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
 
 
   // ─────────────────────────────────────────────── D-R1D helpers
+  const factsOf = async (id: string) => (await admin.query(`SELECT * FROM provider_transaction_fact WHERE "refundAttemptId" = $1 AND kind = 'refund' ORDER BY id`, [id])).rows;
   const sendsOf = async (id: string) => (await admin.query(`SELECT * FROM refund_dispatch_send WHERE "refundAttemptId" = $1 ORDER BY "sendNumber"`, [id])).rows;
   const observationsOf = async (id: string) => (await admin.query(
     `SELECT o.*, s."sendNumber" FROM refund_dispatch_observation o JOIN refund_dispatch_send s ON s.id = o."sendId" WHERE o."refundAttemptId" = $1 ORDER BY s."sendNumber"`, [id])).rows;
@@ -977,6 +978,12 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await manualRecovery(x.attemptId, o, { payload: await failedIntent(x.attemptId, { actor: { id: 'billing-service', type: 'service' } }) })).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
       expect(await manualRecovery(x.attemptId, o, { extra: async (q) => { await outboxInsert(q, 'audit.refund_attempt.failed', await failedIntent(x.attemptId), 2); } }))
         .toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox_evidence' }); // a second copy in the same transaction
+      expect(await manualRecovery(x.attemptId, o, { skipApplication: true, extra: async (q) => {
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'recovery', now())`, [o.id, x.attemptId]);
+        await q.query(`INSERT INTO outbox (id, name, payload, "correlationId", "eventVersion", "publishedAt") VALUES ($1, 'audit.refund_attempt.failed', $2::jsonb, NULL, 2, now())`,
+          [randomUUID(), JSON.stringify(await failedIntent(x.attemptId))]); // already "published": never relayed, so the intent would vanish
+      } })).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
       expect((await row(x.attemptId)).status).toBe('dispatching');
       expect(await manualRecovery(x.attemptId, o)).toEqual({ code: 'accepted' }); // POSITIVE CONTROL: the exact decision commits
       expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length, await failedAudits(x.attemptId)]).toEqual(['failed', 0, 1]);
@@ -1014,6 +1021,26 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await recSql(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "competingAttemptId", "blockingCause", "blockingReason")
         SELECT 'dispatch_blocked', a.id, NULL, a."paymentId", a."companyId", a."captureFactId", a.status, $2, 'prior_may_still_pay', 'database_refused' FROM refund_attempt a WHERE a.id = $1`,
         [b.replacement, b.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation' });
+      // an own verified fact but no D-R1A record: preserved_contradiction is refused; and a D-R1A escalation without its application is refused at commit
+      const y = await authorized();
+      await plan(y.paymentId, 'rejected', 'declined');
+      const sp = t.app.get(SimulationPaymentProvider);
+      const orig = sp.refund.bind(sp);
+      const race = vi.spyOn(sp, 'refund').mockImplementation(async (d) => { const r = await orig(d); if (d.refundAttemptId === y.attemptId) await outcome(y.attemptId, { outcome: 'succeeded' }); return r; });
+      try {
+        await injected('refund_dispatch_application', () => drain(y.attemptId));
+      } finally {
+        race.mockRestore();
+      }
+      const [oy] = await observationsOf(y.attemptId);
+      expect([(await row(y.attemptId)).status, (await admin.query(`SELECT 1 FROM refund_safety_escalation WHERE "refundAttemptId" = $1 AND kind = 'failure_after_refund_evidence'`, [y.attemptId])).rows.length]).toEqual(['succeeded', 0]);
+      expect(await recSql(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+        VALUES ($1, $2, 'preserved_contradiction', 'succeeded', 'succeeded', 'recovery', now())`, [oy.id, y.attemptId])).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
+      const [fy] = await factsOf(y.attemptId);
+      expect(await recTx(async (q) => {
+        await q.query(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "observedFailureCode")
+          SELECT 'failure_after_refund_evidence', a.id, $2, a."paymentId", a."companyId", a."captureFactId", a.status, 'declined' FROM refund_attempt a WHERE a.id = $1`, [y.attemptId, fy.id]);
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation' });
       // the runtime role's own false no_effect is refused too (F3 protects the dispatch as well)
       expect(await refusedWith(rt(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
         VALUES ($1, $2, 'no_effect', 'dispatching', 'dispatching', 'dispatch', now())`, [o.id, x.attemptId]))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
