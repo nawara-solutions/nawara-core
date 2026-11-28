@@ -292,6 +292,11 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
     decision must commit with it. No other event is accepted, never `payment.succeeded` or `refund.case_completed`. The deterministic event id is
     not recomputed: core PostgreSQL has no SHA-1.
   - **F4:** it never updates a payment and never writes `workAfter`.
+  - **Ownership and both directions (Codex round 3):**
+    - "This transaction" is proven by the row's own `xmin`, never by a time comparison.
+    - A recovered failure must write its audit intent, and a new D-R1A escalation must write its own, with the stored answer's code.
+    - A `transitioned` application needs the attempt row updated by the same transaction; this holds for both roles.
+    - Whatever a recovery session is granted later, it never updates, deletes or truncates an outbox row.
   - Operations: [`docs/runbooks/refund-response-recovery.md`](../runbooks/refund-response-recovery.md). The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
   Remaining trust: the runtime role (the service that made the provider call) keeps the authority D-R1B gave it.
 

@@ -91,6 +91,8 @@ BEGIN
       CASE WHEN o.classification IN ('accepted', 'rejected') OR NEW."attemptStatusBefore" = 'dispatching' THEN 'transitioned' ELSE 'no_effect' END
     ELSE 'no_effect' END;
   IF NEW.effect IS DISTINCT FROM expected
+     -- Codex round 3: a `transitioned` application accompanies its transition: the attempt row was updated by THIS transaction
+     OR (NEW.effect = 'transitioned' AND NOT EXISTS (SELECT 1 FROM refund_attempt u WHERE u.id = a.id AND u.xmin = pg_current_xact_id()::xid))
      OR (expected = 'preserved_contradiction' AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e
            WHERE e."refundAttemptId" = a.id AND e.kind = 'failure_after_refund_evidence')) THEN
     RAISE EXCEPTION 'refund_dispatch_application: observation % of attempt % has effect %, not %', NEW."observationId", a.id, expected, NEW.effect
@@ -102,7 +104,9 @@ END $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────────────────────── what a recovery session may write (F1, F2)
 -- A recovery session writes only what applying ONE stored answer produces, in that answer's own transaction, and the database checks each write
--- against the stored rows. `applied_here`: the recovery application of this attempt committed in THIS transaction (appliedAt is database time).
+-- against the stored rows. `applied_here`: the recovery application of this attempt was written by THIS
+-- transaction: its row version's xmin is this transaction's id (Codex round 3: a time comparison orders, it does not prove ownership). Rows written
+-- in a subtransaction carry another id, so they fail closed.
 
 CREATE FUNCTION refund_recovery_applied_here(p_attempt uuid, p_effect text, p_before text, p_after text) RETURNS boolean
 LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
@@ -110,7 +114,7 @@ LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
                    JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
                    JOIN refund_dispatch_send s ON s.id = o."sendId" AND s."refundAttemptId" = o."refundAttemptId"
                    JOIN refund_attempt a ON a.id = p."refundAttemptId" AND a."paymentId" = s."paymentId" AND a.provider = s.provider AND s."idempotencyKey" = a.id::text
-                  WHERE p."refundAttemptId" = p_attempt AND p."appliedBy" = 'recovery' AND p."appliedAt" >= transaction_timestamp()
+                  WHERE p."refundAttemptId" = p_attempt AND p."appliedBy" = 'recovery' AND p.xmin = pg_current_xact_id()::xid -- written by THIS transaction
                     AND p.effect = p_effect AND (p_before IS NULL OR p."attemptStatusBefore" = p_before) AND (p_after IS NULL OR p."attemptStatusAfter" = p_after))
 $$;
 
@@ -136,13 +140,18 @@ BEGIN
   IF NOT refund_is_recovery_session() THEN RETURN NULL; END IF;
   IF NOT EXISTS (SELECT 1 FROM refund_dispatch_application p JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
                    JOIN refund_dispatch_send s ON s.id = o."sendId" AND s."refundAttemptId" = o."refundAttemptId"
-                  WHERE p."refundAttemptId" = NEW.id AND p."appliedBy" = 'recovery' AND p."appliedAt" >= transaction_timestamp() AND p.effect = 'transitioned'
+                  WHERE p."refundAttemptId" = NEW.id AND p."appliedBy" = 'recovery' AND p.xmin = pg_current_xact_id()::xid AND p.effect = 'transitioned'
                     AND p."attemptStatusBefore" = OLD.status AND p."attemptStatusAfter" = NEW.status
                     AND s.provider = NEW.provider AND s."idempotencyKey" = NEW.id::text AND s."paymentId" = NEW."paymentId"
                     AND (NEW.status <> 'failed' OR o."providerCode" = NEW."failureCode")
                     AND (NEW.status <> 'submitted' OR NEW."providerRefundId" IS NOT DISTINCT FROM COALESCE(OLD."providerRefundId", o."providerRefundId"))) THEN
     RAISE EXCEPTION 'refund recovery: attempt % moved % -> % without the recovery application of its own stored answer', NEW.id, OLD.status, NEW.status
       USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_transition_evidence';
+  END IF;
+  -- Codex round 3: a recovered failure is never silent: its own audit intent was written by this transaction (both directions are bound)
+  IF NEW.status = 'failed' AND NOT EXISTS (SELECT 1 FROM outbox x WHERE x.name = 'audit.refund_attempt.failed' AND x.payload->'resource'->>'id' = NEW.id::text
+                                             AND x.xmin = pg_current_xact_id()::xid) THEN
+    RAISE EXCEPTION 'refund recovery: attempt % failed without its audit intent', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_transition_audit';
   END IF;
   RETURN NULL;
 END $$;
@@ -166,8 +175,17 @@ BEGIN
 END $$;
 CREATE FUNCTION refund_recovery_escalation_commit_check() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
-  IF refund_is_recovery_session() AND NOT refund_recovery_applied_here(NEW."refundAttemptId", 'preserved_contradiction', NULL, NULL) THEN
-    RAISE EXCEPTION 'refund recovery: escalation % without the preserved contradiction it records', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_escalation';
+  IF refund_is_recovery_session() AND NOT EXISTS (SELECT 1 FROM refund_dispatch_application p
+       JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
+      WHERE p."refundAttemptId" = NEW."refundAttemptId" AND p."appliedBy" = 'recovery' AND p.effect = 'preserved_contradiction'
+        AND p.xmin = pg_current_xact_id()::xid AND o."providerCode" IS NOT DISTINCT FROM NEW."observedFailureCode") THEN
+    RAISE EXCEPTION 'refund recovery: escalation % without the preserved contradiction (and its code) it records', NEW.id
+      USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_escalation';
+  END IF;
+  -- Codex round 3: and its audit intent, written by this transaction
+  IF refund_is_recovery_session() AND NOT EXISTS (SELECT 1 FROM outbox x WHERE x.name = 'audit.refund_safety.escalated'
+       AND x.payload->'changes'->>'escalation_id' = NEW.id::text AND x.xmin = pg_current_xact_id()::xid) THEN
+    RAISE EXCEPTION 'refund recovery: escalation % without its audit intent', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_escalation_audit';
   END IF;
   RETURN NULL;
 END $$;
@@ -204,7 +222,8 @@ BEGIN
       'changes', jsonb_build_object('escalation_id', e.id, 'kind', e.kind, 'payment_id', e."paymentId", 'attempt_status', e."attemptStatus")
                  || CASE WHEN e."factId" IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('fact_id', e."factId") END,
       'outcome', 'succeeded', 'resource', jsonb_build_object('id', a.id, 'type', 'refund_attempt'), 'organizationId', org);
-    IF a.id IS NULL OR e.id IS NULL OR e."escalatedAt" < transaction_timestamp() OR NEW."eventVersion" <> 1 OR NEW.payload IS DISTINCT FROM expected THEN
+    IF a.id IS NULL OR e.id IS NULL OR NOT EXISTS (SELECT 1 FROM refund_safety_escalation w WHERE w.id = e.id AND w.xmin = pg_current_xact_id()::xid)
+       OR NEW."eventVersion" <> 1 OR NEW.payload IS DISTINCT FROM expected THEN
       RAISE EXCEPTION 'refund recovery: audit intent for attempt % does not match an escalation of this transaction', a.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox';
     END IF;
   END IF;
@@ -219,12 +238,23 @@ BEGIN
   IF NOT (CASE NEW.name WHEN 'audit.refund_attempt.failed' THEN refund_recovery_applied_here(attempt, 'transitioned', NULL, 'failed')
                         ELSE refund_recovery_applied_here(attempt, 'preserved_contradiction', NULL, NULL) END)
      OR (SELECT count(*) FROM outbox x WHERE x.name = NEW.name AND x.payload->'resource'->>'id' = NEW.payload->'resource'->>'id'
-           AND x."occurredAt" = NEW."occurredAt" AND x."publishedAt" IS NULL) > 1 THEN
+           AND x.xmin = pg_current_xact_id()::xid) > 1 THEN
     RAISE EXCEPTION 'refund recovery: audit intent % for attempt % without its own decision in this transaction', NEW.name, attempt
       USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox_evidence';
   END IF;
   RETURN NULL;
 END $$;
+
+-- Codex round 3: whatever it is later granted, a recovery session never rewrites, re-schedules, marks published or erases an outbox row
+CREATE FUNCTION refund_recovery_outbox_immutable() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF refund_is_recovery_session() THEN
+    RAISE EXCEPTION 'refund recovery: outbox rows are never % by recovery', lower(TG_OP) USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_outbox';
+  END IF;
+  RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+END $$;
+CREATE TRIGGER outbox_00_refund_recovery_immutable BEFORE UPDATE OR DELETE ON outbox FOR EACH ROW EXECUTE FUNCTION refund_recovery_outbox_immutable();
+CREATE TRIGGER outbox_01_refund_recovery_no_truncate BEFORE TRUNCATE ON outbox FOR EACH STATEMENT EXECUTE FUNCTION refund_recovery_outbox_immutable();
 
 CREATE TRIGGER refund_attempt_00_recovery_update BEFORE UPDATE ON refund_attempt FOR EACH ROW EXECUTE FUNCTION refund_recovery_attempt_update_guard();
 CREATE CONSTRAINT TRIGGER refund_attempt_30_recovery_commit AFTER UPDATE ON refund_attempt DEFERRABLE INITIALLY DEFERRED

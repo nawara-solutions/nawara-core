@@ -1107,6 +1107,78 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect([(await row(x.attemptId)).status, (await one(`SELECT count(*)::int AS n FROM outbox WHERE payload->>'forged' = 'true'`)).n]).toEqual(['dispatching', 0]);
     });
 
+    it('Y17 (Codex r3) ownership, both directions and later outbox grants: each round-3 attack sequence is refused', async () => {
+      // 1. a recovered failure without its audit intent
+      const x = await storedUnapplied('rejected');
+      const [o] = await observationsOf(x.attemptId);
+      expect(await recTx(async (q) => {
+        await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'recovery', now())`, [o.id, x.attemptId]);
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_transition_audit' });
+      // 2. an OLDER transaction replaying another transaction's intent: session A opens first, B recovers and commits, then A copies B's intent
+      const a = await rec.connect();
+      try {
+        await a.query('BEGIN');
+        await a.query('SELECT transaction_timestamp()');
+        expect(await manualRecovery(x.attemptId, o)).toEqual({ code: 'accepted' }); // session B, the genuine decision
+        const replay = await refusedWith((async () => {
+          await a.query(`INSERT INTO outbox (id, name, payload, "correlationId", "eventVersion")
+            SELECT gen_random_uuid(), x.name, x.payload, x."correlationId", x."eventVersion" FROM outbox x
+             WHERE x.name = 'audit.refund_attempt.failed' AND x.payload->'resource'->>'id' = $1`, [x.attemptId]);
+          await a.query('COMMIT');
+        })());
+        expect(replay).toMatchObject({ code: '42501' });
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined);
+        a.release();
+      }
+      expect(await failedAudits(x.attemptId)).toBe(1);
+      // 3. a preserved contradiction recorded with a FORGED failure code
+      const y = await authorized();
+      await plan(y.paymentId, 'rejected', 'declined');
+      const sp = t.app.get(SimulationPaymentProvider);
+      const orig = sp.refund.bind(sp);
+      const race = vi.spyOn(sp, 'refund').mockImplementation(async (d) => { const r = await orig(d); if (d.refundAttemptId === y.attemptId) await outcome(y.attemptId, { outcome: 'succeeded' }); return r; });
+      try {
+        await injected('refund_dispatch_application', () => drain(y.attemptId));
+      } finally {
+        race.mockRestore();
+      }
+      const [oy] = await observationsOf(y.attemptId);
+      const [fy] = await factsOf(y.attemptId);
+      expect(await recTx(async (q) => {
+        const { rows: [e] } = await q.query(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "observedFailureCode")
+          SELECT 'failure_after_refund_evidence', a.id, $2, a."paymentId", a."companyId", a."captureFactId", a.status, 'forged_code' FROM refund_attempt a WHERE a.id = $1 RETURNING *`, [y.attemptId, fy.id]);
+        const org = (await one(`SELECT "organizationId" FROM payment WHERE id = $1`, [y.paymentId])).organizationId;
+        await outboxInsert(q, 'audit.refund_safety.escalated', { actor: { id: 'payment_refund_worker', type: 'system' }, action: 'refund_safety.escalated',
+          changes: { escalation_id: e.id, kind: e.kind, payment_id: e.paymentId, fact_id: e.factId, attempt_status: e.attemptStatus }, outcome: 'succeeded',
+          resource: { id: y.attemptId, type: 'refund_attempt' }, organizationId: org }, 1);
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'preserved_contradiction', 'succeeded', 'succeeded', 'recovery', now())`, [oy.id, y.attemptId]);
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation' });
+      expect((await admin.query(`SELECT 1 FROM refund_safety_escalation WHERE "refundAttemptId" = $1`, [y.attemptId])).rows).toEqual([]);
+      // 4. a `transitioned` application with no transition (an already failed attempt, an unapplied rejection), for both roles
+      const z = await storedUnapplied('rejected');
+      const [oz] = await observationsOf(z.attemptId);
+      await fixture(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'expired', "completedAt" = now() WHERE id = $1`, [z.attemptId]); // LABELLED FIXTURE
+      const fabricated = (by: 'recovery' | 'dispatch') => `INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+        VALUES ($1, $2, 'transitioned', 'unknown', 'failed', '${by}', now())`;
+      expect(await recSql(fabricated('recovery'), [oz.id, z.attemptId])).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
+      expect(await refusedWith(rt(fabricated('dispatch'), [oz.id, z.attemptId]))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
+      expect(await applicationsOf(z.attemptId)).toEqual([]);
+      // 5. later ordinary outbox UPDATE / DELETE grants: never mark published, re-schedule or erase
+      await admin.query(`GRANT UPDATE, DELETE, TRUNCATE ON outbox TO ${recRole}`);
+      try {
+        expect(await recSql(`UPDATE outbox SET "publishedAt" = clock_timestamp() WHERE "publishedAt" IS NULL`)).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recSql(`UPDATE outbox SET "availableAt" = 'infinity' WHERE "publishedAt" IS NULL`)).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recSql(`DELETE FROM outbox`)).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recSql(`TRUNCATE outbox`)).toMatchObject({ code: '42501' });
+      } finally {
+        await admin.query(`REVOKE UPDATE, DELETE, TRUNCATE ON outbox FROM ${recRole}`);
+      }
+    });
+
     it('Y15-Y16 legitimate recovery is unchanged: ambiguous and transport-error answers, and its audit intents are emitted exactly', async () => {
       const amb = await storedUnapplied('ambiguous');
       const tr = await authorized();
