@@ -278,8 +278,10 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
   (`npm run refund-recovery`, `cli/refund-response-recovery.ts`) connected ONLY as the separate recovery role (`payment_refund_recovery`), which
   has no INSERT on `refund_attempt_failure_finality`, `refund_dispatch_send` or `refund_dispatch_observation`. The database DERIVES `appliedBy`
   from the connected role's authority (`dispatch` only for a role that can record finality) and refuses a different value or a switched role.
-  `payment_grant_refund_recovery(role)` refuses any role with that authority, the schema owner, a superuser and any member of another role; no
-  SECURITY DEFINER function exists. The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
+  `payment_grant_refund_recovery(role)` refuses any role with that authority (column-level grants included), the schema owner, a superuser and any
+  member of another role, and REGISTERS the role (`refund_recovery_role`, owner-written, append-only). A registered recovery role, as the current or
+  the session role, is refused every insert into the finality (any source), send and answer tables and is always `recovery`, whatever it is granted
+  later: its identity decides, not its privileges (Codex round 1, P1 and P2). No SECURITY DEFINER function exists. The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
   Remaining trust: the runtime role (the service that made the provider call) keeps the authority D-R1B gave it.
 
 | Crash point | Durable state | Result |

@@ -772,7 +772,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       } finally {
         await asRuntime.onApplicationShutdown();
       }
-      expect(await recovery.assertAuthority()).toMatchObject({ role: recRole, canRecordFinality: false, canSend: false, canObserve: false, superuser: false, memberships: 0 });
+      expect(await recovery.assertAuthority()).toMatchObject({ role: recRole, canRecordFinality: false, canSend: false, canObserve: false, superuser: false, memberships: 0, registered: true });
     });
 
     it('X5 certificates still decide the dispatch\'s finality: forged, mismatched or revoked are refused', async () => {
@@ -790,6 +790,84 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       await revoke();
       expect(await raw({})).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_certificate' });
       expect(await finalityOf(z.attemptId)).toEqual([]);
+    });
+
+    it('X7 (Codex r1 P1) later grants or memberships never make the registered recovery role a dispatch: finality, sends and answers stay refused', async () => {
+      const x = await storedUnapplied('rejected', (fn) => certified(fn));
+      const [o] = await observationsOf(x.attemptId);
+      const c = await finalityCert();
+      const finalityAs = (source: 'dispatch_response' | 'status_check') => (async () => {
+        const cl = await rec.connect();
+        try {
+          await cl.query('BEGIN');
+          await cl.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+          await cl.query(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+              "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt", "dispatchObservationId")
+            SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, $6, $7, 'declined', $2, $3, $4, now(), $5::uuid FROM refund_attempt a WHERE a.id = $1`,
+            [x.attemptId, c.id, c.version, c.fingerprint, source === 'dispatch_response' ? o.id : null, source === 'dispatch_response' ? 'dispatch_rejected' : 'provider_failed', source]);
+          if (source === 'dispatch_response') {
+            await cl.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+              VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'dispatch', now())`, [o.id, x.attemptId]);
+          }
+          await cl.query('COMMIT');
+          return { code: 'accepted' };
+        } catch (e) {
+          await cl.query('ROLLBACK').catch(() => undefined);
+          return sqlState(e);
+        } finally {
+          cl.release();
+        }
+      })();
+      // LABELLED FIXTURE: an administrator later gives the recovery role finality, send and answer INSERT, and inheriting membership of the runtime role
+      await admin.query(`GRANT INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation TO ${recRole}`);
+      await admin.query(`GRANT ${appRole} TO ${recRole}`);
+      try {
+        expect(await finalityAs('dispatch_response')).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        expect(await finalityAs('status_check')).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' }); // every source
+        expect(await recSql(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'no_effect', 'dispatching', 'dispatching', 'dispatch', now())`, [o.id, x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_dispatch_application_authority' });
+        expect(await recSql(`INSERT INTO refund_dispatch_send (id, "refundAttemptId", "paymentId", provider, "idempotencyKey", "sendNumber", purpose, "createdAt")
+          VALUES ($1, $2::uuid, $3, 'simulation', $2::text, 0, 'same_key_resend', now())`, [randomUUID(), x.attemptId, x.paymentId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        expect(await recSql(`INSERT INTO refund_dispatch_observation ("sendId", "refundAttemptId", classification, "providerRefundId", "providerCode", "responseDigest", "observedAt")
+          VALUES ($1, $2, 'ambiguous', NULL, NULL, repeat('0', 64), now())`, [o.sendId, x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        await expect(recovery.recoverOnce()).rejects.toThrow(/refund_recovery_refused/); // the process refuses to run as it now
+      } finally {
+        await admin.query(`REVOKE ${appRole} FROM ${recRole}`);
+        await admin.query(`REVOKE INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation FROM ${recRole}`);
+      }
+      expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length]).toEqual(['dispatching', 0]);
+      expect(await mayStillPay(x.attemptId)).toBe(true);
+    });
+
+    it('X8 (Codex r1 P2) column-level INSERT grants count: refused at grant time, and refused to a registered role at write time', async () => {
+      const other = `dr1d_col_${randomBytes(3).toString('hex')}`;
+      await admin.query(`CREATE ROLE ${other} NOLOGIN`);
+      try {
+        await admin.query(`GRANT INSERT ("refundAttemptId") ON refund_attempt_failure_finality TO ${other}`);
+        expect((await refusedWith(mig.query('SELECT payment_grant_refund_recovery($1::regrole)', [other]))).code).toBe('42501');
+      } finally {
+        await admin.query(`DROP OWNED BY ${other}`);
+        await admin.query(`DROP ROLE ${other}`);
+      }
+      await admin.query(`GRANT INSERT ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource", "failureCode",
+        "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt") ON refund_attempt_failure_finality TO ${recRole}`);
+      try {
+        expect(await recovery.assertAuthority().then(() => 'ran', (e: Error) => e.message)).toMatch(/can record refund failure finality/);
+        const x = await storedUnapplied('rejected');
+        expect(await recSql(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+            "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt")
+          SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, 'provider_failed', 'status_check', 'declined', 'x', 1, repeat('0', 64), now() FROM refund_attempt a WHERE a.id = $1`,
+          [x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+      } finally {
+        await admin.query(`REVOKE INSERT ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource", "failureCode",
+          "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt") ON refund_attempt_failure_finality FROM ${recRole}`);
+      }
+      // the registry itself: read-only for the runtime and the recovery role; append-only for the owner
+      expect((await refusedWith(rt(`DELETE FROM refund_recovery_role`))).code).toBe('42501');
+      expect((await recSql(`DELETE FROM refund_recovery_role`)).code).toBe('42501');
+      expect((await recSql(`INSERT INTO refund_recovery_role (role) VALUES (1)`)).code).toBe('42501');
+      expect((await refusedWith(mig.query(`DELETE FROM refund_recovery_role`))).code).not.toBe('accepted');
+      expect((await one(`SELECT count(*)::int AS n FROM refund_recovery_role WHERE role = $1::regrole::oid`, [recRole])).n).toBe(1);
     });
 
     it('X6 the recovery CLI: refuses the runtime role (exit 2), runs one pass as the recovery role', async () => {

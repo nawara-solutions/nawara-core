@@ -15,8 +15,41 @@
 --     finality (the runtime role), `recovery` for any other. A caller's different value is refused, as is a session that switched roles.
 --   * 0039's finality checks are unchanged and now rest on that derivation: a `dispatch_response` finality still needs an application by `dispatch`
 --     in the same transaction, and the recovery role cannot insert finality at all (42501).
+--   * The grant REGISTERS the role (`refund_recovery_role`, owner-written, append-only). A registered recovery role, as the current or the session
+--     role, is refused every insert into `refund_attempt_failure_finality` (every source), `refund_dispatch_send` and `refund_dispatch_observation`,
+--     and is always `recovery`, WHATEVER privileges or memberships it is given later (Codex round 1, P1): its identity, not its privileges, decides.
+--     All privilege checks count column-level grants too (`has_any_column_privilege`; Codex round 1, P2).
 --   * No SECURITY DEFINER function exists in this schema (a test pins it), so the recovery role cannot borrow another role's rights.
 -- Remaining trust (recorded): the runtime role itself (the Payment service, which made the provider call) keeps the authority D-R1B gave it.
+
+-- ─────────────────────────────────────────────────────────────────────────────────────────────── the recovery-role registry
+
+CREATE TABLE refund_recovery_role (
+  role          oid PRIMARY KEY,                     -- pg_roles.oid of a role granted by payment_grant_refund_recovery (a recreated role is a new oid)
+  "grantedAt"   timestamptz NOT NULL DEFAULT clock_timestamp(),
+  "grantedBy"   text NOT NULL DEFAULT current_user
+);
+CREATE TRIGGER refund_recovery_role_10_append_only BEFORE UPDATE OR DELETE ON refund_recovery_role FOR EACH ROW EXECUTE FUNCTION refund_append_only();
+CREATE TRIGGER refund_recovery_role_11_no_truncate BEFORE TRUNCATE ON refund_recovery_role FOR EACH STATEMENT EXECUTE FUNCTION refund_append_only();
+
+-- whether this session is a registered recovery role, as its current or its session role (never configuration, never a caller's value)
+CREATE FUNCTION refund_is_recovery_session() RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM refund_recovery_role r
+                  WHERE r.role IN ((SELECT oid FROM pg_roles WHERE rolname = current_user), (SELECT oid FROM pg_roles WHERE rolname = session_user)))
+$$;
+
+CREATE FUNCTION refund_refuse_recovery_role() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF refund_is_recovery_session() THEN
+    RAISE EXCEPTION 'refund recovery role % may not write %: recovery never records finality, a send or an answer', session_user, TG_TABLE_NAME
+      USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_role_refused';
+  END IF;
+  RETURN NEW;
+END $$;
+-- 00: before every existing guard of these tables
+CREATE TRIGGER refund_attempt_failure_finality_00_not_recovery BEFORE INSERT ON refund_attempt_failure_finality FOR EACH ROW EXECUTE FUNCTION refund_refuse_recovery_role();
+CREATE TRIGGER refund_dispatch_send_00_not_recovery BEFORE INSERT ON refund_dispatch_send FOR EACH ROW EXECUTE FUNCTION refund_refuse_recovery_role();
+CREATE TRIGGER refund_dispatch_observation_00_not_recovery BEFORE INSERT ON refund_dispatch_observation FOR EACH ROW EXECUTE FUNCTION refund_refuse_recovery_role();
 
 CREATE OR REPLACE FUNCTION refund_dispatch_application_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE a refund_attempt%ROWTYPE; pay uuid; o refund_dispatch_observation%ROWTYPE; authority text;
@@ -27,7 +60,8 @@ BEGIN
     RAISE EXCEPTION 'refund_dispatch_application: a switched role (% as %) applies no dispatch answer', session_user, current_user
       USING ERRCODE = '42501', CONSTRAINT = 'refund_dispatch_application_authority';
   END IF;
-  authority := CASE WHEN has_table_privilege(current_user, 'refund_attempt_failure_finality', 'INSERT') THEN 'dispatch' ELSE 'recovery' END;
+  authority := CASE WHEN refund_is_recovery_session() THEN 'recovery'
+                    WHEN has_any_column_privilege(current_user, 'refund_attempt_failure_finality', 'INSERT') THEN 'dispatch' ELSE 'recovery' END;
   IF NEW."appliedBy" IS DISTINCT FROM authority THEN
     RAISE EXCEPTION 'refund_dispatch_application: role % applies as %, not %', current_user, authority, NEW."appliedBy"
       USING ERRCODE = '42501', CONSTRAINT = 'refund_dispatch_application_authority';
@@ -55,9 +89,9 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles x WHERE x.oid = r AND (x.rolsuper OR x.rolbypassrls))
      OR pg_has_role(r, (SELECT nspowner FROM pg_namespace WHERE nspname = 'public'), 'MEMBER')
      OR EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r)
-     OR has_table_privilege(r, 'refund_attempt_failure_finality', 'INSERT')
-     OR has_table_privilege(r, 'refund_dispatch_send', 'INSERT')
-     OR has_table_privilege(r, 'refund_dispatch_observation', 'INSERT') THEN
+     OR has_any_column_privilege(r, 'refund_attempt_failure_finality', 'INSERT')
+     OR has_any_column_privilege(r, 'refund_dispatch_send', 'INSERT')
+     OR has_any_column_privilege(r, 'refund_dispatch_observation', 'INSERT') THEN
     RAISE EXCEPTION 'payment_grant_refund_recovery: % can record finality, sends or answers, or can become a role that does; the recovery role must be a separate role', r
       USING ERRCODE = '42501';
   END IF;
@@ -70,8 +104,23 @@ BEGIN
   EXECUTE format('GRANT UPDATE (status, "failureCode", "completedAt", "workAfter", "providerRefundId", "submittedAt") ON refund_attempt TO %s', r);
   -- what the decision writes: its application, a D-R1A preserved contradiction, and their audit intents
   EXECUTE format('GRANT INSERT ON refund_dispatch_application, refund_safety_escalation, outbox TO %s', r);
+  -- registered: from now on its identity refuses it finality, sends and answers, whatever it is granted later
+  INSERT INTO refund_recovery_role (role) VALUES (r::oid) ON CONFLICT (role) DO NOTHING;
 END $$;
 REVOKE EXECUTE ON FUNCTION payment_grant_refund_recovery(regrole) FROM PUBLIC;
+
+DO $$
+DECLARE x record;
+BEGIN
+  REVOKE ALL ON refund_recovery_role FROM PUBLIC;
+  FOR x IN
+    SELECT a.grantee::regrole::text AS role, a.privilege_type AS priv
+      FROM pg_class c, aclexplode(c.relacl) a
+     WHERE c.oid = 'refund_recovery_role'::regclass AND a.grantee <> c.relowner AND a.grantee <> 0 AND a.privilege_type <> 'SELECT'
+  LOOP
+    EXECUTE format('REVOKE %s ON refund_recovery_role FROM %s', x.priv, x.role);
+  END LOOP;
+END $$;
 
 -- The conventional role of `infra/postgres/init` (`payment_refund_recovery`), when it exists; otherwise the schema owner runs the function later.
 DO $$

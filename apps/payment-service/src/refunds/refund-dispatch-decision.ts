@@ -116,14 +116,17 @@ export interface RecoveryAuthority {
   superuser: boolean;
   memberships: number;
   switchedRole: boolean;
+  /** Registered by `payment_grant_refund_recovery` (0040): the database refuses it finality, sends and answers whatever it is granted. */
+  registered: boolean;
 }
 
 export async function recoveryAuthorityOf(db: DbService): Promise<RecoveryAuthority> {
   const { rows } = await db.query<RecoveryAuthority>(
     `SELECT current_user::text AS role,
-            has_table_privilege(current_user, 'refund_attempt_failure_finality', 'INSERT') AS "canRecordFinality",
-            has_table_privilege(current_user, 'refund_dispatch_send', 'INSERT') AS "canSend",
-            has_table_privilege(current_user, 'refund_dispatch_observation', 'INSERT') AS "canObserve",
+            has_any_column_privilege(current_user, 'refund_attempt_failure_finality', 'INSERT') AS "canRecordFinality",
+            has_any_column_privilege(current_user, 'refund_dispatch_send', 'INSERT') AS "canSend",
+            has_any_column_privilege(current_user, 'refund_dispatch_observation', 'INSERT') AS "canObserve",
+            refund_is_recovery_session() AS registered,
             (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user) AS superuser,
             (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user) AS memberships,
             current_user <> session_user AS "switchedRole"`);
@@ -137,6 +140,7 @@ export function recoveryAuthorityRefusal(a: RecoveryAuthority): string | null {
   if (a.canSend || a.canObserve) return 'the role can record dispatch sends or answers: recovery must run as the separate recovery role';
   if (a.memberships > 0) return 'the role is a member of another role';
   if (a.switchedRole) return 'the session switched roles';
+  if (!a.registered) return 'the role is not a registered recovery role (payment_grant_refund_recovery)';
   return null;
 }
 
