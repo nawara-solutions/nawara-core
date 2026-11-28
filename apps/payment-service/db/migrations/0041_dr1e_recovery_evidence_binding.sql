@@ -18,7 +18,67 @@
 --   * F4: a recovery session never updates a payment and never writes "workAfter" (the column grant is withdrawn from every registered role).
 --   * "This transaction" is proven by row ownership (xmin = this transaction's id), never by a time comparison (Codex round 3). Rows written in a
 --     subtransaction carry another id and fail closed; the recovery process uses none.
+--   * Codex review of b954a3e: every row a recovery session writes must belong to the top-level transaction (no subtransaction duplicates); a
+--     session that switched INTO a recovery role writes nothing; a `transitioned` application names a real status change of the same transaction,
+--     recorded by trigger in the append-only `refund_attempt_status_change` (both roles).
 -- Remaining trust (recorded): the runtime role (the service that made the provider call), the schema owner and superusers.
+
+-- ─────────────────────────────────────────────────────────────────────────────────────────────── identity at write time and real transitions
+
+-- Codex review of b954a3e (P2): a login that is NOT a registered recovery role but switches INTO one (SET ROLE, a later membership) could write as
+-- recovery and RESET ROLE before commit, so the commit checks would no longer see a recovery session. Recovery writes are therefore refused at
+-- write time unless the LOGIN itself is the registered role (session_user cannot change inside a session without superuser rights).
+CREATE FUNCTION refund_recovery_switched_into() RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM refund_recovery_role r WHERE r.role = (SELECT oid FROM pg_roles WHERE rolname = current_user))
+     AND NOT EXISTS (SELECT 1 FROM refund_recovery_role r WHERE r.role = (SELECT oid FROM pg_roles WHERE rolname = session_user))
+$$;
+CREATE FUNCTION refund_recovery_refuse_switched() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF refund_recovery_switched_into() THEN
+    RAISE EXCEPTION 'refund recovery: a session switched into a recovery role (% as %) writes nothing', session_user, current_user
+      USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_switched_role';
+  END IF;
+  RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+END $$;
+
+-- Codex review of b954a3e (P2): a `transitioned` application must name a REAL status change of this transaction, not any update of the row (a
+-- bookkeeping update such as "workAfter" proved only that the row changed). Every status change is recorded here by trigger, append-only, and
+-- nothing else may write a row: a direct insert runs this table's guard at trigger depth 1, the recording trigger's insert at depth 2.
+CREATE TABLE refund_attempt_status_change (
+  "refundAttemptId"  uuid NOT NULL REFERENCES refund_attempt (id),
+  "fromStatus"       text NOT NULL,
+  "toStatus"         text NOT NULL,
+  "changedAt"        timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX refund_attempt_status_change_attempt ON refund_attempt_status_change ("refundAttemptId");
+CREATE FUNCTION refund_attempt_status_change_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF pg_trigger_depth() < 2 THEN
+    RAISE EXCEPTION 'refund_attempt_status_change: recorded only by the status trigger' USING ERRCODE = '42501', CONSTRAINT = 'refund_attempt_status_change_origin';
+  END IF;
+  NEW."changedAt" := clock_timestamp();
+  RETURN NEW;
+END $$;
+CREATE FUNCTION refund_attempt_record_status_change() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  INSERT INTO refund_attempt_status_change ("refundAttemptId", "fromStatus", "toStatus") VALUES (NEW.id, OLD.status, NEW.status);
+  RETURN NULL;
+END $$;
+CREATE TRIGGER refund_attempt_status_change_05_guard BEFORE INSERT ON refund_attempt_status_change FOR EACH ROW EXECUTE FUNCTION refund_attempt_status_change_guard();
+CREATE TRIGGER refund_attempt_status_change_10_append_only BEFORE UPDATE OR DELETE ON refund_attempt_status_change FOR EACH ROW EXECUTE FUNCTION refund_append_only();
+CREATE TRIGGER refund_attempt_status_change_11_no_truncate BEFORE TRUNCATE ON refund_attempt_status_change FOR EACH STATEMENT EXECUTE FUNCTION refund_append_only();
+CREATE TRIGGER refund_attempt_40_record_status_change AFTER UPDATE OF status ON refund_attempt
+  FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION refund_attempt_record_status_change();
+DO $$
+DECLARE x record;
+BEGIN
+  REVOKE ALL ON refund_attempt_status_change FROM PUBLIC;
+  FOR x IN SELECT a.grantee::regrole::text AS role, a.privilege_type AS priv FROM pg_class c, aclexplode(c.relacl) a
+            WHERE c.oid = 'refund_attempt_status_change'::regclass AND a.grantee <> c.relowner AND a.grantee <> 0 AND a.privilege_type NOT IN ('SELECT', 'INSERT')
+  LOOP
+    EXECUTE format('REVOKE %s ON refund_attempt_status_change FROM %s', x.priv, x.role);
+  END LOOP;
+END $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────────────────────── F3: the application guard (replaces 0040's)
 
@@ -58,8 +118,9 @@ BEGIN
       CASE WHEN o.classification IN ('accepted', 'rejected') OR NEW."attemptStatusBefore" = 'dispatching' THEN 'transitioned' ELSE 'no_effect' END
     ELSE 'no_effect' END;
   IF NEW.effect IS DISTINCT FROM expected
-     -- Codex round 3: a `transitioned` application accompanies its transition: the attempt row was updated by THIS transaction
-     OR (NEW.effect = 'transitioned' AND NOT EXISTS (SELECT 1 FROM refund_attempt u WHERE u.id = a.id AND u.xmin = pg_current_xact_id()::xid))
+     -- Codex round 3 / review of b954a3e: a `transitioned` application names a REAL status change of THIS transaction, from and to its statuses
+     OR (NEW.effect = 'transitioned' AND NOT EXISTS (SELECT 1 FROM refund_attempt_status_change m WHERE m."refundAttemptId" = a.id
+           AND m.xmin = pg_current_xact_id()::xid AND m."fromStatus" = NEW."attemptStatusBefore" AND m."toStatus" = NEW."attemptStatusAfter"))
      OR (expected = 'preserved_contradiction' AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e
            WHERE e."refundAttemptId" = a.id AND e.kind = 'failure_after_refund_evidence')) THEN
     RAISE EXCEPTION 'refund_dispatch_application: observation % of attempt % has effect %, not %', NEW."observationId", a.id, expected, NEW.effect
@@ -106,6 +167,10 @@ END $$;
 CREATE FUNCTION refund_recovery_attempt_commit_check() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF NOT refund_is_recovery_session() THEN RETURN NULL; END IF;
+  -- review of b954a3e (P2): a recovery write in a subtransaction is refused (its row carries another id than this transaction's)
+  IF (SELECT u.xmin FROM refund_attempt u WHERE u.id = NEW.id) IS DISTINCT FROM pg_current_xact_id()::xid THEN
+    RAISE EXCEPTION 'refund recovery: attempt % was changed in a subtransaction', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_subtransaction';
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM refund_dispatch_application p JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
                    JOIN refund_dispatch_send s ON s.id = o."sendId" AND s."refundAttemptId" = o."refundAttemptId"
                   WHERE p."refundAttemptId" = NEW.id AND p."appliedBy" = 'recovery' AND p.xmin = pg_current_xact_id()::xid AND p.effect = 'transitioned'
@@ -143,6 +208,9 @@ BEGIN
 END $$;
 CREATE FUNCTION refund_recovery_escalation_commit_check() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
+  IF refund_is_recovery_session() AND (SELECT w.xmin FROM refund_safety_escalation w WHERE w.id = NEW.id) IS DISTINCT FROM pg_current_xact_id()::xid THEN
+    RAISE EXCEPTION 'refund recovery: escalation % was written in a subtransaction', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_subtransaction';
+  END IF;
   IF refund_is_recovery_session() AND NOT EXISTS (SELECT 1 FROM refund_dispatch_application p
        JOIN refund_dispatch_observation o ON o.id = p."observationId" AND o."refundAttemptId" = p."refundAttemptId"
       WHERE p."refundAttemptId" = NEW."refundAttemptId" AND p."appliedBy" = 'recovery' AND p.effect = 'preserved_contradiction'
@@ -202,6 +270,9 @@ CREATE FUNCTION refund_recovery_outbox_commit_check() RETURNS trigger LANGUAGE p
 DECLARE attempt uuid;
 BEGIN
   IF NOT refund_is_recovery_session() THEN RETURN NULL; END IF;
+  IF (SELECT x.xmin FROM outbox x WHERE x.id = NEW.id) IS DISTINCT FROM pg_current_xact_id()::xid THEN
+    RAISE EXCEPTION 'refund recovery: outbox row % was written in a subtransaction', NEW.id USING ERRCODE = '42501', CONSTRAINT = 'refund_recovery_subtransaction';
+  END IF;
   attempt := (NEW.payload->'resource'->>'id')::uuid;
   IF NOT (CASE NEW.name WHEN 'audit.refund_attempt.failed' THEN refund_recovery_applied_here(attempt, 'transitioned', NULL, 'failed')
                         ELSE refund_recovery_applied_here(attempt, 'preserved_contradiction', NULL, NULL) END)
@@ -223,6 +294,12 @@ BEGIN
 END $$;
 CREATE TRIGGER outbox_00_refund_recovery_immutable BEFORE UPDATE OR DELETE ON outbox FOR EACH ROW EXECUTE FUNCTION refund_recovery_outbox_immutable();
 CREATE TRIGGER outbox_01_refund_recovery_no_truncate BEFORE TRUNCATE ON outbox FOR EACH STATEMENT EXECUTE FUNCTION refund_recovery_outbox_immutable();
+
+CREATE TRIGGER refund_attempt_000_recovery_switched BEFORE UPDATE ON refund_attempt FOR EACH ROW EXECUTE FUNCTION refund_recovery_refuse_switched();
+CREATE TRIGGER payment_000_recovery_switched BEFORE UPDATE ON payment FOR EACH ROW EXECUTE FUNCTION refund_recovery_refuse_switched();
+CREATE TRIGGER refund_safety_escalation_000_recovery_switched BEFORE INSERT ON refund_safety_escalation FOR EACH ROW EXECUTE FUNCTION refund_recovery_refuse_switched();
+CREATE TRIGGER refund_dispatch_application_000_recovery_switched BEFORE INSERT ON refund_dispatch_application FOR EACH ROW EXECUTE FUNCTION refund_recovery_refuse_switched();
+CREATE TRIGGER outbox_000_refund_recovery_switched BEFORE INSERT OR UPDATE OR DELETE ON outbox FOR EACH ROW EXECUTE FUNCTION refund_recovery_refuse_switched();
 
 CREATE TRIGGER refund_attempt_00_recovery_update BEFORE UPDATE ON refund_attempt FOR EACH ROW EXECUTE FUNCTION refund_recovery_attempt_update_guard();
 CREATE CONSTRAINT TRIGGER refund_attempt_30_recovery_commit AFTER UPDATE ON refund_attempt DEFERRABLE INITIALLY DEFERRED
@@ -257,7 +334,7 @@ BEGIN
   EXECUTE format('GRANT UPDATE ("updatedAt") ON payment TO %s', r);
   EXECUTE format('GRANT UPDATE (status, "failureCode", "completedAt", "providerRefundId", "submittedAt") ON refund_attempt TO %s', r); -- never "workAfter" (F4)
   -- what the decision writes: its application, a D-R1A preserved contradiction, and their audit intents
-  EXECUTE format('GRANT INSERT ON refund_dispatch_application, refund_safety_escalation, outbox TO %s', r);
+  EXECUTE format('GRANT INSERT ON refund_dispatch_application, refund_safety_escalation, outbox, refund_attempt_status_change TO %s', r);
   -- registered: from now on its identity refuses it finality, sends and answers, whatever it is granted later
   INSERT INTO refund_recovery_role (role) VALUES (r::oid) ON CONFLICT (role) DO NOTHING;
 END $$;
@@ -269,5 +346,6 @@ DECLARE x record;
 BEGIN
   FOR x IN SELECT r.rolname FROM refund_recovery_role g JOIN pg_roles r ON r.oid = g.role LOOP
     EXECUTE format('REVOKE UPDATE ("workAfter") ON refund_attempt FROM %I', x.rolname);
+    EXECUTE format('GRANT SELECT, INSERT ON refund_attempt_status_change TO %I', x.rolname); -- its status changes are recorded as it writes them
   END LOOP;
 END $$;

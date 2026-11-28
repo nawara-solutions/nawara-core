@@ -297,6 +297,11 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
     - A recovered failure must write its audit intent, and a new D-R1A escalation must write its own, with the stored answer's code.
     - A `transitioned` application needs the attempt row updated by the same transaction; this holds for both roles.
     - Whatever a recovery session is granted later, it never updates, deletes or truncates an outbox row.
+  - **Codex review of b954a3e (PR #554):**
+    - Every row a recovery session writes must belong to the top-level transaction, so a savepoint cannot hide a duplicate.
+    - A login that switched INTO a recovery role writes nothing; the refusal is at write time, so `RESET ROLE` before commit gains nothing.
+    - A `transitioned` application must name a real status change of the same transaction, with the same from and to. The change is recorded by
+      trigger in the append-only `refund_attempt_status_change`, which nothing else may write. This holds for both roles.
   - Operations: [`docs/runbooks/refund-response-recovery.md`](../runbooks/refund-response-recovery.md). The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
   Remaining trust: the runtime role (the service that made the provider call) keeps the authority D-R1B gave it.
 

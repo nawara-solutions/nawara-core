@@ -1186,6 +1186,69 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       }
     });
 
+    it('Y18 (Codex review of b954a3e) subtransaction duplicates, a role switched INTO recovery, and a transition the attempt never made', async () => {
+      // 1. a second intent inside a savepoint: refused at commit (the row belongs to a subtransaction)
+      const x = await storedUnapplied('rejected');
+      const [o] = await observationsOf(x.attemptId);
+      expect(await manualRecovery(x.attemptId, o, { extra: async (q) => {
+        await q.query('SAVEPOINT duplicate_intent');
+        await outboxInsert(q, 'audit.refund_attempt.failed', await failedIntent(x.attemptId), 2);
+        await q.query('RELEASE SAVEPOINT duplicate_intent');
+      } })).toMatchObject({ code: '42501', constraint: 'refund_recovery_subtransaction' });
+      expect([(await row(x.attemptId)).status, await failedAudits(x.attemptId)]).toEqual(['dispatching', 0]);
+      // 2. an unregistered login switched INTO the recovery role writes nothing (it could RESET ROLE before the commit checks)
+      const caller = `dr1d_sw_${randomBytes(3).toString('hex')}`;
+      const callerPw = randomBytes(12).toString('hex');
+      await admin.query(`CREATE ROLE ${caller} LOGIN PASSWORD '${callerPw}' NOINHERIT`);
+      const sw = new pg.Pool({ connectionString: urlAs(caller, callerPw), max: 1 });
+      try {
+        await admin.query(`GRANT CONNECT ON DATABASE ${dbName} TO ${caller}`);
+        await admin.query(`GRANT USAGE ON SCHEMA public TO ${caller}`);
+        await admin.query(`GRANT SELECT ON refund_recovery_role TO ${caller}`);
+        await admin.query(`GRANT ${recRole} TO ${caller}`);
+        const c = await sw.connect();
+        try {
+          await c.query('BEGIN');
+          await c.query(`SET ROLE ${recRole}`);
+          const r = await refusedWith(c.query(`UPDATE refund_attempt SET status = 'submitted', "providerRefundId" = 'invented-reference', "submittedAt" = now() WHERE id = $1`, [x.attemptId]));
+          expect(r).toMatchObject({ code: '42501', constraint: 'refund_recovery_switched_role' });
+          await c.query('ROLLBACK');
+          await c.query('BEGIN');
+          await c.query(`SET ROLE ${recRole}`);
+          expect(await refusedWith(c.query(`INSERT INTO outbox (id, name, payload, "eventVersion") VALUES ($1, 'audit.refund_attempt.failed', '{}'::jsonb, 2)`, [randomUUID()])))
+            .toMatchObject({ code: '42501', constraint: 'refund_recovery_switched_role' });
+          await c.query('ROLLBACK');
+        } finally {
+          await c.query('ROLLBACK').catch(() => undefined);
+          c.release();
+        }
+      } finally {
+        await sw.end();
+        await admin.query(`DROP OWNED BY ${caller}`);
+        await admin.query(`DROP ROLE ${caller}`);
+      }
+      expect((await row(x.attemptId)).status).toBe('dispatching');
+      // 3. the runtime role: a bookkeeping update cannot back a `transitioned` application the attempt never made
+      const sub = await submitted();
+      const y = await storedUnapplied('accepted');
+      const [oy] = await observationsOf(y.attemptId);
+      await fixture(`UPDATE refund_attempt SET status = 'submitted', "providerRefundId" = $2, "submittedAt" = now() WHERE id = $1`, [y.attemptId, `simr_${y.attemptId}`]); // LABELLED FIXTURE
+      expect(await refusedWith(rtTx(async (q) => {
+        await q.query(`UPDATE refund_attempt SET "workAfter" = now() + interval '1 minute' WHERE id = $1`, [y.attemptId]);
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'transitioned', 'unknown', 'submitted', 'dispatch', now())`, [oy.id, y.attemptId]);
+      }))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
+      expect(await applicationsOf(y.attemptId)).toEqual([]);
+      // 4. the status-change record: written only by its trigger, never directly (runtime or recovery), append-only
+      for (const q of [rt, (sql: string, params?: unknown[]) => rec.query(sql, params)]) {
+        expect(await refusedWith(q(`INSERT INTO refund_attempt_status_change ("refundAttemptId", "fromStatus", "toStatus") VALUES ($1, 'unknown', 'submitted')`, [sub.attemptId])))
+          .toMatchObject({ code: '42501' });
+      }
+      expect((await refusedWith(mig.query(`DELETE FROM refund_attempt_status_change WHERE "refundAttemptId" = $1`, [sub.attemptId]))).code).not.toBe('accepted');
+      expect((await admin.query(`SELECT "fromStatus", "toStatus" FROM refund_attempt_status_change WHERE "refundAttemptId" = $1 ORDER BY "changedAt"`, [sub.attemptId])).rows.slice(-2))
+        .toEqual([{ fromStatus: 'authorized', toStatus: 'dispatching' }, { fromStatus: 'dispatching', toStatus: 'submitted' }]); // the real history, by trigger
+    });
+
     it('Y15-Y16 legitimate recovery is unchanged: ambiguous and transport-error answers, and its audit intents are emitted exactly', async () => {
       const amb = await storedUnapplied('ambiguous');
       const tr = await authorized();
