@@ -25,7 +25,8 @@ class AuthorityError extends Error {}
 
 /** Connection and authentication failures by their stable codes (PostgreSQL SQLSTATE class 08 and 28, and socket errors). */
 const isConnectionFailure = (e: unknown): boolean => {
-  const code = String((e as { code?: unknown })?.code ?? '');
+  const raw = (e as { code?: unknown })?.code;
+  const code = typeof raw === 'string' ? raw : '';
   return /^(08|28)/.test(code) || ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'EHOSTUNREACH', 'EAI_AGAIN'].includes(code);
 };
 
