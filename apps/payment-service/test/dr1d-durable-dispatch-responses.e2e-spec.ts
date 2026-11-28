@@ -1157,6 +1157,13 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
         await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
           VALUES ($1, $2, 'preserved_contradiction', 'succeeded', 'succeeded', 'recovery', now())`, [oy.id, y.attemptId]);
       })).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation' });
+      // the escalation written inside a savepoint: refused as a subtransaction write
+      expect(await recTx(async (q) => {
+        await q.query('SAVEPOINT s');
+        await q.query(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "observedFailureCode")
+          SELECT 'failure_after_refund_evidence', a.id, $2, a."paymentId", a."companyId", a."captureFactId", a.status, 'declined' FROM refund_attempt a WHERE a.id = $1`, [y.attemptId, fy.id]);
+        await q.query('RELEASE SAVEPOINT s');
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_subtransaction' });
       // the right code, but the escalation's audit intent left out: refused at commit
       expect(await recTx(async (q) => {
         await q.query(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "observedFailureCode")
@@ -1175,15 +1182,19 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await refusedWith(rt(fabricated('dispatch'), [oz.id, z.attemptId]))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
       expect(await applicationsOf(z.attemptId)).toEqual([]);
       // 5. later ordinary outbox UPDATE / DELETE grants: never mark published, re-schedule or erase
+      const pending = randomUUID(); // LABELLED FIXTURE: one known unpublished row, so each statement below touches a row
+      await admin.query(`INSERT INTO outbox (id, name, payload) VALUES ($1, 'audit.refund_attempt.failed', '{"fixture":true}'::jsonb)`, [pending]);
       await admin.query(`GRANT UPDATE, DELETE, TRUNCATE ON outbox TO ${recRole}`);
       try {
-        expect(await recSql(`UPDATE outbox SET "publishedAt" = clock_timestamp() WHERE "publishedAt" IS NULL`)).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
-        expect(await recSql(`UPDATE outbox SET "availableAt" = 'infinity' WHERE "publishedAt" IS NULL`)).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
-        expect(await recSql(`DELETE FROM outbox`)).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recSql(`UPDATE outbox SET "publishedAt" = clock_timestamp() WHERE id = $1`, [pending])).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recSql(`UPDATE outbox SET "availableAt" = 'infinity' WHERE id = $1`, [pending])).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
+        expect(await recSql(`DELETE FROM outbox WHERE id = $1`, [pending])).toMatchObject({ code: '42501', constraint: 'refund_recovery_outbox' });
         expect(await recSql(`TRUNCATE outbox`)).toMatchObject({ code: '42501' });
       } finally {
         await admin.query(`REVOKE UPDATE, DELETE, TRUNCATE ON outbox FROM ${recRole}`);
       }
+      expect((await one(`SELECT "publishedAt", "availableAt" < 'infinity' AS due FROM outbox WHERE id = $1`, [pending]))).toEqual({ publishedAt: null, due: true });
+      await admin.query(`DELETE FROM outbox WHERE id = $1`, [pending]);
     });
 
     it('Y18 (Codex review of b954a3e) subtransaction duplicates, a role switched INTO recovery, and a transition the attempt never made', async () => {
@@ -1196,6 +1207,12 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
         await q.query('RELEASE SAVEPOINT duplicate_intent');
       } })).toMatchObject({ code: '42501', constraint: 'refund_recovery_subtransaction' });
       expect([(await row(x.attemptId)).status, await failedAudits(x.attemptId)]).toEqual(['dispatching', 0]);
+      // 1b. the transition itself, or a D-R1A escalation, written inside a savepoint: refused as a subtransaction write
+      expect(await recTx(async (q) => {
+        await q.query('SAVEPOINT s');
+        await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+        await q.query('RELEASE SAVEPOINT s');
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_subtransaction' });
       // 2. an unregistered login switched INTO the recovery role writes nothing (it could RESET ROLE before the commit checks)
       const caller = `dr1d_sw_${randomBytes(3).toString('hex')}`;
       const callerPw = randomBytes(12).toString('hex');
@@ -1239,6 +1256,14 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
           VALUES ($1, $2, 'transitioned', 'unknown', 'submitted', 'dispatch', now())`, [oy.id, y.attemptId]);
       }))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
       expect(await applicationsOf(y.attemptId)).toEqual([]);
+      // 3b. a REAL status change, but the application claims another prior status: refused (from and to must both match)
+      const w = await storedUnapplied('accepted');
+      const [ow] = await observationsOf(w.attemptId);
+      expect(await refusedWith(rtTx(async (q) => {
+        await q.query(`UPDATE refund_attempt SET status = 'submitted', "providerRefundId" = $2, "submittedAt" = now() WHERE id = $1`, [w.attemptId, `simr_${w.attemptId}`]);
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'transitioned', 'unknown', 'submitted', 'dispatch', now())`, [ow.id, w.attemptId]);
+      }))).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_effect' });
       // 4. the status-change record: written only by its trigger, never directly (runtime or recovery), append-only
       for (const q of [rt, (sql: string, params?: unknown[]) => rec.query(sql, params)]) {
         expect(await refusedWith(q(`INSERT INTO refund_attempt_status_change ("refundAttemptId", "fromStatus", "toStatus") VALUES ($1, 'unknown', 'submitted')`, [sub.attemptId])))
