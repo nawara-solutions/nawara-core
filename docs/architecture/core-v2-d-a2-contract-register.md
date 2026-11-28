@@ -1641,6 +1641,13 @@ pending the Owner's merge review).** Payment migration `0038`. No route, event, 
 - Audit: `refund_safety.escalated` and `refund_safety.state_exited` gain the value `dispatch_blocked` in their `kind` field (same version).
 - Details: `core-v2-d-r1-refund-finality.md` §4a. DO-76, OD-RLSC-1, OD-DR1-6 and R3-F2 stay OPEN.
 
+**D-R1D Payment durable dispatch responses (dated note, 2026-11-28; the Owner's conditional GO, OD-DR1-6, Q1 and Q2; DEVELOPMENT AND SIMULATION
+ONLY; EVIDENCE ONLY; pending the Owner's merge review).** Payment migration `0039`. No route, event, audit action, error code or financial rule changes.
+- PAY-12 (Owner only): two new item kinds, `refund_dispatch_send_unobserved` (a refund send with no stored provider answer: outcome UNKNOWN) and
+  `refund_dispatch_response_unapplied` (a stored answer not yet applied), each after a configurable window (default 15 minutes). Not producer kinds.
+- Recovery applies a stored answer without calling the provider and never records finality; a `dispatch_response` finality names its own applied
+  rejection. Details: `core-v2-d-r1-refund-finality.md` §4b. DO-76, OD-RLSC-1 and R3-F2 stay OPEN.
+
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
 ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
 `authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.

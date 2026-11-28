@@ -6,6 +6,7 @@ import { PaymentsModule } from '../payments/payments.module.js';
 import { HttpReceiptAuthority, RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js';
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
+import { RefundDispatchResponseService } from './refund-dispatch-response.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
 import { RefundFinalityService } from './refund-finality.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
@@ -31,6 +32,7 @@ export class RefundsModule {
       controllers: [RefundsController, RefundCapturesController, SettlingCaptureController],
       providers: [
         RefundAttemptService, RefundEvidenceService, RefundAllocationService, RefundSafetyService, RefundFinalityService, RefundWorker, IdempotencyService,
+        RefundDispatchResponseService, // Core V2 D-R1D (0039): durable dispatch sends, answers and their applications
         RefundStalledDispatchSweep, // Core V2 G3 (DO-44): escalation-only review of dispatches whose outcome stays unknown
         ...(opts.worker === false ? [] : [RefundWorkerService, RefundStalledDispatchSweepService]),
         {

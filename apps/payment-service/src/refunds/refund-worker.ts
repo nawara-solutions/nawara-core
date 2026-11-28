@@ -10,6 +10,7 @@ import type { PaymentProvider, RefundDispatchResult } from '../providers/provide
 import { RECEIPT_AUTHORITY, type ReceiptAuthority } from './receipt-authority.js';
 import { RefundAllocationService } from './refund-allocation.service.js';
 import { RefundAttemptService } from './refund-attempt.service.js';
+import { RefundDispatchResponseService, classifyDispatch, type DispatchApplicationEffect, type DispatchObservationRow } from './refund-dispatch-response.service.js';
 import { RefundEvidenceService } from './refund-evidence.service.js';
 import { RefundFinalityService, describeRefusal } from './refund-finality.service.js';
 import { RefundSafetyService } from './refund-safety.service.js';
@@ -18,7 +19,6 @@ import { bindingOf, type RefundAttemptRow } from './refund.types.js';
 const BATCH_SIZE = 50;
 /** Core V2 D-R1A: the attempt states in which a provider failure can contradict the attempt's own verified refund fact (0036). */
 const FAILURE_CONTRADICTABLE = new Set(['dispatching', 'submitted', 'unknown', 'succeeded', 'discrepancy', 'failed']);
-const boundedFailureCode = (code: string): string => (/^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'provider_failure');
 /** How long one claim on an attempt lasts: no other instance (or later pass) works on it meanwhile. Technical, no business meaning. */
 export const REFUND_LEASE_MS = 5000;
 /** An intent the request path may still be authorizing is left to it this long before the recovery lookup (never an expiry rule). */
@@ -27,6 +27,10 @@ export const AUTHORIZATION_RECOVERY_AFTER_MS = 30_000;
 const BLOCKED_RECHECK_MS = 60_000;
 /** A submitted refund is asked about once it has been with the provider this long. */
 const SUBMITTED_CHECK_AFTER_MS = 60_000;
+/** Core V2 D-R1D (Q2): the default window before a stored, unapplied dispatch answer is applied by recovery (configurable; authorizes nothing). */
+export const RESPONSE_RECOVERY_AFTER_MS = 30_000;
+/** What the provider's answer moves an in-flight attempt to (an observation's classification). */
+const TARGET_STATUS = { accepted: 'submitted', rejected: 'failed', ambiguous: 'unknown', transport_error: 'unknown' } as const;
 
 /**
  * Core V2 S6b (register PAY-07; ADR-0067 decision 5; the Owner's R6B-3, R6B-4, R6B-9): the refund worker, asynchronous from the durable
@@ -49,6 +53,13 @@ const SUBMITTED_CHECK_AFTER_MS = 60_000;
  *   * Core V2 D-R1B (0037): nothing is sent, first time or again, while an earlier attempt of the same money may still pay
  *     (`RefundFinalityService.dispatchRefusal`, re-evaluated here; the database refuses the first send independently), nor again once this attempt has
  *     its own verified refund fact contradicted by a failure (OD-DR1-1). Its status is still read; nothing is released, retried or reassigned.
+ *   * Core V2 D-R1D (0039; OD-DR1-6; the Owner's Q1, Q2): every send is recorded BEFORE the call (`refund_dispatch_send`), the provider's answer is
+ *     stored in its own transaction BEFORE the decision (`refund_dispatch_observation`), and the decision records its exactly-once application under
+ *     the attempt lock. An answer no decision applied (a crash, a failed decision transaction) is applied by the RECOVERY pass once it is older than
+ *     the configured window: the same decision, WITHOUT calling the provider and WITHOUT recording finality (a recovered rejection is an uncertified
+ *     failure, which D-R1B treats as possibly payable). While an attempt has a stored answer not yet applied, it is not worked (nothing is sent
+ *     again, no status read) until that answer is applied. A send with no stored answer stays an UNKNOWN outcome: the call is not atomic with
+ *     the database, so a database outage after the call cannot be closed here; status reads (the rules above) remain its only resolution.
  */
 @Injectable()
 export class RefundWorker {
@@ -62,6 +73,7 @@ export class RefundWorker {
   /** The windows above; tests shorten them (the timestamps they compare are immutable database times). */
   recoveryAfterMs = AUTHORIZATION_RECOVERY_AFTER_MS;
   submittedCheckAfterMs = SUBMITTED_CHECK_AFTER_MS;
+  responseRecoveryAfterMs: number;
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -74,7 +86,10 @@ export class RefundWorker {
     @Inject(RefundSafetyService) private readonly safety: RefundSafetyService,
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
     @Inject(RefundFinalityService) private readonly finality: RefundFinalityService,
-  ) {}
+    @Inject(RefundDispatchResponseService) private readonly responses: RefundDispatchResponseService,
+  ) {
+    this.responseRecoveryAfterMs = config.refundResponses?.recoveryAfterMs ?? RESPONSE_RECOVERY_AFTER_MS;
+  }
 
   start(intervalMs = 5000): void {
     this.loop.start(intervalMs);
@@ -89,6 +104,16 @@ export class RefundWorker {
     if (this.running) return { worked: 0 };
     this.running = true;
     try {
+      const ctx = jobContext('refund_worker');
+      let worked = 0;
+      // Core V2 D-R1D: stored dispatch answers no decision applied, first (so a later send or status read of the attempt never overtakes them)
+      for (const o of await this.responses.recoverable(this.responseRecoveryAfterMs, BATCH_SIZE)) {
+        try {
+          if (await this.decideDispatch(o, 'recovery', ctx)) worked++;
+        } catch (e) {
+          this.logger.warn(`refund_dispatch_response_recovery_failure observation=${o.id} refundAttempt=${o.refundAttemptId} ${describeFailure(e)} — kept; retried on a later pass`);
+        }
+      }
       const { rows } = await this.db.query<RefundAttemptRow>(
         `SELECT * FROM refund_attempt
           WHERE ((status = 'authorization_pending' AND "requestedAt" < now() - make_interval(secs => $1))
@@ -97,11 +122,12 @@ export class RefundWorker {
             AND ("workAfter" IS NULL OR "workAfter" <= now())
             -- Core V2 DO-76 S1 (D-76-2): a held attempt is never picked up again: nothing releases, retries or abandons it
             AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation h WHERE h."refundAttemptId" = refund_attempt.id AND h.kind = 'dispatch_held')
+            -- Core V2 D-R1D: a stored dispatch answer not yet applied is applied first (by its decision or by recovery): nothing else happens meanwhile
+            AND NOT EXISTS (SELECT 1 FROM refund_dispatch_observation o WHERE o."refundAttemptId" = refund_attempt.id
+                             AND NOT EXISTS (SELECT 1 FROM refund_dispatch_application p WHERE p."observationId" = o.id))
           ORDER BY "requestedAt", id LIMIT $3`,
         [this.recoveryAfterMs / 1000, this.submittedCheckAfterMs / 1000, BATCH_SIZE],
       );
-      const ctx = jobContext('refund_worker');
-      let worked = 0;
       for (const a of rows) {
         try {
           if (await this.work(a, ctx)) worked++;
@@ -223,63 +249,96 @@ export class RefundWorker {
   }
 
   private async dispatch(a: RefundAttemptRow, provider: PaymentProvider, ctx: EventContext): Promise<boolean> {
-    // `dispatching` is durable BEFORE the provider can learn the key: whatever happens next, this attempt is only ever re-sent with that key
-    if (a.status === 'authorized' && !(await this.startDispatch(a, ctx))) return false;
+    // `dispatching` and the send are durable BEFORE the provider can learn the key: whatever happens next, this attempt is only ever re-sent with that key
+    const sendId = a.status === 'authorized' ? await this.startDispatch(a, ctx) : await this.recordResend(a);
+    if (sendId === null) return false;
     // Core V2 R6H-5: a capture-specific refund returns exactly its capture's provider transaction (an associated fact's attempt is only an anchor)
     const { rows: tx } = a.captureSpecific
       ? await this.db.query<{ providerTransactionId: string | null }>(`SELECT "providerTxnId" AS "providerTransactionId" FROM provider_transaction_fact WHERE id = $1`, [a.captureFactId])
       : await this.db.query<{ providerTransactionId: string | null }>(`SELECT "providerTransactionId" FROM payment_attempt WHERE id = $1`, [a.capturedAttemptId]);
-    let result: RefundDispatchResult;
+    let result: RefundDispatchResult | { kind: 'transport_error' };
     try {
       result = await provider.refund!({
         refundAttemptId: a.id, idempotencyKey: a.id, paymentId: a.paymentId, capturedTransactionId: tx[0]?.providerTransactionId ?? a.capturedAttemptId,
         amount: Number(a.amount), currency: a.currency.trim(),
       });
     } catch (e) {
-      this.logger.warn(`refund_dispatch_ambiguous refundAttempt=${a.id} ${describeFailure(e)} — the outcome is unknown; resent only with the same key`);
-      result = { kind: 'ambiguous' };
+      this.logger.warn(`refund_dispatch_ambiguous refundAttempt=${a.id} send=${sendId} ${describeFailure(e)} — the outcome is unknown; resent only with the same key`);
+      result = { kind: 'transport_error' };
     }
+    const answer = classifyDispatch(result);
+    let observation: DispatchObservationRow;
     try {
-      await this.decideDispatch(a, result, ctx);
+      observation = await this.responses.observe(sendId, a.id, answer);
     } catch (e) {
-      // Core V2 D-R1A limit (OD-DR1-6): a provider's dispatch answer is held only in memory until this decision commits. An `accepted` or
-      // ambiguous answer is recovered by the next status read; a definitive refusal for an attempt a concurrent success already moved on is not.
-      // It is logged here, with its bounded code, as the only evidence left; durable dispatch responses are an open Owner decision
-      if (result.kind === 'rejected') {
-        this.logger.error(`refund_dispatch_refusal_unrecorded refundAttempt=${a.id} payment=${a.paymentId} code=${boundedFailureCode(result.failureCode)} ${describeFailure(e)} — the provider's definitive refusal could not be committed; if the attempt has moved on it is not observed again (D-R1 OD-DR1-6)`);
-      }
+      // Core V2 D-R1D: the external-call boundary. The answer could not be stored (the database is unavailable): it exists only in memory and this log.
+      // The send stays without an observation (an UNKNOWN outcome, Owner-visible); nothing is decided from it; status reads remain its resolution
+      this.logger.error(`refund_dispatch_response_unrecorded refundAttempt=${a.id} payment=${a.paymentId} send=${sendId} answer=${answer.classification}${answer.providerCode ? ` code=${answer.providerCode}` : ''} ${describeFailure(e)} — the outcome stays UNKNOWN; status reads resolve it (D-R1D)`);
       throw e;
     }
-    this.logger.log(`refund_dispatched refundAttempt=${a.id} answer=${result.kind}`);
+    try {
+      await this.decideDispatch(observation, 'dispatch', ctx);
+    } catch (e) {
+      this.logger.warn(`refund_dispatch_decision_deferred refundAttempt=${a.id} observation=${observation.id} answer=${observation.classification} ${describeFailure(e)} — the answer is stored; recovery applies it (D-R1D)`);
+      throw e;
+    }
+    this.logger.log(`refund_dispatched refundAttempt=${a.id} send=${sendId} answer=${observation.classification}`);
     return true;
   }
 
-  /** The provider's dispatch answer, applied under the attempt lock in one transaction. */
-  private async decideDispatch(a: RefundAttemptRow, result: RefundDispatchResult, ctx: EventContext): Promise<void> {
-    await this.db.tx(async (q) => {
+  /** Core V2 D-R1D: a same-key resend the rules above permitted, recorded before the call while the attempt still awaits it; null when it moved on. */
+  private async recordResend(a: RefundAttemptRow): Promise<string | null> {
+    return this.db.tx(async (q) => {
       const current = await this.attempts.lockAttempt(q, a.id);
+      if (current.status !== 'dispatching' && current.status !== 'unknown') return null;
+      return this.responses.recordSend(q, current, 'same_key_resend');
+    });
+  }
+
+  /**
+   * The provider's stored answer, applied ONCE under the attempt lock in one transaction, with its application row. `dispatch`: the transaction right
+   * after the call (it may record D-R1B finality for a rejection, naming this observation). `recovery`: the same decision for an answer no transaction
+   * applied, never calling the provider and NEVER recording finality (Q1): a recovered rejection is an uncertified failure. Returns whether it applied.
+   */
+  private async decideDispatch(o: DispatchObservationRow, appliedBy: 'dispatch' | 'recovery', ctx: EventContext): Promise<boolean> {
+    return this.db.tx(async (q) => {
+      const current = await this.attempts.lockAttempt(q, o.refundAttemptId);
+      if (await this.responses.applicationOf(q, o.id)) return false; // applied already (the dispatch or another recovery): never twice
+      const before = current.status;
+      let effect: DispatchApplicationEffect = 'no_effect';
       // Core V2 D-R1A (Q4): a definitive refusal is a provider failure too; when the attempt already has its own verified refund fact (a success
       // that arrived while this call was in flight), both observations are kept before anything else, exactly as for a reported failure
       let preserved: string | null = null;
-      if (result.kind === 'rejected' && FAILURE_CONTRADICTABLE.has(current.status)) {
-        preserved = await this.evidence.preserveFailureAfterEvidence(q, current, boundedFailureCode(result.failureCode), ctx);
+      if (o.classification === 'rejected' && FAILURE_CONTRADICTABLE.has(current.status)) {
+        preserved = await this.evidence.preserveFailureAfterEvidence(q, current, o.providerCode!, ctx);
+        if (preserved) effect = 'preserved_contradiction';
       }
-      if (current.status !== 'dispatching' && current.status !== 'unknown') return; // evidence got there first: it wins
-      if (result.kind === 'accepted') {
-        await q.query(
-          `UPDATE refund_attempt SET status = 'submitted', "providerRefundId" = COALESCE("providerRefundId", $2), "submittedAt" = now() WHERE id = $1`,
-          [a.id, result.providerRefundId],
-        );
-      } else if (result.kind === 'rejected') {
-        if (preserved) return; // OD-DR1-1 (D-R1B): its own verified refund fact stands; it is never `failed`
-        const code = boundedFailureCode(result.failureCode);
-        await this.finality.recordIfCertified(q, current, 'dispatch_rejected', code, ctx);
-        const { rows } = await q.query<RefundAttemptRow>(
-          `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`, [a.id, code]);
-        await this.audit.recordRefund(q, 'refund_attempt.failed', rows[0]!, await this.attempts.organizationOf(q, a.paymentId), ctx);
-      } else if (current.status === 'dispatching') {
-        await q.query(`UPDATE refund_attempt SET status = 'unknown' WHERE id = $1`, [a.id]);
+      // evidence got there first: it wins
+      if ((current.status === 'dispatching' || current.status === 'unknown') && !preserved) {
+        if (o.classification === 'accepted') {
+          await q.query(
+            `UPDATE refund_attempt SET status = 'submitted', "providerRefundId" = COALESCE("providerRefundId", $2), "submittedAt" = now() WHERE id = $1`,
+            [current.id, o.providerRefundId]);
+          effect = 'transitioned';
+        } else if (o.classification === 'rejected') { // (preserved: OD-DR1-1 (D-R1B): its own verified refund fact stands; it is never `failed`)
+          const code = o.providerCode!;
+          if (appliedBy === 'dispatch') await this.finality.recordIfCertified(q, current, 'dispatch_rejected', code, ctx, o.id);
+          else this.logger.log(`refund_failure_not_final refundAttempt=${current.id} payment=${current.paymentId} observation=dispatch_rejected reason=recovered_response — a recovered refusal records no finality; no replacement is permitted (D-R1B, D-R1D)`);
+          const { rows } = await q.query<RefundAttemptRow>(
+            `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`, [current.id, code]);
+          await this.audit.recordRefund(q, 'refund_attempt.failed', rows[0]!, await this.attempts.organizationOf(q, current.paymentId), ctx);
+          effect = 'transitioned';
+        } else if (current.status === 'dispatching') {
+          await q.query(`UPDATE refund_attempt SET status = 'unknown' WHERE id = $1`, [current.id]);
+          effect = 'transitioned';
+        }
       }
+      const after = effect === 'transitioned' ? TARGET_STATUS[o.classification] : before;
+      await this.responses.recordApplication(q, o, effect, before, after, appliedBy);
+      if (appliedBy === 'recovery') {
+        this.logger.warn(`refund_dispatch_response_recovered refundAttempt=${current.id} observation=${o.id} answer=${o.classification} effect=${effect} status=${before}->${after} — applied without calling the provider; no finality (D-R1D)`);
+      }
+      return true;
     });
   }
 
@@ -290,9 +349,10 @@ export class RefundWorker {
    * evidence of this attempt's capture that already exists (the frozen 0022 rule `refund_capture_has_evidence`, through its fact list) can only be
    * money returned without this dispatch: the attempt is NOT sent and stays `authorized`, held by one append-only escalation (deduplicated per
    * attempt) with its audit intent in the same transaction. Nothing releases, retries, abandons, allocates or resolves it. The database refuses the
-   * same transition independently (`refund_attempt_dispatch_hold`, migration 0032). Returns whether the attempt may be sent now.
+   * same transition independently (`refund_attempt_dispatch_hold`, migration 0032). Returns the send's id when the attempt may be sent now (Core V2
+   * D-R1D: its first send is recorded in this transaction), else null.
    */
-  private async startDispatch(a: RefundAttemptRow, ctx: EventContext): Promise<boolean> {
+  private async startDispatch(a: RefundAttemptRow, ctx: EventContext): Promise<string | null> {
     const held = await this.db.tx(async (q) => {
       // the refund-dispatch lock FIRST (before any row lock: a fact writer holding it shared then needs only its attempt row), then payment, then attempt
       await q.query('SELECT pg_advisory_xact_lock(refund_dispatch_lock_key($1))', [a.paymentId]);
@@ -313,7 +373,7 @@ export class RefundWorker {
           return { dispatch: false as const, refusal: describeRefusal(refusal), escalation };
         }
         await q.query(`UPDATE refund_attempt SET status = 'dispatching' WHERE id = $1 AND status = 'authorized'`, [a.id]);
-        return { dispatch: true as const };
+        return { dispatch: true as const, sendId: await this.responses.recordSend(q, current, 'first_send') };
       }
       if (hold[0] || !evidence[0]) return { dispatch: false as const }; // already held: never written twice
       const escalation = await this.safety.escalate(q, { kind: 'dispatch_held', refundAttemptId: current.id, factId: evidence[0].factId }, ctx);
@@ -325,7 +385,7 @@ export class RefundWorker {
     if ('refusal' in held && held.refusal) {
       this.logger.error(`refund_dispatch_blocked refundAttempt=${a.id} payment=${a.paymentId} ${held.refusal}${held.escalation ? ` escalation=${held.escalation}` : ''} — nothing is sent; the attempt stays authorized (D-R1B, D-R1C)`);
     }
-    return held.dispatch;
+    return 'sendId' in held && held.sendId ? held.sendId : null;
   }
 }
 

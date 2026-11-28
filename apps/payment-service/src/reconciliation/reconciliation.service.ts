@@ -30,11 +30,15 @@ export const ITEM_KINDS = [
   'refund_safety_escalation', // Core V2 DO-76 S1 (D-76-1, D-76-4): held refund dispatches and refund facts without authorization (Owner only)
   'refund_failed_attempt_evidence', // Core V2 RLSC-1 (OD-RLSC-2, additive visibility): a failed attempt's refund evidence kept as an exception (Owner and producer)
   'refund_failed_attempt_evidence_pending', // Core V2 D-R3 (0035): a failed attempt's refund fact whose evidence decision has not committed, so it is not allocated (Owner only)
+  'refund_dispatch_send_unobserved', // Core V2 D-R1D (0039): a refund send with no stored provider answer: its outcome is UNKNOWN (Owner only)
+  'refund_dispatch_response_unapplied', // Core V2 D-R1D (0039): a stored provider answer to a refund send that no decision has applied yet (Owner only)
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 /** Core V2 S0-C12 items 14(f), 15 and S0-C13 Part A: `multiple_captures`, `capture_recovery_exhausted` and `dispute_conflict` are the Owner's alone; a service read never reaches them. */
 const OWNER_ONLY_ITEM_KINDS: readonly ItemKind[] = ['multiple_captures', 'capture_recovery_exhausted', 'dispute_conflict', 'refund_safety_escalation',
-  'refund_failed_attempt_evidence_pending'];
+  'refund_failed_attempt_evidence_pending', 'refund_dispatch_send_unobserved', 'refund_dispatch_response_unapplied'];
+/** Core V2 D-R1D: the kinds whose rows appear only after the configured window (`$4`, minutes; Q2: a technical default that authorizes nothing). */
+const WINDOWED_ITEM_KINDS: readonly ItemKind[] = ['refund_dispatch_send_unobserved', 'refund_dispatch_response_unapplied'];
 /**
  * Core V2 S0-C15B (B-D1): `dispute_conflict_presence` is the PRODUCER's alone: the redacted existence of one preserved dispute conflict of its own
  * payment (the observation's id, its payment and when it was observed). It never carries the reason, the notification, the dispute, a chargeback
@@ -214,6 +218,24 @@ const ITEM_SQL: Record<ItemKind, string> = {
      AND NOT EXISTS (SELECT 1 FROM refund_allocation r WHERE r."factId" = f.id)
      AND NOT EXISTS (SELECT 1 FROM refund_fact_allocation_block b WHERE b."factId" = f.id)
      AND NOT EXISTS (SELECT 1 FROM refund_safety_escalation e WHERE e."factId" = f.id AND e.kind = 'failed_attempt_refund_evidence')`,
+  // Core V2 D-R1D (0039; the Owner's Q2): a provider send of a refund attempt's key with NO stored answer after the window: the outcome is UNKNOWN
+  // (a crash, or a database outage after the call: the call is not atomic with the database). Never a failure, a refusal or a resolution; the
+  // attempt's status reads remain the only resolution, and its current status is shown beside it. Owner only. Read-only: it sends, retries,
+  // releases and decides nothing. The attempt's own figures; its Company is the payment's seller (the scope join below).
+  refund_dispatch_send_unobserved: `SELECT s.id, s."paymentId", NULL::uuid AS "factId", a.amount, a.currency, s."createdAt" AS at,
+      jsonb_build_object('refundAttemptId', s."refundAttemptId", 'sendNumber', s."sendNumber", 'purpose', s.purpose, 'provider', s.provider,
+        'attemptStatus', a.status, 'outcome', 'unknown') AS detail
+    FROM refund_dispatch_send s JOIN refund_attempt a ON a.id = s."refundAttemptId" AND a."paymentId" = s."paymentId"
+   WHERE NOT EXISTS (SELECT 1 FROM refund_dispatch_observation o WHERE o."sendId" = s.id)
+     AND s."createdAt" < now() - make_interval(mins => $4)`,
+  // Core V2 D-R1D (0039): a stored provider answer that no decision applied after the window (the recovery pass applies it once; this shows one it
+  // has not). The answer as stored (classification, reference or code) is an observation only: never finality. Owner only; read-only.
+  refund_dispatch_response_unapplied: `SELECT o.id, a."paymentId", NULL::uuid AS "factId", a.amount, a.currency, o."observedAt" AS at,
+      jsonb_build_object('refundAttemptId', o."refundAttemptId", 'sendId', o."sendId", 'classification', o.classification,
+        'providerRefundId', o."providerRefundId", 'providerCode', o."providerCode", 'attemptStatus', a.status) AS detail
+    FROM refund_dispatch_observation o JOIN refund_attempt a ON a.id = o."refundAttemptId"
+   WHERE NOT EXISTS (SELECT 1 FROM refund_dispatch_application p WHERE p."observationId" = o.id)
+     AND o."observedAt" < now() - make_interval(mins => $4)`,
   // Core V2 S0-C15B (B-D1): the same rows as `dispute_conflict`, REDACTED for the producer: identity, payment and time only; no figure, no detail
   dispute_conflict_presence: `SELECT o.id, o."paymentId", NULL::uuid AS "factId", NULL::bigint AS amount, NULL::text AS currency, o."observedAt" AS at, '{}'::jsonb AS detail
     FROM payment_dispute_observation o JOIN payment p ON p.id = o."paymentId" WHERE o.disposition = 'conflict'`,
@@ -257,10 +279,12 @@ export class ReconciliationService {
     if (scope.kind === 'owner' && !OWNER_ITEM_KINDS.includes(kind as ItemKind)) throw invalid(); // S0-C15B: the redacted producer item is no Owner kind
     const base = ITEM_SQL[kind as ItemKind];
     const scopeSql = scope.kind === 'owner' ? `p."sellerType" = 'company' AND p."sellerId" = $1` : `p.producer = $1`;
+    const params: unknown[] = [scope.kind === 'owner' ? scope.companyId : scope.producer, after ?? null, limit];
+    if (WINDOWED_ITEM_KINDS.includes(kind as ItemKind)) params.push(this.config.refundResponses?.itemAfterMinutes ?? 15);
     const { rows } = await this.db.query<Record<string, any>>(
       `SELECT i.*, p."paymentRequestId", p.producer, p."organizationId", p.purpose FROM (${base}) i JOIN payment p ON p.id = i."paymentId"
         WHERE ${scopeSql} AND ($2::uuid IS NULL OR i.id > $2::uuid) ORDER BY i.id LIMIT $3`,
-      [scope.kind === 'owner' ? scope.companyId : scope.producer, after ?? null, limit],
+      params,
     );
     return rows.map((r) => ({
       kind: kind as ItemKind, id: r.id, paymentId: r.paymentId, paymentRequestId: r.paymentRequestId, producer: r.producer, organizationId: r.organizationId,
