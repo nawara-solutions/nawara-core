@@ -727,6 +727,16 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect((await recSql(`INSERT INTO refund_dispatch_observation ("sendId", "refundAttemptId", classification, "providerRefundId", "providerCode", "responseDigest", "observedAt")
         VALUES ($1, $2, 'ambiguous', NULL, NULL, repeat('0', 64), now())`, [o.sendId, x.attemptId])).code).toBe('42501');
       expect((await recSql(`SET ROLE ${appRole}`)).code).toBe('42501');
+      // a session that switched roles applies nothing, even to a role that could (here a superuser session as the runtime role, a valid row)
+      const sw = await admin.connect();
+      try {
+        await sw.query(`SET ROLE ${appRole}`);
+        expect(await refusedWith(sw.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'no_effect', 'dispatching', 'dispatching', 'dispatch', now())`, [o.id, x.attemptId]))).toMatchObject({ code: '42501', constraint: 'refund_dispatch_application_authority' });
+      } finally {
+        await sw.query('RESET ROLE').catch(() => undefined);
+        sw.release();
+      }
       expect((await recSql(`SELECT payment_grant_refund_recovery('${recRole}'::regrole)`)).code).toBe('42501'); // nobody but the owner grants
       expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length]).toEqual(['dispatching', 0]);
       const p = await one(`SELECT ${['refund_attempt_failure_finality', 'refund_dispatch_send', 'refund_dispatch_observation'].map((tb, i) => `has_table_privilege($1, '${tb}', 'INSERT') AS i${i}`).join(', ')},
