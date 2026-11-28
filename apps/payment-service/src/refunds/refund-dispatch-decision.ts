@@ -90,7 +90,8 @@ export async function applyDispatchObservation(db: DbService, deps: DispatchDeci
         if (deps.finality) await deps.finality(q, current, code, ctx, o.id);
         else deps.log.log(`refund_failure_not_final refundAttempt=${current.id} payment=${current.paymentId} observation=dispatch_rejected reason=recovered_response — a recovered refusal records no finality; no replacement is permitted (D-R1B, D-R1D)`);
         const { rows } = await q.query<RefundAttemptRow>(
-          `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now(), "workAfter" = NULL WHERE id = $1 RETURNING *`, [current.id, code]);
+          // Core V2 D-R1E (F4): the dispatch clears its schedule; recovery holds no scheduling authority and leaves "workAfter" (a failed attempt is never scanned)
+          `UPDATE refund_attempt SET status = 'failed', "failureCode" = $2, "completedAt" = now()${deps.finality ? ', "workAfter" = NULL' : ''} WHERE id = $1 RETURNING *`, [current.id, code]);
         await deps.audit.recordRefund(q, 'refund_attempt.failed', rows[0]!, await organizationOfPayment(q, current.paymentId), ctx);
         effect = 'transitioned';
       } else if (current.status === 'dispatching') {

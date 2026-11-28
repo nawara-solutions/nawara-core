@@ -213,7 +213,7 @@ echo "PASS: 0030 applies over history unchanged; a historical failed row is stil
 
 echo "== migration: Core V2 D-R1A — 0036 applies over escalations of every existing kind and changes none of them =="
 newdb dr1amig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0036_*|0037_*|0039_*|0040_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0036_*|0037_*|0039_*|0040_*|0041_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null # leaves dispatch_held and failed_attempt_refund_evidence rows
 # LABELLED FIXTURE: the two other historical kinds, inserted raw (triggers off); the table's CHECKs still apply
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "BEGIN; SET LOCAL session_replication_role = replica;
@@ -234,7 +234,7 @@ echo "PASS: 0036 applies over escalations of all four existing kinds; every row 
 
 echo "== migration: Core V2 D-R1B — 0037 applies over history, changes no row, backfills no finality; a historical failure blocks =="
 newdb dr1bmig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0037_*|0038_*|0039_*|0040_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0037_*|0038_*|0039_*|0040_*|0041_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null # leaves 7c01 (failed, its late fact) and 7c02 (its replacement, created before 0037)
 snapshot_dr1b() { psql -Atq -d "$db" -c "SELECT md5(string_agg(row_to_json(a)::text, ',' ORDER BY id)) FROM refund_attempt a UNION ALL SELECT md5(string_agg(row_to_json(e)::text, ',' ORDER BY id)) FROM refund_safety_escalation e UNION ALL SELECT md5(string_agg(row_to_json(f)::text, ',' ORDER BY id)) FROM provider_transaction_fact f"; }
 before="$(snapshot_dr1b)"
@@ -254,7 +254,7 @@ echo "PASS: 0037 applies over history; every row unchanged, no finality backfill
 
 echo "== migration: Core V2 D-R1C — 0038 applies over every existing escalation and exit, changes none, backfills nothing =="
 newdb dr1cmig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0038_*|0039_*|0040_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0038_*|0039_*|0040_*|0041_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null
 snapshot_dr1c() { psql -Atq -d "$db" -c "SELECT md5(COALESCE(string_agg((to_jsonb(e) - 'blockingCause' - 'causeBasis' - 'blockingReason')::text, ',' ORDER BY id), '')) FROM refund_safety_escalation e UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(x)::text, ',' ORDER BY \"escalationId\"), '')) FROM refund_safety_escalation_exit x"; }
 [ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_safety_escalation")" -ge 1 ] || fail "0038 history fixture: no escalation"
@@ -269,7 +269,7 @@ echo "PASS: 0038 applies over history; every escalation and exit unchanged, noth
 
 echo "== migration: Core V2 D-R1D — 0039 applies over history, changes no row, backfills no send, answer, application or observation link =="
 newdb dr1dmig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0039_*|0040_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0039_*|0040_*|0041_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null
 snapshot_dr1d() { psql -Atq -d "$db" -c "SELECT md5(COALESCE(string_agg(row_to_json(a)::text, ',' ORDER BY id), '')) FROM refund_attempt a UNION ALL SELECT md5(COALESCE(string_agg((to_jsonb(f) - 'dispatchObservationId')::text, ',' ORDER BY \"refundAttemptId\"), '')) FROM refund_attempt_failure_finality f UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(e)::text, ',' ORDER BY id), '')) FROM refund_safety_escalation e"; }
 [ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_attempt")" -ge 1 ] || fail "0039 history fixture: no refund attempt"
@@ -284,7 +284,7 @@ echo "PASS: 0039 applies over history; every attempt, finality and escalation un
 
 echo "== migration: Core V2 D-R1E — 0040 applies over history, changes no row; the recovery grant refuses a role that can record finality =="
 newdb dr1emig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0040_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0040_*|0041_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null
 snapshot_dr1e() { psql -Atq -d "$db" -c "SELECT md5(COALESCE(string_agg(row_to_json(a)::text, ',' ORDER BY id), '')) FROM refund_attempt a UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(f)::text, ',' ORDER BY \"refundAttemptId\"), '')) FROM refund_attempt_failure_finality f UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(p)::text, ',' ORDER BY \"observationId\"), '')) FROM refund_dispatch_application p"; }
 before="$(snapshot_dr1e)"
@@ -294,3 +294,19 @@ out="$(psql -q -v ON_ERROR_STOP=1 -d "$db" -c "SELECT payment_grant_refund_recov
 grep -q "the recovery role must be a separate role" <<<"$out" || fail "0040: refused for another reason: $out"
 [ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND prosecdef")" -eq 0 ] || fail "0040: a SECURITY DEFINER function exists"
 echo "PASS: 0040 applies over history unchanged; the recovery grant refuses a role that can record finality; no SECURITY DEFINER function exists"
+
+echo "== migration: Core V2 D-R1E F1-F6 — 0041 applies over history (and over a role 0040 registered), changes no row, withdraws scheduling =="
+newdb dr1fmig; db="$DBNAME"
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0041_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null
+rrole="dr1f_rec_$$"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "CREATE ROLE $rrole NOLOGIN; SELECT payment_grant_refund_recovery('$rrole'::regrole);" >/dev/null
+[ "$(psql -Atq -d "$db" -c "SELECT has_column_privilege('$rrole', 'refund_attempt', 'workAfter', 'UPDATE')")" = t ] || fail "0041 fixture: 0040 did not grant workAfter"
+snapshot_dr1f() { psql -Atq -d "$db" -c "SELECT md5(COALESCE(string_agg(row_to_json(a)::text, ',' ORDER BY id), '')) FROM refund_attempt a UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(o)::text, ',' ORDER BY id), '')) FROM outbox o UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(e)::text, ',' ORDER BY id), '')) FROM refund_safety_escalation e"; }
+before="$(snapshot_dr1f)"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0041_dr1e_recovery_evidence_binding.sql" || fail "0041 does not apply over history"
+[ "$before" = "$(snapshot_dr1f)" ] || fail "0041 changed a historical attempt, outbox row or escalation"
+[ "$(psql -Atq -d "$db" -c "SELECT has_column_privilege('$rrole', 'refund_attempt', 'workAfter', 'UPDATE')")" = f ] || fail "0041 left workAfter to a registered recovery role"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND prosecdef")" -eq 0 ] || fail "0041: a SECURITY DEFINER function exists"
+psql -q -d "$db" -c "DROP OWNED BY $rrole; DROP ROLE $rrole;" >/dev/null 2>&1 || true
+echo "PASS: 0041 applies over history unchanged; workAfter withdrawn from a role 0040 registered; no SECURITY DEFINER function exists"
