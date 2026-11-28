@@ -68,8 +68,11 @@ export class RefundFinalityService {
    * In the transaction that is about to move `a` (locked, in flight) to `failed` with `failureCode`: the finality evidence, only when the adapter's
    * certified capability covers this observation in the registry AND the database's mirror holds that exact certificate in force. Otherwise nothing is
    * written and the failure is recorded as before: an uncertified failure, which blocks a replacement. Never throws for a refusal.
+   * Core V2 D-R1D (0039, Q1): a `dispatch_rejected` finality names the dispatch's own stored rejection (`dispatchObservationId`), which the same
+   * transaction applies as the dispatch; recovery never calls this.
    */
-  async recordIfCertified(q: Queryable, a: RefundAttemptRow, observation: RefundFailureObservation, failureCode: string, ctx: EventContext): Promise<boolean> {
+  async recordIfCertified(q: Queryable, a: RefundAttemptRow, observation: RefundFailureObservation, failureCode: string, ctx: EventContext,
+    dispatchObservationId: string | null = null): Promise<boolean> {
     const at = await this.context(q);
     const e = evaluateRefundCapability(this.providers.tryGet(a.provider), 'terminalFailureFinality', at);
     const refusal = !e.certified ? e.reason : e.grant.observations.includes(observation) ? null : 'observation_not_covered';
@@ -80,11 +83,12 @@ export class RefundFinalityService {
     const source = observation === 'dispatch_rejected' ? 'dispatch_response' : ctx.cause.type === 'webhook_event' ? 'webhook' : 'status_check';
     const { rowCount } = await q.query(
       `INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource", "webhookEventId",
-         "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt")
-       SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, $2, $3, $4::uuid, $5, $6, $7, $8, clock_timestamp()
+         "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt", "dispatchObservationId")
+       SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, $2, $3, $4::uuid, $5, $6, $7, $8, clock_timestamp(), $9::uuid
          FROM refund_attempt a
         WHERE a.id = $1 AND refund_capability_certificate_in_force($6, $7, $8, a.provider, $2, clock_timestamp()) AND NOT refund_capture_has_evidence(a."captureFactId")`,
-      [a.id, observation, source, source === 'webhook' ? ctx.cause.id : null, failureCode, e.certificate.id, e.certificate.version, e.fingerprint]);
+      [a.id, observation, source, source === 'webhook' ? ctx.cause.id : null, failureCode, e.certificate.id, e.certificate.version, e.fingerprint,
+        source === 'dispatch_response' ? dispatchObservationId : null]);
     if (rowCount === 1) return true;
     this.log.error(`refund_failure_finality_refused refundAttempt=${a.id} payment=${a.paymentId} certificate=${e.certificate.id}@${e.certificate.version} — the database does not hold this certificate in force, or the capture has refund evidence; recorded as an uncertified failure (D-R1B)`);
     return false;

@@ -105,7 +105,8 @@ transition. D-R1A did **not** solve double refunds; E1 of `test/dr1a-refund-capa
   `unknown`), and the provider's status is still read and applied.
 - **What it is not:** never a new key, a failure, a hold or a release. The first send from `authorized` is unchanged.
 
-**Limit:** a definitive dispatch refusal whose decision transaction fails after a concurrent success is only logged (OD-DR1-6).
+**Limit (closed by D-R1D, §4b):** a definitive dispatch refusal whose decision transaction failed after a concurrent success used to be only logged
+(OD-DR1-6). It is now stored before the decision and applied by recovery (C9 is a positive test).
 
 **Visibility:** both kinds appear in the Owner-only PAY-12 `refund_safety_escalation`. The detail carries `observedFailureCode` or
 `authorizedAt`.
@@ -202,7 +203,8 @@ or superuser who can disable a trigger can bypass these rules.
 | Exception path | None (OD-DR1-5 NO-GO). |
 
 **Limits, recorded:**
-- OD-DR1-6: the dispatch answer is still held in memory until its decision commits.
+- OD-DR1-6: closed for development and simulation by D-R1D (§4b): the dispatch answer is stored before its decision. A database outage between
+  the provider call and that write still leaves an UNKNOWN outcome (inherent: the call is not atomic with the database).
 - An `authorized` replacement blocked at its dispatch is visible in the logs (`refund_dispatch_blocked`) and as an `authorized` attempt.
   It has no escalation kind of its own.
 - An in-flight attempt with its own fact whose success report never arrives again stays in flight, escalated and blocking.
@@ -243,6 +245,51 @@ finality, allocation, case or hold rule changes.
   or field; the topic grants are unchanged.
 - **Unchanged:** a held attempt (DO-76) is never escalated this way; a dispatch D-R1B permits writes nothing.
 
+## 4b. D-R1D: durable dispatch responses (implemented, development and simulation only)
+
+The Owner's conditional GO of 2026-11-28 (OD-DR1-6; Q1, Q2 of 2026-11-24), migration `0039`. EVIDENCE ONLY: no new send, no replacement
+eligibility, no finality rule, no release, no allocation change. Three append-only tables; the runtime role may insert and read them, nothing else.
+
+| Table | Written | Holds | Never |
+| --- | --- | --- | --- |
+| `refund_dispatch_send` | before each provider call: in the `authorized` -> `dispatching` transaction (`first_send`, once), or before a same-key resend the existing D-R1A rule permits (`same_key_resend`, while `dispatching` or `unknown`) | the attempt, its own payment, provider and key (checked), a derived send number and database time | proof that the provider received the call |
+| `refund_dispatch_observation` | after the call, in its OWN transaction, before any decision (bounded retries with the same send) | one per send: `accepted` (with the provider reference), `rejected` (with the bounded code), `ambiguous` or `transport_error` (the call threw); a derived digest and database time | overwritten: a repeat of the same answer is idempotent; a different answer for the same send is logged and the stored one kept |
+| `refund_dispatch_application` | in the deciding transaction, under the payment and attempt locks | once per observation: `transitioned` (to the status the classification names), `preserved_contradiction` (D-R1A) or `no_effect`; the statuses before and after (after checked); `appliedBy` | written twice (primary key) |
+
+- **Decision:** exactly the approved dispatch logic (accepted -> `submitted`; rejected -> D-R1A preservation, OD-DR1-1, else `failed`;
+  ambiguous or transport error -> `unknown` while `dispatching`), now applied to the STORED answer, with its application row.
+- **Finality (Q1):** a new `dispatch_response` finality must name the attempt's own `rejected` observation with the same code, and at commit that
+  observation must have been applied by the dispatch as the transition to `failed`. 0037's certificate, fingerprint, revocation and evidence rules
+  are unchanged and still apply. Existing finality rows keep a NULL observation (no backfill).
+- **Recovery:** every refund worker pass first applies stored answers no transaction applied, once they are older than
+  `PAYMENT_REFUND_RESPONSE_RECOVERY_AFTER_MS` (default 30 s; 1 s to 1 h): the same decision with `appliedBy = recovery`, WITHOUT calling the
+  provider and WITHOUT recording finality (a recovered rejection is an uncertified failure, which D-R1B treats as possibly payable). Two instances
+  apply it once (attempt lock, primary key). While an attempt has a stored answer not yet applied, it is not worked at all (no resend, no status
+  read) until that answer is applied.
+- **Owner visibility** (PAY-12, Owner only, Company-scoped through the payment; read-only), after `PAYMENT_REFUND_RESPONSE_ITEM_AFTER_MINUTES`
+  (default 15; 1 to 1440): `refund_dispatch_send_unobserved` (a send with no stored answer: outcome UNKNOWN; the attempt's current status beside it;
+  never inferred from it) and `refund_dispatch_response_unapplied` (a stored answer not yet applied). Neither window establishes provider finality
+  or authorizes another dispatch (Q2).
+- **The external-call boundary (limit, recorded):** the provider call is not atomic with the database. A crash or database outage after the call and
+  before the observation commits leaves a send with no answer: UNKNOWN, Owner-visible, resolved only by the existing status reads (and, where D-R1A
+  permits, the same-key resend). The in-memory answer survives only in the `refund_dispatch_response_unrecorded` error log.
+- **Producer-labelled:** `appliedBy` is the worker's label (the database cannot tell the dispatch transaction from a recovery transaction); the
+  finality rule binds to it, and the tests and mutation controls pin that recovery never labels itself `dispatch`.
+
+| Crash point | Durable state | Result |
+| --- | --- | --- |
+| Before the send commits | nothing | not sent; the next pass sends once |
+| After the send, before the call | send, no answer | UNKNOWN item; existing status read or certified same-key resend |
+| After the call, before the answer commits | send, no answer | UNKNOWN (the boundary above) |
+| After the answer, before its application | answer | nothing else happens to the attempt; recovery applies it once, no provider call |
+| The decision transaction fails | answer | recovery applies it (C9 is now a positive test) |
+| Two instances recover | answer | applied once |
+| A verified success races the answer | fact and answer | `preserved_contradiction` (D-R1A); the success stands |
+| Two sends, different answers | two answers | both kept, applied in order |
+
+**Tests:** `test/dr1d-durable-dispatch-responses.e2e-spec.ts` (two instances as the runtime role), the rewritten C9 of
+`test/dr1a-refund-capabilities.e2e-spec.ts`, and the `0039` history section of `db/tests/run.sh`.
+
 ## 5. Provider certification requirements (Q3)
 
 A `provider`-scope certificate is added only by a reviewed PR that the Owner merges, with:
@@ -260,6 +307,5 @@ None exists. Simulation behaviour is never evidence for a real provider.
 - **OD-DR1-3:** approved direction, implemented. Expiry and revocation end what evidence permits; the evidence itself is never changed.
 - **OD-DR1-4:** approved for a bounded development-only D-R1B, including the permanent blocking of historical `failed` rows.
 - **OD-DR1-5:** NO-GO. No exception path exists and none is designed.
-- **OD-DR1-6:** OPEN. Durable dispatch responses are a read-only design only: an append-only response record written before the
-  decision, and a recovery pass. Its migration and worker need a separate GO. Until then only the
-  `refund_dispatch_refusal_unrecorded` error log remains of a refusal whose decision transaction failed (pinned by C9).
+- **OD-DR1-6:** conditional GO of 2026-11-28 for one development-only PR, implemented as D-R1D (migration `0039`, §4b), pending the Owner's merge
+  review. Recovery never records finality (Q1); the 30 s and 15 min windows are configurable technical defaults that authorize nothing (Q2).

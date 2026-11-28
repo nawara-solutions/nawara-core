@@ -52,6 +52,13 @@ export interface PaymentConfig extends BaseConfig {
    * (`read_granted`). Only beside refunds (never production); absent, an evidence reference is refused (503) and nothing is recorded.
    */
   disputeEvidence?: { fileServiceUrl: string; fileServiceToken: string };
+  /**
+   * Core V2 D-R1D (0039; the Owner's Q2): technical defaults for stored refund dispatch answers. `recoveryAfterMs` (default 30 s): a stored answer no
+   * transaction applied is applied by the refund worker after this long (never calling the provider, never recording finality).
+   * `itemAfterMinutes` (default 15): a send with no stored answer, or a stored answer not applied, becomes an Owner-visible item after this long.
+   * Neither establishes provider finality or authorizes another dispatch. Read only where refunds exist.
+   */
+  refundResponses: { recoveryAfterMs: number; itemAfterMinutes: number };
   returnUrlAllowlist: string[];
   /** Baseline abuse limits (SDD section 16): requests per minute per authenticated caller. Technical values, no business meaning. */
   rateLimits: { createPerMinute: number; attemptPerMinute: number };
@@ -149,6 +156,10 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     ...(simulation ? { simulation } : {}),
     ...(refunds ? { refunds } : {}),
     ...(disputeEvidence ? { disputeEvidence } : {}),
+    refundResponses: {
+      recoveryAfterMs: reader.int('PAYMENT_REFUND_RESPONSE_RECOVERY_AFTER_MS', { default: 30_000, min: 1_000, max: 3_600_000 }),
+      itemAfterMinutes: reader.int('PAYMENT_REFUND_RESPONSE_ITEM_AFTER_MINUTES', { default: 15, min: 1, max: 1_440 }),
+    },
     returnUrlAllowlist: (reader.optional('PAYMENT_RETURN_URL_ALLOWLIST', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     rateLimits: {
       createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),

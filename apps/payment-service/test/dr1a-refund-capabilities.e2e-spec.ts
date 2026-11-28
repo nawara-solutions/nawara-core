@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import request from 'supertest';
-import { Logger } from '@nestjs/common';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import type { OwnerCompanyAuthority, VerifiedOwner } from '../src/disputes/owner-company.authority.js';
@@ -270,13 +269,12 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
       expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toEqual([]);
     });
 
-    it('C9 LIMIT (OD-DR1-6, characterization): a dispatch refusal whose decision transaction fails after a concurrent success is not recovered', async () => {
+    it('C9 (OD-DR1-6, D-R1D 0039): a dispatch refusal whose decision transaction fails after a concurrent success is stored, then recovered once', async () => {
       const x = await authorizedAttempt();
       await sim(`payments/${x.paymentId}/refund-dispatch-plan`, { commandId: cmd(), mode: 'rejected', failureCode: 'declined' }).expect(201);
       const success = { kind: 'succeeded', amount: 9000, currency: 'TND', providerRefundId: `simr_${x.attemptId}` };
       await admin.query(`CREATE FUNCTION dr1a_fail_audit9() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         IF NEW.name = 'audit.refund_safety.escalated' THEN RAISE EXCEPTION 'injected outbox failure'; END IF; RETURN NEW; END $$`);
-      const errors = vi.spyOn(Logger.prototype, 'error');
       try {
         await duringDispatch(async () => {
           await evidenceSteps().apply(x.attemptId, success, jobContext('refund_worker'));
@@ -286,11 +284,26 @@ describeWithEnv('Core V2 D-R1A: refund capability foundation — real PostgreSQL
         await admin.query(`DROP TRIGGER IF EXISTS zz_dr1a_fail_audit9 ON outbox`);
         await admin.query(`DROP FUNCTION dr1a_fail_audit9()`);
       }
-      expect(errors.mock.calls.some(([m]) => typeof m === 'string' && m.startsWith(`refund_dispatch_refusal_unrecorded refundAttempt=${x.attemptId}`) && m.includes('code=declined'))).toBe(true);
-      errors.mockRestore();
-      await worker.drainOnce(); // a later pass: the terminal attempt is never scanned again
+      // the refusal is durable although its decision rolled back; nothing applied it yet
+      const obs = (await admin.query(`SELECT * FROM refund_dispatch_observation WHERE "refundAttemptId" = $1`, [x.attemptId])).rows;
+      expect(obs).toMatchObject([{ classification: 'rejected', providerCode: 'declined' }]);
+      expect((await admin.query(`SELECT * FROM refund_dispatch_application WHERE "observationId" = $1`, [obs[0].id])).rows).toEqual([]);
+      await worker.drainOnce(); // inside the recovery window: not applied yet
+      expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toEqual([]);
+      const saved = worker.responseRecoveryAfterMs;
+      worker.responseRecoveryAfterMs = 1;
+      try {
+        await new Promise((r) => setTimeout(r, 20));
+        await worker.drainOnce();
+        await worker2.drainOnce();
+      } finally {
+        worker.responseRecoveryAfterMs = saved;
+      }
       expect((await attemptRow(x.attemptId)).status).toBe('succeeded'); // the success stands
-      expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toEqual([]); // the refusal survives only in the error log
+      expect(await escalationsOf(x.attemptId, 'failure_after_refund_evidence')).toMatchObject([{ attemptStatus: 'succeeded', observedFailureCode: 'declined' }]);
+      expect((await admin.query(`SELECT effect, "appliedBy", "attemptStatusBefore", "attemptStatusAfter" FROM refund_dispatch_application WHERE "observationId" = $1`, [obs[0].id])).rows)
+        .toEqual([{ effect: 'preserved_contradiction', appliedBy: 'recovery', attemptStatusBefore: 'succeeded', attemptStatusAfter: 'succeeded' }]);
+      expect(await received(x.attemptId)).toBe(1); // recovery never calls the provider
     });
 
     it('C8 failed, replacement authorized, late success kept by RLSC-1, then another failure: preserved; RLSC-1 row and the attempt unchanged', async () => {
