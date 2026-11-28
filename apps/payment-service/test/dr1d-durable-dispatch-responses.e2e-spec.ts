@@ -831,6 +831,21 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
         expect(await recSql(`INSERT INTO refund_dispatch_observation ("sendId", "refundAttemptId", classification, "providerRefundId", "providerCode", "responseDigest", "observedAt")
           VALUES ($1, $2, 'ambiguous', NULL, NULL, repeat('0', 64), now())`, [o.sendId, x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
         await expect(recovery.recoverOnce()).rejects.toThrow(/refund_recovery_refused/); // the process refuses to run as it now
+        // with that later membership the recovery SESSION can switch to the runtime role: its session identity still refuses it finality
+        const sw = await rec.connect();
+        try {
+          await sw.query(`SET ROLE ${appRole}`);
+          await sw.query('BEGIN');
+          await sw.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+          expect(await refusedWith(sw.query(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+              "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt")
+            SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, 'provider_failed', 'status_check', 'declined', $2, $3, $4, now() FROM refund_attempt a WHERE a.id = $1`,
+            [x.attemptId, c.id, c.version, c.fingerprint]))).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        } finally {
+          await sw.query('ROLLBACK').catch(() => undefined);
+          await sw.query('RESET ROLE').catch(() => undefined);
+          sw.release();
+        }
       } finally {
         await admin.query(`REVOKE ${appRole} FROM ${recRole}`);
         await admin.query(`REVOKE INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation FROM ${recRole}`);
