@@ -1157,6 +1157,13 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
         await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
           VALUES ($1, $2, 'preserved_contradiction', 'succeeded', 'succeeded', 'recovery', now())`, [oy.id, y.attemptId]);
       })).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation' });
+      // the right code, but the escalation's audit intent left out: refused at commit
+      expect(await recTx(async (q) => {
+        await q.query(`INSERT INTO refund_safety_escalation (kind, "refundAttemptId", "factId", "paymentId", "companyId", "captureFactId", "attemptStatus", "observedFailureCode")
+          SELECT 'failure_after_refund_evidence', a.id, $2, a."paymentId", a."companyId", a."captureFactId", a.status, 'declined' FROM refund_attempt a WHERE a.id = $1`, [y.attemptId, fy.id]);
+        await q.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'preserved_contradiction', 'succeeded', 'succeeded', 'recovery', now())`, [oy.id, y.attemptId]);
+      })).toMatchObject({ code: '42501', constraint: 'refund_recovery_escalation_audit' });
       expect((await admin.query(`SELECT 1 FROM refund_safety_escalation WHERE "refundAttemptId" = $1`, [y.attemptId])).rows).toEqual([]);
       // 4. a `transitioned` application with no transition (an already failed attempt, an unapplied rejection), for both roles
       const z = await storedUnapplied('rejected');
