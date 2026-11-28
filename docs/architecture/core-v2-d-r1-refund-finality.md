@@ -261,7 +261,7 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
 - **Finality (Q1):** a new `dispatch_response` finality must name the attempt's own `rejected` observation with the same code, and at commit that
   observation must have been applied by the dispatch as the transition to `failed`. 0037's certificate, fingerprint, revocation and evidence rules
   are unchanged and still apply. Existing finality rows keep a NULL observation (no backfill).
-- **Recovery:** every refund worker pass first applies stored answers no transaction applied, once they are older than
+- **Recovery** (since D-R1E the separate recovery process, below): each pass applies stored answers no transaction applied, once they are older than
   `PAYMENT_REFUND_RESPONSE_RECOVERY_AFTER_MS` (default 30 s; 1 s to 1 h): the same decision with `appliedBy = recovery`, WITHOUT calling the
   provider and WITHOUT recording finality (a recovered rejection is an uncertified failure, which D-R1B treats as possibly payable). Two instances
   apply it once (attempt lock, primary key). While an attempt has a stored answer not yet applied, it is not worked at all (no resend, no status
@@ -273,8 +273,16 @@ eligibility, no finality rule, no release, no allocation change. Three append-on
 - **The external-call boundary (limit, recorded):** the provider call is not atomic with the database. A crash or database outage after the call and
   before the observation commits leaves a send with no answer: UNKNOWN, Owner-visible, resolved only by the existing status reads (and, where D-R1A
   permits, the same-key resend). The in-memory answer survives only in the `refund_dispatch_response_unrecorded` error log.
-- **Producer-labelled:** `appliedBy` is the worker's label (the database cannot tell the dispatch transaction from a recovery transaction); the
-  finality rule binds to it, and the tests and mutation controls pin that recovery never labels itself `dispatch`.
+- **Recovery authority (D-R1E, `0040`, the A1 correction):** under 0039 alone `appliedBy` was the worker's label, and a recovery mislabelled
+  `dispatch` recorded certified finality (reproduced on main e03295e). Since `0040` recovery is a SEPARATE process
+  (`npm run refund-recovery`, `cli/refund-response-recovery.ts`) connected ONLY as the separate recovery role (`payment_refund_recovery`), which
+  has no INSERT on `refund_attempt_failure_finality`, `refund_dispatch_send` or `refund_dispatch_observation`. The database DERIVES `appliedBy`
+  from the connected role's authority (`dispatch` only for a role that can record finality) and refuses a different value or a switched role.
+  `payment_grant_refund_recovery(role)` refuses any role with that authority (column-level grants included), the schema owner, a superuser and any
+  member of another role, and REGISTERS the role (`refund_recovery_role`, owner-written, append-only). A registered recovery role, as the current or
+  the session role, is refused every insert into the finality (any source), send and answer tables and is always `recovery`, whatever it is granted
+  later: its identity decides, not its privileges (Codex round 1, P1 and P2). No SECURITY DEFINER function exists. The recovery process refuses to start as such a role. The Payment service no longer runs recovery.
+  Remaining trust: the runtime role (the service that made the provider call) keeps the authority D-R1B gave it.
 
 | Crash point | Durable state | Result |
 | --- | --- | --- |
@@ -307,5 +315,5 @@ None exists. Simulation behaviour is never evidence for a real provider.
 - **OD-DR1-3:** approved direction, implemented. Expiry and revocation end what evidence permits; the evidence itself is never changed.
 - **OD-DR1-4:** approved for a bounded development-only D-R1B, including the permanent blocking of historical `failed` rows.
 - **OD-DR1-5:** NO-GO. No exception path exists and none is designed.
-- **OD-DR1-6:** conditional GO of 2026-11-28 for one development-only PR, implemented as D-R1D (migration `0039`, §4b), pending the Owner's merge
-  review. Recovery never records finality (Q1); the 30 s and 15 min windows are configurable technical defaults that authorize nothing (Q2).
+- **OD-DR1-6:** conditional GO of 2026-11-28 for one development-only PR, implemented as D-R1D (migration `0039`, §4b), merged as e03295e. Its
+  acceptance stays PENDING until the A1 correction (D-R1E, `0040`, separate recovery role) is reviewed and integrated. Recovery never records finality (Q1); the 30 s and 15 min windows are configurable technical defaults that authorize nothing (Q2).

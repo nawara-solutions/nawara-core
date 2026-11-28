@@ -1648,6 +1648,13 @@ ONLY; EVIDENCE ONLY; pending the Owner's merge review).** Payment migration `003
 - Recovery applies a stored answer without calling the provider and never records finality; a `dispatch_response` finality names its own applied
   rejection. Details: `core-v2-d-r1-refund-finality.md` §4b. DO-76, OD-RLSC-1 and R3-F2 stay OPEN.
 
+**D-R1E Payment recovery authority (dated note, 2026-11-28; the Owner's urgent post-merge direction; DEVELOPMENT AND SIMULATION ONLY; AUTHORITY
+ONLY; pending the Owner's merge review).** Payment migration `0040`. No route, event, audit action, error code or financial rule changes.
+- Recovery of stored dispatch answers runs only as the separate `payment_refund_recovery` database role in a separate process (`npm run
+  refund-recovery`); that role cannot record refund failure finality, sends or answers. `appliedBy` is derived by the database from the role.
+- New local variables: `PAYMENT_REFUND_RECOVERY_PASSWORD` (infra), `REFUND_RECOVERY_DATABASE_URL` (the recovery process). Details:
+  `core-v2-d-r1-refund-finality.md` §4b. OD-DR1-6 acceptance, DO-76, OD-RLSC-1 and R3-F2 stay OPEN.
+
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
 ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
 `authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.

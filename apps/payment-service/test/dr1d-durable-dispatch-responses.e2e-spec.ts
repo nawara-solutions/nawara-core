@@ -4,11 +4,12 @@ import pg from 'pg';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@nestjs/common';
-import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
+import { DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import type { ProviderCapabilities } from '../src/providers/provider.port.js';
 import { SimulationPaymentProvider } from '../src/providers/simulation-provider.js';
 import { RefundWorker } from '../src/refunds/refund-worker.js';
 import { RefundDispatchResponseService } from '../src/refunds/refund-dispatch-response.service.js';
+import { RefundResponseRecovery } from '../src/refunds/refund-dispatch-decision.js';
 import type { OwnerCompanyAuthority, VerifiedOwner } from '../src/disputes/owner-company.authority.js';
 import { TEST_PLATFORM, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
@@ -35,6 +36,8 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
   const suffix = randomBytes(4).toString('hex');
   const migRole = `dr1d_mig_${suffix}`;
   const appRole = `dr1d_app_${suffix}`;
+  const recRole = `dr1d_rec_${suffix}`; // Core V2 D-R1E: the separate recovery role
+  const recPw = randomBytes(12).toString('hex');
   const dbName = `dr1d_payment_${suffix}`;
   const migPw = randomBytes(12).toString('hex');
   const appPw = randomBytes(12).toString('hex');
@@ -49,6 +52,10 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
   let admin: pg.Pool; // superuser: assertions and labelled fixtures
   let mig: pg.Pool; // the migrator (schema owner)
   let app: pg.Pool; // the runtime role, for direct SQL
+  let rec: pg.Pool; // the recovery role, for direct SQL
+  let recDbs: DbService[] = [];
+  let recovery: RefundResponseRecovery;
+  let recovery2: RefundResponseRecovery;
   let auth: FakeReceiptServer;
   let worker: RefundWorker;
   let worker2: RefundWorker;
@@ -160,19 +167,26 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
     try {
       await root.query(`CREATE ROLE ${migRole} LOGIN PASSWORD '${migPw}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`);
       await root.query(`CREATE ROLE ${appRole} LOGIN PASSWORD '${appPw}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`);
+      await root.query(`CREATE ROLE ${recRole} LOGIN PASSWORD '${recPw}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`);
       await root.query(`CREATE DATABASE ${dbName} OWNER ${migRole}`);
       await root.query(`REVOKE ALL ON DATABASE ${dbName} FROM PUBLIC`);
       await root.query(`GRANT CONNECT ON DATABASE ${dbName} TO ${appRole}`);
+      await root.query(`GRANT CONNECT ON DATABASE ${dbName} TO ${recRole}`);
     } finally {
       await root.end();
     }
     admin = new pg.Pool({ connectionString: urlAs(), max: 12 });
     admin.on('error', () => undefined);
-    for (const s of ['REVOKE ALL ON SCHEMA public FROM PUBLIC', `ALTER SCHEMA public OWNER TO ${migRole}`, `GRANT USAGE ON SCHEMA public TO ${appRole}`,
+    for (const s of ['REVOKE ALL ON SCHEMA public FROM PUBLIC', `ALTER SCHEMA public OWNER TO ${migRole}`, `GRANT USAGE ON SCHEMA public TO ${appRole}`, `GRANT USAGE ON SCHEMA public TO ${recRole}`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${migRole} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${appRole}`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${migRole} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${appRole}`]) await admin.query(s);
     await runMigrations(urlAs(migRole, migPw), [kitMigrationsDir, paymentMigrationsDir]);
     mig = new pg.Pool({ connectionString: urlAs(migRole, migPw), max: 6 });
+    await mig.query('SELECT payment_grant_refund_recovery($1::regrole)', [recRole]); // the schema owner grants it (0040)
+    rec = new pg.Pool({ connectionString: urlAs(recRole, recPw), max: 4 });
+    recDbs = [new DbService({ url: urlAs(recRole, recPw), max: 3 }), new DbService({ url: urlAs(recRole, recPw), max: 3 })];
+    recovery = new RefundResponseRecovery(recDbs[0]!, 30_000);
+    recovery2 = new RefundResponseRecovery(recDbs[1]!, 30_000); // a second recovery process
     app = new pg.Pool({ connectionString: urlAs(appRole, appPw), max: 8 });
     auth = await startFakeReceiptServer();
     const opts = () => ({
@@ -198,6 +212,8 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
     await t2?.app.close();
     await auth?.close();
     await app?.end();
+    await rec?.end();
+    for (const d of recDbs) await d.onApplicationShutdown();
     await mig?.end();
     await admin?.end();
     const root = new pg.Client({ connectionString: env.TEST_DATABASE_ADMIN_URL });
@@ -206,6 +222,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       await root.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [dbName]);
       await root.query(`DROP DATABASE IF EXISTS ${dbName}`);
       await root.query(`DROP ROLE IF EXISTS ${appRole}`);
+      await root.query(`DROP ROLE IF EXISTS ${recRole}`);
       await root.query(`DROP ROLE IF EXISTS ${migRole}`);
     } finally {
       await root.end();
@@ -235,16 +252,16 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       await admin.query(`DROP FUNCTION ${name}()`);
     }
   };
-  /** Both workers' recovery window shortened (the compared times are immutable database times), restored after. */
+  /** Both recovery processes' window shortened (the compared times are immutable database times), restored after. */
   const recoveryWindow = async <T>(ms: number, fn: () => Promise<T>): Promise<T> => {
-    const saved = [worker.responseRecoveryAfterMs, worker2.responseRecoveryAfterMs];
-    worker.responseRecoveryAfterMs = ms;
-    worker2.responseRecoveryAfterMs = ms;
+    const saved = [recovery.recoveryAfterMs, recovery2.recoveryAfterMs];
+    recovery.recoveryAfterMs = ms;
+    recovery2.recoveryAfterMs = ms;
     try {
       await new Promise((r) => setTimeout(r, ms + 20));
       return await fn();
     } finally {
-      [worker.responseRecoveryAfterMs, worker2.responseRecoveryAfterMs] = saved;
+      [recovery.recoveryAfterMs, recovery2.recoveryAfterMs] = saved;
     }
   };
   /** Every provider call on both instances counted (dispatches and status reads). */
@@ -423,10 +440,11 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
 
     it('K4 crash after the answer is stored, before its application: nothing else happens to the attempt; recovery applies it once, no provider call', async () => {
       const x = await storedUnapplied('accepted');
-      const inWindow = await providerCalls(async () => { await drain(x.attemptId); await drain(x.attemptId, worker2); });
+      const inWindow = await providerCalls(async () => { await drain(x.attemptId); await drain(x.attemptId, worker2); await recovery.recoverOnce(); });
       expect([inWindow.refunds, inWindow.statusReads]).toEqual([0, 0]); // excluded: no resend, no status read over a stored answer
+      expect(await applicationsOf(x.attemptId)).toEqual([]); // recovery inside its (default, 30 s) window applies nothing
       expect((await row(x.attemptId)).status).toBe('dispatching');
-      const recovered = await providerCalls(() => recoveryWindow(1, () => worker.drainOnce()));
+      const recovered = await providerCalls(() => recoveryWindow(1, () => recovery.recoverOnce()));
       expect([recovered.refunds, recovered.statusReads]).toEqual([0, 0]); // recovery never calls the provider
       const a = await row(x.attemptId);
       expect(a).toMatchObject({ status: 'submitted', providerRefundId: `simr_${x.attemptId}` });
@@ -437,7 +455,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
     it('K5 a failed decision of a certified rejection, then recovery: failed WITHOUT finality; no replacement is permitted', async () => {
       const x = await storedUnapplied('rejected', (fn) => certified(fn));
       expect(await finalityOf(x.attemptId)).toEqual([]); // the rolled-back decision left none
-      await certified(() => recoveryWindow(1, () => worker.drainOnce()));
+      await certified(() => recoveryWindow(1, () => recovery.recoverOnce()));
       expect(await row(x.attemptId)).toMatchObject({ status: 'failed', failureCode: 'declined' });
       expect(await applicationsOf(x.attemptId)).toMatchObject([{ effect: 'transitioned', attemptStatusAfter: 'failed', appliedBy: 'recovery' }]);
       expect(await finalityOf(x.attemptId)).toEqual([]); // Q1: recovery never grants finality
@@ -449,17 +467,17 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
 
     it('K6 restart and retry: a recovery that fails rolls back whole and is retried by another instance; applied once', async () => {
       const x = await storedUnapplied('rejected');
-      await recoveryWindow(1, () => injected('outbox', () => worker.drainOnce(), `NEW.name = 'audit.refund_attempt.failed'`));
+      await recoveryWindow(1, () => injected('outbox', () => recovery.recoverOnce(), `NEW.name = 'audit.refund_attempt.failed'`));
       expect([(await row(x.attemptId)).status, (await applicationsOf(x.attemptId)).length, await failedAudits(x.attemptId)]).toEqual(['dispatching', 0, 0]);
-      await recoveryWindow(1, () => worker2.drainOnce()); // the other instance (a restarted process): the same stored answer
+      await recoveryWindow(1, () => recovery2.recoverOnce()); // the other recovery process (a restart): the same stored answer
       expect([(await row(x.attemptId)).status, (await applicationsOf(x.attemptId)).length, await failedAudits(x.attemptId)]).toEqual(['failed', 1, 1]);
-      await recoveryWindow(1, async () => { await worker.drainOnce(); await worker2.drainOnce(); });
+      await recoveryWindow(1, async () => { await recovery.recoverOnce(); await recovery2.recoverOnce(); await worker.drainOnce(); });
       expect([(await applicationsOf(x.attemptId)).length, await failedAudits(x.attemptId), await received(x.attemptId)]).toEqual([1, 1, 1]);
     });
 
     it('K7 two instances recover the same answer concurrently: one application, one transition, one audit', async () => {
       const x = await storedUnapplied('rejected');
-      await recoveryWindow(1, () => Promise.all([worker.drainOnce(), worker2.drainOnce(), worker.drainOnce()]));
+      await recoveryWindow(1, () => Promise.all([recovery.recoverOnce(), recovery2.recoverOnce(), recovery.recoverOnce()]));
       expect(await applicationsOf(x.attemptId)).toHaveLength(1);
       expect([(await row(x.attemptId)).status, await failedAudits(x.attemptId), await received(x.attemptId)]).toEqual(['failed', 1, 1]);
     });
@@ -555,7 +573,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await observe(randomUUID(), x.attemptId, 'rejected', null, 'Not-Bounded')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_observation_code' });
       const apply = (o: string, attempt: string, effect: string, before: string, after: string) => refusedWith(rt(
         `INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
-         VALUES ($1, $2, $3, $4, $5, 'recovery', now())`, [o, attempt, effect, before, after]));
+         VALUES ($1, $2, $3, $4, $5, 'dispatch', now())`, [o, attempt, effect, before, after])); // the runtime role's derived label (0040)
       expect((await apply(ox.id, x.attemptId, 'no_effect', 'submitted', 'submitted')).code).toBe('23505'); // a second application
       expect(await apply(oy.id, x.attemptId, 'no_effect', 'submitted', 'submitted')).toMatchObject({ code: '23514', constraint: 'refund_dispatch_application_state' }); // y's as x's
       // a fresh stored answer (decision failed) cannot be applied as another attempt's, to a status the attempt is not in, nor as a transition its
@@ -580,7 +598,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       expect(await rawFinality(z.attemptId, oother.id, 'declined', null)).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_dispatch_observation' });
       expect(await rawFinality(z.attemptId, oz.id, 'expired', null)).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_dispatch_observation' });
       expect(await rawFinality(z.attemptId, oz.id, 'declined', null)).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_dispatch_application' }); // not applied
-      expect(await rawFinality(z.attemptId, oz.id, 'declined', 'recovery')).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_dispatch_application' }); // Q1
+      expect(await rawFinality(z.attemptId, oz.id, 'declined', 'recovery')).toMatchObject({ code: '42501', constraint: 'refund_dispatch_application_authority' }); // 0040: not its label
       expect(await finalityOf(z.attemptId)).toEqual([]);
       expect(await rawFinality(z.attemptId, oz.id, 'declined', 'dispatch')).toEqual({ code: 'accepted' }); // positive control: the harness is sound
       expect(await finalityOf(z.attemptId)).toMatchObject([{ dispatchObservationId: oz.id }]);
@@ -623,7 +641,7 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
         expect(await ownerItems('owner2-jwt', kind)).toEqual([]); // another Company's Owner
         await request(t.app.getHttpServer()).get(`/payment/reconciliation/items?kind=${kind}&limit=200`).set('authorization', `Bearer ${billing.token}`).expect(400); // no producer kind
       }
-      await recoveryWindow(1, () => worker.drainOnce()); // applied: the unapplied item is gone; the send without an answer stays (never inferred)
+      await recoveryWindow(1, () => recovery.recoverOnce()); // applied: the unapplied item is gone; the send without an answer stays (never inferred)
       expect(await mine('refund_dispatch_response_unapplied', u.attemptId)).toEqual([]);
       expect(await mine('refund_dispatch_send_unobserved', k.attemptId)).toHaveLength(1);
     });
@@ -647,6 +665,239 @@ describeWithEnv('Core V2 D-R1D: durable refund dispatch responses — real Postg
       await outcome(w.attemptId, { outcome: 'no_record' });
       await declare([], () => drain(w.attemptId));
       expect([(await row(w.attemptId)).status, await received(w.attemptId), (await sendsOf(w.attemptId)).length]).toEqual(['unknown', 1, 1]);
+    });
+  });
+
+  describe('X: recovery has no authority to create finality (D-R1E, 0040)', () => {
+    const recSql = (sql: string, params: unknown[] = []) => refusedWith(rec.query(sql, params));
+    it('X1 the database derives appliedBy from the role: the dispatch (runtime role) records finality; recovery of the same kind of answer never does', async () => {
+      const d = await authorized();
+      await plan(d.paymentId, 'rejected', 'declined');
+      await certified(() => drain(d.attemptId));
+      expect(await applicationsOf(d.attemptId)).toMatchObject([{ appliedBy: 'dispatch', attemptStatusAfter: 'failed' }]);
+      expect(await finalityOf(d.attemptId)).toHaveLength(1);
+      const x = await storedUnapplied('rejected', (fn) => certified(fn));
+      await certified(() => recoveryWindow(1, () => recovery.recoverOnce()));
+      expect(await applicationsOf(x.attemptId)).toMatchObject([{ appliedBy: 'recovery', attemptStatusAfter: 'failed' }]);
+      expect(await finalityOf(x.attemptId)).toEqual([]);
+    });
+
+    it('X2 a recovery mislabelled as dispatch is refused: by its label, and by its missing finality privilege', async () => {
+      const x = await storedUnapplied('rejected', (fn) => certified(fn));
+      const [o] = await observationsOf(x.attemptId);
+      // the label: the recovery role claiming `dispatch` is refused before anything else is checked
+      expect(await recSql(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+        VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'dispatch', now())`, [o.id, x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_dispatch_application_authority' });
+      // the decision itself built WITH a finality recorder but connected as the recovery role: the finality insert is refused, the whole decision rolls back
+      const { applyDispatchObservation } = await import('../src/refunds/refund-dispatch-decision.js');
+      const { PaymentAudit } = await import('../src/audit/payment-audit.js');
+      const { RefundSafetyService } = await import('../src/refunds/refund-safety.service.js');
+      const { RefundFinalityService } = await import('../src/refunds/refund-finality.service.js');
+      const { OutboxService } = await import('@nawara/service-kit');
+      const audit = new PaymentAudit(new OutboxService());
+      const finality = t.app.get(RefundFinalityService);
+      const misbuilt = { audit, safety: new RefundSafetyService(audit), responses: new RefundDispatchResponseService(recDbs[0]!), log: new Logger('probe'),
+        finality: ((q, a, code, ctx, id) => finality.recordIfCertified(q, a, 'dispatch_rejected', code, ctx, id)) as import('../src/refunds/refund-dispatch-decision.js').FinalityRecorder };
+      const { jobContext } = await import('../src/events/payment-events.js');
+      const err = await certified(() => applyDispatchObservation(recDbs[0]!, misbuilt, o as never, jobContext('refund_worker')).then(() => null, (e: unknown) => sqlState(e)));
+      expect(err).toMatchObject({ code: '42501' });
+      expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length, (await applicationsOf(x.attemptId)).length]).toEqual(['dispatching', 0, 0]);
+      await certified(() => recoveryWindow(1, () => recovery.recoverOnce())); // the proper recovery: failed, no finality
+      expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length, await mayStillPay(x.attemptId)]).toEqual(['failed', 0, true]);
+      const r = await certified(() => requestRefund(x.paymentId, x.caseId));
+      expect([r.res.status, r.res.body.code]).toEqual([409, 'refund_in_progress']); // no uncertified replacement
+    });
+
+    it('X3 direct SQL with the recovery credentials cannot create finality, a send or an answer, nor switch to the runtime role', async () => {
+      const x = await storedUnapplied('rejected', (fn) => certified(fn));
+      const [o] = await observationsOf(x.attemptId);
+      const c = await finalityCert();
+      const tx = async (fn: (q: pg.PoolClient) => Promise<unknown>) => {
+        const cl = await rec.connect();
+        try { await cl.query('BEGIN'); await fn(cl); await cl.query('COMMIT'); return { code: 'accepted' }; } catch (e) { await cl.query('ROLLBACK').catch(() => undefined); return sqlState(e); } finally { cl.release(); }
+      };
+      expect(await tx(async (q) => {
+        await q.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]); // permitted
+        await q.query(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+            "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt", "dispatchObservationId")
+          SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, 'dispatch_rejected', 'dispatch_response', 'declined', $2, $3, $4, now(), $5 FROM refund_attempt a WHERE a.id = $1`,
+          [x.attemptId, c.id, c.version, c.fingerprint, o.id]);
+      })).toMatchObject({ code: '42501' });
+      expect((await recSql(`INSERT INTO refund_dispatch_send (id, "refundAttemptId", "paymentId", provider, "idempotencyKey", "sendNumber", purpose, "createdAt")
+        VALUES ($1, $2::uuid, $3, 'simulation', $2::text, 0, 'same_key_resend', now())`, [randomUUID(), x.attemptId, x.paymentId])).code).toBe('42501');
+      expect((await recSql(`INSERT INTO refund_dispatch_observation ("sendId", "refundAttemptId", classification, "providerRefundId", "providerCode", "responseDigest", "observedAt")
+        VALUES ($1, $2, 'ambiguous', NULL, NULL, repeat('0', 64), now())`, [o.sendId, x.attemptId])).code).toBe('42501');
+      expect((await recSql(`SET ROLE ${appRole}`)).code).toBe('42501');
+      // a session that switched roles applies nothing, even to a role that could (here a superuser session as the runtime role, a valid row)
+      const sw = await admin.connect();
+      try {
+        await sw.query(`SET ROLE ${appRole}`);
+        expect(await refusedWith(sw.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'no_effect', 'dispatching', 'dispatching', 'dispatch', now())`, [o.id, x.attemptId]))).toMatchObject({ code: '42501', constraint: 'refund_dispatch_application_authority' });
+      } finally {
+        await sw.query('RESET ROLE').catch(() => undefined);
+        sw.release();
+      }
+      expect((await recSql(`SELECT payment_grant_refund_recovery('${recRole}'::regrole)`)).code).toBe('42501'); // nobody but the owner grants
+      expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length]).toEqual(['dispatching', 0]);
+      const p = await one(`SELECT ${['refund_attempt_failure_finality', 'refund_dispatch_send', 'refund_dispatch_observation'].map((tb, i) => `has_table_privilege($1, '${tb}', 'INSERT') AS i${i}`).join(', ')},
+        has_table_privilege($1, 'refund_dispatch_application', 'INSERT') AS app, has_table_privilege($1, 'refund_attempt_failure_finality', 'UPDATE') AS fu`, [recRole]);
+      expect(p).toEqual({ i0: false, i1: false, i2: false, app: true, fu: false });
+      expect((await one(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND prosecdef`)).n).toBe(0); // nothing to borrow rights through
+    });
+
+    it('X4 the grant refuses any role with that authority; the recovery process refuses to run as one', async () => {
+      const refused = async (role: string) => (await refusedWith(mig.query('SELECT payment_grant_refund_recovery($1::regrole)', [role]))).code;
+      expect(await refused(appRole)).toBe('42501'); // the runtime role can record finality
+      expect(await refused(migRole)).toBe('42501'); // the schema owner
+      const member = `dr1d_mem_${randomBytes(3).toString('hex')}`;
+      await admin.query(`CREATE ROLE ${member} NOLOGIN NOINHERIT`); // NOINHERIT: no privilege of its own, but it can SET ROLE to the runtime role
+      try {
+        await admin.query(`GRANT ${appRole} TO ${member}`);
+        expect(await refused(member)).toBe('42501'); // it could become the runtime role
+      } finally {
+        await admin.query(`DROP OWNED BY ${member}`);
+        await admin.query(`DROP ROLE ${member}`);
+      }
+      // the schema owner is refused even after revoking its own write rights on the three tables (it can grant them back to itself)
+      await mig.query('REVOKE INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation FROM CURRENT_USER');
+      try {
+        expect(await refused(migRole)).toBe('42501');
+      } finally {
+        await mig.query('GRANT INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation TO CURRENT_USER');
+      }
+      const asRuntime = new DbService({ url: urlAs(appRole, appPw), max: 1 });
+      try {
+        await expect(new RefundResponseRecovery(asRuntime, 1).recoverOnce()).rejects.toThrow(/refund_recovery_refused: the role can record refund failure finality/);
+      } finally {
+        await asRuntime.onApplicationShutdown();
+      }
+      expect(await recovery.assertAuthority()).toMatchObject({ role: recRole, canRecordFinality: false, canSend: false, canObserve: false, superuser: false, memberships: 0, registered: true });
+    });
+
+    it('X5 certificates still decide the dispatch\'s finality: forged, mismatched or revoked are refused', async () => {
+      const z = await storedUnapplied('rejected');
+      const [oz] = await observationsOf(z.attemptId);
+      const c = await finalityCert();
+      const raw = (over: Row) => refusedWith(rtTx(async (q) => {
+        await q.query(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+            "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt", "dispatchObservationId")
+          SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, 'dispatch_rejected', 'dispatch_response', 'declined', $2, $3, $4, now(), $5 FROM refund_attempt a WHERE a.id = $1`,
+          [z.attemptId, over.id ?? c.id, over.version ?? c.version, over.fingerprint ?? c.fingerprint, oz.id]);
+      }));
+      expect(await raw({ fingerprint: 'f'.repeat(64) })).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_certificate' }); // forged
+      expect(await raw({ id: CONTRACT_REF.id })).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_certificate' }); // another certificate
+      await revoke();
+      expect(await raw({})).toMatchObject({ code: '23514', constraint: 'refund_failure_finality_certificate' });
+      expect(await finalityOf(z.attemptId)).toEqual([]);
+    });
+
+    it('X7 (Codex r1 P1) later grants or memberships never make the registered recovery role a dispatch: finality, sends and answers stay refused', async () => {
+      const x = await storedUnapplied('rejected', (fn) => certified(fn));
+      const [o] = await observationsOf(x.attemptId);
+      const c = await finalityCert();
+      const finalityAs = (source: 'dispatch_response' | 'status_check') => (async () => {
+        const cl = await rec.connect();
+        try {
+          await cl.query('BEGIN');
+          await cl.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+          await cl.query(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+              "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt", "dispatchObservationId")
+            SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, $6, $7, 'declined', $2, $3, $4, now(), $5::uuid FROM refund_attempt a WHERE a.id = $1`,
+            [x.attemptId, c.id, c.version, c.fingerprint, source === 'dispatch_response' ? o.id : null, source === 'dispatch_response' ? 'dispatch_rejected' : 'provider_failed', source]);
+          if (source === 'dispatch_response') {
+            await cl.query(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+              VALUES ($1, $2, 'transitioned', 'dispatching', 'failed', 'dispatch', now())`, [o.id, x.attemptId]);
+          }
+          await cl.query('COMMIT');
+          return { code: 'accepted' };
+        } catch (e) {
+          await cl.query('ROLLBACK').catch(() => undefined);
+          return sqlState(e);
+        } finally {
+          cl.release();
+        }
+      })();
+      // LABELLED FIXTURE: an administrator later gives the recovery role finality, send and answer INSERT, and inheriting membership of the runtime role
+      await admin.query(`GRANT INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation TO ${recRole}`);
+      await admin.query(`GRANT ${appRole} TO ${recRole}`);
+      try {
+        expect(await finalityAs('dispatch_response')).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        expect(await finalityAs('status_check')).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' }); // every source
+        expect(await recSql(`INSERT INTO refund_dispatch_application ("observationId", "refundAttemptId", effect, "attemptStatusBefore", "attemptStatusAfter", "appliedBy", "appliedAt")
+          VALUES ($1, $2, 'no_effect', 'dispatching', 'dispatching', 'dispatch', now())`, [o.id, x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_dispatch_application_authority' });
+        expect(await recSql(`INSERT INTO refund_dispatch_send (id, "refundAttemptId", "paymentId", provider, "idempotencyKey", "sendNumber", purpose, "createdAt")
+          VALUES ($1, $2::uuid, $3, 'simulation', $2::text, 0, 'same_key_resend', now())`, [randomUUID(), x.attemptId, x.paymentId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        expect(await recSql(`INSERT INTO refund_dispatch_observation ("sendId", "refundAttemptId", classification, "providerRefundId", "providerCode", "responseDigest", "observedAt")
+          VALUES ($1, $2, 'ambiguous', NULL, NULL, repeat('0', 64), now())`, [o.sendId, x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        await expect(recovery.recoverOnce()).rejects.toThrow(/refund_recovery_refused/); // the process refuses to run as it now
+        // with that later membership the recovery SESSION can switch to the runtime role: its session identity still refuses it finality
+        const sw = await rec.connect();
+        try {
+          await sw.query(`SET ROLE ${appRole}`);
+          await sw.query('BEGIN');
+          await sw.query(`UPDATE refund_attempt SET status = 'failed', "failureCode" = 'declined', "completedAt" = now() WHERE id = $1`, [x.attemptId]);
+          expect(await refusedWith(sw.query(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+              "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt")
+            SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, 'provider_failed', 'status_check', 'declined', $2, $3, $4, now() FROM refund_attempt a WHERE a.id = $1`,
+            [x.attemptId, c.id, c.version, c.fingerprint]))).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+        } finally {
+          await sw.query('ROLLBACK').catch(() => undefined);
+          await sw.query('RESET ROLE').catch(() => undefined);
+          sw.release();
+        }
+      } finally {
+        await admin.query(`REVOKE ${appRole} FROM ${recRole}`);
+        await admin.query(`REVOKE INSERT ON refund_attempt_failure_finality, refund_dispatch_send, refund_dispatch_observation FROM ${recRole}`);
+      }
+      expect([(await row(x.attemptId)).status, (await finalityOf(x.attemptId)).length]).toEqual(['dispatching', 0]);
+      expect(await mayStillPay(x.attemptId)).toBe(true);
+    });
+
+    it('X8 (Codex r1 P2) column-level INSERT grants count: refused at grant time, and refused to a registered role at write time', async () => {
+      const other = `dr1d_col_${randomBytes(3).toString('hex')}`;
+      await admin.query(`CREATE ROLE ${other} NOLOGIN`);
+      try {
+        await admin.query(`GRANT INSERT ("refundAttemptId") ON refund_attempt_failure_finality TO ${other}`);
+        expect((await refusedWith(mig.query('SELECT payment_grant_refund_recovery($1::regrole)', [other]))).code).toBe('42501');
+      } finally {
+        await admin.query(`DROP OWNED BY ${other}`);
+        await admin.query(`DROP ROLE ${other}`);
+      }
+      await admin.query(`GRANT INSERT ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource", "failureCode",
+        "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt") ON refund_attempt_failure_finality TO ${recRole}`);
+      try {
+        expect(await recovery.assertAuthority().then(() => 'ran', (e: Error) => e.message)).toMatch(/can record refund failure finality/);
+        const x = await storedUnapplied('rejected');
+        expect(await recSql(`INSERT INTO refund_attempt_failure_finality ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource",
+            "failureCode", "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt")
+          SELECT a.id, a."paymentId", a."captureFactId", a.provider, a.id::text, 'provider_failed', 'status_check', 'declined', 'x', 1, repeat('0', 64), now() FROM refund_attempt a WHERE a.id = $1`,
+          [x.attemptId])).toMatchObject({ code: '42501', constraint: 'refund_recovery_role_refused' });
+      } finally {
+        await admin.query(`REVOKE INSERT ("refundAttemptId", "paymentId", "captureFactId", provider, "idempotencyKey", observation, "observationSource", "failureCode",
+          "certificateId", "certificateVersion", "certificateFingerprint", "recordedAt") ON refund_attempt_failure_finality FROM ${recRole}`);
+      }
+      // the registry itself: read-only for the runtime and the recovery role; append-only for the owner
+      expect((await refusedWith(rt(`DELETE FROM refund_recovery_role`))).code).toBe('42501');
+      expect((await recSql(`DELETE FROM refund_recovery_role`)).code).toBe('42501');
+      expect((await recSql(`INSERT INTO refund_recovery_role (role) VALUES (1)`)).code).toBe('42501');
+      expect((await refusedWith(mig.query(`DELETE FROM refund_recovery_role`))).code).not.toBe('accepted');
+      expect((await one(`SELECT count(*)::int AS n FROM refund_recovery_role WHERE role = $1::regrole::oid`, [recRole])).n).toBe(1);
+    });
+
+    it('X6 the recovery CLI: refuses the runtime role (exit 2), runs one pass as the recovery role', async () => {
+      const { execFile } = await import('node:child_process');
+      const cli = fileURLToPath(new URL('../dist/cli/refund-response-recovery.js', import.meta.url));
+      const run = (url: string, args: string[]) => new Promise<{ code: number; out: string; err: string }>((resolve) => {
+        execFile(process.execPath, [cli, ...args], { env: { PATH: process.env.PATH ?? '', REFUND_RECOVERY_DATABASE_URL: url } }, (e, out, err) =>
+          resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out, err }));
+      });
+      const bad = await run(urlAs(appRole, appPw), ['--once']);
+      expect([bad.code, bad.err]).toEqual([2, expect.stringContaining('refund_recovery_refused: the role can record refund failure finality')]);
+      expect(bad.err).not.toContain(appPw);
+      const ok = await run(urlAs(recRole, recPw), ['--once']);
+      expect([ok.code, JSON.parse(ok.out)]).toEqual([0, { pass: 'refund_response_recovery', applied: expect.any(Number) }]);
+      expect((await run(urlAs(recRole, recPw), ['--apply'])).code).toBe(2);
     });
   });
 });
