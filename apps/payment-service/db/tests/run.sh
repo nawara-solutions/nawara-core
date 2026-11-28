@@ -234,7 +234,7 @@ echo "PASS: 0036 applies over escalations of all four existing kinds; every row 
 
 echo "== migration: Core V2 D-R1B — 0037 applies over history, changes no row, backfills no finality; a historical failure blocks =="
 newdb dr1bmig; db="$DBNAME"
-for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0037_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0037_*|0038_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null # leaves 7c01 (failed, its late fact) and 7c02 (its replacement, created before 0037)
 snapshot_dr1b() { psql -Atq -d "$db" -c "SELECT md5(string_agg(row_to_json(a)::text, ',' ORDER BY id)) FROM refund_attempt a UNION ALL SELECT md5(string_agg(row_to_json(e)::text, ',' ORDER BY id)) FROM refund_safety_escalation e UNION ALL SELECT md5(string_agg(row_to_json(f)::text, ',' ORDER BY id)) FROM provider_transaction_fact f"; }
 before="$(snapshot_dr1b)"
@@ -251,3 +251,18 @@ UPDATE refund_attempt SET status = 'authorized', \"receiptId\" = gen_random_uuid
 out="$(psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE refund_attempt SET status = 'dispatching' WHERE id = '00000000-0000-4000-8000-000000007c02'" 2>&1)" && fail "0037: a historical replacement was dispatched"
 grep -q "refund_attempt_prior_may_still_pay" <<<"$out" || fail "0037: the historical replacement was refused for another reason: $out"
 echo "PASS: 0037 applies over history; every row unchanged, no finality backfilled; a historical failure blocks a replacement and its dispatch"
+
+echo "== migration: Core V2 D-R1C — 0038 applies over every existing escalation and exit, changes none, backfills nothing =="
+newdb dr1cmig; db="$DBNAME"
+for f in "$kitmig"/*.sql "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0038_*) continue ;; esac; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/invariants.sql" >/dev/null
+snapshot_dr1c() { psql -Atq -d "$db" -c "SELECT md5(COALESCE(string_agg((to_jsonb(e) - 'blockingCause' - 'causeBasis' - 'blockingReason')::text, ',' ORDER BY id), '')) FROM refund_safety_escalation e UNION ALL SELECT md5(COALESCE(string_agg(row_to_json(x)::text, ',' ORDER BY \"escalationId\"), '')) FROM refund_safety_escalation_exit x"; }
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_safety_escalation")" -ge 1 ] || fail "0038 history fixture: no escalation"
+before="$(snapshot_dr1c)"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0038_dr1c_dispatch_blocked_escalation.sql" || fail "0038 does not apply over history"
+[ "$before" = "$(snapshot_dr1c)" ] || fail "0038 changed a historical escalation or exit"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM refund_safety_escalation WHERE \"blockingCause\" IS NOT NULL OR \"causeBasis\" IS NOT NULL OR \"blockingReason\" IS NOT NULL")" -eq 0 ] || fail "0038 backfilled"
+out="$(psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO refund_safety_escalation (kind, \"refundAttemptId\", \"factId\", \"paymentId\", \"companyId\", \"captureFactId\", \"attemptStatus\", \"competingAttemptId\", \"blockingCause\", \"blockingReason\")
+  SELECT 'dispatch_blocked', a.id, NULL, a.\"paymentId\", a.\"companyId\", a.\"captureFactId\", 'x', b.id, 'prior_registry_not_final', 'forged' FROM refund_attempt a JOIN refund_attempt b ON b.\"paymentId\" = a.\"paymentId\" AND b.id <> a.id LIMIT 1" 2>&1)" && fail "0038: a forged dispatch_blocked escalation was accepted"
+grep -q "is not blocked at dispatch by attempt" <<<"$out" || fail "0038: refused for another reason: $out"
+echo "PASS: 0038 applies over history; every escalation and exit unchanged, nothing backfilled; a forged dispatch_blocked escalation is refused"

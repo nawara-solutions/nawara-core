@@ -1139,27 +1139,29 @@ const SPEC = {
       escalation_id: { type: 'uuid', shape: 'value', required: true },
       kind: { type: 'code', shape: 'value', required: true, values: ['dispatch_held', 'refund_fact_without_authorization', 'failed_attempt_refund_evidence',
         'dispatch_stalled', // Core V2 G3 (DO-44): dispatching / unknown, never submitted, 72 hours after the authorization
-        'failure_after_refund_evidence', 'idempotency_retention_unproven'] }, // Core V2 D-R1A (Q4, Q5)
+        'failure_after_refund_evidence', 'idempotency_retention_unproven', // Core V2 D-R1A (Q4, Q5)
+        'dispatch_blocked'] }, // Core V2 D-R1C: an authorized attempt D-R1B refused to dispatch (no fact; `authorized`)
       payment_id: { type: 'uuid', shape: 'value', required: true },
       fact_id: { type: 'uuid', shape: 'value', required: false }, // Core V2 G3: absent only for dispatch_stalled and (D-R1A) idempotency_retention_unproven
       attempt_status: { type: 'code', shape: 'value', required: true, values: ['authorization_pending', 'authorized', 'authorization_expired', 'authorization_refused', 'failed',
         'dispatching', 'unknown', // Core V2 G3 (DO-44)
         'submitted', 'succeeded', 'discrepancy'] }, // Core V2 D-R1A (Q4)
     },
-    purpose: 'A refund attempt is held from dispatch, a verified refund fact names an unauthorized attempt, a failed attempt\'s verified refund is kept while another attempt is effective, a dispatch outcome stays unknown past its threshold, a provider failure contradicts the attempt\'s verified refund evidence, or a same-key resend is withheld without a certified idempotency guarantee: an escalation for review, with no commercial effect.',
+    purpose: 'A refund attempt is held from dispatch, a verified refund fact names an unauthorized attempt, a failed attempt\'s verified refund is kept while another attempt is effective, a dispatch outcome stays unknown past its threshold, a provider failure contradicts the attempt\'s verified refund evidence, a same-key resend is withheld without a certified idempotency guarantee, or the dispatch of an authorized attempt is refused while an earlier attempt may still pay: an escalation for review, with no commercial effect.',
   },
   // Core V2 G3 (DO-44; the Owner's G3 rule 1): the attempt of a dispatch_stalled escalation left the stuck state (submitted, or any status other than
   // dispatching / unknown). Once per escalation, in its exit row's transaction. An observation only: the escalation stays; nothing else changes.
+  // Core V2 D-R1C (additive, same version): a dispatch_blocked escalation's attempt left `authorized` (never proof of finality, settlement or release).
   'refund_safety.state_exited': {
     producer: 'payment-service', category: 'commercial', since: 1, actors: { system: ['payment_refund_worker'] }, organization: 'optional',
     resource: ['refund_attempt'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       escalation_id: { type: 'uuid', shape: 'value', required: true },
-      kind: { type: 'code', shape: 'value', required: true, values: ['dispatch_stalled'] },
+      kind: { type: 'code', shape: 'value', required: true, values: ['dispatch_stalled', 'dispatch_blocked'] }, // Core V2 D-R1C: dispatch_blocked once not `authorized`
       payment_id: { type: 'uuid', shape: 'value', required: true },
       exited_status: { type: 'code', shape: 'value', required: true, values: ['authorized', 'dispatching', 'submitted', 'unknown', 'succeeded', 'failed', 'discrepancy'] },
     },
-    purpose: 'The refund attempt of a stalled-dispatch escalation left the stuck state: an observation only; the escalation stays and nothing else changes.',
+    purpose: 'The refund attempt of a stalled-dispatch or dispatch-blocked escalation left the escalated state: an observation only, never proof of finality, settlement or release; the escalation stays and nothing else changes.',
   },
   // Core V2 S0-C12 item 10: a verified late success of any kind (S4c F-4, S0-C11 item 6, S0-C12 items 2, 6, 7), in its row's transaction, once. Identifiers, the
   // observed integer amount and the payment's status at recording only; the currency stays on the row (S0-C12 item 10: never a non-ISO value here).

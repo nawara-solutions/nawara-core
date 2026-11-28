@@ -212,6 +212,37 @@ or superuser who can disable a trigger can bypass these rules.
 `db/tests/invariants.sql`, and the `0037` history section of `db/tests/run.sh`. Suites whose scenarios replace a failed attempt declare
 the simulation's modelled finality explicitly.
 
+## 4a. D-R1C: the dispatch-blocked escalation (implemented, development and simulation only)
+
+The Owner's GO of 2026-11-24 (Q5, Q6), migration `0038`. ESCALATION ONLY. Nothing is sent, released, certified or reallocated, and no replacement,
+finality, allocation, case or hold rule changes.
+
+- **When:** the refund worker's dispatch transaction refuses an `authorized`, not held, attempt under D-R1B
+  (`RefundFinalityService.dispatchRefusal`). In that SAME transaction it writes one `dispatch_blocked` `refund_safety_escalation` per attempt and
+  cause, with its `refund_safety.escalated` audit intent. That transaction calls no provider, so a failure rolls everything back: the attempt stays
+  `authorized` (the refusal stands) and the next pass decides and escalates again.
+- **Causes** (`blockingCause`), each the exact D-R1B decision path; the blocker is in `competingAttemptId`, with its status:
+
+| Cause | `causeBasis` | D-R1B path | What the database checks |
+| --- | --- | --- | --- |
+| `prior_may_still_pay` | `database_verified` | `0037`'s refusal is the prior check | It recomputes the refusal (exactly this cause) and that the blocker, in scope, may still pay |
+| `last_capture_may_still_pay` | `database_verified` | `0037`'s refusal is the last-capture check | Same, for a failed attempt on a sibling capture of the settling attempt |
+| `prior_registry_not_final` | `producer_derived` | the code registry no longer certifies the blocker's finality | Scope only, and that the blocker is `failed` |
+| `last_capture_registry_not_final` | `producer_derived` | the same, on the sibling capture | Scope only, and `failed` |
+| `prior_evidence_unresolved` | `producer_derived` | R3 evidence under the blocker is `notification_pending` or `unknown` | Scope only, and `failed` |
+| `last_capture_evidence_unresolved` | `producer_derived` | the same, on the sibling capture | Scope only, and `failed` |
+
+  A `producer_derived` row is the Payment worker's own decision: the database cannot recompute it, and the row permits nothing. `blockingReason` is
+  the producer's bounded reason code.
+- **Derived, never taken from the caller:** payment, Company, capture, both statuses and `causeBasis`.
+- **Lock order:** the dispatch lock, payment, attempt (the caller), then the capability lock shared (the guard), as in `0037`.
+- **Exit:** the existing exit table and `refund_safety.state_exited`, once, when the attempt is no longer `authorized` (observed by the existing sweep).
+  An exit is an observation only: never provider finality, settlement, financial resolution or release.
+- **Visibility:** the Owner-only PAY-12 `refund_safety_escalation` item adds `blockingCause`, `causeBasis`, `blockingReason` and `exit`.
+- **Audit:** one more value of the existing `kind` field of `refund_safety.escalated` and `refund_safety.state_exited` (same version). No new action
+  or field; the topic grants are unchanged.
+- **Unchanged:** a held attempt (DO-76) is never escalated this way; a dispatch D-R1B permits writes nothing.
+
 ## 5. Provider certification requirements (Q3)
 
 A `provider`-scope certificate is added only by a reviewed PR that the Owner merges, with:

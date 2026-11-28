@@ -179,6 +179,10 @@ const ITEM_SQL: Record<ItemKind, string> = {
            -- Core V2 D-R1A (0036): the reported failure kept beside the verified fact; a withheld same-key resend's authorization time
            WHEN e.kind = 'failure_after_refund_evidence' THEN jsonb_build_object('observedFailureCode', e."observedFailureCode")
            WHEN e.kind = 'idempotency_retention_unproven' THEN jsonb_build_object('authorizedAt', a."authorizedAt")
+           -- Core V2 D-R1C (0038): a dispatch D-R1B refused: the cause, whether the database verified it, the producer's reason, and once observed the exit
+           -- (an observation only: never provider finality, settlement, resolution or release). The blocker is competingAttemptId / competingAttemptStatus
+           WHEN e.kind = 'dispatch_blocked' THEN jsonb_build_object('blockingCause', e."blockingCause", 'causeBasis', e."causeBasis", 'blockingReason', e."blockingReason",
+             'exit', CASE WHEN x."escalationId" IS NULL THEN NULL ELSE jsonb_build_object('status', x."exitedStatus", 'observedAt', x."observedAt") END)
            ELSE '{}'::jsonb END AS detail
     FROM refund_safety_escalation e LEFT JOIN provider_transaction_fact f ON f.id = e."factId" JOIN payment p ON p.id = e."paymentId"
     LEFT JOIN refund_attempt a ON a.id = e."refundAttemptId" AND e.kind IN ('dispatch_stalled', 'idempotency_retention_unproven')

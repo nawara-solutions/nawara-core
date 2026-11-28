@@ -1634,6 +1634,13 @@ SIMULATION ONLY; pending the Owner's merge review).** Payment migration `0037`; 
 - An attempt with its own verified refund fact never becomes `failed` (OD-DR1-1). `failure_after_refund_evidence` keeps the failure as before.
 - Details, lock order, privileges and limits: `core-v2-d-r1-refund-finality.md` §4. DO-76 and OD-RLSC-1 stay OPEN; OD-DR1-6 stays OPEN.
 
+**D-R1C Payment dispatch-blocked escalation (dated note, 2026-11-24; the Owner's GO, Q5 and Q6; DEVELOPMENT AND SIMULATION ONLY; ESCALATION ONLY;
+pending the Owner's merge review).** Payment migration `0038`. No route, event, error code or financial rule changes.
+- PAY-12 `refund_safety_escalation` (Owner only): kind `dispatch_blocked`, one per attempt and cause, when D-R1B refuses to dispatch an authorized
+  attempt; detail `blockingCause`, `causeBasis` (`database_verified` or `producer_derived`), `blockingReason`, the blocker, and the exit once observed.
+- Audit: `refund_safety.escalated` and `refund_safety.state_exited` gain the value `dispatch_blocked` in their `kind` field (same version).
+- Details: `core-v2-d-r1-refund-finality.md` §4a. DO-76, OD-RLSC-1, OD-DR1-6 and R3-F2 stay OPEN.
+
 **G3 Billing stalled-work review (dated note, 2026-11-18; the Owner's G3 + G2 GO, package A; DEVELOPMENT AND SIMULATION ONLY; ESCALATION
 ONLY).** Billing migration `0056` and `src/stalled-work/` cover DO-31, DO-33, DO-41 and DO-42. DO-44 is Payment's (package B), and its
 `authorization_pending` state keeps S6h's existing 15-minute PAY-12 item, which is not duplicated.

@@ -160,11 +160,40 @@ export class RefundFinalityService {
   /**
    * Why `a` may not be sent (first time or again) now, or null: an earlier attempt that may still pay, or (R6H-5) the last capture of the settling
    * attempt because a FAILED attempt on another one may still pay. The caller holds the payment and attempt locks.
+   *
+   * Core V2 D-R1C (0038): the refusal names its cause. The DATABASE's refusal (0037 `refund_attempt_replacement_refusal`) is asked first, under the same
+   * capability lock; when it refuses, the cause is `database_verified` and its blocker is the one the database counts. Otherwise a refusal of this layer
+   * alone (the code registry, or R3 evidence) is `producer_derived`. The decision itself is unchanged from D-R1B: refused exactly when it was before.
    */
-  async dispatchRefusal(q: Queryable, a: RefundAttemptRow): Promise<string | null> {
+  async dispatchRefusal(q: Queryable, a: RefundAttemptRow): Promise<DispatchRefusal | null> {
     const target: RefundTarget = { attemptId: a.id, paymentId: a.paymentId, captureFactId: a.captureFactId, captureSpecific: a.captureSpecific };
-    const b = await this.blocker(q, target);
-    if (b) return `refund_attempt_prior_may_still_pay prior=${b.attemptId} status=${b.status} reason=${b.reason}`;
+    const paying = await this.mayStillPay(q, target);
+    const reasonOf = (id: string) => boundedReason(paying.find((o) => o.id === id)?.reason ?? 'database_may_still_pay');
+    const { rows: db } = await q.query<{ refusal: string | null }>(
+      `SELECT refund_attempt_replacement_refusal($1, $2, $3, $4, clock_timestamp()) AS refusal`, [a.id, a.paymentId, a.captureFactId, a.captureSpecific]);
+    if (db[0]?.refusal === 'refund_attempt_prior_may_still_pay') {
+      const { rows } = await q.query<{ id: string; status: string }>(
+        `SELECT o.id, o.status FROM refund_attempt o
+          WHERE o.id <> $1 AND (o."captureFactId" = $3 OR (o."paymentId" = $2 AND NOT o."captureSpecific" AND NOT $4::boolean))
+            AND refund_attempt_may_still_pay(o.id, clock_timestamp())
+          ORDER BY o."requestedAt", o.id LIMIT 1`, [a.id, a.paymentId, a.captureFactId, a.captureSpecific]);
+      if (rows[0]) return { cause: 'prior_may_still_pay', basis: 'database_verified', blockerId: rows[0].id, blockerStatus: rows[0].status, reason: reasonOf(rows[0].id) };
+    }
+    if (db[0]?.refusal === 'refund_attempt_last_capture_may_still_pay') {
+      const { rows } = await q.query<{ id: string; status: string }>(
+        `SELECT o.id, o.status FROM refund_attempt o
+           JOIN provider_transaction_fact g ON g.id = o."captureFactId" AND g.kind = 'capture'
+           JOIN provider_transaction_fact f ON f.id = $2 AND g."paymentId" = f."paymentId" AND g."attemptId" = f."attemptId" AND g.id <> f.id
+          WHERE o.id <> $1 AND o.status = 'failed' AND refund_attempt_may_still_pay(o.id, clock_timestamp())
+          ORDER BY o."requestedAt", o.id LIMIT 1`, [a.id, a.captureFactId]);
+      if (rows[0]) return { cause: 'last_capture_may_still_pay', basis: 'database_verified', blockerId: rows[0].id, blockerStatus: rows[0].status, reason: reasonOf(rows[0].id) };
+    }
+    const producer = (scope: 'prior' | 'last_capture', o: { id: string; status: string; reason: string }): DispatchRefusal => ({
+      cause: `${scope}_${o.reason.startsWith('evidence_') ? 'evidence_unresolved' : 'registry_not_final'}` as DispatchBlockingCause,
+      basis: 'producer_derived', blockerId: o.id, blockerStatus: o.status, reason: boundedReason(o.reason),
+    });
+    const b = paying.find((o) => o.captureFactId === target.captureFactId || (!target.captureSpecific && !o.captureSpecific));
+    if (b) return producer('prior', b);
     if (!a.captureSpecific) return null;
     const { rows } = await q.query<{ siblings: string[]; succeededAttemptId: string }>(
       `SELECT p."succeededAttemptId", ARRAY(SELECT g.id::text FROM provider_transaction_fact g WHERE g."paymentId" = p.id AND g."attemptId" = f."attemptId" AND g.kind = 'capture' AND g.id <> f.id) AS siblings
@@ -172,8 +201,23 @@ export class RefundFinalityService {
         WHERE p.id = $1 AND p.status = 'succeeded'`, [a.paymentId, a.captureFactId]);
     const s = rows[0];
     if (!s || s.siblings.length === 0) return null;
-    const failed = (await this.mayStillPay(q, target)).find((o) => o.status === 'failed' && s.siblings.includes(o.captureFactId));
+    const failed = paying.find((o) => o.status === 'failed' && s.siblings.includes(o.captureFactId));
     if (!failed || (await this.anotherCaptureRemains(q, { id: a.paymentId, succeededAttemptId: s.succeededAttemptId }, a.captureFactId, a.id))) return null;
-    return `refund_attempt_last_capture_may_still_pay prior=${failed.id} status=failed reason=${failed.reason}`;
+    return producer('last_capture', failed);
   }
 }
+
+/** Core V2 D-R1C (0038): the six causes of a refused dispatch. */
+export type DispatchBlockingCause = 'prior_may_still_pay' | 'last_capture_may_still_pay' | 'prior_registry_not_final' | 'last_capture_registry_not_final'
+  | 'prior_evidence_unresolved' | 'last_capture_evidence_unresolved';
+export interface DispatchRefusal {
+  cause: DispatchBlockingCause;
+  /** `database_verified`: the database recomputes it at the escalation (0038); `producer_derived`: this layer's own decision, scope-checked only. */
+  basis: 'database_verified' | 'producer_derived';
+  blockerId: string;
+  blockerStatus: string;
+  reason: string;
+}
+export const describeRefusal = (r: DispatchRefusal): string => `refund_attempt_${r.cause} prior=${r.blockerId} status=${r.blockerStatus} reason=${r.reason} basis=${r.basis}`;
+/** A reason code in the stored grammar (never free text). */
+const boundedReason = (reason: string): string => (/^[a-z][a-z0-9_]{0,63}$/.test(reason) ? reason : 'unclassified');
